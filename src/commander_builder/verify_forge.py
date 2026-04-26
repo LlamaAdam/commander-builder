@@ -34,6 +34,13 @@ NUM_GAMES = 3
 # if it does, something is wrong (deadlock, GUI launching, missing cards looping).
 MATCH_TIMEOUT_SEC = 600
 
+# Repo-root vendor paths. The verifier checks these BEFORE falling back to system
+# locations, so users can run a self-contained install by dropping a portable JRE
+# and Forge release into vendor/. See vendor/README.md.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VENDOR_JRE = REPO_ROOT / "vendor" / "jre"
+VENDOR_FORGE = REPO_ROOT / "vendor" / "forge"
+
 
 @dataclass
 class Findings:
@@ -59,8 +66,23 @@ class Findings:
 
 
 def find_java() -> tuple[Optional[str], Optional[str]]:
-    """Return (java_path, version_string) or (None, None) if not found."""
-    java = shutil.which("java")
+    """Return (java_path, version_string) or (None, None) if not found.
+
+    Order of resolution:
+      1. vendor/jre/bin/java[.exe] — repo-local portable JRE
+      2. shutil.which("java") — system PATH
+    """
+    candidates: list[Path] = [
+        VENDOR_JRE / "bin" / "java.exe",
+        VENDOR_JRE / "bin" / "java",
+    ]
+    java: Optional[str] = None
+    for c in candidates:
+        if c.is_file():
+            java = str(c)
+            break
+    if java is None:
+        java = shutil.which("java")
     if not java:
         return None, None
     try:
@@ -78,18 +100,32 @@ def find_java() -> tuple[Optional[str], Optional[str]]:
 
 
 def candidate_forge_dirs() -> list[Path]:
-    """Likely locations for Forge on Windows."""
+    """Likely locations for Forge.
+
+    vendor/forge/ is checked FIRST. Users can drop the Forge release directly
+    in vendor/forge/ OR drop the extracted release directory inside it (e.g.
+    vendor/forge/forge-gui-desktop-1.6.62/) — both shapes are handled.
+    """
     candidates: list[Path] = []
+
+    # Vendored install — check vendor/forge/ itself, then any single subdirectory.
+    if VENDOR_FORGE.is_dir():
+        candidates.append(VENDOR_FORGE)
+        for sub in sorted(VENDOR_FORGE.iterdir()):
+            if sub.is_dir():
+                candidates.append(sub)
+
+    # System install fallbacks.
     env = os.environ
     for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA", "APPDATA", "USERPROFILE"):
         base = env.get(key)
         if base:
             candidates.append(Path(base) / "Forge")
     candidates.append(Path("C:/Forge"))
-    # User's documents folder is also a common spot for portable installs.
     user = env.get("USERPROFILE")
     if user:
         candidates.append(Path(user) / "Documents" / "Forge")
+
     # De-dupe while preserving order.
     seen: set[Path] = set()
     out: list[Path] = []
@@ -103,7 +139,7 @@ def candidate_forge_dirs() -> list[Path]:
 def find_forge_install() -> Optional[Path]:
     for cand in candidate_forge_dirs():
         if cand.is_dir():
-            # Heuristic: a Forge install dir contains a jar matching forge-gui-*.jar
+            # A Forge install dir contains a jar matching forge-gui-*.jar
             # OR a `forge.exe` / `forge.cmd` launcher.
             jars = list(cand.glob("forge-gui-*.jar"))
             launchers = list(cand.glob("forge.*"))

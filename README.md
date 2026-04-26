@@ -8,29 +8,32 @@ See [PROJECT.md](PROJECT.md) for the full design, phase plan, and working princi
 
 **Phase 1A — Forge verifier.** Goal is to confirm Forge headless runs on this machine and surface what its output looks like. Nothing else is implemented yet.
 
+## Setup
+
+Requires Python 3.12+. Forge needs JRE 17+ to run.
+
+**Recommended (self-contained):** drop a portable Forge release and JRE into `vendor/`. See [`vendor/README.md`](vendor/README.md) for exact paths and download links. The verifier checks `vendor/` first and falls back to system installs if it's empty.
+
+**Alternative (system-wide):** install Java and Forge with their normal installers. Make sure `java` is on PATH.
+
+After Forge is set up, **launch it once interactively** so it creates its userdata directory and the bundled sample decks become visible.
+
 ## Phase 1A: run the verifier
 
-Requires Python 3.12+ and Java (JRE 8+). Forge must be installed.
-
-From the project root:
+From `C:\dev\commander_builder`:
 
 ```bash
-python -m src.commander_builder.verify_forge
-```
-
-Or from `src/commander_builder/`:
-
-```bash
-python verify_forge.py
+python src/commander_builder/verify_forge.py
 ```
 
 The script:
 
-1. Locates Java, Forge install, the Forge jar, and the userdata `decks/` directory.
-2. Lists existing constructed and commander decks.
-3. Runs a 3-game 2-player constructed sim.
-4. Runs a 3-game 4-player commander sim if 4+ commander decks exist.
-5. Writes everything (stdout, stderr, Forge's log, structured findings) to `verify_output/`.
+1. Locates Java (preferring `vendor/jre/`, then PATH).
+2. Locates Forge (preferring `vendor/forge/`, then standard install paths).
+3. Finds the userdata `decks/` directory and lists existing decks.
+4. Runs a 3-game 2-player constructed sim.
+5. Runs a 3-game 4-player commander sim if 4+ commander decks exist.
+6. Writes everything (stdout, stderr, Forge's log, structured findings) to `verify_output/`.
 
 What you do next: paste back `verify_output/findings.json` and the `*_stdout.txt` files. We'll use the actual output to design the Phase 1B log parser.
 

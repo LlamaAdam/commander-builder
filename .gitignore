@@ -1,3 +1,7 @@
+# Vendored binaries (Forge, JRE) — keep the README, ignore everything else
+vendor/*
+!vendor/README.md
+
 # Verifier output (machine-specific paths and logs)
 verify_output/
 
