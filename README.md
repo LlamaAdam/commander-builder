@@ -6,7 +6,9 @@ See [PROJECT.md](PROJECT.md) for the full design, phase plan, and working princi
 
 ## Status
 
-**Phase 1A — Forge verifier.** Goal is to confirm Forge headless runs on this machine and surface what its output looks like. Nothing else is implemented yet.
+**Phase 1A — Forge verifier: ✅ complete (2026-04-26).** Java + Forge install unattended, both 2-player constructed and 4-player commander sims run end-to-end and produce parseable match results. See `verify_output/` for captured logs and `setup/forge/README.md` for the install recipe.
+
+**Next: Phase 1B — Forge orchestrator pipeline** (Moxfield pull/convert/push, log parser).
 
 ## Setup
 

@@ -43,7 +43,17 @@ After enough iterations: retire LLM analyst in favor of a learned model
 
 The project is split into phases so each phase delivers value independently and can be validated before committing to the next.
 
-### Phase 1A — Forge verifier (current target)
+### Phase 1A — Forge verifier ✅ COMPLETE (2026-04-26)
+
+**Outcome:**
+- Java + Forge installed unattended into `vendor/`
+- 2-player constructed sim: exit 0, ~30s for 3 games, "Match Result: Ai(1)-...: 2 Ai(2)-...: 1" parseable
+- 4-player commander sim: exit 0, ~5min for 3 games, full per-player score line parseable
+- Findings + stdout/stderr captured in `verify_output/` for Phase 1B parser design
+
+**Phase 1B can now design the log parser against real captured output rather than guessing.**
+
+### Phase 1A — Forge verifier (original brief)
 
 **Deliverable:** A standalone Python script that confirms Forge headless works on the user's machine and surfaces what Forge's output actually looks like.
 
@@ -152,8 +162,8 @@ The user's local environment, to the extent it's been documented:
 - **OS:** Windows 11 Home
 - **Hardware:** RTX 3060 laptop, 6GB VRAM
 - **Python:** 3.12 (per memory; verify on first run)
-- **Java:** NOT installed as of 2026-04-26. Verifier surfaced this — `where java` finds nothing, no install in standard locations. Recommend Temurin 21 LTS JRE; current Forge releases need JRE 17+.
-- **Forge:** NOT installed as of 2026-04-26. Verifier surfaced this — none of `%PROGRAMFILES%\Forge`, `%LOCALAPPDATA%\Forge`, etc. exist. Get from `Card-Forge/forge` GitHub releases.
+- **Java:** Temurin 21.0.10 LTS JRE installed at `vendor/jre/` (2026-04-26). Repo-local, no PATH pollution.
+- **Forge:** 2.0.12 installed at `vendor/forge/` (2026-04-26) via unattended IzPack install — see `setup/forge/README.md` for the auto-install XML and the gotchas it took to get there. Userdata is project-local at `vendor/forge/userdata/` (`forge.profile.properties` redirects it). Bundled 505 precon + 167 commander precon decks copied into `userdata/decks/{constructed,commander}/`.
 - **Working directory location:** `C:\dev\commander_builder` — moved out of OneDrive on 2026-04-26 to avoid the reparse-point issues that broke Next.js builds in adjacent projects. Pushed to `github.com/LlamaAdam/commander-builder` (public).
 - **Anthropic API key:** not yet documented — needed for Phase 2.
 
@@ -179,12 +189,12 @@ Honest accounting of what's known versus assumed. Update this as items move from
 
 ### Unverified (must be checked or accepted as risk)
 
-- **Whether Forge's headless mode runs on Windows without launching JavaFX/GUI components.** Some past Forge builds had issues. Phase 1A's first job is to confirm.
-- **Forge's exact log format.** The wiki says "results are printed at the end" but doesn't show the schema. Cannot write a parser without seeing real output.
+- **~~Whether Forge's headless mode runs on Windows without launching JavaFX/GUI components.~~** ✅ Verified 2026-04-26 — runs cleanly, no GUI launched, both 2-player constructed and 4-player commander complete with exit 0.
+- **~~Forge's exact log format.~~** ✅ Captured 2026-04-26 in `verify_output/{constructed,commander}_stdout.txt`. Match results print as `Match Result: Ai(N)-<deck>: <wins> ...` and per-game outcomes as `Game Outcome: Ai(N)-<deck> has lost because life total reached 0`.
 - **Whether Forge supports deterministic RNG seeds** for reproducible runs. If not, accept higher variance and run more games.
-- **Forge's userdata directory location on the user's specific Windows install.** Could be `%APPDATA%\Forge`, could be alongside the install. The verifier checks multiple candidates.
+- **~~Forge's userdata directory location.~~** ✅ Pinned via `forge.profile.properties` to `<install>/userdata/`. Forge's documented `-D` flag is broken in 2.0.12 (silently ignored) — userdata redirection is the only reliable path.
 - **Card coverage for sets released in the last 60 days.** If test decks rely on these, conversion may fail or substitute incorrectly.
-- **Whether 4-player Commander headless actually works.** Documented to work, but not verified on this machine.
+- **~~Whether 4-player Commander headless actually works.~~** ✅ Verified 2026-04-26 — 4-player pod with bundled commander precons runs to completion, all per-player scores reported.
 - **Forge AI behavior on Commander-format games.** Heuristics tuned for 60-card constructed may underperform in 100-card singleton.
 
 ### Decisions made (with reasoning)

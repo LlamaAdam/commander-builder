@@ -158,11 +158,17 @@ def find_forge_jar(install_dir: Path) -> Optional[Path]:
 
 
 def find_userdata_dir(install_dir: Path) -> Optional[Path]:
-    """Forge stores user data in either install/res or %LOCALAPPDATA%/Forge."""
+    """Find a Forge userdata dir containing a `decks/` subfolder.
+
+    Order matches the precedence Forge itself uses when forge.profile.properties
+    is present: project-local `<install>/userdata` wins, then the platform
+    default, then the install dir itself.
+    """
     candidates = [
-        install_dir / "res",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Forge" if os.environ.get("LOCALAPPDATA") else None,
+        install_dir / "userdata",
         Path(os.environ.get("APPDATA", "")) / "Forge" if os.environ.get("APPDATA") else None,
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Forge" if os.environ.get("LOCALAPPDATA") else None,
+        install_dir / "res",
         install_dir,
     ]
     for c in candidates:
@@ -184,12 +190,35 @@ def list_decks(decks_dir: Path) -> tuple[list[Path], list[Path]]:
     return constructed, commander
 
 
+def list_bundled_decks(install_dir: Path) -> tuple[list[Path], list[Path]]:
+    """Fallback: read decks shipped inside the install's `res/quest/` tree.
+
+    Forge releases bundle hundreds of precons under `res/quest/precons/` and
+    `res/quest/commanderprecons/`. These are usable as `sim` opponents without
+    the user ever launching Forge interactively.
+    """
+    quest = install_dir / "res" / "quest"
+    constructed_dir = quest / "precons"
+    commander_dir = quest / "commanderprecons"
+    constructed = sorted(constructed_dir.glob("*.dck")) if constructed_dir.is_dir() else []
+    commander = sorted(commander_dir.glob("*.dck")) if commander_dir.is_dir() else []
+    return constructed, commander
+
+
 # ---------- match runner ----------
 
 
 def deck_id_from_path(deck_path: Path) -> str:
-    """Forge's `sim` command takes deck names without extension."""
-    return deck_path.stem
+    """Forge's `sim` accepts a deck filename when it ends in `.<3 alnum>`.
+
+    Quoting from `forge sim -h`:
+      "deck is treated as file if it ends with a dot followed by three numbers
+       or letters"
+
+    So we pass `<name>.dck` and Forge will resolve it inside the directory
+    given via `-D`.
+    """
+    return deck_path.name
 
 
 def run_sim(
@@ -209,18 +238,30 @@ def run_sim(
     output_dir.mkdir(parents=True, exist_ok=True)
     deck_args = [deck_id_from_path(p) for p in deck_paths]
 
-    # Single -d flag with all decks listed after it (per Forge docs gotcha).
+    # Forge's `sim` flags (from the in-binary help text):
+    #   -d  one or more deck names/filenames
+    #   -D  absolute directory containing those decks
+    #   -f  format
+    #   -n  number of games
+    # All chosen decks must live in the same directory for `-D` to work; the
+    # verifier picks decks from a single source so this holds.
+    deck_dir = deck_paths[0].parent if deck_paths else Path()
+
+    # Forge ignores `-D` in 2.0.12 — it always reads from
+    # `<userDir>/decks/<format>/`. The verifier ensures decks live there
+    # (via forge.profile.properties + a project-local userdata) before
+    # invoking sim, so we just pass deck filenames.
     cmd = [
         java,
         "-jar",
         str(jar),
         "sim",
-        "-d",
-        *deck_args,
         "-f",
         game_format,
         "-n",
         str(num_games),
+        "-d",
+        *deck_args,
     ]
 
     stdout_path = output_dir / f"{label}_stdout.txt"
@@ -346,21 +387,41 @@ def main() -> int:
 
     header("Step 3: Userdata + decks")
     userdata = find_userdata_dir(install)
-    if not userdata:
+    constructed: list[Path] = []
+    commander: list[Path] = []
+    if userdata:
+        findings.forge_userdata_dir = str(userdata)
+        decks_dir = userdata / "decks"
+        findings.decks_dir = str(decks_dir)
+        print(f"Userdata: {userdata}")
+        print(f"Decks dir: {decks_dir}")
+        constructed, commander = list_decks(decks_dir)
+    else:
         findings.notes.append(
-            "Userdata directory with `decks/` subfolder not found. "
-            "Forge may need to be launched once interactively to create it."
+            "Userdata `decks/` not found — falling back to bundled `res/quest/` decks."
         )
-        print("WARN: userdata directory not located. Skipping deck enumeration.")
-        _save_findings(output_dir, findings)
-        return 1
-    findings.forge_userdata_dir = str(userdata)
-    decks_dir = userdata / "decks"
-    findings.decks_dir = str(decks_dir)
-    print(f"Userdata: {userdata}")
-    print(f"Decks dir: {decks_dir}")
+        print("Userdata `decks/` not found — falling back to bundled `res/quest/` decks.")
 
-    constructed, commander = list_decks(decks_dir)
+    if not constructed and not commander:
+        bundled_constructed, bundled_commander = list_bundled_decks(install)
+        if bundled_constructed or bundled_commander:
+            print(
+                f"Bundled decks under res/quest: "
+                f"{len(bundled_constructed)} precons, {len(bundled_commander)} commander precons"
+            )
+            findings.notes.append(
+                f"Using bundled decks: {len(bundled_constructed)} precons, "
+                f"{len(bundled_commander)} commanderprecons"
+            )
+            constructed, commander = bundled_constructed, bundled_commander
+        else:
+            findings.notes.append(
+                "No decks found in userdata or bundled res/quest/. "
+                "Phase 1A cannot proceed without decks."
+            )
+            print("WARN: no decks anywhere. Skipping sim runs.")
+            _save_findings(output_dir, findings)
+            return 1
     findings.constructed_decks = [p.name for p in constructed]
     findings.commander_decks = [p.name for p in commander]
     print(f"Constructed decks found: {len(constructed)}")
