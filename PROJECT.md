@@ -152,13 +152,10 @@ The user's local environment, to the extent it's been documented:
 - **OS:** Windows 11 Home
 - **Hardware:** RTX 3060 laptop, 6GB VRAM
 - **Python:** 3.12 (per memory; verify on first run)
-- **Java:** Installed (per memory; verify version meets Forge's requirement of JRE 8+)
-- **Working directory location:** `C:\Users\pilot\OneDrive\Documents\Python Scripts\commander_builder` — note: under OneDrive, which has caused issues for Next.js builds in adjacent projects. Plain Python should be fine but watch for symlink/reparse-point weirdness if anything fails inexplicably.
-
-The user has NOT yet documented:
-- Whether Forge is actually installed yet
-- Forge install location on this machine
-- Anthropic API key availability for Phase 2
+- **Java:** NOT installed as of 2026-04-26. Verifier surfaced this — `where java` finds nothing, no install in standard locations. Recommend Temurin 21 LTS JRE; current Forge releases need JRE 17+.
+- **Forge:** NOT installed as of 2026-04-26. Verifier surfaced this — none of `%PROGRAMFILES%\Forge`, `%LOCALAPPDATA%\Forge`, etc. exist. Get from `Card-Forge/forge` GitHub releases.
+- **Working directory location:** `C:\dev\commander_builder` — moved out of OneDrive on 2026-04-26 to avoid the reparse-point issues that broke Next.js builds in adjacent projects. Pushed to `github.com/LlamaAdam/commander-builder` (public).
+- **Anthropic API key:** not yet documented — needed for Phase 2.
 
 The verifier (Phase 1A) starts by surfacing the Forge install state. Don't assume — check.
 
