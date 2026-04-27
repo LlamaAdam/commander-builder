@@ -169,7 +169,105 @@ alternative.
 
 ## FP-006 — Local web-app GUI
 
-**What.** A browser-based UI replacing the CLI for the common workflow:
+### Canonical UI design (provided 2026-04-27)
+
+The user shared a polished mockup that should be treated as the
+target UI shape, not a strawman. Reference image saved with this
+session's notes; the surface elements decompose as follows.
+
+**Page header**
+- App brand "Commander Builder" + breadcrumb ("My decks / <deck name>")
+- Right-side actions: `Export`, `Playtest ↗`
+
+**Commander hero card** (top section)
+- Stylized card preview with name, type line, and color-identity dots
+  (W/U/B/R/G as colored circles).
+- Theme tags: `Landfall`, `Counters` (multi-select pills, derived from
+  archetype detection — see `archetype.py`).
+- Right-side: "Deck progress" with `94/100` count + thin progress bar.
+
+**Stat tiles** (4 across)
+- Avg CMC (e.g. `2.84`)
+- Lands count (e.g. `37`)
+- Power level (e.g. `7/10`) — driven by EDHREC bracket / heuristic
+- Est. price (e.g. `$284`) — sum of card prices from Scryfall
+
+**Mana curve** (left half) — histogram with 0..6+ buckets, count under
+each bar. Subtitle "Nonland spells" makes the scope explicit.
+
+**Categories** (right half) — labelled colored progress bars with
+counts:
+- Ramp (green)
+- Card draw (blue)
+- Removal (red)
+- Board wipes (orange)
+- Land payoffs (purple) — archetype-specific category
+- Win conditions (teal)
+
+**Suggested adds** (bottom card)
+- Section title: "Suggested adds (based on commander synergy)" + `More ↗`
+- Each suggestion row:
+  - Card name + one-line rationale
+    (e.g. "Lotus Cobra — Mana on landfall — accelerates Omnath triggers")
+  - Match% pill (98% green / 89% yellow / 85% amber)
+  - Price ($)
+  - `Add` button (mutates the deck; should be undoable)
+
+**Visual style**
+- Dark mode background (#0e0f12-ish), panels at #1a1c20-ish.
+- Color identity dots use Scryfall-canonical colors (W ivory, U blue,
+  B purple-charcoal, R orange-red, G mint).
+- Small radii, generous spacing.
+
+### Backend prerequisites for the UI
+
+Most of these already exist; some need surfacing:
+
+| UI element | Backend status |
+|---|---|
+| Avg CMC | Exists — `synergy.build_metrics` + `ratings.get_cmc` |
+| Lands count | Exists — `card_db.get_type_line` |
+| Power level | **Missing** — needs heuristic. EDHREC publishes "bracket"; could derive from `archetype` + Game Changers list. |
+| Est. price | **Missing in surface** — Scryfall responses include `prices.usd`; need to project this field in `bulk_index` + `cards.py` and aggregate. |
+| Mana curve histogram | Exists — `synergy.DeckMetrics.{two_drops,four_drops,…}` and `goldfish` reports |
+| Categories (ramp / draw / removal / wipes) | Partial — `staples.classify_role` has these. **Missing:** "land_payoff" + "win_condition" roles. |
+| Theme tags ("Landfall", "Counters") | Exists — `archetype.py` heuristic classifier |
+| Match% on suggestions | Partial — `improvement_advisor` produces synergy-pct + inclusion-pct; need a single "match score" derived from those. |
+| Suggestion rationale (one-line) | Exists — `SwapRecommendation.reason` |
+| Add button (mutate deck) | **Missing** — needs a deck-mutation API + persistence. |
+| Card-image preview | **Deferred** (FP-008) — Scryfall image CDN, lazy-fetched into `mtg_cards/images/`. |
+
+### Implementation path (recommended)
+
+Path B (Flask + HTML/JS) remains the right choice. Concrete plan:
+
+1. **Backend prep** (~6h):
+   - Surface `prices.usd` in `forge_py.cards.get()` + `bulk_index`
+     projections.
+   - Expand `staples.classify_role` taxonomy: add `land_payoff`,
+     `win_condition`. Per-archetype category tables.
+   - Power-level heuristic (deck CMC + game-changer count + speed
+     archetype + bracket fitting).
+   - Deck-mutation API in `iteration_loop` for "Add this card" /
+     "Cut this card" without re-running a full audit.
+2. **Flask scaffold** (~4h):
+   - Single-page route serving the deck dashboard.
+   - SSE endpoint for sim progress streaming.
+   - JSON endpoints feeding each panel (curve, categories, suggestions).
+3. **HTML/CSS** (~6h):
+   - Dark theme matching the mockup.
+   - Component library: card hero, stat tile, progress bar, suggestion
+     row.
+   - Animation: graceful enter/leave on suggestion list.
+4. **Wire-up** (~4h):
+   - State management (vanilla JS or Alpine.js — no React build step).
+   - Optimistic UI for `Add` button with undo.
+
+Total estimate: ~20h to ship a usable v1 matching the mockup.
+
+### Original spec (kept for context)
+
+A browser-based UI replacing the CLI for the common workflow:
 
 ```
 [radio: paste URL  |  paste decklist]   [text input]
