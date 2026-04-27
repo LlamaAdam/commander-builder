@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "commander-builder"
+version = "0.2.0"
+description = "Closed-loop MTG Commander deck improvement tool — Forge-validated swap recommendations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "TBD" }
+authors = [
+    { name = "LlamaAdam" }
+]
+keywords = ["mtg", "commander", "edh", "forge", "deckbuilding"]
+
+# Standard library only for the core. Optional extras opt into network /
+# clipboard / LLM backends.
+dependencies = []
+
+[project.optional-dependencies]
+clipboard = ["pyperclip>=1.8"]
+claude = ["anthropic>=0.30"]
+test = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pyperclip>=1.8",
+]
+
+[project.scripts]
+# CLI entry points so users can `commander-import ...` instead of
+# `python -m commander_builder.moxfield_import ...`. Kept the long forms too
+# since they're already documented in PROJECT.md and audit_workflow.md.
+commander-import     = "commander_builder.moxfield_import:main"
+commander-push       = "commander_builder.moxfield_push:main"
+commander-snapshot   = "commander_builder.snapshot_deck:main"
+commander-curate     = "commander_builder.pool_curator:main"
+commander-match      = "commander_builder.run_match:main"
+commander-compare    = "commander_builder.compare_versions:main"
+commander-iterate    = "commander_builder.iteration_loop:main"
+commander-status     = "commander_builder.status:main"
+commander-revert     = "commander_builder.revert_to:main"
+commander-doctor     = "commander_builder.doctor:main"
+commander-history    = "commander_builder.report:main"
+commander-export     = "commander_builder.export:main"
+commander-advise     = "commander_builder.improvement_advisor:main"
+commander-meta-test  = "commander_builder.meta_test:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["commander_builder*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+# pytest auto-discovers tests/conftest.py which puts src/ on sys.path even
+# without a `pip install -e .`, so the suite runs both ways.
