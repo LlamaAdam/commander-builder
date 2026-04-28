@@ -116,9 +116,17 @@ def create_app(
     app.config["DECK_DIR"] = deck_dir
     app.config["KNOWLEDGE_DB"] = knowledge_db
 
+    # Cache-buster: a fresh token per process boot so static assets
+    # are never served from a stale browser cache after a restart.
+    # Without this, app.js / app.css edits ship to GitHub but the
+    # browser keeps the old copy and the user sees stale UI behavior
+    # (e.g. a missing Mode radio while the template clearly has it).
+    import secrets as _secrets
+    _ASSET_VERSION = _secrets.token_hex(4)
+
     @app.route("/")
     def root():
-        return render_template("index.html")
+        return render_template("index.html", asset_version=_ASSET_VERSION)
 
     @app.route("/api/health")
     def health():
