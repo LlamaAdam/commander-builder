@@ -975,6 +975,24 @@ def test_format_added_line_falls_back_when_set_missing(monkeypatch):
     assert _format_added_line("X") == "1 X"
 
 
+def test_apply_swaps_kept_count_sums_quantities_not_lines():
+    """Multi-qty lines like '5 Forest' should count as 5 cards in
+    `kept`, not 1 line. The UI uses kept + adds to compute
+    main_count and earlier counted lines, mis-reporting deck size."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = (
+        "[Commander]\n1 Cmdr\n[Main]\n"
+        "5 Forest\n"
+        "3 Mountain\n"
+        "1 Sol Ring\n"
+    )
+    recs = []  # no swaps — just measure kept_count
+    _, _, _, kept = _apply_swaps_to_dck(original, recs)
+    # 5 + 3 + 1 = 9 actual cards across 3 lines.
+    assert kept == 9
+
+
 def test_apply_swaps_no_op_when_one_list_empty():
     """0 adds + N cuts → no swaps (deck size must stay legal)."""
     from commander_builder.web.app import _apply_swaps_to_dck

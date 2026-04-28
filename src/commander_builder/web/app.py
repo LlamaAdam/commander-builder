@@ -1107,7 +1107,14 @@ def _apply_swaps_to_dck(
                 name = m.group(2).strip().lower()
                 if name in cut_set:
                     continue  # drop this line
-                main_kept += 1
+                # Sum the quantity prefix, not the line count — `5 Forest`
+                # is one line but five cards. Counting lines made the UI
+                # report '83 mainboard' on a deck Forge actually loaded
+                # as the legal 99.
+                try:
+                    main_kept += int(m.group(1))
+                except (TypeError, ValueError):
+                    main_kept += 1
             out_lines.append(raw)
             continue
 
