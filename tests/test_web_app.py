@@ -531,6 +531,149 @@ def test_compare_iterations_404_on_missing_id(seeded_client):
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# /api/deck_text + /api/propose_swap (modify-deck + A/B sim)
+# ---------------------------------------------------------------------------
+
+def test_deck_text_returns_dck_blob(client):
+    """Direct read of a deck file by id."""
+    resp = client.get("/api/deck_text?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["deck"] == "Alpha"
+    assert "[Main]" in body["text"]
+    assert "1 Forest" in body["text"]
+
+
+def test_deck_text_404_on_missing_deck(client):
+    resp = client.get("/api/deck_text?deck=Ghost")
+    assert resp.status_code == 404
+
+
+def _stub_compare(monkeypatch, winner="new", old_wins=4, new_wins=11, draws=0):
+    """Stub commander_builder.compare_versions.compare so the
+    A/B endpoint runs without Forge."""
+    from types import SimpleNamespace
+
+    def fake_compare(old_deck, new_deck, bracket, games_per_pod,
+                     filler_pairs=2, mode="1v1", runner=None,
+                     out_dir=None):
+        old_stats = SimpleNamespace(deck_filename=old_deck,
+                                    wins=old_wins, games=old_wins + new_wins + draws)
+        new_stats = SimpleNamespace(deck_filename=new_deck,
+                                    wins=new_wins, games=old_wins + new_wins + draws)
+        return SimpleNamespace(
+            old_deck=old_deck, new_deck=new_deck,
+            bracket=bracket, mode=mode, games_per_pod=games_per_pod,
+            old_stats=old_stats, new_stats=new_stats,
+            draws=draws, total_games=games_per_pod,
+            timestamp="2026-04-28T12:00:00",
+            winner=winner,
+            margin=abs(new_wins - old_wins),
+        )
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+
+    # Stub ForgeRunner.locate so the endpoint passes the availability check.
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.ForgeRunner.locate",
+        classmethod(lambda cls: SimpleNamespace(name="stubbed")),
+    )
+
+
+def test_propose_swap_runs_compare_and_returns_summary(client, monkeypatch):
+    _stub_compare(monkeypatch, winner="new", old_wins=4, new_wins=11)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["winner"] == "new"
+    assert body["old_wins"] == 4
+    assert body["new_wins"] == 11
+    assert body["games_per_pod"] == 5
+    # Diff was non-empty (Lotus Cobra added, Cultivate removed).
+    assert any("Lotus Cobra" in s for s in body["diff"]["added"])
+
+
+def test_propose_swap_400_on_bad_games_value(client, monkeypatch):
+    _stub_compare(monkeypatch)
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha",
+        "new_text": "[Main]\n1 Forest\n",
+        "games": 7,  # not 5/10/20
+    })
+    assert resp.status_code == 400
+
+
+def test_propose_swap_400_on_no_changes(client, monkeypatch):
+    _stub_compare(monkeypatch)
+    # Same content as fixture — no diff.
+    same_text = (
+        "[metadata]\nName=Alpha\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Cultivate\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": same_text, "games": 5,
+    })
+    assert resp.status_code == 400
+    assert "no changes" in resp.get_json()["error"]
+
+
+def test_propose_swap_404_on_missing_deck(client, monkeypatch):
+    _stub_compare(monkeypatch)
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Ghost",
+        "new_text": "[Main]\n1 Forest\n",
+        "games": 5,
+    })
+    assert resp.status_code == 404
+
+
+def test_propose_swap_400_on_empty_new_text(client, monkeypatch):
+    _stub_compare(monkeypatch)
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": "", "games": 5,
+    })
+    assert resp.status_code == 400
+
+
+def test_propose_swap_503_when_forge_unavailable(client, monkeypatch):
+    """Forge missing should return 503 with detail, not 500."""
+    from types import SimpleNamespace
+
+    def fake_compare(*a, **kw):
+        return SimpleNamespace()  # not reached
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+
+    def boom(cls):
+        raise FileNotFoundError("vendor/forge not found")
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.ForgeRunner.locate",
+        classmethod(boom),
+    )
+
+    new_text = (
+        "[metadata]\nName=v2\n\n[Commander]\n1 Cmdr\n\n"
+        "[Main]\n1 Forest\n1 Lotus Cobra\n"
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5,
+    })
+    assert resp.status_code == 503
+    body = resp.get_json()
+    assert body["error"] == "Forge not available"
+
+
 def test_compare_iterations_handles_added_cards(seeded_client):
     """Demo seeder writes the same minimal snapshot for each version
     plus one extra card slug per iteration; check the diff isn't empty

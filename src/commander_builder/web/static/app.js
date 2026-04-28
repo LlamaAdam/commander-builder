@@ -75,6 +75,101 @@ async function selectDeck(deckId, li) {
   }
 }
 
+async function openProposeModal() {
+  if (!_activeDeckId) return;
+  const modal = $("propose-modal");
+  const ta = $("propose-text");
+  const status = $("propose-status");
+  const result = $("propose-result");
+  status.textContent = "";
+  result.innerHTML = "";
+  ta.value = "Loading…";
+  modal.hidden = false;
+  try {
+    const body = await fetchJSON(
+      `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
+    );
+    ta.value = body.text || "";
+    ta.focus();
+  } catch (e) {
+    ta.value = "";
+    status.textContent = `Could not load deck: ${e.message}`;
+  }
+}
+
+function closeProposeModal() {
+  $("propose-modal").hidden = true;
+}
+
+async function runProposeSwap() {
+  if (!_activeDeckId) return;
+  const ta = $("propose-text");
+  const status = $("propose-status");
+  const result = $("propose-result");
+  const btn = $("propose-run");
+  const games = parseInt(
+    document.querySelector('input[name="games"]:checked').value, 10,
+  );
+  result.innerHTML = "";
+  status.textContent = `Running ${games} games via Forge — this can take ${games === 5 ? "~15s" : games === 10 ? "~30s" : "~60s"}…`;
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/propose_swap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deck: _activeDeckId,
+        new_text: ta.value,
+        games,
+        bracket: 3,
+        mode: "1v1",
+      }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      status.textContent = `Error: ${body.error || resp.status}${
+        body.detail ? " — " + body.detail : ""
+      }`;
+      return;
+    }
+    status.textContent = `Done. ${body.total_games} games played.`;
+    renderProposeResult(result, body);
+  } catch (e) {
+    status.textContent = `Network error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderProposeResult(container, body) {
+  const wrap = el("div");
+  const winnerCls = body.winner === "tie" ? "tie" : body.winner;
+  wrap.appendChild(el(
+    "div", { class: `propose-winner ${winnerCls}` },
+    body.winner === "tie"
+      ? "Tie game"
+      : `Winner: ${body.winner === "new" ? "new version" : "old version"} (margin ${body.margin})`,
+  ));
+  const grid = el("div", { class: "propose-result" });
+  grid.appendChild(rowEl("Old wins", `${body.old_wins} / ${body.old_games}`));
+  grid.appendChild(rowEl("New wins", `${body.new_wins} / ${body.new_games}`));
+  grid.appendChild(rowEl("Draws", String(body.draws)));
+  grid.appendChild(rowEl("Mode", body.mode));
+  grid.appendChild(rowEl("Bracket", String(body.bracket)));
+  grid.appendChild(rowEl("Cards added", String((body.diff?.added || []).length)));
+  grid.appendChild(rowEl("Cards removed", String((body.diff?.removed || []).length)));
+  grid.appendChild(rowEl("Games per pod", String(body.games_per_pod)));
+  wrap.appendChild(grid);
+  container.appendChild(wrap);
+}
+
+function rowEl(label, value) {
+  const r = el("div", { class: "row" });
+  r.appendChild(el("span", { class: "muted" }, label));
+  r.appendChild(el("span", {}, value));
+  return r;
+}
+
 async function loadAdvise() {
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
@@ -105,6 +200,13 @@ function renderDashboard(data, iterations) {
     pips.appendChild(el("span", { class: `color-pip cp-${c}` }, c));
   }
   hero.appendChild(pips);
+  // "Propose changes" → opens the modify-deck + A/B Forge sim modal.
+  const proposeBtn = el(
+    "button", { class: "advise-btn", style: "margin-top: 10px;" },
+    "Propose changes",
+  );
+  proposeBtn.addEventListener("click", openProposeModal);
+  hero.appendChild(proposeBtn);
   dash.appendChild(hero);
 
   // Stat tiles
@@ -262,6 +364,27 @@ function curveBars(curve) {
   ));
   return wrap;
 }
+
+// Wire propose-swap modal handlers (the elements exist regardless of
+// which deck is selected — the modal is hidden until openProposeModal
+// flips its `hidden` attribute).
+document.addEventListener("DOMContentLoaded", () => {
+  const closeBtn = $("propose-close");
+  if (closeBtn) closeBtn.addEventListener("click", closeProposeModal);
+  const runBtn = $("propose-run");
+  if (runBtn) runBtn.addEventListener("click", runProposeSwap);
+  // ESC closes the modal.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeProposeModal();
+  });
+  // Click outside the modal body closes it.
+  const backdrop = $("propose-modal");
+  if (backdrop) {
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) closeProposeModal();
+    });
+  }
+});
 
 loadHealth();
 loadDecks();

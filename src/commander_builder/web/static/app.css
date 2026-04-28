@@ -219,6 +219,122 @@ body {
 .advise-btn:hover { filter: brightness(1.1); }
 .advise-btn:active { filter: brightness(0.9); }
 
+/* --- Propose-swap modal -------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+  padding: 24px;
+}
+.modal-backdrop[hidden] { display: none; }
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: min(720px, 100%);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 22px;
+  gap: 12px;
+  overflow: hidden;
+}
+.modal header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.modal header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.modal-close {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-close:hover { color: var(--text); }
+
+.modal textarea {
+  flex: 1;
+  min-height: 240px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.propose-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.games-radio {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+.games-radio legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.games-radio label {
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.propose-result {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.propose-result .row {
+  display: flex;
+  justify-content: space-between;
+}
+.propose-winner {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-transform: capitalize;
+}
+.propose-winner.new { color: var(--good); }
+.propose-winner.old { color: var(--bad); }
+.propose-winner.tie { color: var(--warn); }
+
+.advise-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .iteration-list { list-style: none; padding: 0; margin: 0; }
 .iteration {
   display: grid;

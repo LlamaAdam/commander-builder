@@ -25,6 +25,33 @@
     </section>
   </main>
 
+  <!-- Propose-swap modal (hidden by default) -->
+  <div class="modal-backdrop" id="propose-modal" hidden>
+    <div class="modal">
+      <header>
+        <h2>Propose changes</h2>
+        <button class="modal-close" id="propose-close" aria-label="Close">&times;</button>
+      </header>
+      <p class="muted">
+        Edit the deck below, pick a game count, then run an A/B Forge sim.
+        Old vs. new will play head-to-head; the winner is whichever
+        version wins more games.
+      </p>
+      <textarea id="propose-text" spellcheck="false"></textarea>
+      <div class="propose-controls">
+        <fieldset class="games-radio">
+          <legend>Games:</legend>
+          <label><input type="radio" name="games" value="5" checked> 5 (~15s)</label>
+          <label><input type="radio" name="games" value="10"> 10 (~30s)</label>
+          <label><input type="radio" name="games" value="20"> 20 (~60s)</label>
+        </fieldset>
+        <button class="advise-btn" id="propose-run">Run A/B sim</button>
+      </div>
+      <div id="propose-status" class="muted"></div>
+      <div id="propose-result"></div>
+    </div>
+  </div>
+
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

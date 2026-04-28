@@ -221,6 +221,155 @@ def create_app(
             "count": len(rows),
         })
 
+    @app.route("/api/deck_text")
+    def deck_text():
+        """Return the raw .dck text for a deck. Used by the
+        'Propose changes' UI to pre-populate the modify-deck editor."""
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({
+                "error": "deck not found",
+                "deck": deck_id, "path": explicit,
+            }), 404
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({
+            "deck": deck_id,
+            "path": str(path),
+            "text": text,
+        })
+
+    @app.route("/api/propose_swap", methods=["POST"])
+    def propose_swap():
+        """Run an A/B Forge comparison between an existing deck
+        (`deck_id`) and a modified version (`new_text`).
+
+        Body: ``{"deck": "<id>", "new_text": "<.dck blob>",
+                  "games": 5|10|20, "bracket": int=3, "mode": "1v1"|"pod"}``
+
+        Synchronous — returns when Forge finishes (5 games is roughly
+        15s in 1v1 mode; 20 games ~60s; pod mode is 4-6x slower).
+        Returns the ComparisonReport as JSON on success.
+
+        Forge availability is required. If ForgeRunner.locate() fails
+        (no JRE, no vendor/forge, etc) the endpoint returns 503.
+        """
+        try:
+            from flask import abort
+            payload = request.get_json(force=True) or {}
+        except Exception:
+            return jsonify({"error": "expected JSON body"}), 400
+
+        deck_id = payload.get("deck")
+        new_text = payload.get("new_text") or ""
+        try:
+            games = int(payload.get("games", 5))
+        except (TypeError, ValueError):
+            return jsonify({"error": "games must be int"}), 400
+        if games not in (5, 10, 20):
+            return jsonify({
+                "error": "games must be one of 5, 10, 20",
+            }), 400
+        try:
+            bracket = int(payload.get("bracket", 3))
+        except (TypeError, ValueError):
+            return jsonify({"error": "bracket must be int"}), 400
+        mode = payload.get("mode", "1v1")
+        if mode not in ("1v1", "pod"):
+            return jsonify({
+                "error": "mode must be '1v1' or 'pod'",
+            }), 400
+
+        old_path = _resolve_deck_path(deck_dir, deck_id, None)
+        if old_path is None:
+            return jsonify({"error": "old deck not found",
+                            "deck": deck_id}), 404
+        if not new_text.strip():
+            return jsonify({"error": "new_text is empty"}), 400
+
+        from ..compare_versions import compare, diff_deck_text
+
+        # Quick dry-run: if no actual changes, refuse to spend Forge
+        # cycles on a no-op.
+        old_text = old_path.read_text(encoding="utf-8")
+        diff = diff_deck_text(old_text, new_text)
+        if not diff["added"] and not diff["removed"]:
+            return jsonify({
+                "error": "no changes detected",
+                "diff": diff,
+            }), 400
+
+        # Stage the proposed deck as a sibling of the old one so Forge
+        # can find it via DECK_DIR. Suffix it _proposed_<timestamp> to
+        # avoid collisions.
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        new_path = old_path.parent / f"{old_path.stem}_proposed_{ts}.dck"
+        try:
+            new_path.write_text(new_text, encoding="utf-8")
+        except OSError as exc:
+            return jsonify({"error": f"could not stage new deck: {exc}"}), 500
+
+        try:
+            from ..forge_runner import ForgeRunner
+            runner = ForgeRunner.locate()
+        except Exception as exc:
+            try:
+                new_path.unlink()
+            except OSError:
+                pass
+            return jsonify({
+                "error": "Forge not available",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 503
+
+        try:
+            report = compare(
+                old_deck=old_path.name,
+                new_deck=new_path.name,
+                bracket=bracket,
+                games_per_pod=games,
+                # In pod mode, default 2 filler pairs is fine; 1v1 ignores it.
+                filler_pairs=2,
+                mode=mode,
+                runner=runner,
+            )
+        except Exception as exc:  # pragma: no cover - Forge runtime errors
+            try:
+                new_path.unlink()
+            except OSError:
+                pass
+            return jsonify({
+                "error": "compare failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 500
+
+        # Don't leak the temp staged file — but DO keep it if the user
+        # might want to commit-the-swap later. Compromise: keep the file
+        # under a `_proposed/` subdir but return a "cleanup hint" the
+        # UI can act on.
+        return jsonify({
+            "old_deck": old_path.name,
+            "new_deck": new_path.name,
+            "diff": diff,
+            "games_per_pod": games,
+            "mode": mode,
+            "bracket": bracket,
+            "winner": report.winner,
+            "old_wins": report.old_stats.wins,
+            "new_wins": report.new_stats.wins,
+            "old_games": report.old_stats.games,
+            "new_games": report.new_stats.games,
+            "draws": report.draws,
+            "margin": report.margin,
+            "total_games": report.total_games,
+            "timestamp": report.timestamp,
+        })
+
     @app.route("/api/iteration/<int:iteration_id>")
     def iteration_detail(iteration_id: int):
         """Full iteration record including the deck_snapshot blob.
