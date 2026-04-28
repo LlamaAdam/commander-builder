@@ -124,6 +124,9 @@ def create_app(
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be an integer 1..5"}), 400
+        with_advise = request.args.get("advise", "").lower() in (
+            "1", "true", "yes",
+        )
 
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
@@ -133,8 +136,52 @@ def create_app(
                 "path": explicit,
             }), 404
 
-        data = build_dashboard(path, bracket=bracket)
+        suggested = None
+        if with_advise:
+            try:
+                suggested = _build_suggested_adds(path, bracket or 3)
+            except Exception as exc:
+                # advise() can fail for many reasons (missing EDHREC,
+                # missing commander, network); the dashboard still
+                # renders without suggestions.
+                suggested = None
+                app.logger.warning("advise failed: %s", exc)
+
+        data = build_dashboard(path, bracket=bracket, suggested=suggested)
         return jsonify(data.to_dict())
+
+    @app.route("/api/advise")
+    def advise_route():
+        """Standalone advise endpoint — same shape as /api/dashboard's
+        suggested_adds but doesn't require a full dashboard rebuild."""
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        try:
+            bracket_raw = request.args.get("bracket")
+            bracket = int(bracket_raw) if bracket_raw else 3
+        except ValueError:
+            return jsonify({"error": "bracket must be an integer 1..5"}), 400
+
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({
+                "error": "deck not found",
+                "deck": deck_id,
+                "path": explicit,
+            }), 404
+
+        try:
+            suggested = _build_suggested_adds(path, bracket)
+        except Exception as exc:
+            return jsonify({
+                "error": "advise unavailable",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 503
+
+        return jsonify({
+            "deck": deck_id, "bracket": bracket,
+            "suggestions": suggested,
+        })
 
     @app.route("/api/iterations")
     def iterations():
@@ -160,6 +207,36 @@ def create_app(
         })
 
     return app
+
+
+def _build_suggested_adds(deck_path: Path, bracket: int) -> list[dict]:
+    """Project ``improvement_advisor.advise()`` recommendations into the
+    shape ``deck_dashboard.build_dashboard`` expects for
+    ``suggested``::
+
+        [{"card": str, "inclusion_pct": float, "synergy_pct": float,
+          "rationale": str, "price_usd": Optional[float]}, ...]
+
+    Only `add` actions are forwarded — the dashboard's "suggested
+    adds" panel is for cards to consider including, not cuts.
+    Pulled out as a helper so both `/api/dashboard?advise=1` and
+    `/api/advise` reuse the same projection.
+    """
+    from ..improvement_advisor import advise
+    report = advise(deck_path, bracket=bracket)
+    out: list[dict] = []
+    for rec in report.recommendations:
+        if rec.action != "add":
+            continue
+        ev = rec.evidence or {}
+        out.append({
+            "card": rec.card,
+            "inclusion_pct": float(ev.get("inclusion_pct") or 0),
+            "synergy_pct": float(ev.get("synergy_pct") or 0),
+            "rationale": rec.reason or "",
+            "price_usd": ev.get("price_usd"),
+        })
+    return out
 
 
 def _iteration_to_dict(it) -> dict:

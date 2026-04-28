@@ -298,3 +298,113 @@ def test_iterations_drops_deck_snapshot_blob(seeded_client):
 def test_iterations_400_on_bad_limit(seeded_client):
     resp = seeded_client.get("/api/iterations?limit=abc")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /api/dashboard?advise=1 + /api/advise
+# ---------------------------------------------------------------------------
+
+def _stub_advise(monkeypatch):
+    """Stub improvement_advisor.advise so tests run offline."""
+    from types import SimpleNamespace
+
+    def fake(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add",
+                    reason="Mana on landfall",
+                    evidence={"inclusion_pct": 78.0, "synergy_pct": 12.0,
+                              "price_usd": 8.5},
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut",
+                    reason="Replaced by faster ramp",
+                    evidence={},
+                ),
+                SimpleNamespace(
+                    card="Tireless Tracker", action="add",
+                    reason="Landfall payoff",
+                    evidence={"inclusion_pct": 65.0, "synergy_pct": 18.0,
+                              "price_usd": 4.0},
+                ),
+            ],
+        )
+    monkeypatch.setattr("commander_builder.improvement_advisor.advise", fake)
+
+
+def test_dashboard_with_advise_param_includes_suggestions(client, monkeypatch):
+    _stub_advise(monkeypatch)
+    resp = client.get("/api/dashboard?deck=Alpha&advise=1")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    sugs = body["suggested_adds"]
+    # Two adds (cuts excluded), no Cultivate.
+    assert len(sugs) == 2
+    cards = {s["card"] for s in sugs}
+    assert "Lotus Cobra" in cards
+    assert "Tireless Tracker" in cards
+    assert "Cultivate" not in cards
+
+
+def test_dashboard_without_advise_param_omits_suggestions(client, monkeypatch):
+    """No `advise=1` → no advisor call, suggested_adds stays empty."""
+    called: dict = {"n": 0}
+    def boom(*a, **kw):
+        called["n"] += 1
+        raise RuntimeError("should not be called")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", boom,
+    )
+    resp = client.get("/api/dashboard?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["suggested_adds"] == []
+    assert called["n"] == 0
+
+
+def test_dashboard_advise_failure_degrades_gracefully(client, monkeypatch):
+    """If advise() raises, dashboard still renders without suggestions."""
+    def explode(*a, **kw):
+        raise RuntimeError("EDHREC fetch failed")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", explode,
+    )
+    resp = client.get("/api/dashboard?deck=Alpha&advise=1")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["suggested_adds"] == []
+
+
+def test_advise_endpoint_returns_suggestions(client, monkeypatch):
+    _stub_advise(monkeypatch)
+    resp = client.get("/api/advise?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["bracket"] == 3
+    assert len(body["suggestions"]) == 2  # adds only
+    first = body["suggestions"][0]
+    assert {"card", "inclusion_pct", "synergy_pct",
+            "rationale", "price_usd"} <= set(first.keys())
+
+
+def test_advise_endpoint_503_on_failure(client, monkeypatch):
+    def explode(*a, **kw):
+        raise ConnectionError("network down")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", explode,
+    )
+    resp = client.get("/api/advise?deck=Alpha")
+    assert resp.status_code == 503
+    body = resp.get_json()
+    assert body["error"] == "advise unavailable"
+
+
+def test_advise_endpoint_404_on_missing_deck(client):
+    resp = client.get("/api/advise?deck=Ghost")
+    assert resp.status_code == 404
+
+
+def test_advise_endpoint_400_on_bad_bracket(client):
+    resp = client.get("/api/advise?deck=Alpha&bracket=zzz")
+    assert resp.status_code == 400

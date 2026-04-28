@@ -57,7 +57,10 @@ function highlight(li) {
   if (li) li.classList.add("active");
 }
 
+let _activeDeckId = null;
+
 async function selectDeck(deckId, li) {
+  _activeDeckId = deckId;
   highlight(li);
   const dash = $("dashboard");
   dash.innerHTML = '<p class="empty-state">Loading…</p>';
@@ -69,6 +72,21 @@ async function selectDeck(deckId, li) {
     renderDashboard(data, iters.iterations || []);
   } catch (e) {
     dash.innerHTML = `<p class="empty-state">Error loading: ${e.message}</p>`;
+  }
+}
+
+async function loadAdvise() {
+  if (!_activeDeckId) return;
+  const sug = $("sug-panel");
+  if (!sug) return;
+  sug.innerHTML = '<p class="muted">Generating suggestions…</p>';
+  try {
+    const body = await fetchJSON(
+      `/api/advise?deck=${encodeURIComponent(_activeDeckId)}&bracket=3`,
+    );
+    renderSuggestions(sug, body.suggestions || []);
+  } catch (e) {
+    sug.innerHTML = `<p class="muted">Advise failed: ${e.message}</p>`;
   }
 }
 
@@ -126,21 +144,23 @@ function renderDashboard(data, iterations) {
     dash.appendChild(panel("Theme tags", tags));
   }
 
-  // Suggested adds
+  // Suggested adds — always render the panel with a "Get suggestions"
+  // button so the user can request advise on demand.
+  const sugPanel = el("section", { class: "panel", id: "sug-panel" });
+  sugPanel.appendChild(el("h3", {}, "Suggested adds"));
   if ((data.suggested_adds || []).length) {
-    const ul = el("ul", { class: "iteration-list" });
-    for (const s of data.suggested_adds) {
-      const row = el("li", { class: "iteration" });
-      row.appendChild(el("span", { class: "verdict pending" }, `${s.match_pct}%`));
-      row.appendChild(el("span", { class: "name" }, s.card));
-      row.appendChild(el(
-        "span", { class: "delta" },
-        s.price_usd != null ? `$${s.price_usd}` : "",
-      ));
-      ul.appendChild(row);
-    }
-    dash.appendChild(panel("Suggested adds", ul));
+    renderSuggestions(sugPanel, data.suggested_adds);
+  } else {
+    const btn = el("button", { class: "advise-btn" }, "Get suggestions");
+    btn.addEventListener("click", loadAdvise);
+    sugPanel.appendChild(btn);
+    sugPanel.appendChild(el(
+      "p", { class: "muted" },
+      "Heuristic over EDHREC + recent match history. ",
+      "Skips universal staples (Sol Ring etc).",
+    ));
   }
+  dash.appendChild(sugPanel);
 
   // Iteration history
   if (iterations.length) {
@@ -160,6 +180,35 @@ function renderDashboard(data, iterations) {
     }
     dash.appendChild(panel("Iteration history", ul));
   }
+}
+
+function renderSuggestions(container, suggestions) {
+  // Clear children except the <h3>.
+  while (container.children.length > 1) container.removeChild(container.lastChild);
+  if (!suggestions.length) {
+    container.appendChild(el("p", { class: "muted" }, "No suggestions found."));
+    return;
+  }
+  const ul = el("ul", { class: "iteration-list" });
+  for (const s of suggestions) {
+    const row = el("li", { class: "iteration" });
+    const pct = s.match_pct != null
+      ? s.match_pct
+      : Math.round((s.inclusion_pct || 0) + Math.min(s.synergy_pct || 0, 20));
+    row.appendChild(el("span", { class: "verdict pending" }, `${pct}%`));
+    const nameWrap = el("div");
+    nameWrap.appendChild(el("div", { class: "name" }, s.card));
+    if (s.rationale) {
+      nameWrap.appendChild(el("div", { class: "muted" }, s.rationale));
+    }
+    row.appendChild(nameWrap);
+    row.appendChild(el(
+      "span", { class: "delta" },
+      s.price_usd != null ? `$${Number(s.price_usd).toFixed(2)}` : "",
+    ));
+    ul.appendChild(row);
+  }
+  container.appendChild(ul);
 }
 
 function tile(label, value, sub) {
