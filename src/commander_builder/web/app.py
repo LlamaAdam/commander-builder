@@ -52,7 +52,7 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
         if user_only and not p.stem.startswith("[USER]"):
             continue
         # Skip transient propose-swap working copies regardless of mode.
-        if _re.search(r"_proposed_\d{8}_\d{6}$", p.stem):
+        if _re.search(r"_(proposed|converted)_\d{8}_\d{6}$", p.stem):
             continue
         display = _re.sub(r"^\[USER\]\s*", "", p.stem)
         out.append({
@@ -776,19 +776,36 @@ def create_app(
                 "diff": diff,
             }), 400
 
-        # Stage the proposed deck as a sibling of the old one so Forge
-        # can find it via DECK_DIR. Suffix it _proposed_<timestamp> to
-        # avoid collisions.
+        # Stage the proposed deck. Two format-dependent destinations:
+        # - mode='pod' (commander): siblings of the original under
+        #   userdata/decks/commander/ so Forge's `-f commander` finds
+        #   them.
+        # - mode='1v1' (constructed): under userdata/decks/constructed/
+        #   because Forge's `-f constructed` ONLY looks there. Staging
+        #   1v1 decks in the commander folder produces "No deck found"
+        #   errors and zero games — that was our 'Done. 0 games played'
+        #   mystery. Strip the [USER]/[REF] prefix because Forge's CLI
+        #   loader also chokes on filenames starting with `[`.
         from datetime import datetime as _dt
         ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-        new_path = old_path.parent / f"{old_path.stem}_proposed_{ts}.dck"
+        bare_stem = old_path.stem
+        for _prefix in ("[USER] ", "[REF] "):
+            if bare_stem.startswith(_prefix):
+                bare_stem = bare_stem[len(_prefix):]
+                break
+        if mode == "1v1":
+            stage_dir = old_path.parent.parent / "constructed"
+            stage_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            stage_dir = old_path.parent
+        new_path = stage_dir / f"{bare_stem}_proposed_{ts}.dck"
         # Rewrite the [metadata] Name= field so Forge displays this
         # deck distinctly from the original. Without this both decks
-        # report 'Name=Wyrm Sovereign' in Forge's Match Result lines
-        # and log_parser can't attribute wins to either side — every
-        # game looks like a tie regardless of who actually won.
+        # report 'Name=Hakbal of the Surging Soul' in Forge's Match
+        # Result lines and log_parser can't attribute wins to either
+        # side — every game looks like a tie regardless of who won.
         import re as _re_meta
-        staged_name = f"{old_path.stem}_proposed_{ts}"
+        staged_name = f"{bare_stem}_proposed_{ts}"
         if _re_meta.search(r"^Name=.+$", new_text, flags=_re_meta.MULTILINE):
             new_text_staged = _re_meta.sub(
                 r"^Name=.+$", f"Name={staged_name}", new_text,
@@ -805,10 +822,46 @@ def create_app(
                 new_text_staged = (
                     f"[metadata]\nName={staged_name}\n\n" + new_text
                 )
+
+        # When mode='1v1' the format is `constructed`, but the user's
+        # decks are commander-format (have a [Commander] section).
+        # Forge silently runs zero games when the deck shape doesn't
+        # match the format flag. Convert both decks to constructed
+        # before staging — this mirrors forge_py's
+        # correlate_with_forge.py conversion pattern.
+        if mode == "1v1":
+            new_text_staged = _to_constructed_format(new_text_staged)
+
         try:
             new_path.write_text(new_text_staged, encoding="utf-8")
         except OSError as exc:
             return jsonify({"error": f"could not stage new deck: {exc}"}), 500
+
+        # The OLD deck file is the unchanged user deck — also has a
+        # [Commander] section, also needs conversion for 1v1. Stage
+        # a sibling _converted_<timestamp>.dck holding the converted
+        # text so we don't mutate the user's actual deck file.
+        old_converted_path: Optional[Path] = None
+        old_for_compare = old_path.name
+        if mode == "1v1":
+            old_text = old_path.read_text(encoding="utf-8")
+            # Ensure the old deck's metadata Name= is also distinct
+            # so log_parser can split wins between old + new.
+            old_staged_name = f"{bare_stem}_converted_{ts}"
+            if _re_meta.search(r"^Name=.+$", old_text, flags=_re_meta.MULTILINE):
+                old_text = _re_meta.sub(
+                    r"^Name=.+$", f"Name={old_staged_name}", old_text,
+                    count=1, flags=_re_meta.MULTILINE,
+                )
+            old_text = _to_constructed_format(old_text)
+            old_converted_path = stage_dir / f"{old_staged_name}.dck"
+            try:
+                old_converted_path.write_text(old_text, encoding="utf-8")
+                old_for_compare = old_converted_path.name
+            except OSError as exc:
+                return jsonify({
+                    "error": f"could not stage converted old deck: {exc}",
+                }), 500
 
         try:
             from ..forge_runner import ForgeRunner
@@ -825,7 +878,7 @@ def create_app(
 
         try:
             report = compare(
-                old_deck=old_path.name,
+                old_deck=old_for_compare,
                 new_deck=new_path.name,
                 bracket=bracket,
                 games_per_pod=games,
@@ -835,25 +888,29 @@ def create_app(
                 runner=runner,
             )
         except Exception as exc:  # pragma: no cover - Forge runtime errors
-            try:
-                new_path.unlink()
-            except OSError:
-                pass
+            for p in (new_path, old_converted_path):
+                if p is None:
+                    continue
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
             return jsonify({
                 "error": "compare failed",
                 "detail": f"{type(exc).__name__}: {exc}",
             }), 500
 
-        # Drop the staged proposed_*.dck now that Forge has finished
-        # with it. It exists only as a working copy for the A/B sim;
-        # leaving it on disk pollutes the sidebar and confuses future
-        # sessions. The proposed text is already in `new_text` if the
-        # client wants to persist (they'd hit /api/deck_text PUT
-        # against the original deck or import a new deck instead).
-        try:
-            new_path.unlink()
-        except OSError:
-            pass
+        # Drop the staged proposed_*.dck and converted-old (1v1 mode
+        # only) now that Forge has finished with them. They exist
+        # only as working copies for the A/B sim; leaving them on
+        # disk pollutes the sidebar and confuses future sessions.
+        for p in (new_path, old_converted_path):
+            if p is None:
+                continue
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
         return jsonify({
             "old_deck": old_path.name,
@@ -1009,6 +1066,92 @@ def _match_pct_from_evidence(evidence: dict | None) -> int:
     synergy = min(float(evidence.get("synergy_pct") or 0), 20.0)
     raw = inclusion + synergy
     return max(1, min(100, round(raw)))
+
+
+def _to_constructed_format(text: str) -> str:
+    """Convert a Forge commander .dck to a 1v1-constructed-loadable
+    .dck.
+
+    Forge's `sim -f constructed` mode silently produces zero games
+    when the deck has a ``[Commander]`` section — the format flag
+    doesn't match the deck shape, so Forge loads the file but never
+    actually starts a match. The fix is to:
+
+    1. Move the commander line into ``[Main]`` so the deck is just
+       a single 100-card stack of cards Forge can shuffle.
+    2. Drop the ``[Commander]`` section header.
+    3. Stamp ``Deck Type=constructed`` into ``[metadata]`` so Forge's
+       deck-type detector picks the right rule set.
+
+    This mirrors what forge_py's correlate_with_forge.py harness has
+    been doing for the round-robin study; the propose-swap web endpoint
+    needs the same conversion before handing decks to Forge.
+    """
+    import re as _re
+    out: list[str] = []
+    in_cmdr = False
+    in_meta = False
+    cmdr_lines: list[str] = []
+    seen_metadata = False
+    deck_type_set = False
+
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            out.append(raw)
+            continue
+        if s.lower() == "[commander]":
+            in_cmdr = True
+            in_meta = False
+            continue  # drop the header
+        if s.lower() == "[metadata]":
+            in_meta = True
+            in_cmdr = False
+            seen_metadata = True
+            out.append(raw)
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            in_cmdr = False
+            in_meta = False
+            out.append(raw)
+            continue
+        if in_cmdr:
+            cmdr_lines.append(s)
+            continue
+        if in_meta and s.lower().startswith("deck type="):
+            out.append("Deck Type=constructed")
+            deck_type_set = True
+            continue
+        out.append(raw)
+
+    new_text = "\n".join(out)
+    if not seen_metadata:
+        new_text = "[metadata]\nDeck Type=constructed\n\n" + new_text
+    elif not deck_type_set:
+        # Insert under existing metadata block.
+        new_text = _re.sub(
+            r"(\[metadata\][^\n]*\n)",
+            r"\1Deck Type=constructed\n",
+            new_text, count=1, flags=_re.IGNORECASE,
+        )
+    # Append commander lines to [Main]. If [Main] doesn't exist, add it.
+    if cmdr_lines:
+        cmdr_block = "\n".join(cmdr_lines) + "\n"
+        if _re.search(r"^\[Main\]\s*$", new_text, _re.MULTILINE | _re.IGNORECASE):
+            # Insert just after the [Main] header. Use a callable
+            # replacement so card-line content (which starts with
+            # digits like "1 Hakbal") doesn't get parsed as numeric
+            # backreferences (\1 → \11 collision).
+            new_text = _re.sub(
+                r"(\[Main\][^\n]*\n)",
+                lambda m: m.group(0) + cmdr_block,
+                new_text, count=1, flags=_re.IGNORECASE,
+            )
+        else:
+            new_text += "\n[Main]\n" + cmdr_block
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    return new_text
 
 
 def _format_added_line(name: str) -> str:
