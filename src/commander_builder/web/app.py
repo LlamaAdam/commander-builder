@@ -27,6 +27,7 @@ from typing import Optional
 from ..deck_dashboard import build_dashboard
 from ..knowledge_log import (
     DEFAULT_DB_PATH as _DEFAULT_KLOG_DB,
+    get_iteration,
     iterations_for_deck,
     recent_iterations,
 )
@@ -205,6 +206,72 @@ def create_app(
             "deck_id": deck_id,
             "count": len(rows),
         })
+
+    @app.route("/api/iteration/<int:iteration_id>")
+    def iteration_detail(iteration_id: int):
+        """Full iteration record including the deck_snapshot blob.
+        Listed separately from /api/iterations so the listing endpoint
+        can stay payload-small."""
+        try:
+            it = get_iteration(iteration_id, db_path=knowledge_db)
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({"error": str(exc)}), 500
+        if it is None:
+            return jsonify({"error": "iteration not found",
+                            "id": iteration_id}), 404
+        body = _iteration_to_dict(it)
+        body["deck_snapshot"] = it.deck_snapshot
+        body["sim_report"] = it.sim_report
+        return jsonify(body)
+
+    @app.route("/api/compare/<int:old_id>/<int:new_id>")
+    def compare_iterations(old_id: int, new_id: int):
+        """Card-level diff between two iteration snapshots.
+
+        Returns ``{old_id, new_id, added: [...], removed: [...],
+        unchanged_count: int}``. Useful for the UI's swap-history
+        view: "what actually changed between v2 and v3?"
+        """
+        from ..compare_versions import diff_deck_text
+        try:
+            old_it = get_iteration(old_id, db_path=knowledge_db)
+            new_it = get_iteration(new_id, db_path=knowledge_db)
+        except Exception as exc:  # pragma: no cover
+            return jsonify({"error": str(exc)}), 500
+
+        if old_it is None or new_it is None:
+            return jsonify({
+                "error": "iteration not found",
+                "old_id": old_id, "new_id": new_id,
+            }), 404
+        if not old_it.deck_snapshot or not new_it.deck_snapshot:
+            return jsonify({
+                "error": "snapshot missing on one of the iterations",
+                "old_id": old_id, "new_id": new_id,
+            }), 404
+
+        diff = diff_deck_text(old_it.deck_snapshot, new_it.deck_snapshot)
+        unchanged = int(diff["unchanged_count"][0]) if diff["unchanged_count"] else 0
+        return jsonify({
+            "old_id": old_id, "new_id": new_id,
+            "added": diff["added"],
+            "removed": diff["removed"],
+            "unchanged_count": unchanged,
+        })
+
+    @app.route("/api/iteration/<int:iteration_id>/snapshot")
+    def iteration_snapshot(iteration_id: int):
+        """Plain-text .dck snapshot for an iteration. Convenient for
+        copy-paste back into Moxfield or for `commander-revert`."""
+        try:
+            it = get_iteration(iteration_id, db_path=knowledge_db)
+        except Exception as exc:  # pragma: no cover
+            return jsonify({"error": str(exc)}), 500
+        if it is None or not it.deck_snapshot:
+            return jsonify({"error": "snapshot not found",
+                            "id": iteration_id}), 404
+        from flask import Response
+        return Response(it.deck_snapshot, mimetype="text/plain")
 
     return app
 

@@ -97,6 +97,34 @@ def test_diff_decks_quantity_change_shows_as_swap(tmp_path):
     assert "2 Foo" in diff["added"]
 
 
+# --- diff_deck_text — string-form diff for in-memory snapshots -------------
+
+def test_diff_deck_text_basic_add_and_remove():
+    from commander_builder.compare_versions import diff_deck_text
+    old = "[metadata]\nName=A\n\n[Main]\n1 Forest\n1 Cultivate\n"
+    new = "[metadata]\nName=B\n\n[Main]\n1 Forest\n1 Lotus Cobra\n"
+    diff = diff_deck_text(old, new)
+    assert "1 Lotus Cobra" in diff["added"]
+    assert "1 Cultivate" in diff["removed"]
+
+
+def test_diff_deck_text_handles_empty():
+    from commander_builder.compare_versions import diff_deck_text
+    diff = diff_deck_text("", "")
+    assert diff["added"] == []
+    assert diff["removed"] == []
+
+
+def test_diff_deck_text_skips_non_main_sections():
+    from commander_builder.compare_versions import diff_deck_text
+    old = "[Commander]\n1 Edgar\n[Main]\n1 Forest\n"
+    new = "[Commander]\n1 Edgar\n[Main]\n1 Mountain\n"
+    diff = diff_deck_text(old, new)
+    # Edgar in Commander section is excluded; only [Main] differs.
+    assert diff["added"] == ["1 Mountain"]
+    assert diff["removed"] == ["1 Forest"]
+
+
 # --- _pick_filler_pairs ----------------------------------------------------
 
 def test_pick_filler_pairs_uses_pool_when_available(tmp_path, monkeypatch):

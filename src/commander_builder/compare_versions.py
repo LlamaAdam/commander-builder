@@ -140,6 +140,30 @@ def _read_main_section(deck_path: Path) -> list[str]:
     return out
 
 
+def _main_lines_from_text(text: str) -> list[str]:
+    """Parse [Main] lines out of a .dck blob string. Same logic as
+    `_read_main_section` but takes the raw text instead of a path —
+    useful for diffing snapshots stored in knowledge_log without
+    materializing temp files."""
+    if not text:
+        return []
+    out: list[str] = []
+    in_main = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower() == "[main]":
+            in_main = True
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_main = False
+            continue
+        if in_main:
+            out.append(stripped)
+    return out
+
+
 def diff_decks(old_path: Path, new_path: Path) -> dict[str, list[str]]:
     """Compute the card-level delta between two .dck files.
 
@@ -148,6 +172,19 @@ def diff_decks(old_path: Path, new_path: Path) -> dict[str, list[str]]:
     printing changes both surface as add+remove pairs."""
     old_lines = set(_read_main_section(old_path))
     new_lines = set(_read_main_section(new_path))
+    return {
+        "added": sorted(new_lines - old_lines),
+        "removed": sorted(old_lines - new_lines),
+        "unchanged_count": [str(len(old_lines & new_lines))],
+    }
+
+
+def diff_deck_text(old_text: str, new_text: str) -> dict[str, list[str]]:
+    """Same as `diff_decks` but for in-memory .dck blobs. Used by the
+    Flask `/api/compare` endpoint to diff iteration snapshots without
+    writing temp files."""
+    old_lines = set(_main_lines_from_text(old_text))
+    new_lines = set(_main_lines_from_text(new_text))
     return {
         "added": sorted(new_lines - old_lines),
         "removed": sorted(old_lines - new_lines),
