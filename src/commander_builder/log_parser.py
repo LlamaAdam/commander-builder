@@ -174,12 +174,17 @@ def parse(stdout: str) -> ParsedSim:
     for raw_line in stdout.splitlines():
         line = raw_line.rstrip()
 
-        if not result.raw_match_line:
-            m = _MATCH_LINE.match(line)
-            if m:
-                result.raw_match_line = m.group(1).strip()
-                result.deck_results = _parse_match_payload(result.raw_match_line)
-                continue
+        # Forge emits Match Result lines differently per format:
+        #   - commander: ONE Match Result at the very end of all games
+        #   - constructed: ONE Match Result per game with cumulative
+        #     win counts; the LAST one is the final tally
+        # Always overwrite with the most recent Match Result so both
+        # formats parse correctly.
+        m = _MATCH_LINE.match(line)
+        if m:
+            result.raw_match_line = m.group(1).strip()
+            result.deck_results = _parse_match_payload(result.raw_match_line)
+            continue
 
         gm = _GAME_END.search(line)
         if gm:
