@@ -165,6 +165,83 @@ def create_app(
         data = build_dashboard(path, bracket=bracket, suggested=suggested)
         return jsonify(data.to_dict())
 
+    @app.route("/api/audit")
+    def audit_route():
+        """Run the improvement advisor and return a **full proposed
+        deck** (the user's current deck with the recommended swaps
+        applied), not just the list of changes.
+
+        This matches the intent of prompts/moxfield_audit_v3.md:
+        produce the ideal version of the deck, then surface the diff.
+        The web client takes the `proposed_text` field and drops it
+        into the Edit modal so the user can preview / tweak before
+        running the A/B sim.
+
+        Returns::
+
+            {
+              "deck": "<id>", "bracket": int,
+              "proposed_text": "<full .dck blob>",
+              "added": [{"card", "rationale", "match_pct", "price"}, ...],
+              "removed": [{"card", "rationale"}, ...],
+              "kept_count": int,
+              "main_count": int,
+            }
+        """
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        try:
+            bracket = int(request.args.get("bracket") or 3)
+        except ValueError:
+            return jsonify({"error": "bracket must be int"}), 400
+
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({"error": "deck not found"}), 404
+
+        try:
+            from ..improvement_advisor import advise as _advise
+            report = _advise(path, bracket=bracket)
+        except FileNotFoundError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except Exception as exc:
+            return jsonify({
+                "error": "audit failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 503
+
+        original = path.read_text(encoding="utf-8")
+        proposed_text, added, removed, kept = _apply_swaps_to_dck(
+            original, report.recommendations,
+        )
+        added_payload = [
+            {
+                "card": rec.card,
+                "rationale": rec.reason or "",
+                "match_pct": _match_pct_from_evidence(rec.evidence),
+                "price_usd": (rec.evidence or {}).get("price_usd"),
+            }
+            for rec in report.recommendations if rec.action == "add"
+        ]
+        removed_payload = [
+            {"card": rec.card, "rationale": rec.reason or ""}
+            for rec in report.recommendations if rec.action == "cut"
+        ]
+        return jsonify({
+            "deck": deck_id,
+            "bracket": bracket,
+            "proposed_text": proposed_text,
+            "added": added_payload,
+            "removed": removed_payload,
+            "kept_count": kept,
+            "main_count": kept + len(added_payload),
+            "diagnosis": getattr(report.diagnosis, "pattern_summary", ""),
+            "weakness_signals": list(getattr(
+                report.diagnosis, "weakness_signals", [],
+            ) or []),
+            "source": getattr(report, "source", "heuristic"),
+        })
+
     @app.route("/api/advise")
     def advise_route():
         """Standalone advise endpoint — same shape as /api/dashboard's
@@ -710,6 +787,87 @@ def _normalize_pasted_deck(text: str) -> str:
             continue
         body_lines.append(s)
     return "[Main]\n" + "\n".join(body_lines) + "\n"
+
+
+def _match_pct_from_evidence(evidence: dict | None) -> int:
+    """Mirror deck_dashboard.match_score combination so audit output
+    uses the same 1..100 scale the suggestion panel renders."""
+    if not evidence:
+        return 0
+    inclusion = float(evidence.get("inclusion_pct") or 0)
+    synergy = min(float(evidence.get("synergy_pct") or 0), 20.0)
+    raw = inclusion + synergy
+    return max(1, min(100, round(raw)))
+
+
+def _apply_swaps_to_dck(
+    original_text: str, recommendations,
+) -> tuple[str, list[str], list[str], int]:
+    """Apply add / cut recommendations to a .dck blob.
+
+    Returns ``(new_text, added_card_names, removed_card_names,
+    kept_count)``. Quantity-1 lines are added by default.
+
+    Handling:
+    - The [Commander] section is preserved as-is (audits never cut commanders).
+    - The [Main] section is rebuilt: drop any line whose card name
+      matches a `cut` recommendation; append `1 <card>` for each `add`.
+    - Other sections (sideboard, considering, metadata) are preserved.
+
+    Card names are matched case-insensitively against the leading
+    ``<qty> <Name>[|<SET>|<CN>]`` pattern. We don't try to handle
+    DFC // back face naming; advise() emits front-face names anyway.
+    """
+    import re as _re
+    add_names = [r.card for r in recommendations if r.action == "add"]
+    cut_set = {r.card.lower() for r in recommendations if r.action == "cut"}
+
+    out_lines: list[str] = []
+    in_main = False
+    main_kept = 0
+    in_metadata = False
+    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+
+    for raw in original_text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            out_lines.append(raw)
+            continue
+        # Section header tracking.
+        if stripped.startswith("[") and stripped.endswith("]"):
+            # If we're leaving [Main], this is where we append the new
+            # cards (so they're inside the section, not after it).
+            if in_main:
+                for name in add_names:
+                    out_lines.append(f"1 {name}")
+            in_main = stripped.lower() == "[main]"
+            in_metadata = stripped.lower() == "[metadata]"
+            out_lines.append(raw)
+            continue
+
+        if in_main:
+            m = line_pattern.match(stripped)
+            if m:
+                name = m.group(2).strip().lower()
+                if name in cut_set:
+                    continue  # drop this line
+                main_kept += 1
+            out_lines.append(raw)
+            continue
+
+        # Non-main section content passes through.
+        out_lines.append(raw)
+
+    # If [Main] was the last section, append-on-exit didn't fire above.
+    # Detect by checking whether all add_names already landed.
+    if in_main:
+        for name in add_names:
+            out_lines.append(f"1 {name}")
+
+    new_text = "\n".join(out_lines)
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    return new_text, add_names, [r.card for r in recommendations if r.action == "cut"], main_kept
 
 
 def _build_suggested_adds(deck_path: Path, bracket: int) -> list[dict]:

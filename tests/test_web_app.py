@@ -847,6 +847,113 @@ def test_deck_audit_404_on_missing(client):
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# /api/audit (full-deck audit output) + _apply_swaps_to_dck
+# ---------------------------------------------------------------------------
+
+def test_apply_swaps_drops_cuts_and_appends_adds():
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = (
+        "[metadata]\nName=Test\n\n"
+        "[Commander]\n1 Edgar Markov\n\n"
+        "[Main]\n"
+        "1 Sol Ring\n"
+        "1 Cultivate\n"
+        "1 Forest|MIR|315\n"
+    )
+    recs = [
+        SimpleNamespace(card="Cultivate", action="cut",
+                        reason="slow ramp", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="landfall", evidence={}),
+        SimpleNamespace(card="Tireless Tracker", action="add",
+                        reason="payoff", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    assert "Cultivate" not in new_text
+    assert "1 Lotus Cobra" in new_text
+    assert "1 Tireless Tracker" in new_text
+    # Set/CN-suffixed lines preserved.
+    assert "1 Forest|MIR|315" in new_text
+    # Commander untouched.
+    assert "1 Edgar Markov" in new_text
+    assert added == ["Lotus Cobra", "Tireless Tracker"]
+    assert removed == ["Cultivate"]
+    assert kept == 2  # Sol Ring + Forest
+
+
+def test_apply_swaps_case_insensitive_cut_match():
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 sol ring\n1 Cultivate\n"
+    recs = [SimpleNamespace(card="Sol Ring", action="cut",
+                            reason="", evidence={})]
+    new_text, _, removed, _ = _apply_swaps_to_dck(original, recs)
+    assert "sol ring" not in new_text.lower() or "1 sol ring" not in new_text
+    assert removed == ["Sol Ring"]
+
+
+def test_audit_endpoint_returns_full_proposed_deck(client, monkeypatch):
+    """Stub improvement_advisor.advise so the endpoint runs offline."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add",
+                    reason="Mana on landfall",
+                    evidence={"inclusion_pct": 78.0, "synergy_pct": 12.0,
+                              "price_usd": 8.5},
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut",
+                    reason="Replaced by faster ramp",
+                    evidence={},
+                ),
+            ],
+            diagnosis=SimpleNamespace(
+                pattern_summary="aggressive landfall",
+                weakness_signals=["slow ramp early"],
+            ),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    # Full proposed deck text — Cultivate dropped, Lotus Cobra added.
+    assert "1 Lotus Cobra" in body["proposed_text"]
+    assert "Cultivate" not in body["proposed_text"]
+    # Diff payload populated.
+    assert any(a["card"] == "Lotus Cobra" for a in body["added"])
+    assert any(r["card"] == "Cultivate" for r in body["removed"])
+    # Diagnosis surfaced.
+    assert body["diagnosis"] == "aggressive landfall"
+    assert "slow ramp early" in body["weakness_signals"]
+
+
+def test_audit_endpoint_503_when_advisor_fails(client, monkeypatch):
+    def boom(deck_path, bracket, **_kwargs):
+        raise RuntimeError("EDHREC down")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", boom,
+    )
+    resp = client.get("/api/audit?deck=Alpha")
+    assert resp.status_code == 503
+    body = resp.get_json()
+    assert body["error"] == "audit failed"
+
+
+def test_audit_endpoint_404_on_missing_deck(client):
+    resp = client.get("/api/audit?deck=Ghost")
+    assert resp.status_code == 404
+
+
 def test_propose_swap_503_when_forge_unavailable(client, monkeypatch):
     """Forge missing should return 503 with detail, not 500."""
     from types import SimpleNamespace

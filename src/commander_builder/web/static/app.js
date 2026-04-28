@@ -217,19 +217,134 @@ function rowEl(label, value) {
   return r;
 }
 
+// Most recent audit's proposed full-deck text — kept so the
+// "Use this list" button can hand it to the Edit modal without
+// re-fetching.
+let _lastAuditProposed = null;
+
 async function loadAdvise() {
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
   if (!sug) return;
-  sug.innerHTML = '<p class="muted">Generating suggestions…</p>';
+  // Restore the panel header (renderSuggestions strips children
+  // beyond the <h3>; we want the header back when re-rendering).
+  sug.innerHTML = "";
+  sug.appendChild(el("h3", {}, "Audit — full proposed deck"));
+  sug.appendChild(el("p", { class: "muted" }, "Generating ideal deck…"));
   try {
     const body = await fetchJSON(
-      `/api/advise?deck=${encodeURIComponent(_activeDeckId)}&bracket=3`,
+      `/api/audit?deck=${encodeURIComponent(_activeDeckId)}&bracket=3`,
     );
-    renderSuggestions(sug, body.suggestions || []);
+    _lastAuditProposed = body.proposed_text || null;
+    renderAuditResult(sug, body);
   } catch (e) {
-    sug.innerHTML = `<p class="muted">Advise failed: ${e.message}</p>`;
+    sug.innerHTML = "";
+    sug.appendChild(el("h3", {}, "Audit"));
+    sug.appendChild(el("p", { class: "muted" }, `Audit failed: ${e.message}`));
   }
+}
+
+function renderAuditResult(container, body) {
+  // Rebuild the panel — header + diagnosis + diff lists + "Use this list"
+  // button + collapsible full-deck preview.
+  container.innerHTML = "";
+  container.appendChild(el("h3", {}, "Audit — full proposed deck"));
+
+  if (body.diagnosis) {
+    container.appendChild(el(
+      "p", {}, el("span", { class: "muted" }, "Diagnosis: "),
+      body.diagnosis,
+    ));
+  }
+  if (body.weakness_signals && body.weakness_signals.length) {
+    const ul = el("ul", { class: "muted", style: "font-size: 12px;" });
+    for (const w of body.weakness_signals) ul.appendChild(el("li", {}, w));
+    container.appendChild(ul);
+  }
+
+  // Counts headline.
+  const headline = el(
+    "p", {},
+    `Proposed: ${body.main_count ?? "?"} mainboard cards `,
+    el("span", { class: "pill good" }, `${body.added.length} added`),
+    " ",
+    el("span", { class: "pill bad" }, `${body.removed.length} removed`),
+  );
+  container.appendChild(headline);
+
+  // "Use this list" button → drops the proposed text into the Edit
+  // modal so the user can preview / tweak before running A/B sim.
+  const useBtn = el("button", { class: "advise-btn" }, "Use this list (open editor)");
+  useBtn.addEventListener("click", () => {
+    if (!_lastAuditProposed) return;
+    openProposeModal({ saveOnly: false }).then(() => {
+      // openProposeModal pre-fills the textarea from /api/deck_text;
+      // overwrite with the proposed text after that returns.
+      $("propose-text").value = _lastAuditProposed;
+      $("propose-status").textContent =
+        "Proposed deck loaded. Pick a game count and run the A/B sim.";
+    });
+  });
+  container.appendChild(useBtn);
+
+  // Adds list (with rationale + price).
+  if (body.added.length) {
+    container.appendChild(el(
+      "h4", { style: "margin-top: 14px;" }, "Cards to add",
+    ));
+    const ul = el("ul", { class: "iteration-list" });
+    for (const a of body.added) {
+      const row = el("li", { class: "iteration" });
+      row.appendChild(el("span", { class: "verdict pending" }, `${a.match_pct}%`));
+      const wrap = el("div");
+      wrap.appendChild(el("div", { class: "name" }, a.card));
+      if (a.rationale) {
+        wrap.appendChild(el("div", { class: "muted" }, a.rationale));
+      }
+      row.appendChild(wrap);
+      row.appendChild(el(
+        "span", { class: "delta" },
+        a.price_usd != null ? `$${Number(a.price_usd).toFixed(2)}` : "",
+      ));
+      ul.appendChild(row);
+    }
+    container.appendChild(ul);
+  }
+
+  // Removed list.
+  if (body.removed.length) {
+    container.appendChild(el(
+      "h4", { style: "margin-top: 14px;" }, "Cards to cut",
+    ));
+    const ul = el("ul", { class: "iteration-list" });
+    for (const r of body.removed) {
+      const row = el("li", { class: "iteration" });
+      row.appendChild(el("span", { class: "verdict reverted" }, "cut"));
+      const wrap = el("div");
+      wrap.appendChild(el("div", { class: "name" }, r.card));
+      if (r.rationale) {
+        wrap.appendChild(el("div", { class: "muted" }, r.rationale));
+      }
+      row.appendChild(wrap);
+      row.appendChild(el("span", { class: "delta" }, ""));
+      ul.appendChild(row);
+    }
+    container.appendChild(ul);
+  }
+
+  // Collapsible full-deck preview.
+  const details = el("details", { style: "margin-top: 14px;" });
+  details.appendChild(el(
+    "summary", { class: "muted" }, "Show full proposed deck text",
+  ));
+  const pre = el("pre", {
+    style: "background: var(--bg); border: 1px solid var(--border); "
+         + "border-radius: 6px; padding: 10px; max-height: 320px; "
+         + "overflow: auto; font-size: 12px;",
+  });
+  pre.textContent = body.proposed_text || "(empty)";
+  details.appendChild(pre);
+  container.appendChild(details);
 }
 
 function renderDashboard(data, iterations) {
@@ -430,15 +545,94 @@ function bracketTile(t) {
 
 async function copyToMoxfield() {
   if (!_activeDeckId) return;
+  let text;
   try {
     const body = await fetchJSON(
       `/api/moxfield_format?deck=${encodeURIComponent(_activeDeckId)}`,
     );
-    await navigator.clipboard.writeText(body.text);
-    flashStatus("Copied to clipboard — paste into Moxfield's bulk-edit.");
+    text = body.text || "";
   } catch (e) {
-    flashStatus(`Copy failed: ${e.message}`);
+    flashStatus(`Couldn't fetch deck text: ${e.message}`);
+    return;
   }
+
+  if (!text) {
+    flashStatus("Deck has no card lines to copy.");
+    return;
+  }
+
+  // Try the modern Clipboard API. In some browsers it rejects when
+  // the document isn't focused or the page isn't a secure context.
+  // Fall back to a hidden textarea + execCommand('copy') which works
+  // on http://127.0.0.1 even when the Clipboard API doesn't.
+  const ok = await tryClipboardWrite(text);
+  if (ok) {
+    flashStatus("Copied to clipboard — paste into Moxfield's bulk-edit.");
+    return;
+  }
+
+  // Last resort: open a fallback dialog with the text selected so the
+  // user can Ctrl+C manually.
+  showFallbackCopyDialog(text);
+}
+
+async function tryClipboardWrite(text) {
+  // Path 1: navigator.clipboard.writeText (requires secure context +
+  // window focus).
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      // Fall through to legacy path.
+    }
+  }
+  // Path 2: legacy execCommand. Build a temp textarea, select, copy.
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // Off-screen but selectable.
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.left = "-1000px";
+    ta.style.opacity = "0";
+    ta.setAttribute("readonly", "");
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand && document.execCommand("copy");
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+function showFallbackCopyDialog(text) {
+  // Reuse the alert modal as a generic "select-this-text" dialog.
+  $("alert-title").textContent = "Copy this text manually";
+  const body = $("alert-body");
+  body.className = "alert-body";
+  body.innerHTML = "";
+  body.appendChild(el(
+    "p", { class: "muted" },
+    "Browser blocked the clipboard write. Select the box below " +
+    "(Ctrl+A) and copy with Ctrl+C, then paste into Moxfield's " +
+    "bulk-edit page.",
+  ));
+  const ta = el("textarea", {
+    spellcheck: "false",
+    style: "width: 100%; min-height: 240px; font-family: ui-monospace, "
+         + "SFMono-Regular, Consolas, monospace; font-size: 12px; "
+         + "background: var(--bg); color: var(--text); border: "
+         + "1px solid var(--border); border-radius: 6px; padding: 10px;",
+  });
+  ta.value = text;
+  body.appendChild(ta);
+  $("alert-modal").hidden = false;
+  // Pre-select the textarea content so a single Ctrl+C copies it.
+  setTimeout(() => { ta.focus(); ta.select(); }, 50);
 }
 
 async function deleteDeck() {
