@@ -38,16 +38,22 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
 
     By default returns only ``[USER] *.dck`` files — those are the
     decks under active iteration. Set ``user_only=False`` to also
-    list filler / pool decks (used by curation commands)."""
+    list filler / pool decks (used by curation commands).
+
+    Always hides ``*_proposed_<timestamp>.dck`` files. Those are
+    transient working copies the propose-swap A/B-sim flow stages
+    while running Forge; they shouldn't pollute the sidebar.
+    """
     if not deck_dir.exists() or not deck_dir.is_dir():
         return []
     out: list[dict] = []
+    import re as _re
     for p in sorted(deck_dir.glob("*.dck")):
         if user_only and not p.stem.startswith("[USER]"):
             continue
-        # Display name: strip the [USER] prefix and any trailing
-        # bracket version like " [B3]" so the sidebar reads cleanly.
-        import re as _re
+        # Skip transient propose-swap working copies regardless of mode.
+        if _re.search(r"_proposed_\d{8}_\d{6}$", p.stem):
+            continue
         display = _re.sub(r"^\[USER\]\s*", "", p.stem)
         out.append({
             "id": p.stem,
@@ -815,10 +821,17 @@ def create_app(
                 "detail": f"{type(exc).__name__}: {exc}",
             }), 500
 
-        # Don't leak the temp staged file — but DO keep it if the user
-        # might want to commit-the-swap later. Compromise: keep the file
-        # under a `_proposed/` subdir but return a "cleanup hint" the
-        # UI can act on.
+        # Drop the staged proposed_*.dck now that Forge has finished
+        # with it. It exists only as a working copy for the A/B sim;
+        # leaving it on disk pollutes the sidebar and confuses future
+        # sessions. The proposed text is already in `new_text` if the
+        # client wants to persist (they'd hit /api/deck_text PUT
+        # against the original deck or import a new deck instead).
+        try:
+            new_path.unlink()
+        except OSError:
+            pass
+
         return jsonify({
             "old_deck": old_path.name,
             "new_deck": new_path.name,

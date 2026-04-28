@@ -135,6 +135,19 @@ def test_list_decks_user_only_false_includes_filler(user_deck_dir):
     assert "Avacyn Tribal" in names
 
 
+def test_list_decks_hides_proposed_working_copies(user_deck_dir):
+    """Transient _proposed_<timestamp> files staged by propose_swap
+    should never appear in the sidebar — neither in user_only mode
+    nor in the unfiltered listing."""
+    # Plant a leftover proposed working copy.
+    leftover = user_deck_dir / "[USER] Hakbal [B3]_proposed_20260428_134828.dck"
+    leftover.write_text("[Main]\n1 Forest\n", encoding="utf-8")
+    user_only = {d["id"] for d in _list_decks(user_deck_dir)}
+    all_mode = {d["id"] for d in _list_decks(user_deck_dir, user_only=False)}
+    assert "[USER] Hakbal [B3]_proposed_20260428_134828" not in user_only
+    assert "[USER] Hakbal [B3]_proposed_20260428_134828" not in all_mode
+
+
 def test_decks_endpoint_filters_to_user_default(user_deck_dir, monkeypatch):
     monkeypatch.setattr(
         "commander_builder.deck_dashboard.lookup_card",
