@@ -652,6 +652,262 @@ needed.
 
 ---
 
+## FP-012 — Autonomous deck improvement agent (the everything-bagel)
+
+> ⚠ **Hardest plan in this document.** Combines almost every other
+> FP into a single cohesive system. Months of work, multi-component,
+> requires real iteration data accumulating first. Documented in
+> detail because the pieces individually are tractable; only the
+> assembly is hard.
+
+**What.** A long-running agent that takes a Moxfield URL, learns
+the deck's intent, and *autonomously* converges on a better version
+without human intervention. The user types one URL and walks away;
+hours later they get back a deck list with empirically-validated
+improvements + a written rationale + a knowledge-log lineage that
+shows the path from v1 to vN.
+
+End-to-end loop, each iteration:
+
+```
+  ┌────────────────────────────────────────────────────────────────┐
+  │                                                                │
+  │  ┌─ Propose ─┐    ┌─ Validate ─┐    ┌─ Verdict ──┐    ┌─ Decide ┐
+  │  │ candidate │ →  │ Forge sim  │ →  │ analyst    │ →  │  next   │
+  │  │  swaps    │    │ + forge_py │    │ verdict +  │    │  swap   │
+  │  │           │    │ pre-filter │    │ confidence │    │ batch   │
+  │  └───────────┘    └────────────┘    └────────────┘    └─────────┘
+  │       ↑                                                    │
+  │       └──────────── learn from outcome ────────────────────┘
+  │
+  └─ stop when: (a) no candidate beats baseline by ≥4 wins/20,
+                (b) iteration budget hit, or (c) human review tag
+```
+
+**Why it might matter.** Today the audit-iterate-validate cycle
+takes ~30 minutes of attention per round (run audit → eyeball
+suggestions → spin up A/B sim → wait → record verdict → repeat).
+At 10 rounds per deck and 13+ user decks that's 60+ hours of
+hands-on time. An autonomous agent collapses the loop to a single
+"train me overnight" click and returns a deck the user can either
+accept or reject without intermediate babysitting.
+
+**Composed of (each is a sub-FP that's already partially built):**
+
+| Component | Sub-FP | Status today | Gap |
+|---|---|---|---|
+| LLM proposer | FP-001 / audit prompt | Manual paste-into-Claude | Programmatic Claude API call |
+| Forge validator | iteration_loop | Working | Concurrency (FP-003) for throughput |
+| forge_py pre-filter | forge_py.rank | Working (r=0.898) | Gate Forge runs on r-score (skip clear losers) |
+| ML verdict | FP-002 | Stubbed (data-blocked) | Train when 200+ iterations exist |
+| Decision policy | New | Not built | Multi-arm bandit / Bayesian opt to choose next swap |
+| Knowledge log | knowledge_log.py | Working | Add agent-run grouping field |
+| Convergence detection | New | Not built | "no further beat-baseline swaps" stop rule |
+| UI integration | FP-006 | Backend ready | "Train agent" button + live progress stream |
+
+**Decision policy in detail.** The non-trivial new piece. Naive
+audit produces 5-15 candidate swaps per round; testing each in
+isolation (5 games × 2 decks per swap × 10 swaps = 100 Forge games)
+costs ~30 minutes per round. The agent needs a *policy* to pick the
+single most-informative swap to test next. Options:
+
+1. **Greedy by predicted win-rate gain.** ML predictor (FP-002)
+   ranks each candidate; test the top-1; record outcome; retrain
+   the predictor; repeat. Simplest. Risk: stuck in local optima
+   if the predictor's wrong about a high-value swap.
+2. **Thompson sampling over swap categories.** Treat each role
+   (ramp / draw / removal / threat) as an arm. Sample which role to
+   improve next based on per-role posterior over win-rate gains.
+   Better exploration. Maps cleanly to staples.classify_role.
+3. **Genetic / hill-climbing.** Maintain a population of N candidate
+   decks; mutate by swapping; cross-breed by sharing high-value
+   cards. Most expressive but expensive — N×iterations Forge runs.
+   Probably overkill until ML predictor is data-rich.
+
+**Recommended path: start with (1), add (2) when 50+ iterations
+exist per archetype, defer (3) indefinitely.**
+
+**Convergence detection.**
+- Stop when N consecutive swaps fail to beat baseline by ≥4 wins/20
+  (margin threshold from analyst.py).
+- Stop when overall Pearson correlation of predictor against actual
+  outcomes drops below 0.5 (signal that the model needs retraining,
+  not more swaps).
+- Stop on manual `commander-iterate --halt` flag the user can drop
+  in the working dir as a kill-switch.
+
+**Cost (honest).** ~120 hours total, distributed across:
+- 8h: Programmatic audit prompt via Claude API + JSON schema
+  validation. Replaces the manual paste.
+- 12h: Concurrency in forge_runner (FP-003 spike) — running 4
+  Forge JVMs in parallel. Without this, a 10-iteration run takes
+  5+ hours wall-time.
+- 16h: forge_py pre-filter integration. Gate each candidate swap
+  on a quick forge_py rank delta; only swaps that produce a
+  ≥0.05 forge_py win-rate lift get the expensive Forge validation.
+  Cuts Forge runs ~3x.
+- 24h: Decision policy implementation + tests. Multi-arm bandit
+  state lives in the knowledge_log so partial runs resume.
+- 16h: Convergence detector + stop criteria + telemetry dashboard.
+- 8h: Web UI integration. "Train this deck overnight" button on
+  the dashboard → SSE progress stream → final deck + verdict.
+- 12h: Phase 3 ML predictor (FP-002 unblocked) once 200+ rows
+  accumulate. Train, validate, deploy.
+- 24h: Real-deck pilot run + drift / failure-mode analysis.
+
+**What would unblock it.**
+
+1. **iteration_loop automation:** the manual proposer step (paste
+   audit prompt into Claude, save JSON) becomes programmatic. This
+   is the single biggest blocker — without it the loop has a human
+   in the middle.
+2. **knowledge_log has 200+ rows.** Phase 3 predictor needs data.
+   Today: 1 row. Realistic timeline: 2-3 months of real iteration
+   work before training is honest.
+3. **Forge concurrency works** (FP-003). Without it, a single
+   agent run takes overnight; with it, ~2 hours.
+4. **A user committed to leaving a deck "in the oven."** The agent
+   is only useful if the user is willing to hand off control for
+   hours. If they want to babysit every swap, the manual workflow
+   is sufficient.
+
+**Honest scope warnings.**
+
+- **The audit prompt isn't deterministic.** Claude returns
+  different JSON manifests on different runs of the same deck.
+  An agent needs to either (a) sample N runs and pick the modal
+  swap set, or (b) fix temperature=0 + seed for reproducibility.
+  Either way the manifest can drift between iterations on the same
+  deck — which is fine for exploration but bad for convergence
+  detection. Need a "manifest stability" metric.
+- **Forge sim variance is real.** 5 games of Forge between the
+  same two decks can differ by 1-2 wins purely from RNG. Margins
+  ≤2 are noise. The agent needs to either run more games per
+  candidate (expensive) or use forge_py's deterministic rank as
+  a tiebreaker. Recommended: use forge_py r-score as primary
+  signal, Forge as confirmation only on swaps where forge_py
+  predicts ≥0.05 lift.
+- **EDHREC bias.** The audit prompt's recommendations come from
+  EDHREC consensus, which represents median play patterns, not
+  optimal play. Agent runs that converge on the EDHREC consensus
+  will produce decks that *look like the median*, not necessarily
+  *win the most*. Need a counterweight — possibly per-card
+  win-rate data from the knowledge_log itself, or empirical
+  outperformance against bracket-matched fillers.
+- **Cost ceiling.** Each Claude audit call is ~$0.05–0.20 in
+  tokens. Each Forge sim is ~5 minutes wall-time per pod. A
+  10-iteration agent run with 5 games per candidate costs ~$2 in
+  API tokens and ~3 hours of compute. Multiply by 13 user decks =
+  $26 + 40 hours of compute. Within reason; worth telegraphing.
+- **Gameability.** If the agent's reward signal is "Forge win-rate
+  vs filler pool," it can game the metric by stacking
+  filler-counters rather than building a *good* deck. Mitigation:
+  rotate filler pools per iteration so the agent can't overfit
+  to a specific opponent.
+
+**My current take.** This is the natural endpoint of the
+project's design. Every component except the decision policy is
+already built and working in some form. The 120-hour estimate is
+honest *given* the prerequisites are met (FP-001 manual proposer
+becomes API call, FP-002 has data, FP-003 concurrency works);
+each prerequisite is a separate multi-week project on its own.
+Realistic ETA: **6–9 months from today** if the user starts
+running the manual loop weekly to accumulate iteration data, and
+the FP-001/FP-002/FP-003 prereqs land in parallel.
+
+**Status: PARKED 2026-04-28.** All prerequisites tracked
+separately. Promote to BACKLOG.md when knowledge_log.sqlite has
+≥150 iteration rows AND iteration_loop's proposer step is
+automated AND forge_runner supports concurrent JVMs. Until then
+this is the north star, not the next step.
+
+---
+
+## FP-013 — Project-tuned LLM (the moonshot)
+
+> ⚠ **More speculative than FP-012.** Documented because it's the
+> logical extension once FP-012 has accumulated enough data, but
+> nothing about it is realistic in the next 12 months.
+
+**What.** Fine-tune a small open-weights LLM on the project's
+accumulated artifacts:
+
+- Every audit manifest in knowledge_log + the sim outcome that
+  followed
+- Magic Comprehensive Rules (already in `mtg_cards/rules/`)
+- 32k oracle snapshots (already in `mtg_cards/oracle_snapshots/`)
+- All 13 user decks + their iteration histories
+- EDHREC top-cards / synergy data per commander
+- Bracket / Game Changers definitions
+
+The output is an MTG-aware model that can:
+- Run audits in <1 second on local hardware (vs 5-10s + $0.05 for
+  Claude API)
+- Run inside the FP-010 EXE without external API dependencies
+  (no token leakage risk — closes FP-011 from the other side)
+- Be retrained whenever the user adds 50+ new iterations, so it
+  drifts toward the user's empirical preferences over time
+- Generate verdicts (kept/reverted/neutral) against new sim data
+  without hitting Claude
+
+**Cost.** Depends entirely on which base model. Realistic options:
+
+| Model | Params | Train cost | Inference | Quality |
+|---|---|---|---|---|
+| Llama 3.1 8B Instruct | 8B | $200 LoRA | RTX 3060 ok | ~70% Claude |
+| Qwen 2.5 7B Coder | 7B | $150 LoRA | RTX 3060 ok | ~75% Claude |
+| Phi-3.5-mini | 3.8B | $80 LoRA | CPU possible | ~50% Claude |
+| Custom from scratch | — | $50k+ | A100 | unknown |
+
+LoRA fine-tuning on a single A100 instance for ~12 hours costs
+$80–$200 depending on rank/epochs. Doable; not weekend money but
+not catastrophic either.
+
+**What unblocks it.**
+
+1. **2000+ iteration rows** in knowledge_log (current: 1). At ~5
+   iterations per audit cycle and ~13 user decks, realistic
+   accumulation is years, not months — unless the FP-012 agent
+   amplifies the rate.
+2. **Synthetic data pipeline.** Augment real iterations with
+   synthetic ones generated by re-running historical audits with
+   Claude at temperature=1 to produce manifest variants.
+3. **Eval harness.** Need a held-out set of "known-good" audits
+   to compare the fine-tuned model against Claude on identical
+   inputs. Without this we can't tell if fine-tuning helped or
+   hurt.
+
+**Honest scope warning.** This is the kind of plan that sounds
+great in roadmap form and crumbles when you actually try it.
+Three failure modes:
+
+- **Catastrophic forgetting.** Fine-tuning a small LLM on
+  domain-specific data often degrades general reasoning. The
+  result might know every Atraxa archetype but lose the ability
+  to write a coherent rationale paragraph.
+- **Data is too narrow.** 2000 rows of (manifest, outcome) pairs
+  might not be enough for the model to learn the *causal*
+  relationship between swap and outcome — it could just memorize
+  manifest patterns and parrot them back.
+- **Maintenance burden.** A locally-finetuned model needs
+  retraining every time the meta shifts, the rules update, or
+  Wizards releases a new set. That's a permanent operational cost.
+
+**My current take.** Worth keeping on the roadmap as the logical
+endpoint of FP-002 + FP-012. **Do not start until FP-012 is
+producing data at >100 iterations/month for ≥6 months.** That
+puts it at minimum 18 months out from today, more likely 24-30.
+The right move *today* is to make sure the data we're collecting
+in knowledge_log is shaped well enough for future training (clean
+manifest schemas, complete sim_report blobs, parent_id chains
+intact).
+
+**Status: PARKED 2026-04-28, do not promote.** Notional plan
+only; revisit when FP-012 has been live for 6+ months and
+knowledge_log shows organic data accumulation.
+
+---
+
 ## How this file relates to BACKLOG.md
 
 - **`BACKLOG.md`**: prioritized, numbered, all items are go-able with a

@@ -39,6 +39,21 @@ def test_commander_slug_empty_returns_unknown():
     assert commander_slug("...") == "unknown"
 
 
+def test_commander_slug_dfc_uses_front_face():
+    """Double-faced commanders use only the front face on EDHREC.
+    Without the front-face split, the slug would include both halves
+    and EDHREC returns 404."""
+    slug = commander_slug(
+        "Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel",
+    )
+    assert slug == "sephiroth-fabled-soldier"
+
+
+def test_commander_slug_dfc_keeps_apostrophe_strip():
+    slug = commander_slug("Brimaz, Blight of Oreskos // Brimaz, King of Oreskos")
+    assert slug == "brimaz-blight-of-oreskos"
+
+
 # --- _walk_for_cardlists ---------------------------------------------------
 
 def test_walk_for_cardlists_buckets_by_header():

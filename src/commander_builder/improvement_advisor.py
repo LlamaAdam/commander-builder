@@ -330,7 +330,15 @@ def _heuristic_swap_recommendations(
     Adds: cards EDHREC ranks high (top_cards or high_synergy) that are NOT
     already in the deck. Cuts: cards in the deck that AREN'T in EDHREC's
     top-cards list (likely off-archetype). No LLM, no card-text reasoning —
-    just statistical co-inclusion."""
+    just statistical co-inclusion.
+
+    If ``edhrec_page`` is ``None`` (commander missing from EDHREC, network
+    blip, slug mismatch), returns an empty list rather than crashing the
+    audit. The caller still produces a valid AdviceReport with zero swaps,
+    which the UI surfaces as "no audit suggestions available."
+    """
+    if edhrec_page is None:
+        return []
     recs: list[SwapRecommendation] = []
     deck_cards_lc = {c.lower() for c in deck_cards}
 

@@ -89,8 +89,15 @@ class CommanderPage:
 
 def commander_slug(commander_name: str) -> str:
     """EDHREC's URL slugs are lowercase + hyphenated, with apostrophes / commas
-    stripped. `Atraxa, Praetors' Voice` → `atraxa-praetors-voice`."""
-    s = commander_name.lower()
+    stripped. `Atraxa, Praetors' Voice` → `atraxa-praetors-voice`.
+
+    Double-faced commanders (DFCs) like
+    ``Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel`` use
+    only the front face on EDHREC. Split on ``//`` and slugify the
+    front half — this matches EDHREC's URL convention exactly.
+    """
+    name = commander_name.split("//")[0].strip()
+    s = name.lower()
     s = re.sub(r"[',.]", "", s)
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
     return s or "unknown"
@@ -267,7 +274,18 @@ def fetch_commander_page(
 
     url = f"{EDHREC_BASE}/commanders/{urllib.parse.quote(slug)}"
     time.sleep(REQUEST_SLEEP_SEC)
-    html = _http_get_text(url)
+    try:
+        html = _http_get_text(url)
+    except urllib.error.HTTPError as exc:
+        # 404 happens when the slug doesn't match EDHREC's
+        # canonical name (newly released commanders, edge-case
+        # spellings). Return None instead of crashing the audit;
+        # the caller falls back to no-EDHREC heuristics.
+        if exc.code == 404:
+            return None
+        raise
+    except Exception:
+        return None
     page = _parse_commander_page(commander_or_slug, slug, html)
     if cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
