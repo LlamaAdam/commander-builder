@@ -21,6 +21,7 @@ dependencies = []
 [project.optional-dependencies]
 clipboard = ["pyperclip>=1.8"]
 claude = ["anthropic>=0.30"]
+web = ["flask>=3.0"]
 test = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
