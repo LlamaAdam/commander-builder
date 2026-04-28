@@ -55,6 +55,9 @@ commander-meta-test  = "commander_builder.meta_test:main"
 where = ["src"]
 include = ["commander_builder*"]
 
+[tool.setuptools.package-data]
+"commander_builder.web" = ["templates/*.html", "static/*.css", "static/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"

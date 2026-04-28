@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commander Builder</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Commander Builder</h1>
+    <span class="muted" id="health-badge">checking…</span>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <h2>Decks</h2>
+      <ul class="deck-list" id="deck-list">
+        <li class="muted">Loading…</li>
+      </ul>
+    </aside>
+
+    <section class="dashboard" id="dashboard">
+      <p class="empty-state">Select a deck on the left to load its dashboard.</p>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

@@ -71,32 +71,6 @@ def _resolve_deck_path(
     return None
 
 
-_PLACEHOLDER_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Commander Builder</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; color: #222; }
-    code { background: #f4f4f4; padding: 0.1rem 0.3rem; border-radius: 3px; }
-    .endpoints li { margin-bottom: 0.4rem; }
-  </style>
-</head>
-<body>
-  <h1>Commander Builder</h1>
-  <p>FP-006 backend scaffold is live. UI rendering not implemented yet.</p>
-  <p>Try the JSON feed:</p>
-  <ul class="endpoints">
-    <li><code>GET /api/health</code></li>
-    <li><code>GET /api/decks</code></li>
-    <li><code>GET /api/dashboard?deck=&lt;id&gt;</code></li>
-    <li><code>GET /api/iterations[?deck=&lt;id&gt;]</code></li>
-  </ul>
-</body>
-</html>
-"""
-
-
 def create_app(
     deck_dir: Optional[Path] = None,
     knowledge_db: Optional[Path] = None,
@@ -104,7 +78,7 @@ def create_app(
     """Build the Flask app. Imports flask lazily so the rest of
     commander_builder works without the ``[web]`` extra installed."""
     try:
-        from flask import Flask, jsonify, request
+        from flask import Flask, jsonify, render_template, request
     except ImportError as exc:
         raise RuntimeError(
             "flask is required for the web scaffold. "
@@ -127,7 +101,7 @@ def create_app(
 
     @app.route("/")
     def root():
-        return _PLACEHOLDER_HTML
+        return render_template("index.html")
 
     @app.route("/api/health")
     def health():
