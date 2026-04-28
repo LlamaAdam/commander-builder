@@ -570,7 +570,7 @@ def _stub_compare(monkeypatch, winner="new", old_wins=4, new_wins=11, draws=0):
 
     def fake_compare(old_deck, new_deck, bracket, games_per_pod,
                      filler_pairs=2, mode="1v1", runner=None,
-                     out_dir=None):
+                     out_dir=None, deck_dir=None):
         old_stats = SimpleNamespace(deck_filename=old_deck,
                                     wins=old_wins, games=old_wins + new_wins + draws)
         new_stats = SimpleNamespace(deck_filename=new_deck,

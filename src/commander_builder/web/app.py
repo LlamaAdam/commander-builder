@@ -886,6 +886,10 @@ def create_app(
                 filler_pairs=2,
                 mode=mode,
                 runner=runner,
+                # 1v1 mode stages files under userdata/decks/constructed/
+                # so compare()'s file-existence checks need to look
+                # there instead of the default commander dir.
+                deck_dir=stage_dir,
             )
         except Exception as exc:  # pragma: no cover - Forge runtime errors
             for p in (new_path, old_converted_path):

@@ -292,14 +292,23 @@ def compare(
     mode: str = "pod",
     runner: Optional[ForgeRunner] = None,
     out_dir: Path = COMPARE_OUT_DIR,
+    deck_dir: Optional[Path] = None,
 ) -> ComparisonReport:
-    """Run the head-to-head comparison and persist the report."""
+    """Run the head-to-head comparison and persist the report.
+
+    ``deck_dir`` overrides the default Commander ``DECK_DIR`` for path
+    resolution. Use it when the staged files live elsewhere (e.g. the
+    web endpoint's 1v1 mode stages converted decks under
+    ``userdata/decks/constructed/`` so Forge's ``-f constructed``
+    can find them).
+    """
     if mode not in {"pod", "1v1"}:
         raise ValueError(f"mode must be 'pod' or '1v1', got {mode!r}")
     runner = runner or ForgeRunner.locate()
 
-    old_path = DECK_DIR / old_deck
-    new_path = DECK_DIR / new_deck
+    resolved_deck_dir = deck_dir or DECK_DIR
+    old_path = resolved_deck_dir / old_deck
+    new_path = resolved_deck_dir / new_deck
     if not old_path.exists():
         raise FileNotFoundError(f"old deck not found: {old_deck}")
     if not new_path.exists():
