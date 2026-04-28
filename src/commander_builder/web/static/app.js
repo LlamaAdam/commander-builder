@@ -252,7 +252,10 @@ async function loadAdvise() {
   // beyond the <h3>; we want the header back when re-rendering).
   sug.innerHTML = "";
   sug.appendChild(el("h3", {}, "Audit — full proposed deck"));
-  sug.appendChild(el("p", { class: "muted" }, "Generating ideal deck…"));
+  sug.appendChild(el("p", { class: "muted" }, "Generating ideal deck (5–15s, hits EDHREC live)…"));
+  // Scroll the audit panel into view immediately so the user sees the
+  // 'Generating…' status, not just an unresponsive Run audit button.
+  sug.scrollIntoView({ behavior: "smooth", block: "start" });
   // Use the filename's [B?] suffix as the audit bracket.
   const bm = (_activeDeckId || "").match(/\[B(\d)\]/);
   const auditBracket = bm ? parseInt(bm[1], 10) : 3;

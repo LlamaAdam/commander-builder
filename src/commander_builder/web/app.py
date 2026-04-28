@@ -223,6 +223,13 @@ def create_app(
         proposed_text, added, removed, kept = _apply_swaps_to_dck(
             original, report.recommendations,
         )
+        # Trim the rendered payloads to exactly the swaps that were
+        # actually applied to the deck text. _apply_swaps_to_dck
+        # balances adds==cuts to keep deck size legal; without this
+        # filter, the UI would say "5 added 8 removed" while only 5+5
+        # of those changes actually landed.
+        applied_add_set = {n.lower() for n in added}
+        applied_cut_set = {n.lower() for n in removed}
         added_payload = [
             {
                 "card": rec.card,
@@ -230,11 +237,13 @@ def create_app(
                 "match_pct": _match_pct_from_evidence(rec.evidence),
                 "price_usd": (rec.evidence or {}).get("price_usd"),
             }
-            for rec in report.recommendations if rec.action == "add"
+            for rec in report.recommendations
+            if rec.action == "add" and rec.card.lower() in applied_add_set
         ]
         removed_payload = [
             {"card": rec.card, "rationale": rec.reason or ""}
-            for rec in report.recommendations if rec.action == "cut"
+            for rec in report.recommendations
+            if rec.action == "cut" and rec.card.lower() in applied_cut_set
         ]
         return jsonify({
             "deck": deck_id,

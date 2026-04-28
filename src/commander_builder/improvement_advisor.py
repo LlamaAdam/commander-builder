@@ -360,11 +360,22 @@ def _heuristic_swap_recommendations(
         # Categorize the recommendation by role so the advice surface can
         # group adds by ramp/draw/removal/finisher rather than show a flat list.
         role = _role_for_card(c.name)
+        # `inclusion_pct` from EDHREC is actually a raw deck count
+        # (e.g. 30627 — "this card appears in 30627 decks"), not a
+        # percentage. Render it as a count so the rationale doesn't
+        # read "in 30627% of decks".
+        # If the value is small (≤100) we treat it as a real
+        # percentage; otherwise format as a deck count.
+        inclusion_phrase = (
+            f"{c.inclusion_pct:.0f}% of decks"
+            if 0 < c.inclusion_pct <= 100
+            else f"{int(c.inclusion_pct):,} decks"
+        )
         add_recs.append(SwapRecommendation(
             card=c.name,
             action="add",
             reason=(
-                f"EDHREC {bucket}: in {c.inclusion_pct:.0f}% of decks"
+                f"EDHREC {bucket}: in {inclusion_phrase}"
                 + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
             ),
             evidence={
