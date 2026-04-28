@@ -1,0 +1,308 @@
+"""analyst.py tests — heuristic verdict logic + router behavior + LLM backends.
+
+LLM backends are mocked (anthropic SDK stand-in for `claude_verdict`,
+urlopen stand-in for `ollama_verdict`) so the suite stays offline. Stub
+fallback paths are also verified — the router catches NotImplementedError
+and degrades to the heuristic.
+"""
+import json
+
+import pytest
+
+from commander_builder.analyst import (
+    AnalystConfig,
+    AnalystInput,
+    Verdict,
+    analyze,
+    claude_verdict,
+    heuristic_verdict,
+    ollama_verdict,
+)
+
+
+def _input(*, old_wins=4, new_wins=4, draws=2, total=10, manifest=None) -> AnalystInput:
+    return AnalystInput(
+        deck_name="test.dck",
+        bracket=3,
+        audit_manifest=manifest or {"added": ["A"], "removed": ["B"], "rationale": "x"},
+        sim_report={
+            "total_games": total,
+            "draws": draws,
+            "old_stats": {"wins": old_wins},
+            "new_stats": {"wins": new_wins},
+        },
+    )
+
+
+# --- heuristic_verdict -----------------------------------------------------
+
+def test_heuristic_kept_when_strong_improvement():
+    v = heuristic_verdict(_input(old_wins=4, new_wins=10, draws=0, total=14), AnalystConfig())
+    assert v.label == "kept"
+    assert v.confidence >= 0.75
+    assert "10-4" in v.reasoning
+
+
+def test_heuristic_reverted_when_strong_regression():
+    v = heuristic_verdict(_input(old_wins=10, new_wins=4, draws=0, total=14), AnalystConfig())
+    assert v.label == "reverted"
+    assert v.confidence >= 0.75
+
+
+def test_heuristic_neutral_when_within_noise():
+    v = heuristic_verdict(_input(old_wins=5, new_wins=6, draws=0, total=11), AnalystConfig())
+    assert v.label == "neutral"
+    assert v.confidence < 0.75
+
+
+def test_heuristic_inconclusive_when_too_many_draws():
+    # 18 of 20 games drew (matches the real Hakbal-vs-Hash smoke test).
+    v = heuristic_verdict(_input(old_wins=1, new_wins=1, draws=18, total=20), AnalystConfig())
+    assert v.label == "neutral"
+    assert "Inconclusive" in v.reasoning
+    assert any("decks_drew_too_often" in lesson for lesson in v.lessons)
+
+
+def test_heuristic_inputs_lessons_for_kept():
+    v = heuristic_verdict(_input(old_wins=2, new_wins=8, draws=0, total=10), AnalystConfig())
+    assert any("swap_kept" in lesson for lesson in v.lessons)
+
+
+def test_heuristic_inputs_lessons_for_reverted():
+    v = heuristic_verdict(_input(old_wins=8, new_wins=2, draws=0, total=10), AnalystConfig())
+    assert any("swap_reverted" in lesson for lesson in v.lessons)
+
+
+# --- analyze() router ------------------------------------------------------
+
+def test_analyze_returns_heuristic_when_strong_signal():
+    """High-confidence heuristic short-circuits — no LLM escalation needed."""
+    v = analyze(_input(old_wins=2, new_wins=10, draws=0, total=12))
+    assert v.source == "heuristic"
+    assert v.label == "kept"
+
+
+def test_analyze_falls_back_to_heuristic_when_llm_unwired(monkeypatch):
+    """Even with use_claude=True, the backends raise NotImplementedError when
+    unwired (no API key, no ollama daemon); router falls back to heuristic."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    import urllib.error
+    def network_down(req, timeout=None):
+        raise urllib.error.URLError("no daemon")
+    monkeypatch.setattr("urllib.request.urlopen", network_down)
+
+    config = AnalystConfig(use_claude=True, use_ollama=True)
+    # Noise band: heuristic confidence is low, would normally escalate.
+    v = analyze(_input(old_wins=5, new_wins=6, draws=0, total=11), config=config)
+    assert v.source == "heuristic"
+
+
+def test_analyze_default_config_no_llm_no_escalation():
+    config = AnalystConfig()
+    assert config.use_claude is False
+    assert config.use_ollama is False
+    v = analyze(_input(old_wins=4, new_wins=5, draws=0, total=9), config=config)
+    assert v.source == "heuristic"
+
+
+# --- LLM stubs ------------------------------------------------------------
+
+def test_claude_verdict_unimplemented_without_key(monkeypatch):
+    """No ANTHROPIC_API_KEY → falls back via NotImplementedError."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(NotImplementedError, match="ANTHROPIC_API_KEY"):
+        claude_verdict(_input(), AnalystConfig())
+
+
+def test_ollama_verdict_unimplemented_when_daemon_unreachable(monkeypatch):
+    import urllib.error
+    def network_down(req, timeout=None):
+        raise urllib.error.URLError("no daemon")
+    monkeypatch.setattr("urllib.request.urlopen", network_down)
+    with pytest.raises(NotImplementedError, match="not reachable"):
+        ollama_verdict(_input(), AnalystConfig())
+
+
+# --- Verdict serialization -------------------------------------------------
+
+def test_verdict_to_dict_round_trips():
+    v = Verdict(label="kept", confidence=0.9, reasoning="x", lessons=["y"])
+    d = v.to_dict()
+    assert d["label"] == "kept"
+    assert d["confidence"] == 0.9
+    assert d["lessons"] == ["y"]
+
+
+# --- claude_verdict success path (mocked Anthropic client) -----------------
+
+def _fake_anthropic_response(text: str):
+    """Build a minimal stand-in for an `anthropic.types.Message`."""
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    return _Msg(text)
+
+
+def test_claude_verdict_parses_valid_json_response(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+
+    fake_payload = json.dumps({
+        "label": "kept",
+        "confidence": 0.92,
+        "reasoning": "New version dominated 12-2.",
+        "lessons": ["finishers reduced draw rate"],
+    })
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response(fake_payload)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+    v = claude_verdict(_input(old_wins=2, new_wins=12, draws=0, total=14), AnalystConfig())
+    assert v.source == "claude"
+    assert v.label == "kept"
+    assert v.confidence == 0.92
+    assert "finishers" in str(v.lessons)
+    # monkeypatch.setitem auto-cleans up; no manual pop needed.
+
+
+def test_claude_verdict_normalizes_invalid_label(monkeypatch):
+    """Bad label from the model gets coerced to 'neutral' rather than crashing."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    fake_payload = json.dumps({"label": "garbage", "confidence": 0.5, "reasoning": "x"})
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response(fake_payload)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    v = claude_verdict(_input(), AnalystConfig())
+    assert v.label == "neutral"
+    # monkeypatch.setitem auto-cleans up; no manual pop needed.
+
+
+def test_claude_verdict_handles_empty_response(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response("")
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    with pytest.raises(RuntimeError, match="empty response"):
+        claude_verdict(_input(), AnalystConfig())
+    # monkeypatch.setitem auto-cleans up; no manual pop needed.
+
+
+# --- ollama_verdict success path (mocked HTTP) -----------------------------
+
+class _FakeUrlOpenResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+    def read(self): return self._body
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
+
+def test_ollama_verdict_parses_daemon_response(monkeypatch):
+    inner = json.dumps({
+        "label": "reverted",
+        "confidence": 0.8,
+        "reasoning": "lost 3-9",
+        "lessons": ["cuts removed too much defense"],
+    })
+    payload = json.dumps({"response": inner}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeUrlOpenResponse(payload)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    v = ollama_verdict(
+        _input(old_wins=9, new_wins=3, draws=0, total=12),
+        AnalystConfig(),
+    )
+    assert v.source == "ollama"
+    assert v.label == "reverted"
+    assert v.confidence == 0.8
+
+
+def test_ollama_verdict_falls_back_when_daemon_unreachable(monkeypatch):
+    import urllib.error
+
+    def network_down(req, timeout=None):
+        raise urllib.error.URLError("no daemon")
+    monkeypatch.setattr("urllib.request.urlopen", network_down)
+
+    with pytest.raises(NotImplementedError, match="Ollama daemon not reachable"):
+        ollama_verdict(_input(), AnalystConfig())
+
+
+def test_ollama_verdict_normalizes_invalid_label(monkeypatch):
+    inner = json.dumps({"label": "garbage", "confidence": 0.5, "reasoning": "x"})
+    payload = json.dumps({"response": inner}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeUrlOpenResponse(payload)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    v = ollama_verdict(_input(), AnalystConfig())
+    assert v.label == "neutral"
+
+
+# --- analyze() router with real backends mocked ----------------------------
+
+def test_analyze_uses_claude_when_heuristic_uncertain(monkeypatch):
+    """Noise-band heuristic (low confidence) → router escalates to claude."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    fake_payload = json.dumps({
+        "label": "kept", "confidence": 0.7,
+        "reasoning": "from claude", "lessons": [],
+    })
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response(fake_payload)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+    # Noise band: heuristic confidence is low → escalate.
+    v = analyze(
+        _input(old_wins=5, new_wins=6, draws=0, total=11),
+        config=AnalystConfig(use_claude=True),
+    )
+    assert v.source == "claude"
+    # monkeypatch.setitem auto-cleans up; no manual pop needed.

@@ -29,6 +29,25 @@ config.json
 # Knowledge log (Phase 2+; single SQLite file per project)
 knowledge_log.db
 knowledge_log.db-journal
+knowledge_log.sqlite
+knowledge_log.sqlite-journal
+integration_test_*.sqlite
+integration_test_*.sqlite-journal
+
+# Generated session logs (live runs, smoke tests)
+*.log
+b4_preflight_results.json
+hakbal_match.log
+compare_smoketest.log
+test2_rerun.json
+test2_rerun_v2.json
+
+# Scryfall response cache (re-fetched on demand)
+.cache/
+
+# Date-stamped session handoffs are kept for narrative; archive them in docs/
+# after a few days rather than committing more recent ones — this comment is
+# a reminder, not a rule.
 
 # Editor / OS
 .vscode/

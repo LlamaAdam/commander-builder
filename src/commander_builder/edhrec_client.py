@@ -1,0 +1,512 @@
+"""EDHREC scraper for commander metadata + meta-opponent discovery.
+
+EDHREC publishes per-commander pages with aggregated stats: card inclusion
+percentages, synergy scores, popular variants, and "Average Deck" links to
+Moxfield. The audit prompt scrapes this manually via a logged-in browser
+session; this module is the programmatic equivalent for automated curation.
+
+Strategy: EDHREC's commander page (`/commanders/<slug>`) renders a
+hydrating React app, but the static HTML is enough for our purposes — the
+key data ships in a `<script id="__NEXT_DATA__">` JSON blob that next.js
+bakes into every page. We grab the page HTML, extract that blob, and parse.
+
+The bracket-deck-list pages (`/decks/<slug>/<bracket>`) sometimes block
+non-browser fetches with a "Cookie/query string data" guard. The commander
+page is reliably fetchable.
+
+Public API:
+
+    fetch_commander_page("Atraxa, Praetors' Voice") → CommanderPage
+    fetch_commander_page("atraxa-praetors-voice")    → CommanderPage  (slug also OK)
+
+    page.top_cards           # most-included cards (>50% inclusion)
+    page.high_synergy_cards  # cards uniquely correlated with this commander
+    page.average_deck_url    # Moxfield URL for the "Average Deck" sample
+    page.related_commanders  # similar-archetype commanders for opponent discovery
+
+Disk cache mirrors `scryfall_client` — 24-hour TTL since EDHREC stats refresh
+weekly.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+import urllib.parse
+import urllib.request
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CACHE_DIR = REPO_ROOT / ".cache" / "edhrec"
+EDHREC_BASE = "https://edhrec.com"
+USER_AGENT = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
+REQUEST_SLEEP_SEC = 0.5  # EDHREC isn't rate-limited like Scryfall but be polite.
+CACHE_TTL_HOURS = 24
+
+# next.js embeds page data here. Match across newlines because the JSON can
+# span thousands of lines.
+_NEXT_DATA_RE = re.compile(
+    r'<script\s+id="__NEXT_DATA__"\s+type="application/json"[^>]*>(.+?)</script>',
+    re.DOTALL,
+)
+
+
+@dataclass
+class CardEntry:
+    """Single row from a card-list section of an EDHREC page."""
+    name: str
+    inclusion_pct: float = 0.0
+    synergy_pct: float = 0.0
+    num_decks: int = 0
+
+
+@dataclass
+class CommanderPage:
+    """Parsed view of an EDHREC commander page. Lists are best-effort —
+    EDHREC's HTML schema shifts, so missing fields default to empty rather
+    than raising."""
+    commander_name: str
+    slug: str
+    fetched_at: str
+    top_cards: list[CardEntry] = field(default_factory=list)
+    high_synergy_cards: list[CardEntry] = field(default_factory=list)
+    new_cards: list[CardEntry] = field(default_factory=list)
+    related_commanders: list[str] = field(default_factory=list)
+    average_deck_url: Optional[str] = None
+    deck_count: Optional[int] = None
+    raw_size_bytes: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
+
+
+def commander_slug(commander_name: str) -> str:
+    """EDHREC's URL slugs are lowercase + hyphenated, with apostrophes / commas
+    stripped. `Atraxa, Praetors' Voice` → `atraxa-praetors-voice`."""
+    s = commander_name.lower()
+    s = re.sub(r"[',.]", "", s)
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s or "unknown"
+
+
+def _cache_path(slug: str) -> Path:
+    return CACHE_DIR / f"{slug}.json"
+
+
+def _is_cache_fresh(path: Path, ttl_hours: int = CACHE_TTL_HOURS) -> bool:
+    if not path.exists():
+        return False
+    age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+        path.stat().st_mtime, tz=timezone.utc
+    )
+    return age < timedelta(hours=ttl_hours)
+
+
+def _http_get_text(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _extract_next_data(html: str) -> dict:
+    """Pull the `__NEXT_DATA__` JSON out of an EDHREC HTML page. Raises
+    ValueError if the blob isn't present (page changed shape, or we hit a
+    redirect / 404 page)."""
+    m = _NEXT_DATA_RE.search(html)
+    if not m:
+        raise ValueError("__NEXT_DATA__ blob not found in HTML")
+    try:
+        return json.loads(m.group(1))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"__NEXT_DATA__ blob isn't valid JSON: {exc}") from exc
+
+
+def _walk_for_cardlists(node, out: dict[str, list[CardEntry]]) -> None:
+    """Recursively walk the next-data blob looking for objects that look like
+    EDHREC cardlist entries (`{name, inclusion, synergy, num_decks, ...}`).
+    EDHREC's schema isn't strictly typed across page versions, so we hunt by
+    shape rather than by path."""
+    if isinstance(node, dict):
+        # An EDHREC cardlist section typically has `header` and `cardviews`.
+        if "header" in node and isinstance(node.get("cardviews"), list):
+            header = str(node.get("header", "")).lower()
+            bucket: list[CardEntry] = []
+            for cv in node["cardviews"]:
+                if not isinstance(cv, dict):
+                    continue
+                bucket.append(CardEntry(
+                    name=str(cv.get("name", cv.get("sanitized", ""))),
+                    inclusion_pct=float(cv.get("inclusion", 0) or 0),
+                    synergy_pct=float(cv.get("synergy", 0) or 0) * 100,
+                    num_decks=int(cv.get("num_decks", 0) or 0),
+                ))
+            # Bucket the section under a normalized key so the parser
+            # tolerates EDHREC's variations ("Top Cards", "topcards", etc.).
+            if "high synergy" in header or "high-synergy" in header:
+                out.setdefault("high_synergy", []).extend(bucket)
+            elif "new card" in header:
+                out.setdefault("new_cards", []).extend(bucket)
+            elif "top card" in header or header.strip() == "":
+                out.setdefault("top_cards", []).extend(bucket)
+        for v in node.values():
+            _walk_for_cardlists(v, out)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_for_cardlists(item, out)
+
+
+def _walk_for_moxfield_url(node) -> Optional[str]:
+    """Recursively scan the next-data blob for any string that points to a
+    Moxfield deck. EDHREC's "Average Deck" link goes through
+    `moxfield.com/decks/<id>` but the path within the blob varies across
+    page versions, so we hunt by content rather than by key."""
+    if isinstance(node, str):
+        if "moxfield.com/decks/" in node:
+            return node
+        return None
+    if isinstance(node, dict):
+        for v in node.values():
+            hit = _walk_for_moxfield_url(v)
+            if hit:
+                return hit
+    elif isinstance(node, list):
+        for item in node:
+            hit = _walk_for_moxfield_url(item)
+            if hit:
+                return hit
+    return None
+
+
+def _walk_for_int(node, key: str) -> Optional[int]:
+    """Find the first int-typed value at any depth keyed by `key`."""
+    if isinstance(node, dict):
+        if key in node:
+            v = node[key]
+            if isinstance(v, int):
+                return v
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+        for v in node.values():
+            hit = _walk_for_int(v, key)
+            if hit is not None:
+                return hit
+    elif isinstance(node, list):
+        for item in node:
+            hit = _walk_for_int(item, key)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _parse_commander_page(commander_name: str, slug: str, html: str) -> CommanderPage:
+    """Build a CommanderPage from raw HTML. Tolerant of schema shifts —
+    missing fields surface as empty lists, not exceptions."""
+    page = CommanderPage(
+        commander_name=commander_name,
+        slug=slug,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+        raw_size_bytes=len(html),
+    )
+    try:
+        next_data = _extract_next_data(html)
+    except ValueError:
+        return page  # Empty page; caller can detect via empty top_cards.
+
+    buckets: dict[str, list[CardEntry]] = {}
+    _walk_for_cardlists(next_data, buckets)
+    page.top_cards = buckets.get("top_cards", [])
+    page.high_synergy_cards = buckets.get("high_synergy", [])
+    page.new_cards = buckets.get("new_cards", [])
+
+    # Recursively hunt for the "Average Deck" Moxfield URL — schema varies.
+    page.average_deck_url = _walk_for_moxfield_url(next_data)
+
+    # Deck count is also schema-fluid; search for it by key name at any depth.
+    deck_count = _walk_for_int(next_data, "num_decks") or _walk_for_int(next_data, "deck_count")
+    page.deck_count = deck_count
+
+    # Related commanders — best-effort, optional.
+    props = next_data.get("props", {}).get("pageProps", {})
+    container = props.get("data") or props
+    if isinstance(container, dict):
+        related = container.get("related_commanders") or []
+        if isinstance(related, list):
+            page.related_commanders = [
+                str(r.get("name", r.get("sanitized", "")))
+                for r in related if isinstance(r, dict)
+            ]
+    return page
+
+
+def fetch_commander_page(
+    commander_or_slug: str,
+    cache: bool = True,
+    ttl_hours: int = CACHE_TTL_HOURS,
+) -> CommanderPage:
+    """Fetch + parse one commander's EDHREC page. Caches the parsed
+    CommanderPage to disk; subsequent calls within `ttl_hours` skip the
+    network."""
+    slug = commander_or_slug if "-" in commander_or_slug and commander_or_slug.islower() \
+        else commander_slug(commander_or_slug)
+    cache_path = _cache_path(slug)
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return _page_from_dict(data)
+        except (OSError, ValueError):
+            pass  # Fall through to fresh fetch on cache corruption.
+
+    url = f"{EDHREC_BASE}/commanders/{urllib.parse.quote(slug)}"
+    time.sleep(REQUEST_SLEEP_SEC)
+    html = _http_get_text(url)
+    page = _parse_commander_page(commander_or_slug, slug, html)
+    if cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(page.to_json(), encoding="utf-8")
+    return page
+
+
+def _page_from_dict(d: dict) -> CommanderPage:
+    """Rehydrate a CommanderPage from a cached JSON dict."""
+    def card_list(rows):
+        return [CardEntry(**r) for r in rows or []]
+    return CommanderPage(
+        commander_name=d.get("commander_name", ""),
+        slug=d.get("slug", ""),
+        fetched_at=d.get("fetched_at", ""),
+        top_cards=card_list(d.get("top_cards", [])),
+        high_synergy_cards=card_list(d.get("high_synergy_cards", [])),
+        new_cards=card_list(d.get("new_cards", [])),
+        related_commanders=list(d.get("related_commanders", [])),
+        average_deck_url=d.get("average_deck_url"),
+        deck_count=d.get("deck_count"),
+        raw_size_bytes=int(d.get("raw_size_bytes", 0)),
+    )
+
+
+@dataclass
+class AverageDeck:
+    """EDHREC's auto-generated 'average deck' for a commander+bracket+budget.
+    Lives at `/average-decks/<slug>/<bracket>/<budget>`. Returned as a
+    Moxfield-shape dict so it can flow through `to_dck` and `_import_reference`
+    unchanged."""
+    commander_name: str
+    slug: str
+    url: str
+    bracket_slug: Optional[str]      # "upgraded" / "optimized" / etc.
+    budget_slug: Optional[str]       # "expensive" / "budget" / None
+    cards: list[CardEntry]           # mainboard + commander, mixed
+
+    def to_moxfield_shape(self, bracket_int: Optional[int] = None) -> dict:
+        """Build a Moxfield-shape deck JSON so existing import code can
+        consume this without a separate path. Commander cards are routed to
+        the [Commander] section by name match (the commander itself in the
+        cards list); everything else lands in [Main]."""
+        cmdr_name_lc = self.commander_name.lower()
+        commanders: dict[str, dict] = {}
+        mainboard: dict[str, dict] = {}
+        for i, card in enumerate(self.cards):
+            entry = {
+                "quantity": int(card.num_decks) if card.num_decks else 1,
+                "card": {
+                    "name": card.name,
+                    "set": "",
+                    "cn": "",
+                },
+            }
+            if card.name.lower() == cmdr_name_lc:
+                # Commander goes to its own bucket; quantity is always 1.
+                entry["quantity"] = 1
+                commanders[f"cmdr-{i}"] = entry
+            else:
+                # `num_decks` from EDHREC is "appears in N decks", not "use N
+                # copies". For mainboard, use 1 unless name suggests basic
+                # land where multiples are typical.
+                qty = 1
+                # Basics get a generous default; EDHREC average decks
+                # represent basic counts in the deck-count number.
+                lc = card.name.lower()
+                if lc in {"forest", "island", "plains", "mountain", "swamp", "wastes"}:
+                    qty = max(1, min(40, int(card.num_decks) or 1))
+                entry["quantity"] = qty
+                mainboard[f"main-{i}"] = entry
+        return {
+            "name": f"EDHREC Average — {self.commander_name}"
+                    + (f" ({self.bracket_slug})" if self.bracket_slug else "")
+                    + (f"/{self.budget_slug}" if self.budget_slug else ""),
+            "publicId": None,  # Not a Moxfield deck.
+            "format": "commander",
+            "bracket": bracket_int,
+            "boards": {
+                "commanders": {"cards": commanders},
+                "mainboard": {"cards": mainboard},
+            },
+        }
+
+
+# Map our integer bracket → EDHREC's URL slug.
+BRACKET_SLUG: dict[int, str] = {
+    1: "exhibition",
+    2: "core",
+    3: "upgraded",
+    4: "optimized",
+    5: "cedh",
+}
+
+
+def _walk_for_average_deck_cards(node) -> list[CardEntry]:
+    """Find the cardlist that represents the average deck itself. EDHREC's
+    average-deck pages typically have ONE big cardlist (the deck contents)
+    where every entry has a num_decks count near 100 (since it's "this many
+    of the average deck's slots are this card"). Distinct from the commander
+    page's many small cardlists per category."""
+    out: list[CardEntry] = []
+    seen: set[str] = set()
+
+    def _walk(n):
+        if isinstance(n, dict):
+            # An average-deck card list looks like a `cardviews` array under
+            # any object that also has cards in it. The cardviews inside
+            # average-deck pages have `name` and either `num_decks` or
+            # similar count.
+            views = n.get("cardviews")
+            if isinstance(views, list):
+                for cv in views:
+                    if not isinstance(cv, dict):
+                        continue
+                    name = str(cv.get("name", cv.get("sanitized", ""))).strip()
+                    if not name or name.lower() in seen:
+                        continue
+                    seen.add(name.lower())
+                    out.append(CardEntry(
+                        name=name,
+                        inclusion_pct=float(cv.get("inclusion", 0) or 0),
+                        synergy_pct=float(cv.get("synergy", 0) or 0) * 100,
+                        num_decks=int(cv.get("num_decks", 0) or 0),
+                    ))
+            for v in n.values():
+                _walk(v)
+        elif isinstance(n, list):
+            for item in n:
+                _walk(item)
+
+    _walk(node)
+    return out
+
+
+def fetch_average_deck(
+    commander_or_slug: str,
+    bracket: Optional[int] = None,
+    budget: Optional[str] = None,
+    direct_url: Optional[str] = None,
+    cache: bool = True,
+    ttl_hours: int = CACHE_TTL_HOURS,
+) -> Optional[AverageDeck]:
+    """Fetch EDHREC's average deck.
+
+    Three call shapes:
+      1. `direct_url=...` (e.g. user passed an EDHREC URL on the CLI) —
+         fetch that exact URL.
+      2. `bracket=N, budget=X` — build URL `/average-decks/<slug>/<bracket-slug>/<budget>`.
+      3. `bracket=N` — build URL `/average-decks/<slug>/<bracket-slug>` and
+         try without the budget tier.
+      4. Bare commander — fall back to `/average-decks/<slug>`.
+
+    Returns None if no average deck is published for the request OR the page
+    has no parseable cardlist."""
+    if direct_url:
+        url = direct_url
+        slug_from_url = urllib.parse.urlparse(direct_url).path
+    else:
+        slug = commander_slug(commander_or_slug)
+        bracket_slug = BRACKET_SLUG.get(bracket) if bracket else None
+        path = f"/average-decks/{slug}"
+        if bracket_slug:
+            path += f"/{bracket_slug}"
+            if budget:
+                path += f"/{budget}"
+        url = f"{EDHREC_BASE}{path}"
+        slug_from_url = path
+
+    cache_key = re.sub(r"[^a-z0-9]+", "_", slug_from_url.lower()).strip("_")[:120] or "avg"
+    cache_path = CACHE_DIR.parent / "edhrec_avg" / f"{cache_key}.json"
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return AverageDeck(
+                commander_name=data["commander_name"],
+                slug=data["slug"],
+                url=data["url"],
+                bracket_slug=data.get("bracket_slug"),
+                budget_slug=data.get("budget_slug"),
+                cards=[CardEntry(**c) for c in data["cards"]],
+            )
+        except (OSError, ValueError, KeyError):
+            pass  # Fall through to fresh fetch.
+
+    try:
+        time.sleep(REQUEST_SLEEP_SEC)
+        html = _http_get_text(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        return None
+    except Exception:
+        return None
+
+    try:
+        next_data = _extract_next_data(html)
+    except ValueError:
+        return None
+
+    cards = _walk_for_average_deck_cards(next_data)
+    if not cards:
+        return None
+
+    deck = AverageDeck(
+        commander_name=commander_or_slug if direct_url is None else "Unknown",
+        slug=commander_slug(commander_or_slug) if direct_url is None else "",
+        url=url,
+        bracket_slug=BRACKET_SLUG.get(bracket) if bracket else None,
+        budget_slug=budget,
+        cards=cards,
+    )
+
+    if cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({
+            "commander_name": deck.commander_name,
+            "slug": deck.slug,
+            "url": deck.url,
+            "bracket_slug": deck.bracket_slug,
+            "budget_slug": deck.budget_slug,
+            "cards": [asdict(c) for c in deck.cards],
+        }, indent=2), encoding="utf-8")
+
+    return deck
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: edhrec_client.py <commander-name-or-slug>")
+        sys.exit(2)
+    page = fetch_commander_page(" ".join(sys.argv[1:]))
+    print(json.dumps({
+        "commander": page.commander_name,
+        "slug": page.slug,
+        "deck_count": page.deck_count,
+        "top_card_count": len(page.top_cards),
+        "high_synergy_count": len(page.high_synergy_cards),
+        "first_5_top_cards": [c.name for c in page.top_cards[:5]],
+        "average_deck_url": page.average_deck_url,
+    }, indent=2))
