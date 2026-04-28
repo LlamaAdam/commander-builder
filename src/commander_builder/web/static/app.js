@@ -230,9 +230,13 @@ function curveBars(curve) {
   const wrap = el("div");
   const bars = el("div", { class: "curve-bars" });
   const max = Math.max(1, ...curve.map(([_, c]) => c));
+  const total = curve.reduce((s, [, c]) => s + c, 0);
   for (const [bucket, count] of curve) {
     const bar = el("div", { class: "curve-bar" });
     bar.style.height = `${Math.round((count / max) * 100)}%`;
+    bar.title = `CMC ${bucket >= 6 ? "6+" : bucket}: ${count} cards (${
+      total > 0 ? Math.round((count / total) * 100) : 0
+    }% of nonland)`;
     bar.appendChild(el("span", { class: "bar-count" }, String(count)));
     bars.appendChild(bar);
   }
@@ -242,6 +246,13 @@ function curveBars(curve) {
   }
   wrap.appendChild(bars);
   wrap.appendChild(labels);
+  // Average CMC summary line.
+  const sumWeighted = curve.reduce((s, [b, c]) => s + b * c, 0);
+  const avg = total > 0 ? (sumWeighted / total).toFixed(2) : "—";
+  wrap.appendChild(el(
+    "p", { class: "muted" },
+    `Avg nonland CMC: ${avg}  ·  Total: ${total} nonland cards`,
+  ));
   return wrap;
 }
 
