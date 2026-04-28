@@ -484,6 +484,93 @@ parked-items queue — promote to BACKLOG.md when GUI work starts.
 
 ---
 
+## FP-010 — Package the web app as a desktop EXE
+
+**What.** Once FP-006 (web GUI) is feature-complete and stable, ship
+it as a single-file Windows executable that bundles:
+
+- The Flask backend (Python interpreter + all deps + your `src/`)
+- The HTML/CSS/JS front-end as embedded static assets
+- A small native launcher that:
+  1. Starts the Flask server on `127.0.0.1:<random_free_port>`
+  2. Opens the system default browser to that URL, OR opens the
+     embedded `pywebview` window directly inside the EXE
+  3. Shuts the server down cleanly when the window closes
+- A bundled `vendor/forge/` Forge install + JRE (or a first-run
+  download step that fetches them and caches under `%LOCALAPPDATA%`)
+- A reference to the shared `mtg_cards/` folder, configurable on
+  first run (default: `%LOCALAPPDATA%\commander-builder\mtg_cards`)
+
+**Why it might matter.** Right now the user-facing path requires a
+Python install + `pip install -e ".[web]"` + a manual
+`python -m commander_builder.web` invocation. An EXE collapses that
+to "double-click `CommanderBuilder.exe`, browser pops open." That's
+the difference between a project anyone can run and a project only
+the maintainer runs.
+
+**Cost.** ~12-20h depending on packaging route:
+
+| Path | Tool | Cost | Pros | Cons |
+|---|---|---|---|---|
+| A | **PyInstaller** | ~12h | Mature, single-file output | Slow startup (extracts to temp); antivirus false positives |
+| B | **PyInstaller + pywebview** | ~16h | Embedded Chromium-style window — no browser needed | Adds ~50MB to EXE size for the webview runtime |
+| C | **Briefcase** (BeeWare) | ~16h | Real native installers (.msi) | Less mature; Flask integration is custom |
+| D | **Nuitka** | ~20h | Faster startup than PyInstaller; harder to reverse-engineer | Build complexity; less common patterns |
+
+Recommend **Path B (PyInstaller + pywebview)** — gives the user a
+real desktop window that feels like an app, not "open this URL in
+Chrome."
+
+**What would unblock it.** All of:
+
+1. ✅ FP-006 backend: Flask routes are live and stable
+2. ✅ FP-006 minimal UI: at least the seven dashboard panels render
+3. ⏳ FP-006 polish: the HTML/CSS feels like an app, not a debug page
+4. ⏳ Workflow completeness: the user can drive a full audit cycle
+   (snapshot → propose swap → run A/B sim → record verdict) without
+   ever touching a CLI
+5. ⏳ Forge bundling decision: ship Forge in the EXE (fat install,
+   ~150MB) vs. first-run downloader (lean install, online required)
+
+**What's required when packaging starts:**
+
+- A `pyproject.toml` `[project.gui-scripts]` entry pointing at a new
+  `commander_builder.launcher:main` that boots Flask + opens the
+  webview
+- A `commander_builder/launcher.py` that:
+  - Picks a free port via `socket.bind(("", 0))`
+  - Launches Flask in a thread
+  - `webview.create_window("Commander Builder", url)` (Path B)
+- Excludes `tests/`, `scripts/`, `docs/` from the bundle (already
+  the case under setuptools `packages.find`)
+- Code-signs the EXE before distribution to dodge antivirus FP
+  (signing certificate ~$200/yr — defer until first user reports
+  a SmartScreen warning)
+- A simple GitHub Actions workflow `release.yml` that builds the
+  EXE on a Windows runner and attaches it to a tagged release.
+
+**Honest scope warnings.**
+
+- A self-contained Python EXE is roughly 80-100MB before bundling
+  Forge. With Forge + JRE the install is ~250MB. That's normal for
+  this class of tool but worth setting expectations.
+- The mtg_cards folder is large (~180MB after bulk_data + 32k
+  oracle snapshots). Cannot reasonably ship inside the EXE; the
+  first-run flow downloads it.
+- Auto-update is out of scope for v1. Users redownload from
+  GitHub Releases.
+
+**My current take.** Right shape; wrong time. Don't start until
+the web app demonstrably works for a full iteration cycle on real
+decks. Premature packaging means re-packaging after every UX
+change. Promote to BACKLOG.md when the user has run ≥5 full audit
+cycles via the web GUI without touching a CLI.
+
+**Status: PARKED 2026-04-28.** Re-evaluate after FP-006 polish
+ships and the workflow is genuinely browser-only.
+
+---
+
 ## How this file relates to BACKLOG.md
 
 - **`BACKLOG.md`**: prioritized, numbered, all items are go-able with a
