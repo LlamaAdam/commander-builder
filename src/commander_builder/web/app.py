@@ -33,15 +33,25 @@ from ..knowledge_log import (
 )
 
 
-def _list_decks(deck_dir: Path) -> list[dict]:
-    """Enumerate ``.dck`` files under ``deck_dir`` (non-recursive)."""
+def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
+    """Enumerate ``.dck`` files under ``deck_dir`` (non-recursive).
+
+    By default returns only ``[USER] *.dck`` files — those are the
+    decks under active iteration. Set ``user_only=False`` to also
+    list filler / pool decks (used by curation commands)."""
     if not deck_dir.exists() or not deck_dir.is_dir():
         return []
     out: list[dict] = []
     for p in sorted(deck_dir.glob("*.dck")):
+        if user_only and not p.stem.startswith("[USER]"):
+            continue
+        # Display name: strip the [USER] prefix and any trailing
+        # bracket version like " [B3]" so the sidebar reads cleanly.
+        import re as _re
+        display = _re.sub(r"^\[USER\]\s*", "", p.stem)
         out.append({
             "id": p.stem,
-            "name": p.stem,
+            "name": display,
             "path": str(p),
         })
     return out
@@ -114,7 +124,11 @@ def create_app(
 
     @app.route("/api/decks")
     def decks():
-        return jsonify({"decks": _list_decks(deck_dir)})
+        # Default: only [USER] decks. Pass ?all=1 to include filler/pool.
+        all_flag = request.args.get("all", "").lower() in ("1", "true", "yes")
+        return jsonify({
+            "decks": _list_decks(deck_dir, user_only=not all_flag),
+        })
 
     @app.route("/api/dashboard")
     def dashboard():

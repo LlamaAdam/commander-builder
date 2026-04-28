@@ -37,7 +37,8 @@ body {
 .layout {
   display: grid;
   grid-template-columns: 280px 1fr;
-  min-height: calc(100vh - 53px);
+  height: calc(100vh - 53px);
+  overflow: hidden;
 }
 
 .sidebar {
@@ -45,6 +46,19 @@ body {
   padding: 18px;
   background: var(--panel);
   overflow-y: auto;
+  /* overscroll-behavior: contain stops sidebar wheel events from
+     bubbling up and scrolling the page once you hit the top/bottom
+     of the deck list. Otherwise scrolling through a long list while
+     hovering a deck row drags the whole page. */
+  overscroll-behavior: contain;
+  height: 100%;
+}
+
+.dashboard {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  height: 100%;
+  padding: 24px;
 }
 .sidebar h2 {
   font-size: 12px;
@@ -72,7 +86,6 @@ body {
   font-weight: 600;
 }
 
-.dashboard { padding: 24px; }
 .empty-state { color: var(--muted); }
 
 .commander-hero {

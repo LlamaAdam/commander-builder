@@ -44,6 +44,19 @@ def deck_dir(tmp_path) -> Path:
 
 
 @pytest.fixture
+def user_deck_dir(tmp_path) -> Path:
+    """Deck dir that mixes [USER] and filler decks — used to exercise
+    the user-only default filter."""
+    d = tmp_path / "user_decks"
+    d.mkdir()
+    _write_deck(d, "[USER] Hakbal [B3]")
+    _write_deck(d, "[USER] Hash [B3]")
+    _write_deck(d, "Allies")          # filler / pool, no [USER] prefix
+    _write_deck(d, "Avacyn Tribal")   # filler / pool
+    return d
+
+
+@pytest.fixture
 def client(deck_dir, monkeypatch):
     """A Flask test client with Scryfall lookup stubbed."""
     def fake_lookup(name: str):
@@ -86,7 +99,10 @@ def client(deck_dir, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_list_decks_finds_dck_files(deck_dir):
-    decks = _list_decks(deck_dir)
+    # Default `user_only=True` filters out our test fixture decks
+    # (Alpha/Bravo lack the [USER] prefix); use user_only=False for
+    # the all-files test.
+    decks = _list_decks(deck_dir, user_only=False)
     names = sorted(d["name"] for d in decks)
     assert names == ["Alpha", "Bravo"]
 
@@ -97,8 +113,53 @@ def test_list_decks_handles_missing_dir(tmp_path):
 
 def test_list_decks_skips_non_dck(deck_dir):
     (deck_dir / "notes.txt").write_text("ignore me", encoding="utf-8")
-    names = {d["name"] for d in _list_decks(deck_dir)}
+    names = {d["name"] for d in _list_decks(deck_dir, user_only=False)}
     assert "notes" not in names
+
+
+def test_list_decks_default_filters_to_user_prefix(user_deck_dir):
+    """Default user_only=True keeps only [USER] *.dck files."""
+    decks = _list_decks(user_deck_dir)
+    names = {d["name"] for d in decks}
+    # Display names strip the [USER] prefix.
+    assert "Hakbal [B3]" in names
+    assert "Hash [B3]" in names
+    assert "Allies" not in names
+    assert "Avacyn Tribal" not in names
+
+
+def test_list_decks_user_only_false_includes_filler(user_deck_dir):
+    decks = _list_decks(user_deck_dir, user_only=False)
+    names = {d["name"] for d in decks}
+    assert "Allies" in names
+    assert "Avacyn Tribal" in names
+
+
+def test_decks_endpoint_filters_to_user_default(user_deck_dir, monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda name: None,
+    )
+    app = create_app(deck_dir=user_deck_dir)
+    app.config["TESTING"] = True
+    c = app.test_client()
+    body = c.get("/api/decks").get_json()
+    names = {d["name"] for d in body["decks"]}
+    assert "Hakbal [B3]" in names
+    assert "Allies" not in names
+
+
+def test_decks_endpoint_all_flag_includes_filler(user_deck_dir, monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda name: None,
+    )
+    app = create_app(deck_dir=user_deck_dir)
+    app.config["TESTING"] = True
+    c = app.test_client()
+    body = c.get("/api/decks?all=1").get_json()
+    names = {d["name"] for d in body["decks"]}
+    assert "Allies" in names
 
 
 # ---------------------------------------------------------------------------
@@ -173,11 +234,14 @@ def test_health_reports_ok_and_deck_count(client):
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["status"] == "ok"
-    assert body["deck_count"] == 2
+    # The fixture decks lack the [USER] prefix so the default health
+    # count (which honors the user_only filter) is 0. The all=1 listing
+    # below confirms the files are present.
+    assert body["deck_count"] == 0
 
 
 def test_decks_endpoint_lists_available(client):
-    resp = client.get("/api/decks")
+    resp = client.get("/api/decks?all=1")
     assert resp.status_code == 200
     body = resp.get_json()
     names = sorted(d["name"] for d in body["decks"])
