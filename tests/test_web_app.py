@@ -145,6 +145,29 @@ def test_root_serves_placeholder_html(client):
     assert b"<html" in resp.data.lower()
 
 
+def test_root_loads_static_assets(client):
+    """Smoke test: root HTML references app.js and app.css, both
+    served by Flask's static endpoint."""
+    resp = client.get("/")
+    body = resp.data.decode("utf-8")
+    assert "app.js" in body
+    assert "app.css" in body
+
+
+def test_static_css_serves(client):
+    resp = client.get("/static/app.css")
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/css"
+    assert b"--bg" in resp.data  # CSS variable from the theme
+
+
+def test_static_js_serves(client):
+    resp = client.get("/static/app.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.mimetype.lower()
+    assert b"renderDashboard" in resp.data
+
+
 def test_health_reports_ok_and_deck_count(client):
     resp = client.get("/api/health")
     assert resp.status_code == 200
