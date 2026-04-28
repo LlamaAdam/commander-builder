@@ -782,8 +782,31 @@ def create_app(
         from datetime import datetime as _dt
         ts = _dt.now().strftime("%Y%m%d_%H%M%S")
         new_path = old_path.parent / f"{old_path.stem}_proposed_{ts}.dck"
+        # Rewrite the [metadata] Name= field so Forge displays this
+        # deck distinctly from the original. Without this both decks
+        # report 'Name=Wyrm Sovereign' in Forge's Match Result lines
+        # and log_parser can't attribute wins to either side — every
+        # game looks like a tie regardless of who actually won.
+        import re as _re_meta
+        staged_name = f"{old_path.stem}_proposed_{ts}"
+        if _re_meta.search(r"^Name=.+$", new_text, flags=_re_meta.MULTILINE):
+            new_text_staged = _re_meta.sub(
+                r"^Name=.+$", f"Name={staged_name}", new_text,
+                count=1, flags=_re_meta.MULTILINE,
+            )
+        else:
+            # No metadata Name line — synthesize one at the top.
+            if "[metadata]" in new_text.lower():
+                new_text_staged = _re_meta.sub(
+                    r"(\[metadata\][^\n]*\n)", rf"\1Name={staged_name}\n",
+                    new_text, count=1, flags=_re_meta.IGNORECASE,
+                )
+            else:
+                new_text_staged = (
+                    f"[metadata]\nName={staged_name}\n\n" + new_text
+                )
         try:
-            new_path.write_text(new_text, encoding="utf-8")
+            new_path.write_text(new_text_staged, encoding="utf-8")
         except OSError as exc:
             return jsonify({"error": f"could not stage new deck: {exc}"}), 500
 
