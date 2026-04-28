@@ -982,17 +982,26 @@ def _format_added_line(name: str) -> str:
     lookups (alternate art, reprints across many sets, special
     characters like //). We resolve each appended card to its
     current Scryfall printing so the proposed deck loads cleanly.
-    Falls back to plain `1 <name>` when Scryfall doesn't return
-    usable set/cn info — better to ship a slightly-ambiguous line
-    than crash the whole audit on a network blip.
+
+    The shared ``oracle_snapshots`` cache stores forge_py-projected
+    snapshots that don't carry ``set`` / ``collector_number`` fields
+    (those are stripped to keep payload size small). When the cached
+    snapshot lacks them we fall through to a cache-bypassed Scryfall
+    fetch, which returns the full payload and re-caches it. Plain
+    ``1 <name>`` is the final fallback when Scryfall is unreachable.
     """
     try:
         from ..scryfall_client import lookup_card
         data = lookup_card(name) or {}
+        set_code = (data.get("set") or "").upper()
+        cn = data.get("collector_number") or ""
+        if not (set_code and cn):
+            # Cached snapshot was the projected shape — fetch fresh.
+            data = lookup_card(name, cache=False) or {}
+            set_code = (data.get("set") or "").upper()
+            cn = data.get("collector_number") or ""
     except Exception:
         return f"1 {name}"
-    set_code = (data.get("set") or "").upper()
-    cn = data.get("collector_number") or ""
     if set_code and cn:
         return f"1 {name}|{set_code}|{cn}"
     return f"1 {name}"
