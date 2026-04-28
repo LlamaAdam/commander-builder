@@ -102,6 +102,61 @@ def refresh_card(name: str) -> Optional[dict]:
     return data
 
 
+def format_card_for_display(name: str) -> str:
+    """Render a card from the cache as a plain-text reference block.
+
+    Same shape as ``forge_py.cards.format_card_for_display`` so the
+    two projects emit interchangeable card-reference output. Returns
+    the empty string if the card can't be found locally.
+
+    The format is intentionally plain-text — readable in CLI output,
+    web panels, and LLM prompts identically. See
+    [FUTURE_PLANS.md FP-009] for context: oracle text is
+    authoritative, images are decorative.
+    """
+    card = lookup_card(name) if name else None
+    if not card:
+        return ""
+
+    head_left = card.get("name") or name
+    cost = card.get("mana_cost") or ""
+    head = f"{head_left}   {cost}" if cost else head_left
+
+    type_line = card.get("type_line") or ""
+    pt = ""
+    power = card.get("power")
+    toughness = card.get("toughness")
+    if power is not None and toughness is not None:
+        pt = f"   {power}/{toughness}"
+
+    oracle = (card.get("oracle_text") or "").rstrip()
+    color_id = "".join(card.get("color_identity") or []) or "—"
+    cmc = card.get("cmc")
+    cmc_s = f"{cmc:g}" if isinstance(cmc, (int, float)) else "?"
+
+    parts = [head, f"{type_line}{pt}", "----"]
+    if oracle:
+        parts.append(oracle)
+    parts.append("")
+    parts.append(f"Color identity: {color_id}   CMC: {cmc_s}")
+    return "\n".join(parts)
+
+
+def diff_oracle_text(name: str, candidate: str) -> Optional[dict]:
+    """Compare cached oracle text for ``name`` against ``candidate``.
+
+    Returns ``None`` if the card can't be found in the cache.
+    Otherwise ``{"changed": bool, "before": str, "after": str}``.
+    Use the freshly-fetched text as ``candidate`` to detect errata.
+    """
+    cached = lookup_card(name)
+    if cached is None:
+        return None
+    before = (cached.get("oracle_text") or "").strip()
+    after = (candidate or "").strip()
+    return {"changed": before != after, "before": before, "after": after}
+
+
 def lookup_card(name: str, cache: bool = True) -> Optional[dict]:
     """Look up `name` via Scryfall's exact-named endpoint. Caches successful
     responses to ``oracle_snapshots/<slug>.json``. Returns None on 404."""
