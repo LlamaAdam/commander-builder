@@ -645,6 +645,208 @@ def test_propose_swap_400_on_empty_new_text(client, monkeypatch):
     assert resp.status_code == 400
 
 
+# ---------------------------------------------------------------------------
+# /api/deck_text PUT + DELETE
+# ---------------------------------------------------------------------------
+
+def test_deck_text_put_overwrites(client, deck_dir):
+    new_body = (
+        "[metadata]\nName=Edited\n\n"
+        "[Commander]\n1 New Cmdr\n\n[Main]\n1 Forest\n"
+    )
+    resp = client.put(
+        "/api/deck_text?deck=Alpha",
+        json={"text": new_body},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["saved"] is True
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert "1 New Cmdr" in on_disk
+
+
+def test_deck_text_put_400_on_empty(client):
+    resp = client.put("/api/deck_text?deck=Alpha", json={"text": ""})
+    assert resp.status_code == 400
+
+
+def test_deck_text_delete_removes(client, deck_dir):
+    assert (deck_dir / "Alpha.dck").exists()
+    resp = client.delete("/api/deck_text?deck=Alpha")
+    assert resp.status_code == 200
+    assert resp.get_json()["deleted"] is True
+    assert not (deck_dir / "Alpha.dck").exists()
+
+
+def test_deck_text_delete_404(client):
+    resp = client.delete("/api/deck_text?deck=Ghost")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /api/import_deck (Moxfield URL + paste)
+# ---------------------------------------------------------------------------
+
+def test_import_deck_paste_creates_user_prefixed_file(client, deck_dir):
+    paste = (
+        "1 Sol Ring\n"
+        "1 Arcane Signet\n"
+        "1 Command Tower\n"
+        "30 Forest\n"
+    )
+    resp = client.post("/api/import_deck", json={
+        "name": "My Brew", "paste_text": paste, "bracket": 3,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    # Filename is normalized to [USER] My Brew [B3].dck.
+    assert "[USER]" in body["filename"]
+    assert "[B3]" in body["filename"]
+    on_disk = (deck_dir / body["filename"]).read_text(encoding="utf-8")
+    # Paste lacked a [Main] section → normalized to wrap one.
+    assert "[Main]" in on_disk
+    assert "1 Sol Ring" in on_disk
+
+
+def test_import_deck_dck_format_paste_preserved(client, deck_dir):
+    paste = (
+        "[metadata]\nName=Already Forge\n\n"
+        "[Commander]\n1 Edgar Markov\n\n"
+        "[Main]\n1 Sol Ring\n"
+    )
+    resp = client.post("/api/import_deck", json={
+        "name": "Edgar Test", "paste_text": paste,
+    })
+    assert resp.status_code == 200
+    fn = resp.get_json()["filename"]
+    on_disk = (deck_dir / fn).read_text(encoding="utf-8")
+    assert "[Commander]" in on_disk
+    assert "1 Edgar Markov" in on_disk
+
+
+def test_import_deck_409_on_duplicate(client, deck_dir):
+    paste = "1 Sol Ring\n"
+    client.post("/api/import_deck", json={
+        "name": "Dup", "paste_text": paste,
+    })
+    resp = client.post("/api/import_deck", json={
+        "name": "Dup", "paste_text": paste,
+    })
+    assert resp.status_code == 409
+
+
+def test_import_deck_400_when_no_content(client):
+    resp = client.post("/api/import_deck", json={"name": "Empty"})
+    assert resp.status_code == 400
+
+
+def test_import_deck_via_moxfield_url(client, deck_dir, monkeypatch):
+    """Stubs fetch_deck so we don't hit Moxfield."""
+    fake_json = {
+        "name": "Moxfield Test Deck",
+        "publicId": "abc123",
+        "boards": {
+            "commanders": {
+                "cards": {
+                    "k1": {
+                        "quantity": 1,
+                        "card": {
+                            "name": "Edgar Markov",
+                            "set": "C17",
+                            "cn": "37",
+                        },
+                    },
+                },
+            },
+            "mainboard": {
+                "cards": {
+                    "k2": {
+                        "quantity": 1,
+                        "card": {
+                            "name": "Sol Ring", "set": "C17", "cn": "260",
+                        },
+                    },
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda public_id: fake_json,
+    )
+    resp = client.post("/api/import_deck", json={
+        "moxfield_url": "https://moxfield.com/decks/abc123",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert "Moxfield Test Deck" in body["filename"]
+
+
+def test_import_deck_502_when_moxfield_fails(client, monkeypatch):
+    def boom(public_id):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck", boom,
+    )
+    resp = client.post("/api/import_deck", json={
+        "moxfield_url": "https://moxfield.com/decks/abc",
+    })
+    assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# /api/moxfield_format
+# ---------------------------------------------------------------------------
+
+def test_moxfield_format_returns_paste_ready_text(client):
+    resp = client.get("/api/moxfield_format?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # No [metadata] block in the paste output.
+    assert "[metadata]" not in body["text"]
+    # Card lines preserved.
+    assert "1 Forest" in body["text"]
+
+
+def test_moxfield_format_404_on_missing(client):
+    resp = client.get("/api/moxfield_format?deck=Ghost")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /api/game_changers + /api/deck_audit
+# ---------------------------------------------------------------------------
+
+def test_game_changers_list(client, monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.game_changers.load_game_changers",
+        lambda **kw: {"Sol Ring", "Mana Crypt", "Demonic Tutor"},
+    )
+    resp = client.get("/api/game_changers")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["count"] == 3
+    assert "Mana Crypt" in body["cards"]
+
+
+def test_deck_audit_flags_in_deck_game_changers(client, monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.game_changers.load_game_changers",
+        lambda **kw: {"Cultivate", "Some Game Changer"},
+    )
+    # Alpha's mainboard contains Cultivate per the fixture.
+    resp = client.get("/api/deck_audit?deck=Alpha&bracket=2")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "Cultivate" in body["in_deck_game_changers"]
+    # Bracket 2 + GCs present → warning fires.
+    assert any("Game Changers" in w for w in body["warnings"])
+
+
+def test_deck_audit_404_on_missing(client):
+    resp = client.get("/api/deck_audit?deck=Ghost")
+    assert resp.status_code == 404
+
+
 def test_propose_swap_503_when_forge_unavailable(client, monkeypatch):
     """Forge missing should return 503 with detail, not 500."""
     from types import SimpleNamespace

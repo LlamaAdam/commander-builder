@@ -10,6 +10,16 @@
   <header class="topbar">
     <h1>Commander Builder</h1>
     <span class="muted" id="health-badge">checking…</span>
+    <div class="topbar-spacer"></div>
+    <button class="topbar-btn" id="btn-game-changers" title="Show Game Changers list + flag any in this deck">
+      Game Changers
+    </button>
+    <button class="topbar-btn" id="btn-illegal" title="Check the selected deck for banned-in-Commander cards">
+      Illegal Cards
+    </button>
+    <button class="topbar-btn primary" id="btn-new-deck" title="Import a deck from Moxfield URL or paste a list">
+      + New deck
+    </button>
   </header>
 
   <main class="layout">
@@ -24,6 +34,62 @@
       <p class="empty-state">Select a deck on the left to load its dashboard.</p>
     </section>
   </main>
+
+  <!-- New / import deck modal -->
+  <div class="modal-backdrop" id="new-deck-modal" hidden>
+    <div class="modal">
+      <header>
+        <h2>Add a deck</h2>
+        <button class="modal-close" data-close="new-deck-modal" aria-label="Close">&times;</button>
+      </header>
+      <div class="tabs">
+        <button class="tab active" data-tab="moxfield">Moxfield URL</button>
+        <button class="tab" data-tab="paste">Paste deck list</button>
+      </div>
+      <div class="tab-panel" id="tab-moxfield">
+        <label>Display name (optional — defaults to Moxfield deck name)</label>
+        <input id="new-mox-name" type="text" placeholder="e.g. Hakbal Test">
+        <label>Moxfield URL or deck id</label>
+        <input id="new-mox-url" type="text" placeholder="https://moxfield.com/decks/abc123 or just abc123">
+        <label>Bracket</label>
+        <select id="new-mox-bracket">
+          <option value="1">1 — Exhibition</option>
+          <option value="2">2 — Core</option>
+          <option value="3" selected>3 — Upgraded</option>
+          <option value="4">4 — Optimized</option>
+          <option value="5">5 — cEDH</option>
+        </select>
+        <button class="advise-btn" id="new-mox-import">Import from Moxfield</button>
+      </div>
+      <div class="tab-panel" id="tab-paste" hidden>
+        <label>Display name</label>
+        <input id="new-paste-name" type="text" placeholder="e.g. Brewed Up">
+        <label>Bracket</label>
+        <select id="new-paste-bracket">
+          <option value="1">1 — Exhibition</option>
+          <option value="2">2 — Core</option>
+          <option value="3" selected>3 — Upgraded</option>
+          <option value="4">4 — Optimized</option>
+          <option value="5">5 — cEDH</option>
+        </select>
+        <label>Deck list (.dck format or Moxfield bulk-paste — both work)</label>
+        <textarea id="new-paste-text" spellcheck="false" placeholder="1 Sol Ring&#10;1 Arcane Signet&#10;1 Command Tower&#10;..."></textarea>
+        <button class="advise-btn" id="new-paste-create">Create deck</button>
+      </div>
+      <div id="new-deck-status" class="muted"></div>
+    </div>
+  </div>
+
+  <!-- Game Changers / Illegal alert modal (single shared modal) -->
+  <div class="modal-backdrop" id="alert-modal" hidden>
+    <div class="modal">
+      <header>
+        <h2 id="alert-title">Alert</h2>
+        <button class="modal-close" data-close="alert-modal" aria-label="Close">&times;</button>
+      </header>
+      <div id="alert-body"></div>
+    </div>
+  </div>
 
   <!-- Propose-swap modal (hidden by default) -->
   <div class="modal-backdrop" id="propose-modal" hidden>

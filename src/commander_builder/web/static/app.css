@@ -25,14 +25,151 @@ body {
 
 .topbar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space);
-  padding: 14px 24px;
+  padding: 10px 24px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
 .topbar h1 { margin: 0; font-size: 18px; letter-spacing: 0.02em; }
+.topbar-spacer { flex: 1; }
+.topbar-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.topbar-btn:hover { background: var(--border); }
+.topbar-btn.primary {
+  background: var(--accent);
+  color: #0b1b33;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.topbar-btn.primary:hover { filter: brightness(1.1); }
 .muted { color: var(--muted); font-size: 13px; }
+
+/* Tabbed modal (used by the Add-a-deck modal). */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tab-panel[hidden] { display: none; }
+.tab-panel label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.tab-panel input,
+.tab-panel select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.tab-panel select { cursor: pointer; }
+.tab-panel textarea {
+  min-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+/* Hero action row — small inline buttons next to "Propose changes". */
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.hero-actions button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.hero-actions button:hover { background: var(--border); }
+.hero-actions button.primary {
+  background: var(--accent);
+  color: #0b1b33;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.hero-actions button.danger:hover {
+  background: #4a0a04;
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+/* Bracket override pill */
+.bracket-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.bracket-control select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* Alert modal body — used by Game Changers + Illegal Cards. */
+.alert-body { font-size: 14px; }
+.alert-body ul { padding-left: 20px; }
+.alert-body li { margin-bottom: 4px; }
+.alert-body .pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  margin-right: 6px;
+}
+.alert-body .pill.bad { background: var(--bad); color: #380808; }
+.alert-body .pill.warn { background: var(--warn); color: #4a3308; }
+.alert-body .pill.good { background: var(--good); color: #08361d; }
 
 .layout {
   display: grid;

@@ -221,10 +221,14 @@ def create_app(
             "count": len(rows),
         })
 
-    @app.route("/api/deck_text")
+    @app.route("/api/deck_text", methods=["GET", "PUT", "DELETE"])
     def deck_text():
-        """Return the raw .dck text for a deck. Used by the
-        'Propose changes' UI to pre-populate the modify-deck editor."""
+        """Read / overwrite / delete a .dck file by id.
+
+        - GET   → {"deck", "path", "text"} for the file
+        - PUT   body {"text": ...} overwrites in place
+        - DELETE removes the file
+        """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
@@ -233,15 +237,247 @@ def create_app(
                 "error": "deck not found",
                 "deck": deck_id, "path": explicit,
             }), 404
+
+        if request.method == "GET":
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                return jsonify({"error": str(exc)}), 500
+            return jsonify({
+                "deck": deck_id,
+                "path": str(path),
+                "text": text,
+            })
+
+        if request.method == "PUT":
+            try:
+                payload = request.get_json(force=True) or {}
+            except Exception:
+                return jsonify({"error": "expected JSON body"}), 400
+            new_text = payload.get("text") or ""
+            if not new_text.strip():
+                return jsonify({"error": "text is empty"}), 400
+            try:
+                path.write_text(new_text, encoding="utf-8")
+            except OSError as exc:
+                return jsonify({"error": str(exc)}), 500
+            return jsonify({"deck": deck_id, "path": str(path),
+                            "saved": True})
+
+        # DELETE
         try:
-            text = path.read_text(encoding="utf-8")
+            path.unlink()
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"deck": deck_id, "deleted": True})
+
+    @app.route("/api/import_deck", methods=["POST"])
+    def import_deck():
+        """Create a new .dck under deck_dir from either a Moxfield URL
+        or a paste of the deck text.
+
+        Body: ``{"name": "<display>", "moxfield_url": "<url>"}``  OR
+              ``{"name": "<display>", "paste_text": "<.dck or moxfield-format>"}``
+
+        Filename is derived from ``name`` with a ``[USER]`` prefix and
+        ``[B?]`` suffix so the deck shows up in the user-only sidebar.
+        """
+        try:
+            payload = request.get_json(force=True) or {}
+        except Exception:
+            return jsonify({"error": "expected JSON body"}), 400
+
+        name = (payload.get("name") or "").strip()
+        url = (payload.get("moxfield_url") or "").strip()
+        paste = (payload.get("paste_text") or "").strip()
+        try:
+            bracket = int(payload.get("bracket") or 3)
+        except (TypeError, ValueError):
+            bracket = 3
+
+        if not url and not paste:
+            return jsonify({
+                "error": "need moxfield_url or paste_text",
+            }), 400
+
+        deck_text_out: str
+        derived_name = name
+        if url:
+            try:
+                from ..moxfield_import import (
+                    fetch_deck, parse_deck_id, to_dck,
+                )
+                public_id = parse_deck_id(url)
+                deck_json = fetch_deck(public_id)
+                deck_text_out = to_dck(deck_json)
+                if not derived_name:
+                    derived_name = deck_json.get("name", "Imported")
+            except Exception as exc:
+                return jsonify({
+                    "error": "Moxfield fetch failed",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }), 502
+        else:
+            # Paste path. Accept both .dck format (with [Main] sections)
+            # and the plain Moxfield bulk-paste line list.
+            deck_text_out = _normalize_pasted_deck(paste)
+            if not derived_name:
+                derived_name = "Pasted Deck"
+
+        # Filename: [USER] <name> [B<bracket>].dck. Sanitize invalid
+        # path chars (keep brackets — they're meaningful here).
+        import re as _re
+        safe = _re.sub(r"[<>:\"/\\|?*]", "_", derived_name)
+        safe = safe.strip().strip(".")
+        if not safe.lower().startswith("[user]"):
+            safe = f"[USER] {safe}"
+        if not _re.search(r"\[B\d\]$", safe):
+            safe = f"{safe} [B{bracket}]"
+        filename = f"{safe}.dck"
+        target = deck_dir / filename
+
+        if target.exists():
+            return jsonify({
+                "error": "deck with this name already exists",
+                "filename": filename,
+            }), 409
+        try:
+            target.write_text(deck_text_out, encoding="utf-8")
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify({
-            "deck": deck_id,
-            "path": str(path),
-            "text": text,
+            "id": target.stem,
+            "name": _re.sub(r"^\[USER\]\s*", "", target.stem),
+            "filename": filename,
+            "path": str(target),
         })
+
+    @app.route("/api/moxfield_format")
+    def moxfield_format():
+        """Return the deck rendered as a Moxfield-paste-ready string
+        (newline-joined card lines). Excludes the [metadata] block."""
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({"error": "deck not found"}), 404
+        from ..moxfield_push import dck_to_textarea
+        try:
+            text = dck_to_textarea(path)
+        except Exception as exc:  # pragma: no cover
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"deck": deck_id, "text": text})
+
+    @app.route("/api/game_changers")
+    def game_changers_route():
+        """Return the loaded Game Changers list. Used by the topbar
+        Game Changers button + by the dashboard to flag in-deck cards."""
+        from ..game_changers import load_game_changers
+        try:
+            cards = sorted(load_game_changers())
+        except Exception as exc:  # pragma: no cover
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"cards": cards, "count": len(cards)})
+
+    @app.route("/api/deck_audit")
+    def deck_audit():
+        """Audit a deck against bracket-legality + Game Changers.
+
+        Returns:
+            {
+              "deck_id": "...",
+              "bracket": 3,
+              "in_deck_game_changers": [...],
+              "illegal_cards": [...],   # banned in Commander
+              "warnings": [...],
+            }
+        """
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({"error": "deck not found"}), 404
+        try:
+            bracket = int(request.args.get("bracket") or 0) or None
+        except ValueError:
+            bracket = None
+
+        from ..game_changers import load_game_changers
+        from .. import doctor
+        gc_set = load_game_changers()
+
+        # Read deck card names.
+        names: list[str] = []
+        in_main = False
+        in_cmdr = False
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            s = raw.strip()
+            if not s:
+                continue
+            if s.lower() == "[main]":
+                in_main, in_cmdr = True, False; continue
+            if s.lower() == "[commander]":
+                in_cmdr, in_main = True, False; continue
+            if s.startswith("[") and s.endswith("]"):
+                in_main, in_cmdr = False, False; continue
+            if not (in_main or in_cmdr):
+                continue
+            import re as _re
+            m = _re.match(r"^\d+\s+([^|]+?)(?:\s*\|.*)?$", s)
+            if m:
+                names.append(m.group(1).strip())
+
+        # Cross-reference Game Changers list.
+        present_gc = sorted({n for n in names if n in gc_set})
+
+        # Banned-in-Commander list. We use commander_builder.doctor's
+        # check if available, else hand-roll a small core list.
+        banned: list[str] = []
+        try:
+            doctor_banned = getattr(doctor, "BANNED_IN_COMMANDER", None)
+            if doctor_banned:
+                banned = sorted(set(names) & set(doctor_banned))
+        except Exception:
+            banned = []
+        if not banned:
+            # Minimal fallback list of high-profile bans.
+            _CORE_BANS = {
+                "Ancestral Recall", "Black Lotus", "Mox Ruby", "Mox Pearl",
+                "Mox Sapphire", "Mox Emerald", "Mox Jet", "Time Walk",
+                "Time Vault", "Library of Alexandria", "Channel",
+                "Falling Star", "Shahrazad", "Chaos Orb", "Iona, Shield of Emeria",
+                "Limited Resources", "Painter's Servant", "Panoptic Mirror",
+                "Primeval Titan", "Recurring Nightmare", "Sundering Titan",
+                "Sway of the Stars", "Tempest Efreet", "Time Vault",
+                "Tinker", "Trade Secrets", "Upheaval", "Worldfire",
+                "Yawgmoth's Bargain", "Coalition Victory",
+                "Emrakul, the Aeons Torn", "Erayo, Soratami Ascendant",
+                "Hullbreacher", "Sylvan Primordial", "Prophet of Kruphix",
+                "Mana Crypt", "Jeweled Lotus", "Dockside Extortionist",
+                "Nadu, Winged Wisdom",
+            }
+            banned = sorted(set(names) & _CORE_BANS)
+
+        warnings = []
+        if bracket and bracket <= 3 and present_gc:
+            warnings.append(
+                f"Bracket {bracket} ({_BRACKET_NAMES.get(bracket, '?')}) "
+                f"expects 0 Game Changers; deck contains "
+                f"{len(present_gc)}."
+            )
+        if banned:
+            warnings.append(
+                f"{len(banned)} card(s) are banned in Commander."
+            )
+
+        return jsonify({
+            "deck_id": deck_id,
+            "bracket": bracket,
+            "in_deck_game_changers": present_gc,
+            "illegal_cards": banned,
+            "warnings": warnings,
+        })
+
 
     @app.route("/api/propose_swap", methods=["POST"])
     def propose_swap():
@@ -437,6 +673,43 @@ def create_app(
         return Response(it.deck_snapshot, mimetype="text/plain")
 
     return app
+
+
+_BRACKET_NAMES = {
+    1: "Exhibition", 2: "Core", 3: "Upgraded", 4: "Optimized", 5: "cEDH",
+}
+
+
+def _normalize_pasted_deck(text: str) -> str:
+    """Accept either a Forge-format .dck blob or a Moxfield bulk-paste
+    line list and return a valid .dck. Bulk-paste shape is one line
+    per card: ``<qty> <Name>`` with no `[Main]` header. We detect that
+    by looking for any `[section]` markers; if none, wrap the lines
+    in a `[Main]` section.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+    # If the paste already has section headers, trust the user.
+    has_section = any(
+        line.strip().startswith("[") and line.strip().endswith("]")
+        for line in text.splitlines()
+    )
+    if has_section:
+        return text + "\n"
+    # Otherwise wrap in [Main]. Filter trivial header lines like
+    # "Mainboard (99)" that Moxfield's UI sometimes includes.
+    body_lines: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # Skip obvious headers (e.g. "Commander (1)", "Mainboard (99)").
+        if s.lower().startswith(("mainboard", "commander", "sideboard",
+                                 "considering")):
+            continue
+        body_lines.append(s)
+    return "[Main]\n" + "\n".join(body_lines) + "\n"
 
 
 def _build_suggested_adds(deck_path: Path, bracket: int) -> list[dict]:

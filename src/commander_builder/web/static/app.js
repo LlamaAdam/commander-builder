@@ -75,12 +75,27 @@ async function selectDeck(deckId, li) {
   }
 }
 
-async function openProposeModal() {
+let _proposeMode = "ab";   // "ab" (Run A/B sim) or "save" (Edit deck)
+
+async function openProposeModal(opts) {
   if (!_activeDeckId) return;
+  _proposeMode = (opts && opts.saveOnly) ? "save" : "ab";
   const modal = $("propose-modal");
   const ta = $("propose-text");
   const status = $("propose-status");
   const result = $("propose-result");
+  const runBtn = $("propose-run");
+  const radios = document.querySelector(".games-radio");
+  // Toggle UI between A/B sim and save-only modes.
+  if (_proposeMode === "save") {
+    runBtn.textContent = "Save changes";
+    if (radios) radios.style.display = "none";
+    modal.querySelector(".modal h2").textContent = "Edit deck";
+  } else {
+    runBtn.textContent = "Run A/B sim";
+    if (radios) radios.style.display = "";
+    modal.querySelector(".modal h2").textContent = "Propose changes";
+  }
   status.textContent = "";
   result.innerHTML = "";
   ta.value = "Loading…";
@@ -107,6 +122,38 @@ async function runProposeSwap() {
   const status = $("propose-status");
   const result = $("propose-result");
   const btn = $("propose-run");
+
+  if (_proposeMode === "save") {
+    // Edit-only path: PUT the new text and reload the dashboard.
+    btn.disabled = true;
+    status.textContent = "Saving…";
+    try {
+      const resp = await fetch(
+        `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: ta.value }),
+        },
+      );
+      const body = await resp.json();
+      if (!resp.ok) {
+        status.textContent = `Error: ${body.error || resp.status}`;
+        return;
+      }
+      status.textContent = "Saved.";
+      $("propose-modal").hidden = true;
+      // Reload dashboard so panels reflect the new deck contents.
+      const li = document.querySelector(`.deck-list li[data-id="${_activeDeckId}"]`);
+      selectDeck(_activeDeckId, li);
+    } catch (e) {
+      status.textContent = `Save failed: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+    return;
+  }
+
   const games = parseInt(
     document.querySelector('input[name="games"]:checked').value, 10,
   );
@@ -200,13 +247,31 @@ function renderDashboard(data, iterations) {
     pips.appendChild(el("span", { class: `color-pip cp-${c}` }, c));
   }
   hero.appendChild(pips);
-  // "Propose changes" → opens the modify-deck + A/B Forge sim modal.
-  const proposeBtn = el(
-    "button", { class: "advise-btn", style: "margin-top: 10px;" },
-    "Propose changes",
-  );
+  // Action row — Propose / Run audit / Edit / Copy to Moxfield / Delete.
+  const actions = el("div", { class: "hero-actions" });
+
+  const proposeBtn = el("button", { class: "primary" }, "Propose changes");
   proposeBtn.addEventListener("click", openProposeModal);
-  hero.appendChild(proposeBtn);
+  actions.appendChild(proposeBtn);
+
+  const auditBtn = el("button", {}, "Run audit");
+  auditBtn.title = "Generate swap suggestions via heuristic + EDHREC";
+  auditBtn.addEventListener("click", loadAdvise);
+  actions.appendChild(auditBtn);
+
+  const editBtn = el("button", {}, "Edit deck");
+  editBtn.addEventListener("click", () => openProposeModal({ saveOnly: true }));
+  actions.appendChild(editBtn);
+
+  const copyBtn = el("button", {}, "Copy to Moxfield");
+  copyBtn.addEventListener("click", copyToMoxfield);
+  actions.appendChild(copyBtn);
+
+  const deleteBtn = el("button", { class: "danger" }, "Delete");
+  deleteBtn.addEventListener("click", deleteDeck);
+  actions.appendChild(deleteBtn);
+
+  hero.appendChild(actions);
   dash.appendChild(hero);
 
   // Stat tiles
@@ -214,14 +279,11 @@ function renderDashboard(data, iterations) {
   const tiles = el("section", { class: "tile-grid" });
   tiles.appendChild(tile("Avg CMC", t.avg_cmc?.toFixed(2) ?? "—"));
   tiles.appendChild(tile("Lands", t.lands ?? "—"));
-  // Wizards' Commander Bracket (1..5) replaced the old 1..10 power
-  // level. `bracket_name` carries the human label.
-  const bracketNum = t.bracket ?? t.power_level ?? "—";
-  const bracketLabel = t.bracket_name ? ` (${t.bracket_name})` : "";
-  const gcSub = t.n_game_changers != null
-    ? `${t.n_game_changers} game changer${t.n_game_changers === 1 ? "" : "s"}`
-    : null;
-  tiles.appendChild(tile("Bracket", `${bracketNum}${bracketLabel}`, gcSub));
+  // Bracket tile: heuristic recommendation + dropdown to override.
+  // `bracket_name` carries the human label. The override re-fetches
+  // /api/dashboard with the chosen bracket, so the user sees how
+  // the heuristic shifts power-related fields.
+  tiles.appendChild(bracketTile(t));
   tiles.appendChild(tile(
     "Est. price",
     t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",
@@ -320,6 +382,275 @@ function renderSuggestions(container, suggestions) {
   container.appendChild(ul);
 }
 
+function bracketTile(t) {
+  const t_node = el("div", { class: "tile" });
+  t_node.appendChild(el("div", { class: "label" }, "Bracket"));
+  const num = t.bracket ?? t.power_level ?? "—";
+  const label = t.bracket_name ? ` (${t.bracket_name})` : "";
+  t_node.appendChild(el("div", { class: "value" }, `${num}${label}`));
+  if (t.n_game_changers != null) {
+    t_node.appendChild(el(
+      "div", { class: "sub" },
+      `${t.n_game_changers} game changer${t.n_game_changers === 1 ? "" : "s"}`,
+    ));
+  }
+  // Override dropdown — change rebuilds dashboard with the new bracket.
+  const ctrl = el("div", { class: "bracket-control" });
+  ctrl.appendChild(el("span", { class: "muted" }, "Override:"));
+  const sel = el("select");
+  for (const [v, name] of [
+    [1, "1 Exhibition"], [2, "2 Core"], [3, "3 Upgraded"],
+    [4, "4 Optimized"], [5, "5 cEDH"],
+  ]) {
+    const opt = el("option", { value: String(v) }, name);
+    if (Number(v) === Number(num)) opt.setAttribute("selected", "selected");
+    sel.appendChild(opt);
+  }
+  sel.addEventListener("change", async (ev) => {
+    const newBracket = ev.target.value;
+    if (!_activeDeckId) return;
+    const dash = $("dashboard");
+    dash.innerHTML = '<p class="empty-state">Reloading with bracket ' + newBracket + '…</p>';
+    try {
+      const [data, iters] = await Promise.all([
+        fetchJSON(
+          `/api/dashboard?deck=${encodeURIComponent(_activeDeckId)}&bracket=${newBracket}`,
+        ),
+        fetchJSON(`/api/iterations?deck=${encodeURIComponent(_activeDeckId)}`),
+      ]);
+      renderDashboard(data, iters.iterations || []);
+    } catch (e) {
+      dash.innerHTML = `<p class="empty-state">Error: ${e.message}</p>`;
+    }
+  });
+  ctrl.appendChild(sel);
+  t_node.appendChild(ctrl);
+  return t_node;
+}
+
+async function copyToMoxfield() {
+  if (!_activeDeckId) return;
+  try {
+    const body = await fetchJSON(
+      `/api/moxfield_format?deck=${encodeURIComponent(_activeDeckId)}`,
+    );
+    await navigator.clipboard.writeText(body.text);
+    flashStatus("Copied to clipboard — paste into Moxfield's bulk-edit.");
+  } catch (e) {
+    flashStatus(`Copy failed: ${e.message}`);
+  }
+}
+
+async function deleteDeck() {
+  if (!_activeDeckId) return;
+  if (!confirm(`Delete "${_activeDeckId}"? This removes the .dck file from disk.`)) {
+    return;
+  }
+  try {
+    const resp = await fetch(
+      `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
+      { method: "DELETE" },
+    );
+    if (!resp.ok) {
+      flashStatus(`Delete failed: ${resp.status}`);
+      return;
+    }
+    flashStatus("Deck deleted.");
+    _activeDeckId = null;
+    $("dashboard").innerHTML = '<p class="empty-state">Select a deck on the left to load its dashboard.</p>';
+    loadDecks();
+  } catch (e) {
+    flashStatus(`Delete failed: ${e.message}`);
+  }
+}
+
+function flashStatus(msg) {
+  // Reuse the health badge as a transient toast — simple + visible.
+  const badge = $("health-badge");
+  if (!badge) { console.log(msg); return; }
+  const original = badge.textContent;
+  badge.textContent = msg;
+  setTimeout(() => { badge.textContent = original; }, 4000);
+}
+
+// Game Changers + Illegal Cards alert modals.
+async function showGameChangersAlert() {
+  const modal = $("alert-modal");
+  $("alert-title").textContent = "Game Changers";
+  const body = $("alert-body");
+  body.className = "alert-body";
+  body.innerHTML = '<p class="muted">Loading…</p>';
+  modal.hidden = false;
+  try {
+    const list = await fetchJSON("/api/game_changers");
+    body.innerHTML = "";
+    body.appendChild(el(
+      "p", { class: "muted" },
+      `Wizards' Game Changers list — ${list.count} cards. Bracket-3 ` +
+      "(Upgraded) and below expect zero of these. " +
+      "Bracket 4+ allows them.",
+    ));
+    if (_activeDeckId) {
+      try {
+        const audit = await fetchJSON(
+          `/api/deck_audit?deck=${encodeURIComponent(_activeDeckId)}`,
+        );
+        if (audit.in_deck_game_changers.length) {
+          body.appendChild(el(
+            "p", {},
+            el("span", { class: "pill warn" },
+               `${audit.in_deck_game_changers.length} in this deck`),
+          ));
+          const ul = el("ul");
+          for (const c of audit.in_deck_game_changers) {
+            ul.appendChild(el("li", {}, c));
+          }
+          body.appendChild(ul);
+        } else {
+          body.appendChild(el(
+            "p", {}, el("span", { class: "pill good" },
+                        "None in this deck"),
+          ));
+        }
+      } catch (e) { /* ignore */ }
+    }
+    body.appendChild(el(
+      "details", {},
+      el("summary", { class: "muted" }, "Show full Game Changers list"),
+      (() => {
+        const ul = el("ul");
+        for (const c of list.cards) {
+          ul.appendChild(el("li", {}, c));
+        }
+        return ul;
+      })(),
+    ));
+  } catch (e) {
+    body.innerHTML = `<p class="muted">Could not load Game Changers: ${e.message}</p>`;
+  }
+}
+
+async function showIllegalAlert() {
+  const modal = $("alert-modal");
+  $("alert-title").textContent = "Illegal cards";
+  const body = $("alert-body");
+  body.className = "alert-body";
+  body.innerHTML = '<p class="muted">Loading…</p>';
+  modal.hidden = false;
+  if (!_activeDeckId) {
+    body.innerHTML = '<p class="muted">Select a deck first to check for illegal cards.</p>';
+    return;
+  }
+  try {
+    const audit = await fetchJSON(
+      `/api/deck_audit?deck=${encodeURIComponent(_activeDeckId)}`,
+    );
+    body.innerHTML = "";
+    if (audit.illegal_cards.length) {
+      body.appendChild(el(
+        "p", {}, el("span", { class: "pill bad" },
+                    `${audit.illegal_cards.length} banned in Commander`),
+      ));
+      const ul = el("ul");
+      for (const c of audit.illegal_cards) ul.appendChild(el("li", {}, c));
+      body.appendChild(ul);
+    } else {
+      body.appendChild(el(
+        "p", {}, el("span", { class: "pill good" },
+                    "All cards are legal in Commander."),
+      ));
+    }
+    if (audit.warnings.length) {
+      body.appendChild(el("h4", {}, "Other warnings"));
+      const ul = el("ul");
+      for (const w of audit.warnings) ul.appendChild(el("li", {}, w));
+      body.appendChild(ul);
+    }
+  } catch (e) {
+    body.innerHTML = `<p class="muted">Audit failed: ${e.message}</p>`;
+  }
+}
+
+function openNewDeckModal() {
+  $("new-deck-status").textContent = "";
+  $("new-mox-name").value = "";
+  $("new-mox-url").value = "";
+  $("new-paste-name").value = "";
+  $("new-paste-text").value = "";
+  $("new-deck-modal").hidden = false;
+}
+
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach((t) => {
+    t.classList.toggle("active", t.dataset.tab === name);
+  });
+  document.querySelectorAll(".tab-panel").forEach((p) => {
+    p.hidden = p.id !== `tab-${name}`;
+  });
+}
+
+async function importMoxfield() {
+  const name = $("new-mox-name").value.trim();
+  const url = $("new-mox-url").value.trim();
+  const bracket = parseInt($("new-mox-bracket").value, 10);
+  const status = $("new-deck-status");
+  if (!url) {
+    status.textContent = "Enter a Moxfield URL or deck id.";
+    return;
+  }
+  status.textContent = "Fetching from Moxfield…";
+  try {
+    const resp = await fetch("/api/import_deck", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, moxfield_url: url, bracket }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      status.textContent = `Error: ${body.error || resp.status}${body.detail ? " — " + body.detail : ""}`;
+      return;
+    }
+    status.textContent = `Imported as ${body.filename}.`;
+    $("new-deck-modal").hidden = true;
+    await loadDecks();
+  } catch (e) {
+    status.textContent = `Network error: ${e.message}`;
+  }
+}
+
+async function createPasteDeck() {
+  const name = $("new-paste-name").value.trim();
+  const text = $("new-paste-text").value;
+  const bracket = parseInt($("new-paste-bracket").value, 10);
+  const status = $("new-deck-status");
+  if (!name) {
+    status.textContent = "Display name is required.";
+    return;
+  }
+  if (!text.trim()) {
+    status.textContent = "Paste a deck list first.";
+    return;
+  }
+  status.textContent = "Saving…";
+  try {
+    const resp = await fetch("/api/import_deck", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, paste_text: text, bracket }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      status.textContent = `Error: ${body.error || resp.status}`;
+      return;
+    }
+    status.textContent = `Created ${body.filename}.`;
+    $("new-deck-modal").hidden = true;
+    await loadDecks();
+  } catch (e) {
+    status.textContent = `Network error: ${e.message}`;
+  }
+}
+
 function tile(label, value, sub) {
   const t = el("div", { class: "tile" });
   t.appendChild(el("div", { class: "label" }, label));
@@ -365,25 +696,53 @@ function curveBars(curve) {
   return wrap;
 }
 
-// Wire propose-swap modal handlers (the elements exist regardless of
-// which deck is selected — the modal is hidden until openProposeModal
-// flips its `hidden` attribute).
+// Wire all modal + topbar handlers.
 document.addEventListener("DOMContentLoaded", () => {
+  // Propose-swap modal.
   const closeBtn = $("propose-close");
   if (closeBtn) closeBtn.addEventListener("click", closeProposeModal);
   const runBtn = $("propose-run");
   if (runBtn) runBtn.addEventListener("click", runProposeSwap);
-  // ESC closes the modal.
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeProposeModal();
-  });
-  // Click outside the modal body closes it.
-  const backdrop = $("propose-modal");
-  if (backdrop) {
-    backdrop.addEventListener("click", (e) => {
-      if (e.target === backdrop) closeProposeModal();
+
+  // Generic modal-close buttons (Add-deck modal + Alert modal).
+  document.querySelectorAll("[data-close]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $(btn.dataset.close).hidden = true;
     });
-  }
+  });
+
+  // ESC closes any open modal.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      ["propose-modal", "new-deck-modal", "alert-modal"].forEach((id) => {
+        const m = $(id); if (m) m.hidden = true;
+      });
+    }
+  });
+
+  // Backdrop click closes — for each modal-backdrop.
+  document.querySelectorAll(".modal-backdrop").forEach((bd) => {
+    bd.addEventListener("click", (e) => {
+      if (e.target === bd) bd.hidden = true;
+    });
+  });
+
+  // Topbar buttons.
+  const gcBtn = $("btn-game-changers");
+  if (gcBtn) gcBtn.addEventListener("click", showGameChangersAlert);
+  const illegalBtn = $("btn-illegal");
+  if (illegalBtn) illegalBtn.addEventListener("click", showIllegalAlert);
+  const newDeckBtn = $("btn-new-deck");
+  if (newDeckBtn) newDeckBtn.addEventListener("click", openNewDeckModal);
+
+  // New-deck modal: tab switching + import buttons.
+  document.querySelectorAll(".tab").forEach((t) => {
+    t.addEventListener("click", () => switchTab(t.dataset.tab));
+  });
+  const moxImport = $("new-mox-import");
+  if (moxImport) moxImport.addEventListener("click", importMoxfield);
+  const pasteCreate = $("new-paste-create");
+  if (pasteCreate) pasteCreate.addEventListener("click", createPasteDeck);
 });
 
 loadHealth();
