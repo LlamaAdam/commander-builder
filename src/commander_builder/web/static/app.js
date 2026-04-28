@@ -112,7 +112,14 @@ function renderDashboard(data, iterations) {
   const tiles = el("section", { class: "tile-grid" });
   tiles.appendChild(tile("Avg CMC", t.avg_cmc?.toFixed(2) ?? "—"));
   tiles.appendChild(tile("Lands", t.lands ?? "—"));
-  tiles.appendChild(tile("Power level", `${t.power_level ?? "—"} / 10`));
+  // Wizards' Commander Bracket (1..5) replaced the old 1..10 power
+  // level. `bracket_name` carries the human label.
+  const bracketNum = t.bracket ?? t.power_level ?? "—";
+  const bracketLabel = t.bracket_name ? ` (${t.bracket_name})` : "";
+  const gcSub = t.n_game_changers != null
+    ? `${t.n_game_changers} game changer${t.n_game_changers === 1 ? "" : "s"}`
+    : null;
+  tiles.appendChild(tile("Bracket", `${bracketNum}${bracketLabel}`, gcSub));
   tiles.appendChild(tile(
     "Est. price",
     t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",

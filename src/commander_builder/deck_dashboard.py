@@ -140,52 +140,74 @@ def _count_game_changers(card_names: list[str]) -> int:
     return sum(1 for gc in GAME_CHANGERS if gc.lower() in lower)
 
 
-def _power_level(
+# Wizards' official Commander Bracket system (replaced the old 1-10
+# power level scale). Reference:
+# https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta
+BRACKET_NAMES = {
+    1: "Exhibition",
+    2: "Core",
+    3: "Upgraded",
+    4: "Optimized",
+    5: "cEDH",
+}
+
+
+def _power_bracket(
     avg_cmc: float,
     n_game_changers: int,
     bracket: Optional[int],
     archetype: Optional[str] = None,
 ) -> int:
-    """Heuristic 1..10 power level.
+    """Heuristic Commander Bracket (1..5).
 
     Inputs:
-    - avg_cmc — lower curves run faster, push power up.
-    - n_game_changers — more proxy-strong cards push power up.
-    - bracket — when known, anchors the result around that bracket.
-    - archetype — combo / control / aggro tendencies nudge the score.
+    - avg_cmc — lower curves push toward higher brackets.
+    - n_game_changers — count of cards on the official Game Changers
+      list. Brackets 1-3 expect 0; bracket 4 allows 3+; bracket 5 is
+      uncapped.
+    - bracket — when explicitly set by the user, anchors the result.
+    - archetype — combo / stax tendencies nudge the score.
 
-    Returns an int in [1, 10]. Heuristic-only; not a substitute for
-    the user's own assessment, but good enough to populate a "Power
-    level" stat tile."""
-    score = 5.0  # casual midrange baseline
+    Returns an int in [1, 5]. Heuristic-only — Wizards' system has
+    a hard "Game Changers" check the user is responsible for; we
+    surface a best-guess so the dashboard tile is informative.
+    """
+    # Game-changer count is the dominant signal under the Wizards rules.
+    # 0 GCs and reasonable curve → bracket 2-3.
+    # 1-2 GCs → bracket 3 (Upgraded).
+    # 3+ GCs → bracket 4 (Optimized).
+    # cEDH-class fast-mana suite → bracket 5 (manual override only).
+    if n_game_changers >= 3:
+        guess = 4
+    elif n_game_changers >= 1:
+        guess = 3
+    elif avg_cmc <= 2.6:
+        guess = 3  # tight curve, no GCs → upper Core / lower Upgraded
+    elif avg_cmc <= 3.4:
+        guess = 2  # standard Core deck
+    else:
+        guess = 1  # high-curve casual / Exhibition
 
-    # CMC contribution: 2.5 → +1, 4.0 → -1.
-    if avg_cmc <= 2.5:
-        score += 1.5
-    elif avg_cmc <= 3.0:
-        score += 0.5
-    elif avg_cmc >= 4.0:
-        score -= 1.0
-
-    # Game changers: each adds ~0.5 up to a cap of +2.5 (5 changers).
-    score += min(n_game_changers * 0.5, 2.5)
-
-    # Bracket anchor — if specified, pull score toward bracket value.
-    # Bracket 1=casual, 5=cEDH; reasonable mapping bracket→target power:
-    bracket_targets = {1: 3, 2: 5, 3: 6, 4: 8, 5: 10}
-    if bracket and bracket in bracket_targets:
-        target = bracket_targets[bracket]
-        score = (score + target) / 2.0  # midpoint pull
-
-    # Archetype nudges.
+    # Archetype nudges — only push UP, never down (combo decks are
+    # almost always at least bracket 3 even without GCs in our list).
     if archetype:
-        if "combo" in archetype.lower():
-            score += 0.5
-        elif "stax" in archetype.lower():
-            score += 0.3
+        if "combo" in archetype.lower() and guess < 4:
+            guess += 1
+        elif "stax" in archetype.lower() and guess < 3:
+            guess = 3
 
-    # Clamp.
-    return max(1, min(10, round(score)))
+    # User-supplied bracket trumps the heuristic — this is the
+    # bracket the deck declares it's playing at.
+    if bracket and 1 <= bracket <= 5:
+        return bracket
+
+    return max(1, min(5, guess))
+
+
+# Backwards-compatible alias kept so any external caller importing
+# ``_power_level`` doesn't break. Returns a bracket integer (1..5),
+# not the legacy 1..10 score.
+_power_level = _power_bracket
 
 
 # --- Match% scoring for suggestions ------------------------------------
@@ -372,9 +394,21 @@ def build_dashboard(
         stat_tiles={
             "avg_cmc": avg_cmc,
             "lands": lands,
-            "power_level": _power_level(
+            # Wizards' official Commander Bracket (1..5). Replaces the
+            # old 1..10 power-level scale. Both keys are emitted for
+            # backwards-compat with any client still reading
+            # `power_level` — both contain the same bracket integer.
+            "bracket": _power_bracket(
                 avg_cmc, n_game_changers, bracket, archetype,
             ),
+            "bracket_name": BRACKET_NAMES.get(
+                _power_bracket(avg_cmc, n_game_changers, bracket, archetype),
+                "Unknown",
+            ),
+            "power_level": _power_bracket(
+                avg_cmc, n_game_changers, bracket, archetype,
+            ),
+            "n_game_changers": n_game_changers,
             "est_price_usd": round(total_price, 2),
             "n_priced_cards": cards_with_price,
         },

@@ -217,7 +217,13 @@ def test_dashboard_with_valid_bracket(client):
     assert resp.status_code == 200
     body = resp.get_json()
     # Power level should be in 1..10.
-    assert 1 <= body["stat_tiles"]["power_level"] <= 10
+    # Bracket is the canonical 1..5 field; power_level is kept as a
+    # backwards-compat alias and contains the same value.
+    assert 1 <= body["stat_tiles"]["bracket"] <= 5
+    assert body["stat_tiles"]["power_level"] == body["stat_tiles"]["bracket"]
+    assert body["stat_tiles"]["bracket_name"] in {
+        "Exhibition", "Core", "Upgraded", "Optimized", "cEDH",
+    }
 
 
 def test_dashboard_traversal_blocked(client, tmp_path):

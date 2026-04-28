@@ -103,38 +103,41 @@ def test_extract_price_handles_zero():
 
 
 # ---------------------------------------------------------------------------
-# _power_level
+# _power_bracket — Wizards' 1..5 Commander Bracket system
 # ---------------------------------------------------------------------------
 
-def test_power_level_low_for_high_cmc_no_game_changers():
-    """Slow deck (avg cmc 4, 0 changers) below the casual midpoint."""
+def test_power_bracket_low_for_high_cmc_no_game_changers():
+    """Slow deck (avg cmc 4, 0 changers) is bracket 1 (Exhibition)."""
     p = _power_level(avg_cmc=4.5, n_game_changers=0, bracket=None)
-    assert p <= 5
+    assert p == 1
 
 
-def test_power_level_high_for_fast_deck_with_changers():
-    """Fast deck with multiple game-changers should be high."""
+def test_power_bracket_high_for_fast_deck_with_changers():
+    """Fast deck with 3+ game changers is bracket 4 (Optimized)."""
     p = _power_level(avg_cmc=2.2, n_game_changers=4, bracket=None)
-    assert p >= 8
+    assert p == 4
 
 
-def test_power_level_anchors_to_bracket_when_specified():
-    """Bracket 4 (high power) should pull score upward even with
-    moderate metrics."""
+def test_power_bracket_user_supplied_bracket_wins():
+    """An explicit bracket trumps the heuristic — it's what the user
+    declares the deck is built for."""
     p_no_bracket = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None)
     p_bracket_4 = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=4)
-    assert p_bracket_4 > p_no_bracket
+    assert p_bracket_4 == 4
+    assert p_no_bracket != 4  # heuristic landed elsewhere
 
 
-def test_power_level_clamped_to_1_to_10():
-    """Even absurd inputs should produce a value in [1, 10]."""
+def test_power_bracket_clamped_to_1_to_5():
+    """Output is always a valid bracket integer."""
     very_high = _power_level(avg_cmc=1.0, n_game_changers=20, bracket=5)
     very_low = _power_level(avg_cmc=8.0, n_game_changers=0, bracket=1)
-    assert 1 <= very_high <= 10
-    assert 1 <= very_low <= 10
+    assert 1 <= very_high <= 5
+    assert 1 <= very_low <= 5
 
 
-def test_power_level_combo_archetype_nudges_up():
+def test_power_bracket_combo_archetype_nudges_up():
+    """Combo decks are at least bracket 3 (Upgraded) even with 0 GCs
+    in our list (combo lines always pack interaction & tutors)."""
     p_combo = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None,
                            archetype="combo")
     p_other = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None,
