@@ -106,10 +106,15 @@
       <textarea id="propose-text" spellcheck="false"></textarea>
       <div class="propose-controls">
         <fieldset class="games-radio">
+          <legend>Mode:</legend>
+          <label title="4-player commander pods. Both versions face the same fillers; whichever wins more across pods wins. Real commander dynamics."><input type="radio" name="mode" value="pod" checked> Pod (recommended)</label>
+          <label title="1v1 head-to-head. Faster but reduces commander to a duel."><input type="radio" name="mode" value="1v1"> 1v1 (fast)</label>
+        </fieldset>
+        <fieldset class="games-radio">
           <legend>Games:</legend>
-          <label><input type="radio" name="games" value="5" checked> 5 (~15s)</label>
-          <label><input type="radio" name="games" value="10"> 10 (~30s)</label>
-          <label><input type="radio" name="games" value="20"> 20 (~60s)</label>
+          <label><input type="radio" name="games" value="5" checked> 5</label>
+          <label><input type="radio" name="games" value="10"> 10</label>
+          <label><input type="radio" name="games" value="20"> 20</label>
         </fieldset>
         <button class="advise-btn" id="propose-run">Run A/B sim</button>
       </div>

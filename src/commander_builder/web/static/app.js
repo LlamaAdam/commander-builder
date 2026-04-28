@@ -158,12 +158,19 @@ async function runProposeSwap() {
     document.querySelector('input[name="games"]:checked').value, 10,
   );
   result.innerHTML = "";
-  status.textContent = `Running ${games} games via Forge — this can take ${games === 5 ? "~15s" : games === 10 ? "~30s" : "~60s"}…`;
+  // Wall-time depends on mode. Pod (4-player commander) takes
+  // ~30-60s/game; 1v1 constructed is ~5-10s/game.
+  const podSecs = { 5: 180, 10: 360, 20: 720 };
+  const duelSecs = { 5: 30, 10: 60, 20: 120 };
+  const eta = mode === "pod" ? podSecs[games] : duelSecs[games];
+  status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} games via Forge — ~${eta}s…`;
   btn.disabled = true;
   try {
     // Pull the bracket from the filename's [B?] suffix; fall back to 3.
     const bracketMatch = (_activeDeckId || "").match(/\[B(\d)\]/);
     const bracket = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
+    const modeEl = document.querySelector('input[name="mode"]:checked');
+    const mode = modeEl ? modeEl.value : "pod";
     const resp = await fetch("/api/propose_swap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -172,7 +179,7 @@ async function runProposeSwap() {
         new_text: ta.value,
         games,
         bracket,
-        mode: "1v1",
+        mode,
       }),
     });
     const body = await resp.json();

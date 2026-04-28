@@ -751,7 +751,13 @@ def create_app(
             bracket = int(payload.get("bracket", 3))
         except (TypeError, ValueError):
             return jsonify({"error": "bracket must be int"}), 400
-        mode = payload.get("mode", "1v1")
+        # Default to pod (4-player commander with shared filler
+        # opposition) because that's the honest commander signal —
+        # 1v1 reduces commander to a duel and misses politics /
+        # threat-assessment / archenemy dynamics. Pod also avoids
+        # the deck-format conversion the constructed path requires.
+        # Caller can override to '1v1' for fast goldfish-style runs.
+        mode = payload.get("mode", "pod")
         if mode not in ("1v1", "pod"):
             return jsonify({
                 "error": "mode must be '1v1' or 'pod'",
