@@ -109,6 +109,25 @@ body {
   resize: vertical;
 }
 
+/* Legality + source banner — at-a-glance status under the commander. */
+.legality-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+.legality-banner .pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.legality-banner button.pill { font-weight: 500; }
+
 /* Hero action row — small inline buttons next to "Propose changes". */
 .hero-actions {
   display: flex;

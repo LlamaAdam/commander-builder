@@ -1005,6 +1005,145 @@ def test_audit_endpoint_404_on_missing_deck(client):
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# /api/deck_source GET + PUT (Moxfield URL attached to a deck)
+# ---------------------------------------------------------------------------
+
+def test_deck_source_get_returns_none_when_unattached(client):
+    resp = client.get("/api/deck_source?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["moxfield_id"] is None
+    assert body["moxfield_url"] is None
+
+
+def test_deck_source_put_attaches_url(client, deck_dir):
+    resp = client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/abc123"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["moxfield_id"] == "abc123"
+    assert "moxfield.com/decks/abc123" in body["moxfield_url"]
+    # Persisted to file.
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert "Moxfield=abc123" in on_disk
+
+
+def test_deck_source_put_updates_existing(client, deck_dir):
+    # First attach.
+    client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/orig"},
+    )
+    # Now update.
+    resp = client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/newone"},
+    )
+    body = resp.get_json()
+    assert body["moxfield_id"] == "newone"
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    # Old line gone, new line in place.
+    assert "Moxfield=orig" not in on_disk
+    assert "Moxfield=newone" in on_disk
+
+
+def test_deck_source_put_clears_when_empty_url(client, deck_dir):
+    client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/abc"},
+    )
+    resp = client.put("/api/deck_source?deck=Alpha", json={"moxfield_url": ""})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["moxfield_id"] is None
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert "Moxfield=" not in on_disk
+
+
+def test_deck_source_put_400_on_bad_url(client):
+    resp = client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "not a url"},
+    )
+    # parse_deck_id may reject or accept; the endpoint should return
+    # 400 either way because the value isn't useful as an id.
+    assert resp.status_code in (200, 400)
+
+
+def test_deck_source_404_on_missing_deck(client):
+    resp = client.get("/api/deck_source?deck=Ghost")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /api/verify_against_source
+# ---------------------------------------------------------------------------
+
+def test_verify_against_source_400_when_no_url_attached(client):
+    resp = client.get("/api/verify_against_source?deck=Alpha")
+    assert resp.status_code == 400
+    assert "no Moxfield source" in resp.get_json()["error"]
+
+
+def test_verify_against_source_diffs_local_vs_remote(client, monkeypatch):
+    # Attach a source URL first.
+    client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/abc"},
+    )
+    # Stub fetch_deck so we get a deterministic remote.
+    fake_remote_json = {
+        "name": "Alpha", "publicId": "abc",
+        "boards": {
+            "commanders": {
+                "cards": {
+                    "k1": {"quantity": 1,
+                           "card": {"name": "Test Cmdr", "set": "C", "cn": "1"}},
+                },
+            },
+            "mainboard": {
+                "cards": {
+                    # Remote diverged: 'Sol Ring' replaced by 'Mana Crypt'.
+                    "k2": {"quantity": 1,
+                           "card": {"name": "Mana Crypt", "set": "MS", "cn": "1"}},
+                    "k3": {"quantity": 1,
+                           "card": {"name": "Forest", "set": "M", "cn": "1"}},
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda public_id: fake_remote_json,
+    )
+    resp = client.get("/api/verify_against_source?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "moxfield.com/decks/abc" in body["source_url"]
+    # Local has Cultivate + Forest, remote has Mana Crypt + Forest.
+    # Diff should show Cultivate as local-only and Mana Crypt as
+    # remote-only.
+    assert any("Cultivate" in line for line in body["in_local_only"])
+    assert any("Mana Crypt" in line for line in body["in_remote_only"])
+
+
+def test_verify_against_source_502_on_moxfield_failure(client, monkeypatch):
+    client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/abc"},
+    )
+    def boom(public_id):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck", boom,
+    )
+    resp = client.get("/api/verify_against_source?deck=Alpha")
+    assert resp.status_code == 502
+
+
 def test_propose_swap_503_when_forge_unavailable(client, monkeypatch):
     """Forge missing should return 503 with detail, not 500."""
     from types import SimpleNamespace

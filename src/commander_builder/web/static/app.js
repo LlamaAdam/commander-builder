@@ -387,6 +387,11 @@ function renderDashboard(data, iterations) {
     pips.appendChild(el("span", { class: `color-pip cp-${c}` }, c));
   }
   hero.appendChild(pips);
+  // Legality banner (always visible above action row).
+  if (data.legality) {
+    hero.appendChild(legalityBanner(data.legality, data));
+  }
+
   // Action row — Propose / Run audit / Edit / Copy to Moxfield / Delete.
   const actions = el("div", { class: "hero-actions" });
 
@@ -520,6 +525,135 @@ function renderSuggestions(container, suggestions) {
     ul.appendChild(row);
   }
   container.appendChild(ul);
+}
+
+function legalityBanner(legality, data) {
+  const wrap = el("div", { class: "legality-banner" });
+  // Legality pill.
+  if (legality.all_legal) {
+    wrap.appendChild(el("span", { class: "pill good" },
+      "✓ All cards legal in Commander"));
+  } else {
+    wrap.appendChild(el("span", { class: "pill bad" },
+      `✗ ${legality.n_illegal} illegal card${legality.n_illegal === 1 ? "" : "s"}`));
+  }
+  // Game Changers pill.
+  const gcCount = legality.n_game_changers || 0;
+  if (gcCount > 0) {
+    const pill = el("span", { class: "pill warn" },
+      `${gcCount} Game Changer${gcCount === 1 ? "" : "s"}`);
+    pill.title = (legality.in_deck_game_changers || []).join("\n");
+    wrap.appendChild(pill);
+  }
+  // Source / Moxfield link.
+  if (data.moxfield_url) {
+    const link = el("a", {
+      href: data.moxfield_url, target: "_blank",
+      rel: "noopener noreferrer",
+      class: "pill",
+      style: "background: var(--panel-2); color: var(--accent); text-decoration: none;",
+    }, "↗ View on Moxfield");
+    wrap.appendChild(link);
+
+    // Verify-against-source button — diffs local vs live Moxfield.
+    const verifyBtn = el("button", {
+      class: "pill",
+      style: "background: var(--panel-2); color: var(--text); border: 1px solid var(--border); cursor: pointer;",
+    }, "Verify vs Moxfield");
+    verifyBtn.addEventListener("click", verifyAgainstSource);
+    wrap.appendChild(verifyBtn);
+  } else {
+    // No source attached — offer to attach one.
+    const attachBtn = el("button", {
+      class: "pill",
+      style: "background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); cursor: pointer;",
+    }, "Attach Moxfield URL");
+    attachBtn.addEventListener("click", attachMoxfieldUrl);
+    wrap.appendChild(attachBtn);
+  }
+  return wrap;
+}
+
+async function attachMoxfieldUrl() {
+  if (!_activeDeckId) return;
+  const url = window.prompt(
+    "Paste the Moxfield URL for this deck:\n" +
+    "(e.g. https://moxfield.com/decks/abc123)",
+    "",
+  );
+  if (!url) return;
+  try {
+    const resp = await fetch(
+      `/api/deck_source?deck=${encodeURIComponent(_activeDeckId)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ moxfield_url: url }),
+      },
+    );
+    const body = await resp.json();
+    if (!resp.ok) {
+      flashStatus(`Couldn't attach: ${body.error || resp.status}`);
+      return;
+    }
+    flashStatus(`Linked to ${body.moxfield_url}`);
+    // Reload the dashboard so the banner shows the new link.
+    const li = document.querySelector(`.deck-list li[data-id="${_activeDeckId}"]`);
+    selectDeck(_activeDeckId, li);
+  } catch (e) {
+    flashStatus(`Network error: ${e.message}`);
+  }
+}
+
+async function verifyAgainstSource() {
+  if (!_activeDeckId) return;
+  $("alert-title").textContent = "Verify vs Moxfield source";
+  const body = $("alert-body");
+  body.className = "alert-body";
+  body.innerHTML = '<p class="muted">Fetching live Moxfield deck and diffing…</p>';
+  $("alert-modal").hidden = false;
+  try {
+    const resp = await fetchJSON(
+      `/api/verify_against_source?deck=${encodeURIComponent(_activeDeckId)}`,
+    );
+    body.innerHTML = "";
+    body.appendChild(el(
+      "p", {},
+      el("a", {
+        href: resp.source_url, target: "_blank",
+        rel: "noopener noreferrer",
+        style: "color: var(--accent);",
+      }, resp.source_url),
+    ));
+    if (resp.in_local_only.length === 0 && resp.in_remote_only.length === 0) {
+      body.appendChild(el(
+        "p", {}, el("span", { class: "pill good" },
+          `In sync — ${resp.matched} cards match`),
+      ));
+      return;
+    }
+    body.appendChild(el(
+      "p", {},
+      el("span", { class: "pill warn" },
+        `Drift detected — ${resp.matched} matched, ` +
+        `${resp.in_local_only.length} only-local, ` +
+        `${resp.in_remote_only.length} only-remote`),
+    ));
+    if (resp.in_local_only.length) {
+      body.appendChild(el("h4", {}, "In your local copy but not on Moxfield"));
+      const ul = el("ul");
+      for (const c of resp.in_local_only) ul.appendChild(el("li", {}, c));
+      body.appendChild(ul);
+    }
+    if (resp.in_remote_only.length) {
+      body.appendChild(el("h4", {}, "On Moxfield but not in your local copy"));
+      const ul = el("ul");
+      for (const c of resp.in_remote_only) ul.appendChild(el("li", {}, c));
+      body.appendChild(ul);
+    }
+  } catch (e) {
+    body.innerHTML = `<p class="muted">Verify failed: ${e.message}</p>`;
+  }
 }
 
 function bracketTile(t) {

@@ -132,12 +132,22 @@ def _extract_price_usd(card_data: dict | None) -> Optional[float]:
 # Game Changers from commander_builder.game_changers (rough proxy for
 # strong cards). When present in the deck, push the power level up.
 def _count_game_changers(card_names: list[str]) -> int:
+    """Count how many of ``card_names`` appear on Wizards' Game
+    Changers list.
+
+    Earlier versions of this function tried to import a
+    ``GAME_CHANGERS`` constant that doesn't exist on the module —
+    the public API is ``load_game_changers()``, which returns a
+    set. The old import-error path silently returned 0 for every
+    deck, breaking the bracket heuristic + the dashboard tile.
+    """
     try:
-        from .game_changers import GAME_CHANGERS
+        from .game_changers import load_game_changers
+        gc_set = load_game_changers()
     except Exception:
         return 0
     lower = {n.lower() for n in card_names}
-    return sum(1 for gc in GAME_CHANGERS if gc.lower() in lower)
+    return sum(1 for gc in gc_set if gc.lower() in lower)
 
 
 # Wizards' official Commander Bracket system (replaced the old 1-10
@@ -274,6 +284,14 @@ class DashboardData:
     categories: dict[str, int] = field(default_factory=dict)
     theme_tags: list[str] = field(default_factory=list)
     suggested_adds: list[dict] = field(default_factory=list)
+    # Per-deck legality + brackets-fit banner data. Lets the UI
+    # surface "All cards legal in Commander" / "X illegal cards" /
+    # "Y game changers (bracket 4+)" without an extra API call.
+    legality: dict = field(default_factory=dict)
+    # Moxfield URL parsed from the deck's `Moxfield=<publicId>`
+    # metadata line. None when the deck wasn't imported from
+    # Moxfield (manually pasted, etc).
+    moxfield_url: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -381,6 +399,43 @@ def build_dashboard(
 
     mana_curve = sorted(curve_buckets.items())
 
+    # --- Legality banner data + Moxfield URL ----------------------------
+    # Pull the (Moxfield publicId) metadata line if present.
+    moxfield_url: Optional[str] = None
+    try:
+        text = deck_path.read_text(encoding="utf-8")
+        m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
+        if m:
+            mox_id = m.group(1).strip()
+            moxfield_url = f"https://moxfield.com/decks/{mox_id}"
+    except OSError:
+        pass
+
+    # Cross-reference deck names against the Game Changers list AND
+    # the doctor module's banned-in-Commander set if it exposes one.
+    in_deck_gcs: list[str] = []
+    illegal: list[str] = []
+    try:
+        from .game_changers import load_game_changers
+        gc_set = load_game_changers()
+        in_deck_gcs = sorted({n for n in deck_card_names if n in gc_set})
+    except Exception:
+        pass
+    try:
+        from . import doctor as _doctor
+        banned = getattr(_doctor, "BANNED_IN_COMMANDER", None)
+        if banned:
+            illegal = sorted(set(deck_card_names) & set(banned))
+    except Exception:
+        pass
+    legality = {
+        "in_deck_game_changers": in_deck_gcs,
+        "n_game_changers": len(in_deck_gcs),
+        "illegal_cards": illegal,
+        "n_illegal": len(illegal),
+        "all_legal": len(illegal) == 0,
+    }
+
     return DashboardData(
         commander={
             "name": primary_commander,
@@ -416,4 +471,6 @@ def build_dashboard(
         categories=categories,
         theme_tags=theme_tags,
         suggested_adds=sug,
+        legality=legality,
+        moxfield_url=moxfield_url,
     )

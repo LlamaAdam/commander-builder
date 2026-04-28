@@ -440,6 +440,136 @@ def create_app(
             "path": str(target),
         })
 
+    @app.route("/api/deck_source", methods=["GET", "PUT"])
+    def deck_source():
+        """Get or set the Moxfield source URL attached to a deck.
+
+        The deck's source URL is stored as a ``Moxfield=<publicId>``
+        line in the [metadata] section of the .dck file (same shape
+        moxfield_import already writes). This endpoint lets the UI:
+
+        - GET: read the current source URL (None if unattached)
+        - PUT: attach / update the source URL for an already-imported
+          deck so future "verify against source" workflows can diff
+          our local copy against the live Moxfield deck.
+        """
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({"error": "deck not found"}), 404
+        text = path.read_text(encoding="utf-8")
+
+        import re as _re
+        existing = _re.search(r"^Moxfield=(.+)$", text, _re.MULTILINE)
+
+        if request.method == "GET":
+            mox_id = existing.group(1).strip() if existing else None
+            return jsonify({
+                "deck": deck_id,
+                "moxfield_id": mox_id,
+                "moxfield_url": (
+                    f"https://moxfield.com/decks/{mox_id}"
+                    if mox_id else None
+                ),
+            })
+
+        # PUT — update / clear the Moxfield URL.
+        try:
+            payload = request.get_json(force=True) or {}
+        except Exception:
+            return jsonify({"error": "expected JSON body"}), 400
+
+        url = (payload.get("moxfield_url") or "").strip()
+        if url:
+            try:
+                from ..moxfield_import import parse_deck_id
+                mox_id = parse_deck_id(url)
+            except Exception as exc:
+                return jsonify({
+                    "error": "could not parse Moxfield URL",
+                    "detail": str(exc),
+                }), 400
+            new_meta = f"Moxfield={mox_id}"
+            if existing:
+                text = _re.sub(
+                    r"^Moxfield=.+$", new_meta, text, count=1,
+                    flags=_re.MULTILINE,
+                )
+            else:
+                # Insert under [metadata]; create the section if missing.
+                if "[metadata]" in text.lower():
+                    text = _re.sub(
+                        r"(\[metadata\][^\n]*\n)",
+                        rf"\1{new_meta}\n", text, count=1,
+                        flags=_re.IGNORECASE,
+                    )
+                else:
+                    text = f"[metadata]\n{new_meta}\n\n" + text
+            path.write_text(text, encoding="utf-8")
+            return jsonify({
+                "deck": deck_id, "moxfield_id": mox_id,
+                "moxfield_url": f"https://moxfield.com/decks/{mox_id}",
+            })
+
+        # Empty URL → clear the metadata line.
+        if existing:
+            text = _re.sub(
+                r"^Moxfield=.+\n?", "", text, count=1, flags=_re.MULTILINE,
+            )
+            path.write_text(text, encoding="utf-8")
+        return jsonify({
+            "deck": deck_id, "moxfield_id": None, "moxfield_url": None,
+        })
+
+    @app.route("/api/verify_against_source")
+    def verify_against_source():
+        """Diff the local deck against the live Moxfield deck it was
+        imported from. Surfaces any drift so the user can sync back.
+
+        Returns:
+            {
+              "deck": "<id>",
+              "source_url": "...",
+              "in_local_only": [...],   # cards in our copy, not Moxfield
+              "in_remote_only": [...],  # cards on Moxfield, not local
+              "matched": int,
+            }
+        """
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({"error": "deck not found"}), 404
+        text = path.read_text(encoding="utf-8")
+        import re as _re
+        m = _re.search(r"^Moxfield=(.+)$", text, _re.MULTILINE)
+        if not m:
+            return jsonify({
+                "error": "no Moxfield source attached",
+                "hint": "PUT /api/deck_source first",
+            }), 400
+        mox_id = m.group(1).strip()
+        try:
+            from ..moxfield_import import fetch_deck, to_dck
+            deck_json = fetch_deck(mox_id)
+            remote_text = to_dck(deck_json)
+        except Exception as exc:
+            return jsonify({
+                "error": "Moxfield fetch failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 502
+
+        from ..compare_versions import diff_deck_text
+        diff = diff_deck_text(text, remote_text)
+        return jsonify({
+            "deck": deck_id,
+            "source_url": f"https://moxfield.com/decks/{mox_id}",
+            "in_local_only": diff["removed"],
+            "in_remote_only": diff["added"],
+            "matched": int(diff["unchanged_count"][0]) if diff["unchanged_count"] else 0,
+        })
+
     @app.route("/api/moxfield_format")
     def moxfield_format():
         """Return the deck rendered as a Moxfield-paste-ready string

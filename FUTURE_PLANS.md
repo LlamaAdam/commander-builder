@@ -571,6 +571,87 @@ ships and the workflow is genuinely browser-only.
 
 ---
 
+## FP-011 — BYO LLM token (per-user, never committed)
+
+**What.** Once the project is shared with other users (locally or
+via the FP-010 EXE), each user needs to bring their own LLM token
+for the Claude / Ollama / OpenAI escalation paths. Today the system
+reads `ANTHROPIC_API_KEY` from the process environment, which works
+for a single dev box but fails the moment we ship a binary.
+
+The plan:
+
+- **First-run UI flow** in the web app: a "Settings" panel under
+  the topbar that asks for the user's API key the first time the
+  app boots. Stored to a per-user config file at:
+  - **Windows:** `%LOCALAPPDATA%\commander-builder\config.json`
+  - **macOS:** `~/Library/Application Support/commander-builder/config.json`
+  - **Linux:** `$XDG_CONFIG_HOME/commander-builder/config.json`
+  
+  Same shape as the existing dev-mode `.env` keys
+  (`ANTHROPIC_API_KEY`, `OLLAMA_BASE_URL`, `OPENAI_API_KEY`).
+- **Backend resolution order** stays consistent with today's:
+  1. Process env var (still wins — useful for CI / dev)
+  2. Per-user config file (the new path)
+  3. None → endpoints that need an LLM degrade to heuristic
+- **Server endpoint**: `GET/PUT /api/settings`
+  - GET returns the current config keys with values **redacted**
+    (`{"ANTHROPIC_API_KEY": "sk-ant-***...***last4"}`) so the UI
+    can show "configured" / "missing" without exposing the secret.
+  - PUT accepts a JSON body and writes to the config file with
+    `0600` permissions (Windows: ACL restricted to current user).
+- **Validation**: on save, ping the corresponding API with a
+  zero-token sanity request; surface "401 invalid key" / "200 ok"
+  to the user before persisting.
+- **Forge_py mirror**: same path resolution in
+  `forge_py.cards._scryfall_get` (only Scryfall today, but the
+  shape stays consistent for future LLM-backed forge_py features).
+
+**Critical safety constraints.**
+
+- The committed `.gitignore` files in all three repos already cover
+  `.env`, `.env.local`, and `config.json`. **Never** check in:
+  - `.env` / `.env.local` / `.env.production` etc.
+  - `config.json` containing real keys
+  - SQLite files that might log API keys verbatim (none today,
+    but worth scanning before any commit)
+  - Test fixtures with real keys baked in (use `sk-ant-XXXXX`
+    placeholders only)
+- Pre-commit safety net (FP-011 implementation requirement): add a
+  hook (`scripts/pre-commit-secrets-scan.sh`) that greps staged
+  diffs for `sk-ant-`, `sk-`, `Bearer `, `xoxb-`, common token
+  prefixes; aborts on hit. The hook should be optional (won't break
+  for contributors who skip it) but documented in CONTRIBUTING.md.
+- The web UI's GET /api/settings response **must** redact —
+  responding with the literal key opens it to network capture even
+  on localhost.
+- The PUT endpoint **must not** log the body. Flask's default
+  request logging is OK (path-only), but any custom audit logging
+  added later needs explicit redaction.
+
+**Cost.** ~6h:
+- 1h: backend `commander_builder.user_config` module (read/write
+  with permissions, redaction helper, resolution order)
+- 1h: GET/PUT `/api/settings` endpoints + tests
+- 2h: Settings UI panel (HTML/CSS/JS) + the
+  validate-on-save round-trip
+- 1h: Pre-commit hook + CONTRIBUTING.md docs
+- 1h: Smoke-test on a fresh machine with no env vars set
+
+**What would unblock it.** The project being shared with anyone
+beyond the original developer. Right now there's exactly one user
+with one key in their local `.env` — no urgency. Promote to
+BACKLOG.md when:
+1. FP-010 (EXE packaging) starts, OR
+2. A second user actually wants to run the project, OR
+3. The audit prompt becomes a routine workflow (currently
+   uses heuristic-only because nobody's set ANTHROPIC_API_KEY).
+
+**Status: PARKED 2026-04-28.** Architecture documented; not yet
+needed.
+
+---
+
 ## How this file relates to BACKLOG.md
 
 - **`BACKLOG.md`**: prioritized, numbered, all items are go-able with a
