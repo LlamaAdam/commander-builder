@@ -7,15 +7,29 @@
 > (paused on something external). Backlog items live in `BACKLOG.md`; design
 > decisions live in `docs/decisions/`. This file is for *operational state*.
 
-**Last updated**: 2026-04-27 (autonomous-improvement session)
-**Current phase**: Phase 2 scaffolding complete; production-hardening done; shared cards folder + suggestion-quality pass landed this session
+**Last updated**: 2026-04-28 (project-manager session)
+**Current phase**: FP-006 backend live; Flask scaffold + iteration history feed shipped; UI rendering still TBD
 
 ---
 
 ## Now
 
 ### Working on
-Nothing actively in flight. This session (2026-04-27) landed:
+Nothing actively in flight. The 2026-04-28 project-manager session landed:
+
+- **FP-006 Flask scaffold** — `src/commander_builder/web/`. Routes:
+  `/api/health`, `/api/decks`, `/api/dashboard?deck=<id>`,
+  `/api/iterations[?deck=<id>]`. Path-traversal guard validates deck
+  inputs against `deck_dir`. `pyproject.toml` adds `[web]` extra
+  (`flask>=3.0`). 21 tests cover route shapes + traversal guard +
+  iteration listing. Run dev server: `python -m commander_builder.web`.
+- **Knowledge-log demo seeder** — `scripts/seed_demo_knowledge_log.py`
+  writes a 4-iteration arc (pending → kept → reverted → neutral) for
+  a fictional Omnath deck. Lets the UI's version-history strip
+  develop end-to-end before real Forge data exists. 6 tests.
+- **Test counts**: 482 tests total (was 453), all green.
+
+The 2026-04-27 session before that landed:
 
 - **Shared `mtg_cards` folder** at `C:\dev\mtg_cards\` (out-of-repo, ~180MB
   Scryfall bulk data + per-card snapshots + Magic Comp Rules text). Both
