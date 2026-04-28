@@ -11,18 +11,24 @@ past.
 [docs/audit_workflow.md](docs/audit_workflow.md) (the user-facing pipeline),
 [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Status (2026-04-26)
+## Status (2026-04-28)
 
 - **Phase 1A — Forge verifier**: ✅ complete
 - **Phase 1B — Forge orchestrator pipeline**: ✅ complete
-- **Phase 2 — LLM analyst + iteration loop**: scaffolding complete; programmatic
-  proposer (`proposer.py`) and Claude/Ollama verdict backends pending —
-  see `BACKLOG.md` GAP-005 / GAP-007.
-- **Phase 3 — Learned predictor**: deferred until 200+ iterations are logged.
-  Feature schema and dataset extraction in `ml_dataset.py` ready to feed it.
+- **Phase 2 — LLM analyst + iteration loop**: ✅ complete (proposer +
+  Claude/Ollama verdict backends + diagnosis-driven re-ranking).
+  Suggestion-quality work landed in 2026-04-27.
+- **Phase 3 — Learned predictor**: deferred until 200+ iterations are
+  logged. Feature schema + dataset extraction in `ml_dataset.py`
+  ready to feed it; `commander-status` reports the row threshold.
+- **FP-006 — Web GUI**: backend + minimal UI shipped. Flask scaffold
+  serves the dashboard data feed (`/api/dashboard`,
+  `/api/iterations`) and a sidebar + 7-panel HTML. Run with
+  `python -m commander_builder.web`. Polished CSS is incremental
+  follow-up.
 
-14 modules, 144 tests passing in ~0.6s. Live smoke and integration tests on
-real B3 decks all passing.
+26+ modules, 489+ tests passing in ~21s. Live smoke and integration
+tests on real B3 decks all passing.
 
 ## Setup
 
@@ -92,6 +98,24 @@ commander-match --user "[USER] My Deck [B3].dck" --bracket 3 --games 5 --pods 3
 
 # Push a local .dck back to Moxfield via clipboard
 commander-push "[USER] My Deck v2 [B3].dck"
+
+# Get LLM-style improvement suggestions (universal-staples filtered,
+# role-grouped, diagnosis-driven)
+commander-advise "[USER] My Deck v1 [B3].dck"
+
+# Compare your deck to consensus meta-references at a bracket
+commander-meta-test "[USER] My Deck [B3].dck" --bracket 3
+
+# Inspect or revert any historical iteration
+commander-history --deck-id <publicId>
+commander-revert --to-deck <publicId> --version 3
+
+# Health-check a Forge install + cache
+commander-doctor
+
+# Launch the FP-006 web GUI (requires `pip install -e ".[web]"`)
+python -m commander_builder.web --deck-dir ./decks
+# → http://127.0.0.1:5000  (sidebar deck list + 7-panel dashboard)
 ```
 
 ## Phase 1A: run the verifier (one-time, machine-specific)
@@ -107,13 +131,22 @@ verification or when troubleshooting a Forge install.
 ## Project layout
 
 ```
-src/commander_builder/   14 production modules
-tests/                   144 unit tests, all offline (~0.6s)
+src/commander_builder/   26+ production modules (incl. web/ subpackage)
+tests/                   489+ unit tests, all offline (~21s)
 scripts/                 integration tests + batch runners (hit Forge)
 prompts/                 versioned LLM workflow prompts
 docs/                    architecture, audit workflow, decision logs
 vendor/                  Forge install (gitignored)
 ```
+
+Companion repo at `C:\dev\forge_py\` — Python-native simulator that
+emits Forge-compatible stdout. Used as a fast pre-filter for ranking
+decks. See [forge_py/ROADMAP.md](https://github.com/LlamaAdam/forge-py)
+for status; correlation r=0.898 vs Forge on the 5-deck round-robin.
+
+Shared card data at `C:\dev\mtg_cards\` (out-of-repo). Both projects
+read oracle snapshots, bulk data, and rules from this directory via
+`MTG_CARDS_DIR` env var with a sensible default.
 
 See [docs/architecture.md](docs/architecture.md) for the module map and
 data-flow diagrams.

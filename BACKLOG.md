@@ -156,12 +156,14 @@
   verify all 20 modules import. No secrets needed since the suite is
   offline-only.
 
-### GAP-016 — README doesn't reflect Phase 2 workflow
-- **File**: `README.md`
-- **What**: Points at Phase 1A docs. With Phase 2 mostly done, the
-  "Getting started" walkthrough should reflect actual usage:
-  import → snapshot → audit → import → snapshot → compare → record → analyze.
-- **Effort**: ~30 lines of Markdown.
+### GAP-016 — README doesn't reflect Phase 2 workflow ✅ DONE 2026-04-28
+- **Resolution**: README updated. Status block now reflects Phase 2
+  complete + FP-006 web GUI shipped + Phase 3 still data-gated.
+  "Other useful commands" added for `commander-advise`,
+  `commander-meta-test`, `commander-history`, `commander-revert`,
+  `commander-doctor`, and `python -m commander_builder.web`. Project
+  layout block updated to current module count + companion repo
+  reference (forge_py) + shared mtg_cards data folder.
 
 ### GAP-017 — Rollback automation ✅ DONE 2026-04-26
 - **Resolution**: New `revert_to.py` module + `commander-revert` CLI.
