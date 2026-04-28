@@ -161,6 +161,9 @@ async function runProposeSwap() {
   status.textContent = `Running ${games} games via Forge — this can take ${games === 5 ? "~15s" : games === 10 ? "~30s" : "~60s"}…`;
   btn.disabled = true;
   try {
+    // Pull the bracket from the filename's [B?] suffix; fall back to 3.
+    const bracketMatch = (_activeDeckId || "").match(/\[B(\d)\]/);
+    const bracket = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
     const resp = await fetch("/api/propose_swap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -168,7 +171,7 @@ async function runProposeSwap() {
         deck: _activeDeckId,
         new_text: ta.value,
         games,
-        bracket: 3,
+        bracket,
         mode: "1v1",
       }),
     });
@@ -190,6 +193,25 @@ async function runProposeSwap() {
 
 function renderProposeResult(container, body) {
   const wrap = el("div");
+  const totalGames = (body.old_games || 0) + (body.new_games || 0) + (body.draws || 0);
+  if (!body.total_games || totalGames === 0) {
+    // Forge ran but no games completed — usually means the proposed
+    // deck failed Forge's legality check (wrong card count, illegal
+    // cards, missing commander). Don't pretend it was a tie.
+    wrap.appendChild(el(
+      "div", { class: "propose-winner tie" },
+      "No games completed",
+    ));
+    wrap.appendChild(el(
+      "p", { class: "muted" },
+      "Forge ran but reported zero games. Most common cause: the " +
+      "proposed deck has the wrong card count (Commander needs " +
+      "exactly 99 mainboard + 1 commander = 100). Check the textarea " +
+      "above and re-run.",
+    ));
+    container.appendChild(wrap);
+    return;
+  }
   const winnerCls = body.winner === "tie" ? "tie" : body.winner;
   wrap.appendChild(el(
     "div", { class: `propose-winner ${winnerCls}` },
@@ -231,9 +253,12 @@ async function loadAdvise() {
   sug.innerHTML = "";
   sug.appendChild(el("h3", {}, "Audit — full proposed deck"));
   sug.appendChild(el("p", { class: "muted" }, "Generating ideal deck…"));
+  // Use the filename's [B?] suffix as the audit bracket.
+  const bm = (_activeDeckId || "").match(/\[B(\d)\]/);
+  const auditBracket = bm ? parseInt(bm[1], 10) : 3;
   try {
     const body = await fetchJSON(
-      `/api/audit?deck=${encodeURIComponent(_activeDeckId)}&bracket=3`,
+      `/api/audit?deck=${encodeURIComponent(_activeDeckId)}&bracket=${auditBracket}`,
     );
     _lastAuditProposed = body.proposed_text || null;
     renderAuditResult(sug, body);

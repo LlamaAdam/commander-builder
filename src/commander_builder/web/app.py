@@ -139,6 +139,11 @@ def create_app(
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be an integer 1..5"}), 400
+        # Default to the [B?] suffix in the filename when the request
+        # didn't explicitly pass a bracket — the filename is the user's
+        # declared bracket and should beat the heuristic.
+        if bracket is None:
+            bracket = _bracket_from_filename(deck_id)
         with_advise = request.args.get("advise", "").lower() in (
             "1", "true", "yes",
         )
@@ -191,9 +196,13 @@ def create_app(
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
         try:
-            bracket = int(request.args.get("bracket") or 3)
+            bracket_raw = request.args.get("bracket")
+            bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be int"}), 400
+        # Filename bracket is the default when not overridden.
+        if bracket is None:
+            bracket = _bracket_from_filename(deck_id) or 3
 
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
@@ -250,9 +259,11 @@ def create_app(
         explicit = request.args.get("path")
         try:
             bracket_raw = request.args.get("bracket")
-            bracket = int(bracket_raw) if bracket_raw else 3
+            bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be an integer 1..5"}), 400
+        if bracket is None:
+            bracket = _bracket_from_filename(deck_id) or 3
 
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
@@ -475,9 +486,13 @@ def create_app(
         if path is None:
             return jsonify({"error": "deck not found"}), 404
         try:
-            bracket = int(request.args.get("bracket") or 0) or None
+            bracket_raw = request.args.get("bracket")
+            bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             bracket = None
+        # Default to the deck filename's [B?] suffix.
+        if bracket is None:
+            bracket = _bracket_from_filename(deck_id)
 
         from ..game_changers import load_game_changers
         from .. import doctor
@@ -757,6 +772,27 @@ _BRACKET_NAMES = {
 }
 
 
+def _bracket_from_filename(deck_id: str | None) -> int | None:
+    """Parse the ``[B<n>]`` suffix the user encodes in deck filenames.
+
+    Returns the bracket integer (1..5) or None if the suffix is missing
+    or unparseable. The filename is the user's declared/intended
+    bracket; it should override the heuristic guess unless the request
+    explicitly passes a different bracket.
+    """
+    if not deck_id:
+        return None
+    import re as _re
+    m = _re.search(r"\[B(\d)\](?:\.dck)?\s*$", deck_id)
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+    except ValueError:
+        return None
+    return n if 1 <= n <= 5 else None
+
+
 def _normalize_pasted_deck(text: str) -> str:
     """Accept either a Forge-format .dck blob or a Moxfield bulk-paste
     line list and return a valid .dck. Bulk-paste shape is one line
@@ -814,13 +850,26 @@ def _apply_swaps_to_dck(
       matches a `cut` recommendation; append `1 <card>` for each `add`.
     - Other sections (sideboard, considering, metadata) are preserved.
 
+    **Adds and cuts are balanced** — Commander needs exactly 99 main +
+    1 commander. The advisor's heuristic produces M adds and N cuts
+    independently and they're often unequal, leaving an illegal deck
+    that Forge refuses to load. We trim whichever list is longer so
+    both have ``min(M, N)`` entries (priority: keep adds, since they
+    came from EDHREC's top-cards rank order; drop the *bottom* of the
+    cuts list, since those are the lowest-confidence "doesn't appear
+    in EDHREC top/synergy" guesses).
+
     Card names are matched case-insensitively against the leading
-    ``<qty> <Name>[|<SET>|<CN>]`` pattern. We don't try to handle
-    DFC // back face naming; advise() emits front-face names anyway.
+    ``<qty> <Name>[|<SET>|<CN>]`` pattern.
     """
     import re as _re
     add_names = [r.card for r in recommendations if r.action == "add"]
-    cut_set = {r.card.lower() for r in recommendations if r.action == "cut"}
+    cuts = [r.card for r in recommendations if r.action == "cut"]
+    # Balance to keep Commander deck size legal.
+    n = min(len(add_names), len(cuts))
+    add_names = add_names[:n]
+    cuts = cuts[:n]
+    cut_set = {c.lower() for c in cuts}
 
     out_lines: list[str] = []
     in_main = False
@@ -867,7 +916,7 @@ def _apply_swaps_to_dck(
     new_text = "\n".join(out_lines)
     if not new_text.endswith("\n"):
         new_text += "\n"
-    return new_text, add_names, [r.card for r in recommendations if r.action == "cut"], main_kept
+    return new_text, add_names, cuts, main_kept
 
 
 def _build_suggested_adds(deck_path: Path, bracket: int) -> list[dict]:

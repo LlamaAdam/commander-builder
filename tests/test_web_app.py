@@ -862,6 +862,8 @@ def test_apply_swaps_drops_cuts_and_appends_adds():
         "1 Cultivate\n"
         "1 Forest|MIR|315\n"
     )
+    # 1 cut + 2 adds → balanced to 1 each (we keep the first add, drop
+    # the second, since deck size must stay legal).
     recs = [
         SimpleNamespace(card="Cultivate", action="cut",
                         reason="slow ramp", evidence={}),
@@ -873,25 +875,74 @@ def test_apply_swaps_drops_cuts_and_appends_adds():
     new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
     assert "Cultivate" not in new_text
     assert "1 Lotus Cobra" in new_text
-    assert "1 Tireless Tracker" in new_text
     # Set/CN-suffixed lines preserved.
     assert "1 Forest|MIR|315" in new_text
     # Commander untouched.
     assert "1 Edgar Markov" in new_text
-    assert added == ["Lotus Cobra", "Tireless Tracker"]
+    # Balanced output: 1 add + 1 cut.
+    assert added == ["Lotus Cobra"]
     assert removed == ["Cultivate"]
     assert kept == 2  # Sol Ring + Forest
 
 
+def test_apply_swaps_balances_unequal_lists():
+    """5 cuts + 2 adds → trimmed to 2 + 2 to keep deck size legal."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = (
+        "[Commander]\n1 Cmdr\n[Main]\n"
+        + "\n".join(f"1 Card{i}" for i in range(5)) + "\n"
+    )
+    recs = (
+        [SimpleNamespace(card=f"Card{i}", action="cut",
+                         reason="", evidence={}) for i in range(5)]
+        + [SimpleNamespace(card=f"NewCard{i}", action="add",
+                           reason="", evidence={}) for i in range(2)]
+    )
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    assert len(added) == 2
+    assert len(removed) == 2
+    # Deck size: original 5 main - 2 cut + 2 add = 5 main.
+    main_lines = [
+        line for line in new_text.splitlines()
+        if line.startswith("1 ") and "Cmdr" not in line
+    ]
+    assert len(main_lines) == 5
+
+
 def test_apply_swaps_case_insensitive_cut_match():
+    """Cut matching ignores case. Test pairs cut+add 1:1 since the
+    balance-rule requires equal counts to keep deck size legal."""
     from commander_builder.web.app import _apply_swaps_to_dck
     from types import SimpleNamespace
     original = "[Main]\n1 sol ring\n1 Cultivate\n"
+    recs = [
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mana Vault", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, added, removed, _ = _apply_swaps_to_dck(original, recs)
+    assert "1 sol ring" not in new_text.lower()
+    assert "1 Mana Vault" in new_text
+    assert removed == ["Sol Ring"]
+    assert added == ["Mana Vault"]
+
+
+def test_apply_swaps_no_op_when_one_list_empty():
+    """0 adds + N cuts → no swaps (deck size must stay legal)."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Sol Ring\n1 Cultivate\n"
     recs = [SimpleNamespace(card="Sol Ring", action="cut",
                             reason="", evidence={})]
-    new_text, _, removed, _ = _apply_swaps_to_dck(original, recs)
-    assert "sol ring" not in new_text.lower() or "1 sol ring" not in new_text
-    assert removed == ["Sol Ring"]
+    new_text, added, removed, _ = _apply_swaps_to_dck(original, recs)
+    # Both lists trimmed to 0.
+    assert added == []
+    assert removed == []
+    # Original deck untouched.
+    assert "1 Sol Ring" in new_text
+    assert "1 Cultivate" in new_text
 
 
 def test_audit_endpoint_returns_full_proposed_deck(client, monkeypatch):
