@@ -929,6 +929,39 @@ def test_apply_swaps_case_insensitive_cut_match():
     assert added == ["Mana Vault"]
 
 
+def test_format_added_line_resolves_set_and_cn(monkeypatch):
+    """Appended cards should write '1 <name>|<SET>|<CN>' so Forge's
+    deck loader doesn't trip on ambiguous name-only resolution."""
+    from commander_builder.web.app import _format_added_line
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: {
+            "name": "Atarka, World Render",
+            "set": "frf", "collector_number": "122",
+        },
+    )
+    line = _format_added_line("Atarka, World Render")
+    assert line == "1 Atarka, World Render|FRF|122"
+
+
+def test_format_added_line_falls_back_when_lookup_fails(monkeypatch):
+    from commander_builder.web.app import _format_added_line
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: None,
+    )
+    assert _format_added_line("Mystery Card") == "1 Mystery Card"
+
+
+def test_format_added_line_falls_back_when_set_missing(monkeypatch):
+    from commander_builder.web.app import _format_added_line
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: {"name": "X", "set": "", "collector_number": ""},
+    )
+    assert _format_added_line("X") == "1 X"
+
+
 def test_apply_swaps_no_op_when_one_list_empty():
     """0 adds + N cuts → no swaps (deck size must stay legal)."""
     from commander_builder.web.app import _apply_swaps_to_dck

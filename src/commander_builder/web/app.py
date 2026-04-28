@@ -975,6 +975,29 @@ def _match_pct_from_evidence(evidence: dict | None) -> int:
     return max(1, min(100, round(raw)))
 
 
+def _format_added_line(name: str) -> str:
+    """Render a `1 <Name>|<SET>|<CN>` line for an added card.
+
+    Forge's deck loader can be strict about ambiguous name-only
+    lookups (alternate art, reprints across many sets, special
+    characters like //). We resolve each appended card to its
+    current Scryfall printing so the proposed deck loads cleanly.
+    Falls back to plain `1 <name>` when Scryfall doesn't return
+    usable set/cn info — better to ship a slightly-ambiguous line
+    than crash the whole audit on a network blip.
+    """
+    try:
+        from ..scryfall_client import lookup_card
+        data = lookup_card(name) or {}
+    except Exception:
+        return f"1 {name}"
+    set_code = (data.get("set") or "").upper()
+    cn = data.get("collector_number") or ""
+    if set_code and cn:
+        return f"1 {name}|{set_code}|{cn}"
+    return f"1 {name}"
+
+
 def _apply_swaps_to_dck(
     original_text: str, recommendations,
 ) -> tuple[str, list[str], list[str], int]:
@@ -1027,7 +1050,7 @@ def _apply_swaps_to_dck(
             # cards (so they're inside the section, not after it).
             if in_main:
                 for name in add_names:
-                    out_lines.append(f"1 {name}")
+                    out_lines.append(_format_added_line(name))
             in_main = stripped.lower() == "[main]"
             in_metadata = stripped.lower() == "[metadata]"
             out_lines.append(raw)
@@ -1050,7 +1073,7 @@ def _apply_swaps_to_dck(
     # Detect by checking whether all add_names already landed.
     if in_main:
         for name in add_names:
-            out_lines.append(f"1 {name}")
+            out_lines.append(_format_added_line(name))
 
     new_text = "\n".join(out_lines)
     if not new_text.endswith("\n"):
