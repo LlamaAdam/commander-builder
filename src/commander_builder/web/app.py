@@ -7,6 +7,8 @@ Routes:
     GET  /api/decks                 -> {"decks": [{"id", "name", "path"}, ...]}
     GET  /api/dashboard?deck=<id>   -> DashboardData JSON for that deck
     GET  /api/dashboard?path=<p>    -> DashboardData JSON for an explicit path
+    GET  /api/iterations            -> recent iterations across all decks
+    GET  /api/iterations?deck=<id>  -> iteration history for one deck
 
 Notes:
 - The deck index is built from a single ``deck_dir`` configured at
@@ -23,6 +25,11 @@ from pathlib import Path
 from typing import Optional
 
 from ..deck_dashboard import build_dashboard
+from ..knowledge_log import (
+    DEFAULT_DB_PATH as _DEFAULT_KLOG_DB,
+    iterations_for_deck,
+    recent_iterations,
+)
 
 
 def _list_decks(deck_dir: Path) -> list[dict]:
@@ -83,13 +90,17 @@ _PLACEHOLDER_HTML = """<!doctype html>
     <li><code>GET /api/health</code></li>
     <li><code>GET /api/decks</code></li>
     <li><code>GET /api/dashboard?deck=&lt;id&gt;</code></li>
+    <li><code>GET /api/iterations[?deck=&lt;id&gt;]</code></li>
   </ul>
 </body>
 </html>
 """
 
 
-def create_app(deck_dir: Optional[Path] = None):
+def create_app(
+    deck_dir: Optional[Path] = None,
+    knowledge_db: Optional[Path] = None,
+):
     """Build the Flask app. Imports flask lazily so the rest of
     commander_builder works without the ``[web]`` extra installed."""
     try:
@@ -105,8 +116,14 @@ def create_app(deck_dir: Optional[Path] = None):
         deck_dir = Path(env_dir) if env_dir else Path.cwd() / "decks"
     deck_dir = deck_dir.resolve()
 
+    if knowledge_db is None:
+        env_db = os.environ.get("COMMANDER_BUILDER_KNOWLEDGE_DB")
+        knowledge_db = Path(env_db) if env_db else _DEFAULT_KLOG_DB
+    knowledge_db = Path(knowledge_db)
+
     app = Flask(__name__)
     app.config["DECK_DIR"] = deck_dir
+    app.config["KNOWLEDGE_DB"] = knowledge_db
 
     @app.route("/")
     def root():
@@ -145,7 +162,51 @@ def create_app(deck_dir: Optional[Path] = None):
         data = build_dashboard(path, bracket=bracket)
         return jsonify(data.to_dict())
 
+    @app.route("/api/iterations")
+    def iterations():
+        deck_id = request.args.get("deck")
+        try:
+            limit = int(request.args.get("limit", "50"))
+        except ValueError:
+            return jsonify({"error": "limit must be an integer"}), 400
+        limit = max(1, min(limit, 500))
+
+        try:
+            if deck_id:
+                rows = iterations_for_deck(deck_id, db_path=knowledge_db)
+            else:
+                rows = recent_iterations(limit=limit, db_path=knowledge_db)
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({"error": str(exc)}), 500
+
+        return jsonify({
+            "iterations": [_iteration_to_dict(r) for r in rows],
+            "deck_id": deck_id,
+            "count": len(rows),
+        })
+
     return app
+
+
+def _iteration_to_dict(it) -> dict:
+    """JSON-friendly projection of an Iteration. Drops the deck_snapshot
+    blob to keep payloads small — callers can re-request the full row
+    via /api/iteration/<id> if we add it later."""
+    return {
+        "id": it.id,
+        "deck_id": it.deck_id,
+        "deck_name": it.deck_name,
+        "bracket": it.bracket,
+        "parent_id": it.parent_id,
+        "audit_version": it.audit_version,
+        "audit_manifest": it.audit_manifest,
+        "verdict": it.verdict,
+        "verdict_notes": it.verdict_notes,
+        "win_rate_old": it.win_rate_old,
+        "win_rate_new": it.win_rate_new,
+        "margin": it.margin,
+        "created_at": it.created_at,
+    }
 
 
 def main() -> int:

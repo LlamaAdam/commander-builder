@@ -202,3 +202,76 @@ def test_dashboard_traversal_blocked(client, tmp_path):
     outside.write_text("[Main]\n1 Forest\n", encoding="utf-8")
     resp = client.get(f"/api/dashboard?path={outside}")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /api/iterations
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def seeded_client(deck_dir, tmp_path, monkeypatch):
+    """A client with a knowledge_log seeded by the demo script."""
+    import importlib.util
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts" / "seed_demo_knowledge_log.py"
+    )
+    spec = importlib.util.spec_from_file_location("_seed_demo_klog", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    db = tmp_path / "klog.sqlite"
+    mod.seed_demo(db, deck_id="omnath")
+
+    # Stub Scryfall (in case any dashboard call piggy-backs).
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda name: {"type_line": "Basic Land", "cmc": 0.0,
+                      "color_identity": ["G"], "prices": {"usd": "0.05"}},
+    )
+
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def test_iterations_endpoint_without_deck_returns_recent(seeded_client):
+    resp = seeded_client.get("/api/iterations")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "iterations" in body
+    assert body["count"] == 4
+    # Recent-first ordering — newest is the v4 tutor experiment.
+    assert "tutor" in body["iterations"][0]["deck_name"].lower()
+
+
+def test_iterations_endpoint_filters_by_deck(seeded_client):
+    resp = seeded_client.get("/api/iterations?deck=omnath")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["count"] == 4
+    assert body["deck_id"] == "omnath"
+    # iterations_for_deck returns oldest-first.
+    assert "v1" in body["iterations"][0]["deck_name"]
+
+
+def test_iterations_endpoint_filters_unknown_deck(seeded_client):
+    resp = seeded_client.get("/api/iterations?deck=does-not-exist")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["count"] == 0
+    assert body["iterations"] == []
+
+
+def test_iterations_drops_deck_snapshot_blob(seeded_client):
+    """Snapshot blobs would balloon JSON payloads — we omit them
+    from the listing endpoint."""
+    resp = seeded_client.get("/api/iterations?deck=omnath")
+    body = resp.get_json()
+    for entry in body["iterations"]:
+        assert "deck_snapshot" not in entry
+
+
+def test_iterations_400_on_bad_limit(seeded_client):
+    resp = seeded_client.get("/api/iterations?limit=abc")
+    assert resp.status_code == 400
