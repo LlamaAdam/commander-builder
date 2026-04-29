@@ -140,14 +140,30 @@ def _count_game_changers(card_names: list[str]) -> int:
     the public API is ``load_game_changers()``, which returns a
     set. The old import-error path silently returned 0 for every
     deck, breaking the bracket heuristic + the dashboard tile.
+
+    Also filters out universal staples (Sol Ring, Arcane Signet,
+    Command Tower) which are GC-listed but appear in essentially
+    every deck. Counting them produces noisy "3 game changers"
+    readings on otherwise vanilla bracket-3 decks and breaks the
+    bracket-1/2/3 "expects 0 GCs" warning's signal-to-noise ratio.
     """
     try:
         from .game_changers import load_game_changers
         gc_set = load_game_changers()
     except Exception:
         return 0
+    # Strip universal staples from the GC set used for counting —
+    # they're on Wizards' list but represent baseline ramp/fixing,
+    # not "this deck is powered up." UNIVERSAL_STAPLES_LC is the
+    # canonical set already shared with improvement_advisor + meta_test.
+    try:
+        from .staples import UNIVERSAL_STAPLES_LC
+        lc_filter = set(UNIVERSAL_STAPLES_LC)
+    except Exception:
+        lc_filter = set()
+    counted = {gc for gc in gc_set if gc.lower() not in lc_filter}
     lower = {n.lower() for n in card_names}
-    return sum(1 for gc in gc_set if gc.lower() in lower)
+    return sum(1 for gc in counted if gc.lower() in lower)
 
 
 # Wizards' official Commander Bracket system (replaced the old 1-10
@@ -417,8 +433,14 @@ def build_dashboard(
     illegal: list[str] = []
     try:
         from .game_changers import load_game_changers
+        from .staples import UNIVERSAL_STAPLES_LC
         gc_set = load_game_changers()
-        in_deck_gcs = sorted({n for n in deck_card_names if n in gc_set})
+        # Match the bracket-tile filter so the banner pill and the
+        # bracket sub-line agree on the count.
+        in_deck_gcs = sorted({
+            n for n in deck_card_names
+            if n in gc_set and n.lower() not in UNIVERSAL_STAPLES_LC
+        })
     except Exception:
         pass
     try:
@@ -428,12 +450,20 @@ def build_dashboard(
             illegal = sorted(set(deck_card_names) & set(banned))
     except Exception:
         pass
+    # Total cards = main + commander section. Commander legality
+    # requires exactly 100. Surface deficits in the banner so the
+    # user sees "deck is short by N" before running an audit /
+    # propose-swap that would otherwise produce illegal A/B inputs.
+    deck_total = total_main + len(commander_names)
     legality = {
         "in_deck_game_changers": in_deck_gcs,
         "n_game_changers": len(in_deck_gcs),
         "illegal_cards": illegal,
         "n_illegal": len(illegal),
         "all_legal": len(illegal) == 0,
+        "deck_total": deck_total,
+        "deck_target": 100,
+        "deck_size_ok": deck_total == 100,
     }
 
     return DashboardData(

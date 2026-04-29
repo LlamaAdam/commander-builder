@@ -547,6 +547,18 @@ function legalityBanner(legality, data) {
     wrap.appendChild(el("span", { class: "pill bad" },
       `✗ ${legality.n_illegal} illegal card${legality.n_illegal === 1 ? "" : "s"}`));
   }
+  // Deck-size pill — only show when the deck isn't 100 cards.
+  // Universal staples-aware audit produces sub-100 proposed decks
+  // when source is short; the warning prevents the user from
+  // chasing 0-games Forge runs.
+  if (legality.deck_size_ok === false) {
+    const total = legality.deck_total ?? "?";
+    const target = legality.deck_target ?? 100;
+    wrap.appendChild(el(
+      "span", { class: "pill bad" },
+      `Deck is ${total}/${target} — needs ${target - total} more`,
+    ));
+  }
   // Game Changers pill.
   const gcCount = legality.n_game_changers || 0;
   if (gcCount > 0) {
