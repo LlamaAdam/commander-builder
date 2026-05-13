@@ -20,24 +20,17 @@ Notes:
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Optional
 
-from ..deck_dashboard import build_dashboard
+# ``detect_forge_version`` is still needed at app boot for the
+# Forge-jar staleness check that prints to stdout. The per-blueprint
+# route modules import the rest of the heavyweight deps themselves
+# (build_dashboard, knowledge_log functions, etc.) so they don't
+# need re-importing here.
 from ..forge_runner import detect_forge_version
-from ..knowledge_log import (
-    DEFAULT_DB_PATH as _DEFAULT_KLOG_DB,
-    Iteration,
-    get_iteration,
-    iterations_for_deck,
-    pricing_series_for_deck,
-    recent_iterations,
-    record_iteration,
-    stats_summary,
-    verdict_breakdown_for_deck,
-)
+from ..knowledge_log import DEFAULT_DB_PATH as _DEFAULT_KLOG_DB
 
 # Pure helpers extracted to ``_helpers.py`` as part of the
 # 2026-05-13 blueprint refactor (tier-3 issue #3.1). Re-exported
@@ -160,7 +153,7 @@ def create_app(
     """Build the Flask app. Imports flask lazily so the rest of
     commander_builder works without the ``[web]`` extra installed."""
     try:
-        from flask import Flask, jsonify, render_template, request
+        from flask import Flask
     except ImportError as exc:
         raise RuntimeError(
             "flask is required for the web scaffold. "
@@ -249,237 +242,25 @@ def create_app(
     # ``routes_<group>.py`` modules and are wired in here. The
     # remaining inline routes are being migrated incrementally.
     from .routes_audit import make_audit_blueprint
+    from .routes_dashboard import make_dashboard_blueprint
     from .routes_decks import make_decks_blueprint
+    from .routes_meta import make_meta_blueprint
     from .routes_sim import make_sim_blueprint
     app.register_blueprint(
         make_audit_blueprint(deck_dir, _resolve_deck_path),
     )
+    app.register_blueprint(make_dashboard_blueprint(
+        deck_dir, knowledge_db, _list_decks, _resolve_deck_path,
+    ))
     app.register_blueprint(
         make_decks_blueprint(deck_dir, _resolve_deck_path),
     )
     app.register_blueprint(
+        make_meta_blueprint(deck_dir, _list_decks, _ASSET_VERSION),
+    )
+    app.register_blueprint(
         make_sim_blueprint(deck_dir, knowledge_db, _resolve_deck_path),
     )
-
-    @app.route("/")
-    def root():
-        return render_template("index.html", asset_version=_ASSET_VERSION)
-
-    @app.route("/api/correlation_summary")
-    def correlation_summary_route():
-        """Read the forge_py↔Forge correlation log and return summary
-        stats. UI can show "forge_py agrees X% of the time across N
-        runs" so the user knows the Track-2 dataset is growing."""
-        from ..forge_py_correlation import correlation_summary
-        log_path = deck_dir.parent.parent / "_forge_py_correlation.csv"
-        try:
-            stats = correlation_summary(log_path)
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({
-                "error": "could not read correlation log",
-                "detail": f"{type(exc).__name__}: {exc}",
-            }), 500
-        stats["log_path"] = str(log_path)
-        stats["enabled"] = bool(
-            os.environ.get(
-                "COMMANDER_BUILDER_CORRELATE_FORGE_PY", "",
-            ).strip().lower() in ("1", "true", "yes"),
-        )
-        return jsonify(stats)
-
-    @app.route("/api/health")
-    def health():
-        return jsonify({
-            "status": "ok",
-            "deck_dir": str(deck_dir),
-            "deck_count": len(_list_decks(deck_dir)),
-        })
-
-    @app.route("/api/forge_version")
-    def forge_version_route():
-        """Surface the bundled Forge jar's version + age so the UI can
-        warn when the install is stale enough to misbehave on errata-
-        sensitive cards. is_stale=False when age can't be determined
-        (no build.txt) — don't alarm on unknowable state."""
-        info = detect_forge_version()
-        return jsonify({
-            "version": info.version,
-            "jar_path": str(info.jar_path) if info.jar_path else None,
-            "build_date": (
-                info.build_date.isoformat() if info.build_date else None
-            ),
-            "age_days": info.age_days,
-            "is_stale": info.is_stale,
-        })
-
-    # JS error collector. The browser-side window.onerror /
-    # unhandledrejection handlers POST here so silent failures
-    # (TDZ ReferenceErrors, async network errors, etc.) land
-    # in a server-readable log instead of vanishing in the user's
-    # devtools. Plain text — easy to grep, easy to copy into chat.
-    _JS_ERROR_LOG = deck_dir.parent.parent / "_js_errors.log"
-
-    @app.route("/api/log_error", methods=["POST"])
-    def log_error():
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
-            return jsonify({"error": "expected JSON body"}), 400
-        msg = (payload.get("message") or "").strip()
-        if not msg:
-            return jsonify({"error": "message is required"}), 400
-        # Cap fields so a runaway browser doesn't bloat the log.
-        msg = msg[:2000]
-        url = (payload.get("url") or "")[:512]
-        stack = (payload.get("stack") or "")[:4000]
-        ua = (payload.get("user_agent") or "")[:256]
-        kind = (payload.get("kind") or "error")[:40]
-        from datetime import datetime as _dt, timezone as _tz
-        ts = _dt.now(_tz.utc).isoformat()
-        # Append-only; never read from this endpoint.
-        try:
-            _JS_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
-            with _JS_ERROR_LOG.open("a", encoding="utf-8") as f:
-                f.write(f"--- {ts} [{kind}] {url}\n")
-                f.write(f"UA: {ua}\n")
-                f.write(f"MSG: {msg}\n")
-                if stack:
-                    f.write(f"STACK:\n{stack}\n")
-                f.write("\n")
-        except OSError as exc:
-            return jsonify({
-                "error": "could not write log",
-                "detail": f"{type(exc).__name__}: {exc}",
-            }), 500
-        # Hand the user a short reference token they can copy into chat.
-        # Format: ts + first 4 hex chars of message hash. Not crypto,
-        # just a "this is the one I'm complaining about" handle.
-        import hashlib as _hashlib
-        ref = ts.replace(":", "").replace("-", "")[:14] + "-" + (
-            _hashlib.sha1((msg + stack).encode("utf-8")).hexdigest()[:4]
-        )
-        return jsonify({"ok": True, "ref": ref})
-
-    @app.route("/api/decks")
-    def decks():
-        # Default: only [USER] decks. Pass ?all=1 to include filler/pool.
-        all_flag = request.args.get("all", "").lower() in ("1", "true", "yes")
-        return jsonify({
-            "decks": _list_decks(deck_dir, user_only=not all_flag),
-        })
-
-    @app.route("/api/dashboard")
-    def dashboard():
-        deck_id = request.args.get("deck")
-        explicit = request.args.get("path")
-        try:
-            bracket_raw = request.args.get("bracket")
-            bracket = int(bracket_raw) if bracket_raw else None
-        except ValueError:
-            return jsonify({"error": "bracket must be an integer 1..5"}), 400
-        # Default to the [B?] suffix in the filename when the request
-        # didn't explicitly pass a bracket — the filename is the user's
-        # declared bracket and should beat the heuristic.
-        if bracket is None:
-            bracket = _bracket_from_filename(deck_id)
-        with_advise = request.args.get("advise", "").lower() in (
-            "1", "true", "yes",
-        )
-
-        path = _resolve_deck_path(deck_dir, deck_id, explicit)
-        if path is None:
-            return jsonify({
-                "error": "deck not found",
-                "deck": deck_id,
-                "path": explicit,
-            }), 404
-
-        suggested = None
-        if with_advise:
-            try:
-                suggested = _build_suggested_adds(path, bracket or 3)
-            except Exception as exc:
-                # advise() can fail for many reasons (missing EDHREC,
-                # missing commander, network); the dashboard still
-                # renders without suggestions.
-                suggested = None
-                app.logger.warning("advise failed: %s", exc)
-
-        data = build_dashboard(path, bracket=bracket, suggested=suggested)
-        return jsonify(data.to_dict())
-
-    @app.route("/api/iterations")
-    def iterations():
-        deck_id = request.args.get("deck")
-        try:
-            limit = int(request.args.get("limit", "50"))
-        except ValueError:
-            return jsonify({"error": "limit must be an integer"}), 400
-        limit = max(1, min(limit, 500))
-
-        try:
-            if deck_id:
-                rows = iterations_for_deck(deck_id, db_path=knowledge_db)
-            else:
-                rows = recent_iterations(limit=limit, db_path=knowledge_db)
-        except Exception as exc:  # pragma: no cover - sqlite errors
-            return jsonify({"error": str(exc)}), 500
-
-        return jsonify({
-            "iterations": [_iteration_to_dict(r) for r in rows],
-            "deck_id": deck_id,
-            "count": len(rows),
-        })
-
-    @app.route("/api/pricing_series")
-    def pricing_series_route():
-        """Time-series of total deck cost across one deck's iteration
-        chain. Powers the dashboard sparkline that surfaces cost
-        evolution over time.
-
-        Returns ``{deck_id, count, points: [{iteration_id, captured_at,
-        total_price_usd}, ...]}``. Empty points list when the deck
-        has no iterations OR none of them captured a pricing snapshot.
-        """
-        deck_id = request.args.get("deck")
-        if not deck_id:
-            return jsonify({"error": "deck is required"}), 400
-        try:
-            points = pricing_series_for_deck(
-                deck_id, db_path=knowledge_db,
-            )
-        except Exception as exc:  # pragma: no cover - sqlite errors
-            return jsonify({"error": str(exc)}), 500
-        return jsonify({
-            "deck_id": deck_id,
-            "count": len(points),
-            "points": points,
-        })
-
-    @app.route("/api/verdict_breakdown")
-    def verdict_breakdown_route():
-        """Per-audit-version verdict counts for one deck.
-
-        Returns ``{deck_id, total_iterations, breakdown: {<version>:
-        {kept, reverted, neutral, pending, total}}}``. UI consumes this
-        to show "kept 4/5 v3 swaps, kept 2/3 v4 swaps" when the deck
-        has accumulated enough iterations to be meaningful (≥5).
-        """
-        deck_id = request.args.get("deck")
-        if not deck_id:
-            return jsonify({"error": "deck is required"}), 400
-        try:
-            breakdown = verdict_breakdown_for_deck(
-                deck_id, db_path=knowledge_db,
-            )
-        except Exception as exc:  # pragma: no cover - sqlite errors
-            return jsonify({"error": str(exc)}), 500
-        total = sum(b.get("total", 0) for b in breakdown.values())
-        return jsonify({
-            "deck_id": deck_id,
-            "total_iterations": total,
-            "breakdown": breakdown,
-        })
 
 
     return app
