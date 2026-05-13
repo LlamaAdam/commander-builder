@@ -242,10 +242,12 @@ def test_find_top_liked_decks_returns_top_n_when_search_has_more(monkeypatch):
             return card_search_response
         if "/decks/search" in url:
             return deck_search_response
-        # fetch_deck path — URL ends with /{publicId}
+        # fetch_deck path — URL ends with /{publicId}.
+        # Tag each deck with the requested bracket so the new
+        # re-verification step (Phase A gap #1) doesn't drop them.
         pid = url.rstrip("/").rsplit("/", 1)[-1]
         fetched_pids.append(pid)
-        return {"publicId": pid, "name": f"Hakbal #{pid}"}
+        return {"publicId": pid, "name": f"Hakbal #{pid}", "bracket": 3}
 
     monkeypatch.setattr(
         "commander_builder.moxfield_import._http_get_json", fake_get,
@@ -349,6 +351,97 @@ def test_find_top_liked_decks_passes_bracket_to_search(monkeypatch):
     # Sort by likes desc so the highest-engagement decks come first.
     assert "sortColumn=likes" in seen_search_url["url"]
     assert "sortDirection=descending" in seen_search_url["url"]
+
+
+def test_find_top_liked_decks_filters_out_wrong_bracket(monkeypatch):
+    """Regression for Phase A gap #1: Moxfield's `bracket` search filter
+    is loose — it returns near-bracket decks too. Without a client-side
+    re-check, a B4 audit could read recommendations from B3/B5 decks
+    mixed in, diluting the signal we're trying to capture. Re-verify
+    each returned deck via resolve_bracket() and drop mismatches."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return {"data": [{"id": "c1", "name": "Hakbal"}]}
+        if "/decks/search" in url:
+            return {"data": [
+                {"publicId": "b4-a", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "b3",   "commanders": [{"name": "Hakbal"}]},  # wrong bracket
+                {"publicId": "b4-b", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "b5",   "commanders": [{"name": "Hakbal"}]},  # wrong bracket
+                {"publicId": "b4-c", "commanders": [{"name": "Hakbal"}]},
+            ]}
+        pid = url.rstrip("/").rsplit("/", 1)[-1]
+        # Tag each fetched deck with a bracket consistent with its id.
+        bracket = (
+            4 if pid.startswith("b4")
+            else 3 if pid == "b3"
+            else 5 if pid == "b5"
+            else 0
+        )
+        return {"publicId": pid, "name": pid, "bracket": bracket}
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    out = find_top_liked_decks_for_commander("Hakbal", bracket=4, n=5)
+    pids = [d["publicId"] for d in out]
+    # Only the B4 decks survived the re-verification step.
+    assert pids == ["b4-a", "b4-b", "b4-c"]
+
+
+def test_find_top_liked_decks_skips_verification_when_bracket_none(monkeypatch):
+    """When no bracket filter was passed (caller doesn't care), don't
+    re-verify — accept whatever Moxfield returned."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return {"data": [{"id": "c1", "name": "Hakbal"}]}
+        if "/decks/search" in url:
+            return {"data": [
+                {"publicId": "a", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "b", "commanders": [{"name": "Hakbal"}]},
+            ]}
+        pid = url.rstrip("/").rsplit("/", 1)[-1]
+        return {"publicId": pid, "name": pid}  # no bracket field
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    out = find_top_liked_decks_for_commander("Hakbal", bracket=None, n=5)
+    # Both accepted — no filter requested.
+    assert len(out) == 2
+
+
+def test_find_top_liked_decks_drops_unverifiable_bracket_when_filtering(
+    monkeypatch,
+):
+    """Decks with no bracket fields at all (resolve_bracket returns 0)
+    must drop when a bracket filter is active — we can't confirm they
+    match what the user asked for."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return {"data": [{"id": "c1", "name": "Hakbal"}]}
+        if "/decks/search" in url:
+            return {"data": [
+                {"publicId": "good", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "no-bracket", "commanders": [{"name": "Hakbal"}]},
+            ]}
+        pid = url.rstrip("/").rsplit("/", 1)[-1]
+        if pid == "good":
+            return {"publicId": pid, "name": pid, "bracket": 4}
+        return {"publicId": pid, "name": pid}  # no bracket at all
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    out = find_top_liked_decks_for_commander("Hakbal", bracket=4, n=5)
+    pids = [d["publicId"] for d in out]
+    assert pids == ["good"]
 
 
 def test_find_top_liked_decks_dedupes_duplicate_public_ids(monkeypatch):

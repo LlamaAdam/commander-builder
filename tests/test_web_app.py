@@ -2297,6 +2297,62 @@ def test_audit_source_param_overrides_llm_param(client, monkeypatch):
     assert seen["use_claude"] is False  # source overrode the llm param
 
 
+def test_audit_payload_match_pct_from_reference_frequency(client, monkeypatch):
+    """Phase A gap #2 from the bracket-peers self-audit: bracket_peers
+    recs only set in_n_references / total_references, not inclusion_pct
+    / synergy_pct. The audit response's match_pct field must compute
+    from those for the UI pill to render anything other than 0%."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Moat", action="add", reason="r",
+                    evidence={
+                        "in_n_references": 5,
+                        "total_references": 5,
+                        "source": "bracket_peers",
+                    },
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Last March", action="add", reason="r",
+                    evidence={
+                        "in_n_references": 3,
+                        "total_references": 5,
+                        "source": "bracket_peers",
+                    },
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut", reason="r",
+                    evidence={}, name_known=True,
+                ),
+                # Second cut so _apply_swaps_to_dck can keep BOTH adds.
+                # The endpoint balances adds==cuts; without this we'd
+                # only see the first add land in the response.
+                SimpleNamespace(
+                    card="Old Card", action="cut", reason="r",
+                    evidence={}, name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="bracket_peers",
+            fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&source=bracket_peers")
+    body = resp.get_json()
+    by_card = {a["card"]: a for a in body["added"]}
+    # 5/5 = 100% — unanimous reference inclusion gets max pill.
+    assert by_card["Moat"]["match_pct"] == 100
+    # 3/5 = 60% — majority but not unanimous.
+    assert by_card["Last March"]["match_pct"] == 60
+
+
 def test_audit_payload_includes_saturation_skips(client, monkeypatch):
     """When the saturation guard drops ramp adds (deck over-saturated),
     the dropped cards surface in body.skipped_for_saturation so the UI

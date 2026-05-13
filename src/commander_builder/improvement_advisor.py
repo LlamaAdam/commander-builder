@@ -562,6 +562,18 @@ def _extract_main_cards_from_moxfield_json(deck_json: dict) -> list[str]:
     return out
 
 
+def _default_min_refs(total_refs: int) -> int:
+    """Default frequency floor for bracket-peers adds.
+
+    Singletons (cards in 1 of N references) are noise — they reflect
+    one builder's idiosyncrasy, not a tuned-archetype consensus. Default
+    to "at least majority of references, but never less than 2" so a
+    small reference set (N=2 or 3) still produces some recommendations.
+    """
+    import math
+    return max(2, math.ceil(total_refs / 2))
+
+
 def _bracket_peers_recommendations(
     commander_name: str,
     bracket: int,
@@ -569,6 +581,8 @@ def _bracket_peers_recommendations(
     n: int = DEFAULT_BRACKET_PEERS_N,
     add_limit: int = DEFAULT_ADD_LIMIT,
     cut_limit: int = DEFAULT_CUT_LIMIT,
+    min_refs: Optional[int] = None,
+    diagnosis: Optional["DeckDiagnosis"] = None,
 ) -> tuple[list[SwapRecommendation], int]:
     """Source swap recommendations from the top-N highest-liked Moxfield
     decks for ``commander_name`` at ``bracket``.
@@ -627,11 +641,20 @@ def _bracket_peers_recommendations(
             if c.lower() not in case_map:
                 case_map[c.lower()] = c
 
-    # Adds: any card appearing in a reference, missing from user, not
-    # a universal staple. Sort by frequency desc, then alphabetical.
+    # Drop singletons (cards in only 1 of N references) — they're one
+    # builder's quirk, not a tuned-archetype consensus. Default floor is
+    # majority-of-references (never below 2). Phase A gap #3.
+    effective_min_refs = (
+        min_refs if min_refs is not None else _default_min_refs(total_refs)
+    )
+
+    # Adds: any card appearing in ≥ effective_min_refs references,
+    # missing from user, not a universal staple. Sort by frequency
+    # desc, then alphabetical.
     add_candidates_lc = [
         lc for lc in freq
         if lc not in deck_cards_lc
+        and freq[lc] >= effective_min_refs
         and not is_universal_staple(case_map[lc])
         and not is_basic_land(case_map[lc])
     ]
@@ -639,13 +662,13 @@ def _bracket_peers_recommendations(
         key=lambda lc: (-freq[lc], case_map[lc].lower()),
     )
 
-    recs: list[SwapRecommendation] = []
-    for lc in add_candidates_lc[:add_limit]:
+    add_recs: list[SwapRecommendation] = []
+    for lc in add_candidates_lc:
         name = case_map[lc]
         n_refs = freq[lc]
         role = _role_for_card(name)
         label = render_frequency_label(n_refs, total_refs)
-        recs.append(SwapRecommendation(
+        add_recs.append(SwapRecommendation(
             card=name,
             action="add",
             reason=(
@@ -660,6 +683,21 @@ def _bracket_peers_recommendations(
                 "source": "bracket_peers",
             },
         ))
+
+    # Phase A gap #5: re-rank by diagnosis priority roles when
+    # available, matching the heuristic path's behavior. If the deck's
+    # weakness signals say "no closer / high draw rate", finisher-tagged
+    # adds float to the top regardless of which reference they came
+    # from. Stable sort preserves frequency-desc within each priority
+    # bucket.
+    if diagnosis and getattr(diagnosis, "priority_roles", None):
+        priority_index = {r: i for i, r in enumerate(diagnosis.priority_roles)}
+        def _rank(rec: SwapRecommendation) -> int:
+            role_str = (rec.evidence or {}).get("role", "unknown")
+            return priority_index.get(role_str, len(priority_index) + 1)
+        add_recs.sort(key=_rank)
+
+    recs: list[SwapRecommendation] = list(add_recs[:add_limit])
 
     # Cuts: user cards absent from every reference, with the universal-
     # staples filter applied so we don't recommend cutting Sol Ring.
@@ -885,6 +923,7 @@ def advise(
             commander_name=primary_commander,
             bracket=bracket,
             deck_cards=main_cards,
+            diagnosis=diagnosis,
         )
         if peer_recs:
             recs = peer_recs

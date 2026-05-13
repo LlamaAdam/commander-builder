@@ -306,6 +306,24 @@ def find_top_liked_decks_for_commander(
                 print(f"  [moxfield] fetch_deck({pid}) failed: {exc}",
                       flush=True)
             continue
+        # Bracket re-verification. Moxfield's search-side `bracket`
+        # filter is documented as loose — it surfaces near-bracket
+        # decks too — so a B4 audit could otherwise read recs from
+        # B3/B5 decks mixed in, defeating the whole point of sourcing
+        # from same-bracket builds. When a bracket filter is active,
+        # check resolve_bracket() (which prefers Moxfield's confirmed
+        # `bracket` field, then userBracket, then autoBracket) and
+        # drop mismatches.
+        if bracket and 1 <= bracket <= 5:
+            actual = resolve_bracket(deck_json)
+            if actual != bracket:
+                if verbose:
+                    print(
+                        f"  [moxfield] {pid} bracket={actual} mismatched "
+                        f"requested {bracket}; dropping.",
+                        flush=True,
+                    )
+                continue
         seen_ids.add(pid)
         decks.append(deck_json)
     return decks

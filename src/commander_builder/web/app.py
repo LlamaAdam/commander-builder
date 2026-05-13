@@ -1627,9 +1627,23 @@ def _normalize_pasted_deck(text: str) -> str:
 
 def _match_pct_from_evidence(evidence: dict | None) -> int:
     """Mirror deck_dashboard.match_score combination so audit output
-    uses the same 1..100 scale the suggestion panel renders."""
+    uses the same 1..100 scale the suggestion panel renders.
+
+    Bracket-peers recs (source="bracket_peers") only set
+    ``in_n_references`` / ``total_references`` rather than the EDHREC
+    inclusion%/synergy% pair. When those are present we compute
+    ``100 * in_n_references / total_references`` — a card in 5/5
+    references shows 100, 3/5 shows 60. This keeps the UI's match-pct
+    pill meaningful across all sources without bracket_peers needing
+    to fabricate EDHREC-shaped fields.
+    """
     if not evidence:
         return 0
+    # Prefer reference-frequency math when bracket_peers fields are set.
+    total = evidence.get("total_references")
+    in_n = evidence.get("in_n_references")
+    if isinstance(total, int) and total > 0 and isinstance(in_n, int):
+        return max(1, min(100, round(100 * in_n / total)))
     inclusion = float(evidence.get("inclusion_pct") or 0)
     synergy = min(float(evidence.get("synergy_pct") or 0), 20.0)
     raw = inclusion + synergy
