@@ -1,0 +1,471 @@
+"""Pure helper functions shared across the web layer's route handlers.
+
+Extracted from ``web/app.py`` as part of the blueprint refactor
+(tier-3 issue #3.1). Every function here is independent of Flask
+state — no ``current_app``, no ``request``, no closure over
+``create_app``'s arguments — so the route blueprints can import
+them freely.
+
+Functions:
+
+- ``_bracket_from_filename``    parse [B<n>] suffix from a deck name
+- ``_normalize_pasted_deck``    Moxfield bulk-paste → .dck shape
+- ``_match_pct_from_evidence``  evidence dict → 0..100 or None
+- ``_to_constructed_format``    Commander .dck → 1v1-constructed .dck
+- ``_format_added_line``        ``1 <Name>|<SET>|<CN>`` for an add
+- ``_pad_main_to_99``           top up [Main] with basics
+- ``_apply_swaps_to_dck``       splice add/cut recs into a .dck
+- ``_build_suggested_adds``     project ``advise()`` recs → dashboard shape
+- ``_iteration_to_dict``        Iteration row → JSON-friendly dict
+
+External callers should NOT import from this module — it's an
+internal layout detail. The web layer's public surface stays
+``commander_builder.web.app:create_app``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+
+def _bracket_from_filename(deck_id: str | None) -> int | None:
+    """Parse the ``[B<n>]`` suffix the user encodes in deck filenames.
+
+    Returns the bracket integer (1..5) or None if the suffix is missing
+    or unparseable. The filename is the user's declared/intended
+    bracket; it should override the heuristic guess unless the request
+    explicitly passes a different bracket.
+    """
+    if not deck_id:
+        return None
+    import re as _re
+    m = _re.search(r"\[B(\d)\](?:\.dck)?\s*$", deck_id)
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+    except ValueError:
+        return None
+    return n if 1 <= n <= 5 else None
+
+
+def _normalize_pasted_deck(text: str) -> str:
+    """Accept either a Forge-format .dck blob or a Moxfield bulk-paste
+    line list and return a valid .dck. Bulk-paste shape is one line
+    per card: ``<qty> <Name>`` with no `[Main]` header. We detect that
+    by looking for any `[section]` markers; if none, wrap the lines
+    in a `[Main]` section.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+    # If the paste already has section headers, trust the user.
+    has_section = any(
+        line.strip().startswith("[") and line.strip().endswith("]")
+        for line in text.splitlines()
+    )
+    if has_section:
+        return text + "\n"
+    # Otherwise wrap in [Main]. Filter trivial header lines like
+    # "Mainboard (99)" that Moxfield's UI sometimes includes.
+    body_lines: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # Skip obvious headers (e.g. "Commander (1)", "Mainboard (99)").
+        if s.lower().startswith(("mainboard", "commander", "sideboard",
+                                 "considering")):
+            continue
+        body_lines.append(s)
+    return "[Main]\n" + "\n".join(body_lines) + "\n"
+
+
+def _match_pct_from_evidence(evidence: dict | None) -> int | None:
+    """Mirror deck_dashboard.match_score combination so audit output
+    uses the same 0..100 scale the suggestion panel renders.
+
+    Bracket-peers recs (source="bracket_peers") only set
+    ``in_n_references`` / ``total_references`` rather than the EDHREC
+    inclusion%/synergy% pair. When those are present we compute
+    ``100 * in_n_references / total_references`` — a card in 5/5
+    references shows 100, 3/5 shows 60. This keeps the UI's match-pct
+    pill meaningful across all sources without bracket_peers needing
+    to fabricate EDHREC-shaped fields.
+
+    Returns ``None`` (JSON ``null``) when evidence carries no usable
+    scoring signal — manabase essentials, vanilla Claude recs with
+    no peer-ref data, etc. The UI branches on null and shows a
+    source-specific badge (Manabase / Claude analyst) instead of a
+    misleading "0%" pill. Before 2026-05-13 we returned 0 here and
+    the UI rendered it as "0%", which looked identical to "this
+    card is a bad match" rather than "this card has no inclusion%
+    to score against."
+    """
+    if not evidence:
+        return None
+    # Prefer reference-frequency math when bracket_peers fields are set.
+    total = evidence.get("total_references")
+    in_n = evidence.get("in_n_references")
+    if isinstance(total, int) and total > 0 and isinstance(in_n, int):
+        return max(0, min(100, round(100 * in_n / total)))
+    inclusion = evidence.get("inclusion_pct")
+    synergy = evidence.get("synergy_pct")
+    # If neither inclusion nor synergy was provided, the rec carries
+    # no scoring signal — return None so the UI renders a
+    # source-tag badge instead of a confusing "0%" pill.
+    if inclusion is None and synergy is None:
+        return None
+    inclusion = float(inclusion or 0)
+    synergy = min(float(synergy or 0), 20.0)
+    raw = inclusion + synergy
+    if raw <= 0:
+        return None
+    return max(1, min(100, round(raw)))
+
+
+def _to_constructed_format(text: str) -> str:
+    """Convert a Forge commander .dck to a 1v1-constructed-loadable
+    .dck.
+
+    Forge's `sim -f constructed` mode silently produces zero games
+    when the deck has a ``[Commander]`` section — the format flag
+    doesn't match the deck shape, so Forge loads the file but never
+    actually starts a match. The fix is to:
+
+    1. Move the commander line into ``[Main]`` so the deck is just
+       a single 100-card stack of cards Forge can shuffle.
+    2. Drop the ``[Commander]`` section header.
+    3. Stamp ``Deck Type=constructed`` into ``[metadata]`` so Forge's
+       deck-type detector picks the right rule set.
+
+    This mirrors what forge_py's correlate_with_forge.py harness has
+    been doing for the round-robin study; the propose-swap web endpoint
+    needs the same conversion before handing decks to Forge.
+    """
+    import re as _re
+    out: list[str] = []
+    in_cmdr = False
+    in_meta = False
+    cmdr_lines: list[str] = []
+    seen_metadata = False
+    deck_type_set = False
+
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            out.append(raw)
+            continue
+        if s.lower() == "[commander]":
+            in_cmdr = True
+            in_meta = False
+            continue  # drop the header
+        if s.lower() == "[metadata]":
+            in_meta = True
+            in_cmdr = False
+            seen_metadata = True
+            out.append(raw)
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            in_cmdr = False
+            in_meta = False
+            out.append(raw)
+            continue
+        if in_cmdr:
+            cmdr_lines.append(s)
+            continue
+        if in_meta and s.lower().startswith("deck type="):
+            out.append("Deck Type=constructed")
+            deck_type_set = True
+            continue
+        out.append(raw)
+
+    new_text = "\n".join(out)
+    if not seen_metadata:
+        new_text = "[metadata]\nDeck Type=constructed\n\n" + new_text
+    elif not deck_type_set:
+        # Insert under existing metadata block.
+        new_text = _re.sub(
+            r"(\[metadata\][^\n]*\n)",
+            r"\1Deck Type=constructed\n",
+            new_text, count=1, flags=_re.IGNORECASE,
+        )
+    # Append commander lines to [Main]. If [Main] doesn't exist, add it.
+    if cmdr_lines:
+        cmdr_block = "\n".join(cmdr_lines) + "\n"
+        if _re.search(r"^\[Main\]\s*$", new_text, _re.MULTILINE | _re.IGNORECASE):
+            # Insert just after the [Main] header. Use a callable
+            # replacement so card-line content (which starts with
+            # digits like "1 Hakbal") doesn't get parsed as numeric
+            # backreferences (\1 → \11 collision).
+            new_text = _re.sub(
+                r"(\[Main\][^\n]*\n)",
+                lambda m: m.group(0) + cmdr_block,
+                new_text, count=1, flags=_re.IGNORECASE,
+            )
+        else:
+            new_text += "\n[Main]\n" + cmdr_block
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    return new_text
+
+
+def _format_added_line(name: str) -> str:
+    """Render a `1 <Name>|<SET>|<CN>` line for an added card.
+
+    Forge's deck loader can be strict about ambiguous name-only
+    lookups (alternate art, reprints across many sets, special
+    characters like //). We resolve each appended card to its
+    current Scryfall printing so the proposed deck loads cleanly.
+
+    The shared ``oracle_snapshots`` cache stores forge_py-projected
+    snapshots that don't carry ``set`` / ``collector_number`` fields
+    (those are stripped to keep payload size small). When the cached
+    snapshot lacks them we fall through to a cache-bypassed Scryfall
+    fetch, which returns the full payload and re-caches it. Plain
+    ``1 <name>`` is the final fallback when Scryfall is unreachable.
+    """
+    try:
+        from ..scryfall_client import lookup_card
+        data = lookup_card(name) or {}
+        set_code = (data.get("set") or "").upper()
+        cn = data.get("collector_number") or ""
+        if not (set_code and cn):
+            # Cached snapshot was the projected shape — fetch fresh.
+            data = lookup_card(name, cache=False) or {}
+            set_code = (data.get("set") or "").upper()
+            cn = data.get("collector_number") or ""
+    except Exception:
+        return f"1 {name}"
+    if set_code and cn:
+        return f"1 {name}|{set_code}|{cn}"
+    return f"1 {name}"
+
+
+_BASIC_LANDS = ("Forest", "Island", "Plains", "Swamp", "Mountain", "Wastes")
+
+
+def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, int]]:
+    """Top up the [Main] section with basic lands until it hits 99.
+
+    The user's source decks sometimes ship short of legal Commander
+    size (e.g. the Goblin deck is 71 mainboard). The advisor's adds==
+    cuts balance preserves any deficit, so the proposed deck inherits
+    it and Forge refuses to load it. Pad with basics matching the
+    distribution already present in the deck — preserves color balance
+    without us needing to round-trip Scryfall for the commander's color
+    identity.
+
+    Returns ``(padded_text, padding_added, breakdown)`` where breakdown
+    is ``{basic_name: count_added}``. If the deck is already at or above
+    99 mainboard, returns the input text and an empty breakdown.
+    """
+    import re as _re
+    if current_main >= 99:
+        return text, 0, {}
+    deficit = 99 - current_main
+
+    # Count basics currently in [Main] so we mirror the user's distribution.
+    counts: dict[str, int] = {b: 0 for b in _BASIC_LANDS}
+    in_main = False
+    qty_name_re = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_main = stripped.lower() == "[main]"
+            continue
+        if not in_main:
+            continue
+        m = qty_name_re.match(stripped)
+        if not m:
+            continue
+        name = m.group(2).strip()
+        if name in counts:
+            try:
+                counts[name] += int(m.group(1))
+            except (TypeError, ValueError):
+                counts[name] += 1
+
+    basics_present = {b: c for b, c in counts.items() if c > 0}
+    # No basics? Fall back to Wastes (colorless, legal in any color identity).
+    # Better than guessing colors blind.
+    if not basics_present:
+        basics_present = {"Wastes": 1}
+
+    total = sum(basics_present.values())
+    pad: dict[str, int] = {}
+    distributed = 0
+    # Largest share first (sorted descending) so floor-rounding leftovers
+    # gravitate to the dominant color.
+    for b, c in sorted(basics_present.items(), key=lambda kv: -kv[1]):
+        share = (c * deficit) // total
+        if share > 0:
+            pad[b] = share
+            distributed += share
+    leftover = deficit - distributed
+    if leftover > 0:
+        top = max(basics_present, key=lambda b: basics_present[b])
+        pad[top] = pad.get(top, 0) + leftover
+
+    # Render new lines and splice them at the end of [Main].
+    pad_lines = [f"{n} {b}" for b, n in pad.items() if n > 0]
+    out_lines: list[str] = []
+    in_main = False
+    inserted = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_main and not inserted:
+                out_lines.extend(pad_lines)
+                inserted = True
+            in_main = stripped.lower() == "[main]"
+        out_lines.append(raw)
+    if in_main and not inserted:
+        out_lines.extend(pad_lines)
+
+    new_text = "\n".join(out_lines)
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    return new_text, deficit, pad
+
+
+def _apply_swaps_to_dck(
+    original_text: str, recommendations,
+) -> tuple[str, list[str], list[str], int]:
+    """Apply add / cut recommendations to a .dck blob.
+
+    Returns ``(new_text, added_card_names, removed_card_names,
+    kept_count)``. Quantity-1 lines are added by default.
+
+    Handling:
+    - The [Commander] section is preserved as-is (audits never cut commanders).
+    - The [Main] section is rebuilt: drop any line whose card name
+      matches a `cut` recommendation; append `1 <card>` for each `add`.
+    - Other sections (sideboard, considering, metadata) are preserved.
+
+    **Adds and cuts are balanced** — Commander needs exactly 99 main +
+    1 commander. The advisor's heuristic produces M adds and N cuts
+    independently and they're often unequal, leaving an illegal deck
+    that Forge refuses to load. We trim whichever list is longer so
+    both have ``min(M, N)`` entries (priority: keep adds, since they
+    came from EDHREC's top-cards rank order; drop the *bottom* of the
+    cuts list, since those are the lowest-confidence "doesn't appear
+    in EDHREC top/synergy" guesses).
+
+    Card names are matched case-insensitively against the leading
+    ``<qty> <Name>[|<SET>|<CN>]`` pattern.
+    """
+    import re as _re
+    add_names = [r.card for r in recommendations if r.action == "add"]
+    cuts = [r.card for r in recommendations if r.action == "cut"]
+    # Balance to keep Commander deck size legal.
+    n = min(len(add_names), len(cuts))
+    add_names = add_names[:n]
+    cuts = cuts[:n]
+    cut_set = {c.lower() for c in cuts}
+
+    out_lines: list[str] = []
+    in_main = False
+    main_kept = 0
+    in_metadata = False
+    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+
+    for raw in original_text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            out_lines.append(raw)
+            continue
+        # Section header tracking.
+        if stripped.startswith("[") and stripped.endswith("]"):
+            # If we're leaving [Main], this is where we append the new
+            # cards (so they're inside the section, not after it).
+            if in_main:
+                for name in add_names:
+                    out_lines.append(_format_added_line(name))
+            in_main = stripped.lower() == "[main]"
+            in_metadata = stripped.lower() == "[metadata]"
+            out_lines.append(raw)
+            continue
+
+        if in_main:
+            m = line_pattern.match(stripped)
+            if m:
+                name = m.group(2).strip().lower()
+                if name in cut_set:
+                    continue  # drop this line
+                # Sum the quantity prefix, not the line count — `5 Forest`
+                # is one line but five cards. Counting lines made the UI
+                # report '83 mainboard' on a deck Forge actually loaded
+                # as the legal 99.
+                try:
+                    main_kept += int(m.group(1))
+                except (TypeError, ValueError):
+                    main_kept += 1
+            out_lines.append(raw)
+            continue
+
+        # Non-main section content passes through.
+        out_lines.append(raw)
+
+    # If [Main] was the last section, append-on-exit didn't fire above.
+    # Detect by checking whether all add_names already landed.
+    if in_main:
+        for name in add_names:
+            out_lines.append(_format_added_line(name))
+
+    new_text = "\n".join(out_lines)
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    return new_text, add_names, cuts, main_kept
+
+
+def _build_suggested_adds(deck_path: Path, bracket: int) -> list[dict]:
+    """Project ``improvement_advisor.advise()`` recommendations into the
+    shape ``deck_dashboard.build_dashboard`` expects for
+    ``suggested``::
+
+        [{"card": str, "inclusion_pct": float, "synergy_pct": float,
+          "rationale": str, "price_usd": Optional[float]}, ...]
+
+    Only `add` actions are forwarded — the dashboard's "suggested
+    adds" panel is for cards to consider including, not cuts.
+    Pulled out as a helper so both `/api/dashboard?advise=1` and
+    `/api/advise` reuse the same projection.
+    """
+    from ..improvement_advisor import advise
+    report = advise(deck_path, bracket=bracket)
+    out: list[dict] = []
+    for rec in report.recommendations:
+        if rec.action != "add":
+            continue
+        ev = rec.evidence or {}
+        out.append({
+            "card": rec.card,
+            "inclusion_pct": float(ev.get("inclusion_pct") or 0),
+            "synergy_pct": float(ev.get("synergy_pct") or 0),
+            "rationale": rec.reason or "",
+            "price_usd": ev.get("price_usd"),
+        })
+    return out
+
+
+def _iteration_to_dict(it) -> dict:
+    """JSON-friendly projection of an Iteration. Drops the deck_snapshot
+    blob to keep payloads small — callers can re-request the full row
+    via /api/iteration/<id> if we add it later."""
+    return {
+        "id": it.id,
+        "deck_id": it.deck_id,
+        "deck_name": it.deck_name,
+        "bracket": it.bracket,
+        "parent_id": it.parent_id,
+        "audit_version": it.audit_version,
+        "audit_manifest": it.audit_manifest,
+        "verdict": it.verdict,
+        "verdict_notes": it.verdict_notes,
+        "win_rate_old": it.win_rate_old,
+        "win_rate_new": it.win_rate_new,
+        "margin": it.margin,
+        "created_at": it.created_at,
+    }
