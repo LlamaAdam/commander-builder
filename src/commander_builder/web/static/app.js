@@ -269,25 +269,36 @@ async function runProposeSwap() {
   // ReferenceError that silently killed the click handler.
   const modeEl = document.querySelector('input[name="mode"]:checked');
   const mode = modeEl ? modeEl.value : "pod";
-  // Wall-time depends on mode. Pod (4-player commander) takes
-  // ~30-60s/game; 1v1 constructed is ~5-10s/game.
-  //
-  // Pod estimates assume the Sprint 1A+1B+1C+1E speedup stack:
-  //   - 1A: parallel pods (filler-pair pods run concurrently)
-  //   - 1B: skip late pods once the cumulative verdict is locked
-  //   - 1C: kill a pod when its in-pod margin is uncatchable
-  //   - 1E: filler_pairs auto-scales to min(4, cpu_count)
-  // On a 4-core box with 4 filler pairs running in parallel, the
-  // wall-time tracks the slowest pod, not their sum.
-  const podSecs = { 5: 75, 10: 150, 20: 300 };
-  const duelSecs = { 5: 20, 10: 45, 20: 90 };
-  const eta = mode === "pod" ? podSecs[games] : duelSecs[games];
-  status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} games via Forge — ~${eta}s…`;
+  // Pull the bracket from the filename's [B?] suffix; fall back to 3.
+  // Resolved up here (not down in the try block) so the ETA copy can
+  // factor it in — B4/B5 games run 2-3x longer than B3, so a flat
+  // estimate misled users about how long to wait. Real datapoint that
+  // forced this fix: a B4 10g pod sim took ~700s vs. the old flat
+  // 150s estimate.
+  const bracketMatch = (_activeDeckId || "").match(/\[B(\d)\]/);
+  const bracket = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
+  // Per-game wall-time in seconds, keyed by bracket. Conservative
+  // (slow side of observed distribution) so users don't get
+  // over-optimistic ETAs that breed "is it stuck?" questions.
+  // Pod = 4-player commander; duel = 1v1 constructed (~3-5x faster).
+  // With parallel-pod dispatch (Sprint 1A) + intra-pod abort (1C),
+  // wall-time tracks the SLOWEST pod, not the sum — these figures
+  // already account for that. 1B early-stop is effectively a no-op
+  // when filler_pairs == cpu_count (all pods run concurrently,
+  // nothing queued to cancel), so we don't discount for it.
+  const podSecPerGame = { 1: 15, 2: 22, 3: 30, 4: 55, 5: 75 };
+  const duelSecPerGame = { 1: 4, 2: 6, 3: 8, 4: 14, 5: 22 };
+  const perGame = (mode === "pod")
+    ? (podSecPerGame[bracket] ?? podSecPerGame[3])
+    : (duelSecPerGame[bracket] ?? duelSecPerGame[3]);
+  const etaSec = games * perGame;
+  const etaStr = etaSec >= 90
+    ? `~${Math.round(etaSec / 60)} min`
+    : `~${etaSec}s`;
+  status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} `
+    + `games on B${bracket} via Forge — ${etaStr}…`;
   btn.disabled = true;
   try {
-    // Pull the bracket from the filename's [B?] suffix; fall back to 3.
-    const bracketMatch = (_activeDeckId || "").match(/\[B(\d)\]/);
-    const bracket = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
     const resp = await fetch("/api/propose_swap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
