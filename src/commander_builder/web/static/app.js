@@ -513,6 +513,15 @@ function renderSaveIterationBlock(body) {
         + `knowledge_log now has ${total} rows.`;
       // Leave button disabled — the row is persisted; clicking again
       // would write a duplicate.
+      // Auto-refresh the dashboard so the new iteration row appears
+      // in the history panel (+ verdict breakdown + pricing sparkline
+      // pick up the new data point) without a manual reload.
+      // Soft-refresh keeps the existing rendered dashboard visible
+      // while the new fetch runs in background.
+      const li = document.querySelector(
+        `.deck-list li[data-id="${_activeDeckId}"]`,
+      );
+      if (li) selectDeck(_activeDeckId, li, { soft: true });
     } catch (e) {
       saveStatus.textContent = `Network error: ${e.message}`;
       saveBtn.disabled = false;
@@ -982,6 +991,13 @@ function renderAuditResult(container, body) {
       const total = (out.stats && out.stats.total) || "?";
       saveAuditStatus.textContent =
         `Saved audit #${out.id} (pending). knowledge_log: ${total} rows.`;
+      // Auto-refresh so the new row appears in the dashboard's
+      // iteration history without a manual reload. Same soft-refresh
+      // pattern as the post-sim save flow.
+      const li = document.querySelector(
+        `.deck-list li[data-id="${_activeDeckId}"]`,
+      );
+      if (li) selectDeck(_activeDeckId, li, { soft: true });
     } catch (e) {
       saveAuditStatus.textContent = `Network error: ${e.message}`;
       saveAuditBtn.disabled = false;

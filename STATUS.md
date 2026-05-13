@@ -61,25 +61,27 @@ predictor) still data-gated.
 2. ~~**Fix multi-jar selection bug in `detect_forge_version`.**~~ ✅
    Shipped in commit `23fc108` (parsed-version sort).
 
-3. **Pricing chart / query endpoint.** Pricing snapshots now land in
-   `audit_manifest.pricing` per iteration save, but there's no UI to
-   chart cost evolution. Add `/api/pricing_series?deck=<id>` returning
-   `[{iteration_id, captured_at, total_price_usd}, ...]` + a small
-   inline sparkline on the deck dashboard. ~1 h. *Source: handoff #5
-   self-audit — stated goal not yet met.*
+3. ~~**Pricing chart / query endpoint.**~~ ✅ Shipped.
+   `pricing_series_for_deck()` + `/api/pricing_series?deck=<id>` +
+   inline SVG sparkline on the deck dashboard (activates at ≥2
+   captured points; tooltip per dot; trend label with $ delta + %
+   change). 7 new tests.
 
 4. ~~**Reject negative `total_price_usd`.**~~ ✅ Shipped in commit
    `43205d4`.
 
-5. **Auto-refresh dashboard when knowledge_log gains rows.** After a
-   successful save_iteration, the iterations panel should update
-   without a full reload. Soft-refresh infra exists; just wire the
-   call. ~30 min. *Source: 2026-05-06 handoff item #6.*
+5. ~~**Auto-refresh dashboard when knowledge_log gains rows.**~~ ✅
+   Shipped. Both `save_iteration` paths (post-sim verdict save +
+   audit-only "Save audit (no sim)") now trigger a soft-refresh of
+   the active deck on success so the iteration history /
+   verdict-breakdown / pricing-sparkline pick up the new row
+   without a manual reload.
 
-6. **Per-archetype win-rate breakdown.** When the user has ≥5
-   iterations for a deck, show "kept verdict in 4/5 v3 swaps, kept in
-   2/3 v4 swaps." Reads from `knowledge_log`. ~1–2 h. *Source:
-   2026-05-06 handoff item #7.*
+6. ~~**Per-archetype win-rate breakdown.**~~ ✅ Shipped.
+   `verdict_breakdown_for_deck()` + `/api/verdict_breakdown?deck=<id>` +
+   "Verdict by audit version" panel that activates at ≥5
+   iterations. Groups by `audit_version` with zero-padded
+   {kept, reverted, neutral, pending, total}. 8 new tests.
 
 7. ~~**Advisor: archetype-aware redundancy guard.**~~ ✅ Shipped.
    New `_filter_for_saturation()` + `staples.ROLE_SATURATION_THRESHOLDS`
