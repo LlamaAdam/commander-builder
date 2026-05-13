@@ -841,6 +841,66 @@ def test_bracket_peers_tags_role_on_adds(monkeypatch):
     assert moat.evidence["role"] != ""
 
 
+def test_bracket_peers_never_cuts_nonbasic_lands(monkeypatch):
+    """Regression for the 2026-05-13 Ur-Dragon audit: bracket-peers
+    cut Savannah ($200 ABU dual) because none of the top-5 references
+    happened to run it. Manabase is deliberate — the advisor must
+    never auto-recommend cutting any land (basic, dual, fetch, etc.).
+    """
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    # User runs Savannah; none of the references do. Without the land
+    # guard the old code would emit Savannah in the cut list.
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Sol Ring", "Mountain"]),
+        _moxfield_deck_with_cards("d2", ["Sol Ring", "Mountain"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    # Savannah's Scryfall hit says "Land" in the type_line, so
+    # staples.is_land() returns True and the cut path skips it.
+    def fake_lookup(name):
+        if name == "Savannah":
+            return {"type_line": "Land — Plains Forest", "oracle_text": ""}
+        return {"type_line": "Creature — Dragon", "oracle_text": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="The Ur-Dragon", bracket=4,
+        deck_cards={"Savannah", "Some Other Card"},
+    )
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Savannah" not in cut_cards
+    # Sanity: the non-land "Some Other Card" still gets recommended
+    # for cut (so the guard isn't accidentally over-broad).
+    assert "Some Other Card" in cut_cards
+
+
+def test_heuristic_never_cuts_nonbasic_lands(monkeypatch):
+    """Same guard as above, applied to the EDHREC heuristic cut path."""
+    deck_cards = {"Savannah", "Some Other Card"}
+    page = _fake_edhrec_page(top=[("Sol Ring", 90.0)], synergy=[])
+    def fake_lookup(name):
+        if name == "Savannah":
+            return {"type_line": "Land — Plains Forest", "oracle_text": ""}
+        return {"type_line": "Creature — Dragon", "oracle_text": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+    recs = _heuristic_swap_recommendations(deck_cards, page)
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Savannah" not in cut_cards
+    assert "Some Other Card" in cut_cards
+
+
 def test_bracket_peers_excludes_user_cards_from_adds(monkeypatch):
     """A card already in the user's deck must NEVER appear as an add
     even if it's in every reference — that's a no-op recommendation."""

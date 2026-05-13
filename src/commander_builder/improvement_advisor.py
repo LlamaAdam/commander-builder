@@ -60,6 +60,7 @@ from .staples import (
     classify_role,
     count_deck_roles,
     is_basic_land,
+    is_land,
     is_role_saturated,
     is_universal_staple,
     render_frequency_label,
@@ -513,8 +514,11 @@ def _heuristic_swap_recommendations(
                  | {c.name.lower() for c in edhrec_page.high_synergy_cards}
 
     for card in deck_cards:
-        # Don't recommend cutting basic lands or universal staples.
-        if is_basic_land(card) or is_universal_staple(card):
+        # Don't recommend cutting any land (basic, dual, fetch, shock,
+        # MDFC, utility) or universal staples. The manabase is a
+        # deliberate construction; a missing reference doesn't mean
+        # the user should pull a $200 ABU dual.
+        if is_land(card) or is_universal_staple(card):
             continue
         if card.lower() not in edhrec_known:
             recs.append(SwapRecommendation(
@@ -706,7 +710,12 @@ def _bracket_peers_recommendations(
         case_map[lc] for lc in (deck_cards_lc - any_ref_lc)
         if lc in case_map
         and not is_universal_staple(case_map[lc])
-        and not is_basic_land(case_map[lc])
+        # Skip ALL lands (basic + nonbasic + fetch + shock + MDFC).
+        # Regression caught 2026-05-13: bracket_peers recommended
+        # cutting Savannah from a 5-color Ur-Dragon deck because the
+        # top-5 references happened to use different specific duals.
+        # Manabase decisions are deliberate, not auto-recommended.
+        and not is_land(case_map[lc])
     ]
     cut_candidates.sort(key=str.lower)
     for name in cut_candidates[:cut_limit]:

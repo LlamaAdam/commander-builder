@@ -77,6 +77,31 @@ def is_basic_land(card_name: str) -> bool:
     return card_name.lower().strip() in BASIC_LANDS_LC
 
 
+def is_land(card_name: str) -> bool:
+    """Catch any land — basic, dual, fetch, shock, MDFC, utility, etc.
+
+    Manabase decisions are deliberate; the advisor's cut path uses this
+    to skip lands so it never recommends pulling a $200 ABU dual
+    (Savannah, 2026-05-13 Ur-Dragon audit) just because reference
+    decks happened to substitute a different mana base configuration.
+
+    Basics short-circuit through the static frozenset (no Scryfall
+    round-trip). Everything else falls back to a type_line check via
+    ``lookup_card``. Lookup failures return False — over-protecting
+    an unknown nonland is the worse mistake.
+    """
+    if is_basic_land(card_name):
+        return True
+    try:
+        card = lookup_card(card_name)
+    except Exception:
+        return False
+    if not card:
+        return False
+    type_line = (card.get("type_line") or "").lower()
+    return "land" in type_line
+
+
 # --- Role classification --------------------------------------------------
 
 # Each role has a list of (regex, expected_in_type_line, score) tuples.

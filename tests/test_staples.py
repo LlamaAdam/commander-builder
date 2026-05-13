@@ -322,3 +322,74 @@ def test_is_role_saturated_unknown_role_never_fires():
     role string to silently drop all recommendations."""
     assert is_role_saturated("not-a-real-role", count=999) is False
     assert is_role_saturated("other", count=999) is False
+
+
+# ---------------------------------------------------------------------------
+# is_land — manabase guard for advisor cut path
+# ---------------------------------------------------------------------------
+# Real failure mode caught 2026-05-13: the bracket-peers recommender
+# cut Savannah (a $200 ABU dual) from a 5-color Ur-Dragon deck because
+# none of the top-5 reference decks happened to run it. Manabase
+# decisions are deliberate — the advisor shouldn't auto-recommend
+# cutting any land. is_land powers the new skip filter.
+
+
+def test_is_land_recognizes_basic(monkeypatch):
+    from commander_builder.staples import is_land
+    def boom(name):
+        raise AssertionError("must not call Scryfall for basics")
+    monkeypatch.setattr("commander_builder.staples.lookup_card", boom)
+    assert is_land("Forest") is True
+    assert is_land("Mountain") is True
+
+
+def test_is_land_recognizes_nonbasic_via_type_line(monkeypatch):
+    """Savannah, fetch lands, MDFCs, shocks — anything Scryfall marks
+    with 'Land' in the type_line is a land for our purposes."""
+    from commander_builder.staples import is_land
+    fakes = {
+        "savannah": "Land — Plains Forest",
+        "wooded foothills": "Land",
+        "stomping ground": "Land — Mountain Forest",
+        "boseiju, who endures": "Legendary Land — Forest",
+    }
+    def fake_lookup(name):
+        entry = fakes.get(name.lower())
+        if entry is None:
+            return None
+        return {"type_line": entry, "oracle_text": ""}
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+    assert is_land("Savannah") is True
+    assert is_land("Wooded Foothills") is True
+    assert is_land("Stomping Ground") is True
+    assert is_land("Boseiju, Who Endures") is True
+
+
+def test_is_land_returns_false_for_nonland_cards(monkeypatch):
+    from commander_builder.staples import is_land
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card",
+        lambda name: {"type_line": "Creature — Dragon", "oracle_text": ""},
+    )
+    assert is_land("Drakuseth, Maw of Flames") is False
+
+
+def test_is_land_returns_false_on_lookup_failure(monkeypatch):
+    """Defensive: Scryfall unreachable or unknown card → False so the
+    cut path falls back to normal handling rather than over-protecting
+    a non-land just because the lookup failed."""
+    from commander_builder.staples import is_land
+    def boom(name):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", boom,
+    )
+    assert is_land("Mystery Card") is False
+
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card",
+        lambda name: None,
+    )
+    assert is_land("Unknown Card") is False
