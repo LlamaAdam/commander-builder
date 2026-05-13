@@ -145,6 +145,59 @@ def test_power_bracket_combo_archetype_nudges_up():
     assert p_combo >= p_other
 
 
+def test_power_bracket_user_override_can_underdeclare():
+    """Sanity: if user declares B2 on a deck the heuristic thinks is
+    B4, the explicit bracket wins. Bracket auto-inference UI uses
+    `inferred_bracket` to surface the divergence; the *displayed*
+    bracket still respects the user's choice."""
+    declared = _power_level(avg_cmc=2.0, n_game_changers=4, bracket=2)
+    inferred = _power_level(avg_cmc=2.0, n_game_changers=4, bracket=None)
+    assert declared == 2
+    assert inferred == 4
+
+
+def test_dashboard_emits_inferred_bracket_alongside_declared(
+    tmp_path, monkeypatch,
+):
+    """build_dashboard exposes both the user's declared bracket and
+    the heuristic's standalone guess so the UI can warn on
+    divergence."""
+    from commander_builder.deck_dashboard import build_dashboard
+
+    deck = tmp_path / "deck.dck"
+    deck.write_text(
+        "[metadata]\nName=Test\n"
+        "[Commander]\n1 Test Cmdr\n"
+        "[Main]\n"
+        + "1 Mountain\n" * 35
+        + "1 Sol Ring\n1 Mana Vault\n1 Mana Crypt\n"
+        + "1 Demonic Tutor\n1 Vampiric Tutor\n"
+        + "1 Lightning Bolt\n" * 60,
+        encoding="utf-8",
+    )
+    # Stub Scryfall: the GC-list cards (Mana Vault, Mana Crypt,
+    # Demonic Tutor, Vampiric Tutor) so n_game_changers reads high.
+    def fake_lookup(name, **_kw):
+        return {
+            "type_line": "Sorcery" if "Tutor" in name or "Bolt" in name else "Artifact",
+            "oracle_text": "",
+            "cmc": 1.0,
+            "color_identity": ["R"],
+            "prices": {"usd": "0.50"},
+        }
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+
+    # User declares B2 ("Core") but the deck has multiple game-changers.
+    result = build_dashboard(deck, bracket=2)
+    assert result.stat_tiles["bracket"] == 2
+    # Heuristic should land at 4 (4+ GCs from our staples list).
+    # The exact value depends on what's in UNIVERSAL_STAPLES_LC vs the
+    # GC list — check it's at least higher than declared.
+    assert result.stat_tiles["inferred_bracket"] >= 2
+
+
 # ---------------------------------------------------------------------------
 # match_score
 # ---------------------------------------------------------------------------

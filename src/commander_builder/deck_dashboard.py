@@ -493,6 +493,15 @@ def build_dashboard(
             "power_level": _power_bracket(
                 avg_cmc, n_game_changers, bracket, archetype,
             ),
+            # Heuristic guess in isolation — what the deck *looks like*
+            # without the user's declared override. UI can compare to
+            # `bracket` and warn if they diverge (e.g. user declared
+            # B3 but the deck has 5 game-changers and goldfishes like
+            # B4). Stable shape: always set, even when bracket is also
+            # the heuristic's value.
+            "inferred_bracket": _power_bracket(
+                avg_cmc, n_game_changers, None, archetype,
+            ),
             "n_game_changers": n_game_changers,
             "est_price_usd": round(total_price, 2),
             "n_priced_cards": cards_with_price,

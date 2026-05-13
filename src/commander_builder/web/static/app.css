@@ -398,14 +398,27 @@ body {
   flex-direction: column;
   padding: 20px 22px;
   gap: 12px;
-  overflow: hidden;
+  /* Content can be tall once an A/B sim result + Save-iteration block
+     render below the textarea; let the modal body scroll instead of
+     hiding overflow (which trapped the close button off-screen). */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .modal header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
-  padding-bottom: 8px;
+  padding: 4px 0 8px;
+  /* Pin the close button to the top of the scrollable modal so the
+     user can always dismiss the dialog regardless of scroll depth. */
+  position: sticky;
+  top: -20px;             /* cancel the modal's top padding */
+  margin-top: -20px;
+  margin-bottom: -4px;
+  padding-top: 20px;
+  background: var(--panel);
+  z-index: 2;
 }
 .modal header h2 {
   margin: 0;
@@ -422,8 +435,14 @@ body {
 .modal-close:hover { color: var(--text); }
 
 .modal textarea {
-  flex: 1;
-  min-height: 240px;
+  /* Fixed height + internal scroll so the deck text can be long
+     without pushing the Run button / result panel below the fold.
+     Use `flex: 0 0 auto` to opt out of the flex stretch behavior
+     that previously consumed the modal's full vertical space. */
+  flex: 0 0 auto;
+  height: 240px;
+  min-height: 160px;
+  max-height: 50vh;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 12px;
   background: var(--bg);
