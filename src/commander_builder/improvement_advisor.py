@@ -624,6 +624,44 @@ def _heuristic_swap_recommendations(
 DEFAULT_BRACKET_PEERS_N = 5
 
 
+def _peer_card_frequency(decks):
+    """Build per-card reference-frequency across a list of Moxfield
+    deck JSONs.
+
+    Returns ``(frequency_counter, case_map)`` where:
+      - ``frequency_counter`` maps lowercased card name → number of
+        references that contain it. **Each deck contributes at most
+        once per card** (so basic lands present 30× in a deck don't
+        inflate the count — what we want is the "shows up in N of
+        the M references" signal).
+      - ``case_map`` maps lowercased name → display-cased name
+        (first-seen wins, mirrors how source decks render the card).
+
+    Extracted from ``_bracket_peers_recommendations`` and
+    ``_collect_bracket_peer_summary_for_prompt`` which previously
+    duplicated this logic. The duplication had a subtle divergence:
+    the prompt-summary path counted Forest once per occurrence
+    instead of once per deck, inflating the frequency of basics in
+    the Claude prompt. The unified helper set-ifies per deck so the
+    same correct semantics apply everywhere.
+    """
+    from collections import Counter
+    freq: Counter = Counter()
+    case_map: dict[str, str] = {}
+    for deck in decks:
+        cards = _extract_main_cards_from_moxfield_json(deck)
+        seen_this_deck: set[str] = set()
+        for c in cards:
+            lc = c.lower()
+            if lc not in case_map:
+                case_map[lc] = c
+            if lc in seen_this_deck:
+                continue
+            seen_this_deck.add(lc)
+            freq[lc] += 1
+    return freq, case_map
+
+
 def _extract_main_cards_from_moxfield_json(deck_json: dict) -> list[str]:
     """Pull the mainboard card names out of a Moxfield deck JSON.
 
@@ -700,31 +738,19 @@ def _bracket_peers_recommendations(
     if not decks:
         return [], 0
 
-    # Parse the reference cardlists upfront so the frequency math is
-    # plain Python set ops. Lower-case throughout to match the existing
-    # case-insensitive comparisons in `_heuristic_swap_recommendations`.
-    ref_cardlists: list[list[str]] = [
-        _extract_main_cards_from_moxfield_json(d) for d in decks
-    ]
-    ref_sets_lc: list[set[str]] = [{c.lower() for c in cs} for cs in ref_cardlists]
-    total_refs = len(ref_sets_lc)
-
+    # Shared frequency helper — counts each deck at most once per
+    # card, so basics don't inflate the signal. case_map preserves
+    # first-seen capitalization.
+    freq, case_map = _peer_card_frequency(decks)
+    total_refs = len(decks)
     deck_cards_lc = {c.lower() for c in deck_cards}
-
-    # Frequency: how many references contain each card.
-    from collections import Counter
-    freq: Counter[str] = Counter()
-    for s in ref_sets_lc:
-        for c in s:
-            freq[c] += 1
-
-    # Map lowercase → display-cased name (preserve first-seen capitalization
-    # to match how the source decks render the card).
-    case_map: dict[str, str] = {}
-    for cardlist in ref_cardlists + [list(deck_cards)]:
-        for c in cardlist:
-            if c.lower() not in case_map:
-                case_map[c.lower()] = c
+    # Extend case_map with the user's own cards so cuts can render the
+    # user's casing (the peer-cardlists may not include cards that are
+    # in the user's deck and absent from every reference).
+    for c in deck_cards:
+        lc = c.lower()
+        if lc not in case_map:
+            case_map[lc] = c
 
     # Drop singletons (cards in only 1 of N references) — they're one
     # builder's quirk, not a tuned-archetype consensus. Default floor is
@@ -841,16 +867,11 @@ def _collect_bracket_peer_summary_for_prompt(
     if not decks:
         return None
 
-    ref_cardlists = [_extract_main_cards_from_moxfield_json(d) for d in decks]
-    from collections import Counter
-    freq: Counter[str] = Counter()
-    case_map: dict[str, str] = {}
-    for cardlist in ref_cardlists:
-        for c in cardlist:
-            lc = c.lower()
-            freq[lc] += 1
-            if lc not in case_map:
-                case_map[lc] = c
+    # Shared frequency helper — same semantics as the standalone
+    # bracket_peers source. Each deck counts at most once per card,
+    # which keeps the in_n_refs count meaningful: "Moat in 5/5
+    # references" rather than "Forest in 150 occurrences."
+    freq, case_map = _peer_card_frequency(decks)
 
     # Top-100 most frequent cards is a generous cap — keeps the
     # prompt compact while covering virtually every relevant card

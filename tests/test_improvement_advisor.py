@@ -1332,6 +1332,43 @@ def test_bracket_peers_reranks_by_diagnosis_priority_roles(monkeypatch):
     assert adds[0].evidence.get("role") == "finisher"
 
 
+def test_peer_card_frequency_counts_each_deck_once_per_card():
+    """Helper bug fix: basics that appear N times in one deck's
+    mainboard count as 1 toward that card's reference frequency, not
+    N. Previously _collect_bracket_peer_summary duplicated frequency
+    logic with the wrong semantics — Forest x30 in a single ref
+    inflated the prompt's 'in_n_refs' figure into nonsense."""
+    from commander_builder.improvement_advisor import _peer_card_frequency
+    fake_decks = [
+        # Deck 1: 30 copies of "Forest" + 1 "Moat".
+        {"boards": {"mainboard": {"cards": {
+            **{f"forest-{i}": {"card": {"name": "Forest"}, "quantity": 1}
+               for i in range(30)},
+            "moat": {"card": {"name": "Moat"}, "quantity": 1},
+        }}}},
+        # Deck 2: 30 Forests + 1 Moat.
+        {"boards": {"mainboard": {"cards": {
+            **{f"forest-{i}": {"card": {"name": "Forest"}, "quantity": 1}
+               for i in range(30)},
+            "moat": {"card": {"name": "Moat"}, "quantity": 1},
+        }}}},
+    ]
+    freq, case_map = _peer_card_frequency(fake_decks)
+    # Each card counts once per deck regardless of duplicates within.
+    assert freq["forest"] == 2
+    assert freq["moat"] == 2
+    # Case is preserved (first-seen wins).
+    assert case_map["forest"] == "Forest"
+
+
+def test_peer_card_frequency_empty_list():
+    """No decks → empty Counter + empty map, never raises."""
+    from commander_builder.improvement_advisor import _peer_card_frequency
+    freq, case_map = _peer_card_frequency([])
+    assert dict(freq) == {}
+    assert case_map == {}
+
+
 def test_collect_bracket_peer_summary_builds_frequency_map(monkeypatch):
     """The summary used by the Claude prompt is a compact frequency
     representation — for each card that appears in any reference, the
