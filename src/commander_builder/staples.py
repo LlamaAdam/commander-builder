@@ -403,46 +403,48 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
     ]),
     ("wipe", [
         (r"destroy all (?:creatures|nonland|nonland permanents|permanents)", None, 90),
+        # "Destroy all <type> creatures" — Crux of Fate's real
+        # Scryfall oracle reads "Destroy all Dragon creatures" /
+        # "Destroy all non-Dragon creatures" (typed all-sweep, not
+        # the "each" idiom). Live-browser audit 2026-05-13 caught
+        # this: the dashboard reported wipe=0 on the Ur-Dragon deck
+        # despite Crux of Fate being present. ``\S+`` covers
+        # "Dragon" + "non-Dragon" + any hyphenated subtype.
+        (r"destroy all \S+ creatures", None, 90),
         (r"exile all (?:creatures|permanents)", None, 90),
         (r"return all .* to (?:its|their) owners' hands", None, 80),
         (r"deals \d+ damage to each (?:creature|player)", None, 75),
         # "Destroy each <typed> creature" / "destroy each <subtype>" —
-        # Crux of Fate, In Garruk's Wake, Dusk // Dawn, etc. The
-        # "each <typed>" idiom is modern templating for board-scoped
-        # removal. Score above single-target removal (70-75) but at
-        # the same tier as the "destroy all" wipe so plain "destroy
-        # each creature" + "destroy each <subtype>" classify alongside
-        # Wrath/Damnation.
+        # In Garruk's Wake, Dusk // Dawn, etc. The "each <typed>"
+        # idiom is modern templating for board-scoped removal.
+        # Score above single-target removal (70-75) but at the same
+        # tier as the "destroy all" wipe.
         (r"destroy each (?:creature|non-?\w+ creature|\w+)", None, 90),
         (r"exile each (?:creature|non-?\w+ creature|\w+)", None, 90),
-        # Overload bounce wipes — Cyclonic Rift, Evacuation when read
-        # via the overload-rewritten "each" form. The "you don't
-        # control" qualifier disambiguates from generic single-target
-        # bounce; "owner's hand" (singular) is the post-overload
-        # phrasing while the unmodified Evacuation reads "their
-        # owners' hands" (plural, already covered above).
-        (r"return each .*?(?:you don't control|nonland permanent).*? to (?:its|their) owner(?:'s|s')? hands?", None, 85),
-        # Overload-mechanic catch-all: Scryfall's printed oracle text
-        # for Cyclonic Rift et al. keeps the "target" wording and
-        # only describes the overload rewrite in a parenthetical, so
-        # the "return each ..." pattern above misses the printed
-        # text. Anything with a single-target bounce/destroy clause
-        # AND an "overload {" mana cost in the same text is a
-        # board-wide wipe at the overload cost. Score equal to the
-        # "destroy all" wipe — it IS a wipe at overload cost, with a
-        # cheap targeted mode pre-overload.
+        # Overload bounce wipes — Cyclonic Rift et al. Scryfall's
+        # real oracle text puts the overload paragraph AFTER a
+        # newline (``\n``) following the target clause, so the
+        # regex must cross newlines. Using ``[\s\S]*`` (any char
+        # incl. newline) instead of ``.*``, which Python's
+        # ``re.search`` doesn't cross-line by default.
         #
-        # NOTE: oracle text places the targeted clause BEFORE the
-        # overload reminder in printed templating, so the regex
-        # threads target-clause → overload-mention. ``re.search`` is
-        # not DOTALL by default, so ``.*`` won't cross a true newline
-        # — that's fine because Scryfall's text for these cards puts
-        # the overload clause on the same line as the target clause
-        # when read as a single oracle string (verified for
-        # Cyclonic Rift, Vandalblast, Mizzium Mortars).
-        (r"return target.*?to (?:its|their) owner(?:'s|s')? hands?.*overload\s*\{", None, 85),
-        (r"destroy target (?:creature|permanent|artifact|enchantment).*overload\s*\{", None, 85),
-        (r"exile target (?:creature|permanent|artifact|enchantment).*overload\s*\{", None, 85),
+        # Live-browser audit 2026-05-13 caught the original miss:
+        # ``classify_role_extended('Cyclonic Rift oracle text')``
+        # returned ``"other"`` because the test fixtures had
+        # synthesized the oracle on one line. The real Scryfall
+        # text reads:
+        #   "Return target nonland permanent you don't control to
+        #    its owner's hand.\nOverload {6}{U} (...)"
+        #
+        # Order matters: the target clause comes BEFORE the
+        # overload paragraph in printed templating, so the regex
+        # threads target-clause → overload-mention.
+        (r"return target[\s\S]*?to (?:its|their) owner(?:'s|s')? hands?[\s\S]*overload\s*\{", None, 85),
+        (r"destroy target (?:creature|permanent|artifact|enchantment)[\s\S]*overload\s*\{", None, 85),
+        (r"exile target (?:creature|permanent|artifact|enchantment)[\s\S]*overload\s*\{", None, 85),
+        # Symmetric: when the overload appears earlier (unlikely
+        # but possible in re-formatted oracle text), still catch it.
+        (r"return each[\s\S]*?(?:you don't control|nonland permanent)[\s\S]*?to (?:its|their) owner(?:'s|s')? hands?", None, 85),
     ]),
     ("protection", [
         (r"hexproof", None, 50),
@@ -486,6 +488,12 @@ _LAND_PAYOFF_PATTERNS = [
 
 _WIN_CONDITION_PATTERNS = [
     re.compile(r"target opponent loses the game", re.IGNORECASE),
+    # "You win the game" — Coalition Victory, Approach of the
+    # Second Sun (second cast), Test of Endurance, Felidar
+    # Sovereign, etc. Live-browser audit 2026-05-13 caught the
+    # original miss: Coalition Victory was returning "other" for
+    # the Ur-Dragon deck despite being listed as a Game Changer.
+    re.compile(r"you win the game", re.IGNORECASE),
     re.compile(r"each opponent loses \d+ life", re.IGNORECASE),
     re.compile(r"deals damage equal to .* to each opponent", re.IGNORECASE),
     re.compile(r"each opponent's life total becomes", re.IGNORECASE),

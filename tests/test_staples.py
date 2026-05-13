@@ -171,6 +171,38 @@ def test_classify_role_wipe_evacuation_style_bounce():
     assert role == "wipe"
 
 
+def test_classify_role_wipe_cyclonic_rift_real_scryfall_text():
+    # Live-browser audit 2026-05-13 caught a misclassification the
+    # original synthetic-text test missed: Scryfall returns
+    # Cyclonic Rift's oracle as TWO paragraphs separated by ``\n``,
+    # not a single line. ``re.search`` is not DOTALL by default, so
+    # ``.*`` doesn't cross newlines — the old pattern silently
+    # failed against real card data.
+    #
+    # This is the byte-exact text Scryfall returns. Keep it so any
+    # future pattern rewrite that breaks multi-paragraph oracle
+    # parsing fails loud in CI.
+    real_oracle = (
+        "Return target nonland permanent you don't control to its "
+        "owner's hand.\n"
+        "Overload {6}{U} (You may cast this spell for its overload "
+        "cost. If you do, change \"target\" in its text to \"each.\")"
+    )
+    assert classify_role(real_oracle, "Instant") == "wipe"
+
+
+def test_classify_role_wipe_crux_of_fate_real_scryfall_text():
+    # Same multi-paragraph issue. Crux of Fate's real Scryfall
+    # oracle reads "Destroy all Dragon creatures" (typed all-sweep,
+    # not the "each <subtype>" idiom the original test assumed).
+    real_oracle = (
+        "Choose one —\n"
+        "• Destroy all Dragon creatures.\n"
+        "• Destroy all non-Dragon creatures."
+    )
+    assert classify_role(real_oracle, "Sorcery") == "wipe"
+
+
 def test_classify_role_finisher():
     role = classify_role("Target opponent loses the game.", "Sorcery")
     assert role == "finisher"
