@@ -1376,6 +1376,13 @@ def create_app(
             return jsonify({
                 "error": "total_price_usd must be a number",
             }), 400
+        # Negative price almost certainly means bad Scryfall data or
+        # an upstream sign flip; accepting it silently would poison
+        # the cost-evolution chart with nonsensical points.
+        if total_price_usd is not None and total_price_usd < 0:
+            return jsonify({
+                "error": "total_price_usd must be non-negative",
+            }), 400
 
         if total_price_usd is not None:
             from datetime import datetime as _dt, timezone as _tz

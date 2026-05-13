@@ -2076,6 +2076,23 @@ def test_save_iteration_accepts_zero_price(save_client):
     assert detail["audit_manifest"]["pricing"]["total_price_usd"] == 0.0
 
 
+def test_save_iteration_rejects_negative_price(save_client):
+    """Regression: a negative price almost certainly means bad Scryfall
+    data or a sign-flip bug upstream — never a legitimate value.
+    Accepting it silently would poison the cost-evolution chart with
+    nonsensical points; reject at the boundary instead."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": -42.50,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 400
+    assert "total_price_usd" in resp.get_json()["error"]
+    assert "negative" in resp.get_json()["error"].lower() or \
+        "non-negative" in resp.get_json()["error"].lower()
+
+
 # --- /api/audit — card-name validation (hallucination defense) ------------
 
 def test_audit_payload_includes_name_known_for_each_rec(client, monkeypatch):
