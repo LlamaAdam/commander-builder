@@ -743,8 +743,14 @@ async function loadAdvise() {
   const bm = (_activeDeckId || "").match(/\[B(\d)\]/);
   const auditBracket = bm ? parseInt(bm[1], 10) : 3;
   try {
+    // Stream phases from /api/audit/stream so the user sees
+    // intermediate progress (diagnosis → manabase → primary →
+    // complete) rather than staring at "Generating…" for 6-8s
+    // while Claude runs. The complete event carries the same
+    // payload shape as the legacy /api/audit, so renderAuditResult
+    // works unchanged once the final event arrives.
     let url =
-      `/api/audit?deck=${encodeURIComponent(_activeDeckId)}`
+      `/api/audit/stream?deck=${encodeURIComponent(_activeDeckId)}`
       + `&bracket=${auditBracket}`
       + `&source=${encodeURIComponent(sourceFinal)}`;
     if (sourceFinal === "claude") {
@@ -755,33 +761,169 @@ async function loadAdvise() {
     }
     const headers = {};
     if (keyFinal) headers["X-Anthropic-API-Key"] = keyFinal;
-    const resp = await fetch(url, { headers });
-    if (!resp.ok) throw new Error(`${url} -> ${resp.status}`);
-    const body = await resp.json();
-    _lastAuditProposed = body.proposed_text || null;
+    // EventSource doesn't support custom headers (the BYO Claude
+    // key case needs X-Anthropic-API-Key) so we use fetch + a
+    // manual SSE reader. ``streamAuditEvents`` returns an async
+    // iterator of ``{event, data}`` pairs.
+    const completeBody = await streamAuditEvents(url, headers, {
+      onDiagnosis: (d) => updateAuditProgress(sug, "diagnosis", d, sourceFinal),
+      onManabase: (m) => updateAuditProgress(sug, "manabase", m, sourceFinal),
+      onPrimary: (p) => updateAuditProgress(sug, "primary", p, sourceFinal),
+    });
+    _lastAuditProposed = completeBody.proposed_text || null;
     _lastAuditManifest = {
       deck_id: _activeDeckId,
       bracket: auditBracket,
-      audit_version: body.audit_version || (body.source === "claude" ? "v3-claude" : "v3"),
-      source: body.source || "heuristic",
-      added: (body.added || []).map((a) => ({
+      audit_version: completeBody.audit_version
+        || (completeBody.source === "claude" ? "v3-claude" : "v3"),
+      source: completeBody.source || "heuristic",
+      added: (completeBody.added || []).map((a) => ({
         card: a.card,
         rationale: a.rationale || "",
         match_pct: a.match_pct,
         price_usd: a.price_usd,
       })),
-      removed: (body.removed || []).map((r) => ({
+      removed: (completeBody.removed || []).map((r) => ({
         card: r.card,
         rationale: r.rationale || "",
       })),
-      diagnosis: body.diagnosis || "",
-      weakness_signals: body.weakness_signals || [],
+      diagnosis: completeBody.diagnosis || "",
+      weakness_signals: completeBody.weakness_signals || [],
     };
-    renderAuditResult(sug, body);
+    renderAuditResult(sug, completeBody);
   } catch (e) {
     sug.innerHTML = "";
     sug.appendChild(el("h3", {}, "Audit"));
     sug.appendChild(el("p", { class: "muted" }, `Audit failed: ${e.message}`));
+  }
+}
+
+// Drive the /api/audit/stream SSE endpoint. Yields ``{event, data}``
+// for each chunk to the supplied callbacks and resolves with the
+// final ``complete`` event's payload. Throws on ``error`` events.
+//
+// We can't use the browser's native ``EventSource`` because it
+// doesn't support custom request headers — and the Claude path
+// needs ``X-Anthropic-API-Key``. So we parse SSE manually from the
+// fetch response body. Buffering note: most browsers expose ReadableStream
+// over the response body; we decode chunks as they arrive.
+async function streamAuditEvents(url, headers, callbacks) {
+  const resp = await fetch(url, { headers });
+  if (!resp.ok) {
+    // Input-validation errors (404 deck-not-found, 400 bad source)
+    // return plain JSON, not SSE. Surface the server's error
+    // message if available.
+    let detail = `${url} -> ${resp.status}`;
+    try {
+      const errBody = await resp.json();
+      if (errBody && errBody.error) detail = errBody.error;
+    } catch (_e) { /* ignore JSON parse failure */ }
+    throw new Error(detail);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let completeData = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // SSE frames are separated by a blank line (\n\n). Parse and
+    // dispatch any complete frames in the buffer; keep the tail
+    // for the next read.
+    let sepIdx;
+    while ((sepIdx = buffer.indexOf("\n\n")) >= 0) {
+      const frame = buffer.slice(0, sepIdx);
+      buffer = buffer.slice(sepIdx + 2);
+      const parsed = _parseSseFrame(frame);
+      if (!parsed) continue;
+      const { event, data } = parsed;
+      if (event === "error") {
+        throw new Error(data.error || data.detail || "audit error");
+      }
+      if (event === "diagnosis" && callbacks.onDiagnosis) {
+        callbacks.onDiagnosis(data);
+      } else if (event === "manabase" && callbacks.onManabase) {
+        callbacks.onManabase(data);
+      } else if (event === "primary" && callbacks.onPrimary) {
+        callbacks.onPrimary(data);
+      } else if (event === "complete") {
+        completeData = data;
+      }
+    }
+  }
+  if (!completeData) {
+    throw new Error("audit stream ended without complete event");
+  }
+  return completeData;
+}
+
+// Parse a single SSE frame (text between two blank-line separators)
+// into ``{event, data}``. Returns null when the frame has no
+// ``event:`` line (heartbeat, comment-only frame). Tolerates
+// multi-line ``data:`` continuations per the spec.
+function _parseSseFrame(frame) {
+  let event = null;
+  const dataLines = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trim());
+    }
+  }
+  if (!event || !dataLines.length) return null;
+  try {
+    return { event, data: JSON.parse(dataLines.join("\n")) };
+  } catch (_e) {
+    return null;
+  }
+}
+
+// Update the audit-in-progress panel as each phase arrives. Shows
+// a live progress line so the user can tell what's happening
+// during the 6-8s Claude call instead of staring at a static
+// "Generating…" message.
+function updateAuditProgress(sug, phase, data, sourceFinal) {
+  // Find or create the dedicated progress paragraph. We replace
+  // its text per phase rather than appending so the panel doesn't
+  // accumulate stale status lines.
+  let prog = sug.querySelector(".audit-progress");
+  if (!prog) {
+    prog = el("p", { class: "muted audit-progress" }, "");
+    sug.appendChild(prog);
+  }
+  if (phase === "diagnosis") {
+    const commander = (data.commander_names || [])[0] || "this deck";
+    prog.textContent = `Analyzing ${commander}…`;
+  } else if (phase === "manabase") {
+    const n = (data.recommendations || []).length;
+    const tribe = data.tribe ? ` (${data.tribe} tribal lands included)` : "";
+    if (n > 0) {
+      prog.textContent =
+        `Manabase scan: ${n} essential land${n === 1 ? "" : "s"} `
+        + `missing${tribe}. Now fetching ${
+          sourceFinal === "claude" ? "Claude analyst" :
+          sourceFinal === "bracket_peers" ? "bracket-peer references"
+          : "EDHREC heuristic"
+        }…`;
+    } else {
+      prog.textContent =
+        `Manabase looks complete${tribe}. Now fetching ${
+          sourceFinal === "claude" ? "Claude analyst" :
+          sourceFinal === "bracket_peers" ? "bracket-peer references"
+          : "EDHREC heuristic"
+        }…`;
+    }
+  } else if (phase === "primary") {
+    const n = (data.recommendations || []).length;
+    const eff = data.effective_source;
+    const fallback = data.fallback_reason
+      ? ` (fell back to ${eff} — ${data.fallback_reason})`
+      : "";
+    prog.textContent =
+      `Source returned ${n} candidate${n === 1 ? "" : "s"} from ${eff}${
+        fallback}. Finalizing…`;
   }
 }
 
