@@ -233,84 +233,14 @@ from ._advisor_heuristic import (  # noqa: E402
 # _signals_to_priority_roles which now lives in _advisor_heuristic.
 
 
-def _filter_for_saturation(
-    recs: list[SwapRecommendation],
-    role_counts: dict,
-) -> tuple[list[SwapRecommendation], list[dict]]:
-    """Drop add candidates whose role bucket is already saturated in
-    the user's deck.
-
-    Real failure mode this addresses (Ur-Dragon B4 audit, 2026-05-13):
-    the EDHREC heuristic and bracket-peers source both rank "what
-    other decks have a lot of" without checking what the user's deck
-    already has. A deck running 13 ramp pieces doesn't need a 14th
-    suggested; recommending one would either get applied (replacing
-    a stronger non-ramp card) or get balanced out by
-    ``_apply_swaps_to_dck``'s adds==cuts rule, wasting a slot.
-
-    Returns ``(kept_recs, skipped_records)``. Each skipped record:
-    ``{card, role, deck_count, threshold}``. Cuts are never filtered
-    (they're already in the deck — removing a 13th ramp piece IS the
-    user's decision). Recs without ``evidence.role`` bucket as
-    ``"other"`` which never saturates, so legacy stubs pass through
-    untouched.
-    """
-    kept: list[SwapRecommendation] = []
-    skipped: list[dict] = []
-    for rec in recs:
-        if rec.action != "add":
-            kept.append(rec)
-            continue
-        role = (rec.evidence or {}).get("role", "other") or "other"
-        deck_count = int(role_counts.get(role, 0))
-        if is_role_saturated(role, deck_count):
-            threshold = ROLE_SATURATION_THRESHOLDS.get(role, 0)
-            skipped.append({
-                "card": rec.card,
-                "role": role,
-                "deck_count": deck_count,
-                "threshold": threshold,
-            })
-            continue
-        kept.append(rec)
-    return kept, skipped
-
-
-# Manabase recommender extracted to its own module so the dataclass
-# import surface is narrow. External callers continue to use
-# `from .improvement_advisor import _missing_manabase_recommendations`
-# via this re-export.
+# Post-recommendation filters extracted to _advisor_filters. Plus the
+# manabase recommender. All re-exported here so external callers
+# don't see the move.
+from ._advisor_filters import (  # noqa: E402,F401
+    _filter_for_saturation,
+    _validate_card_names,
+)
 from ._advisor_manabase import _missing_manabase_recommendations  # noqa: E402,F401
-
-
-def _validate_card_names(recs: list[SwapRecommendation]) -> None:
-    """Mutate each rec's ``name_known`` flag based on Scryfall lookup.
-
-    Defense against Claude analyst hallucinations: when the LLM invents a
-    plausible-sounding card name (e.g. "Accursed Marauder"), the audit
-    pipeline would otherwise pass it down to Forge, which then rejects
-    the deck silently. Cross-checking against the Scryfall cache catches
-    it early so the UI can mark the recommendation with a warning pill.
-
-    Three terminal states for each rec:
-
-    - ``True``  — Scryfall returned a card dict; the name is real.
-    - ``False`` — Scryfall returned ``None`` (HTTP 404); the name is fake.
-    - ``None``  — lookup raised (network, cache corruption); we couldn't
-      check. **Never** flag a legitimate card as fake on transient
-      failure.
-
-    Heuristic recs come from EDHREC and should always resolve; running
-    them through the validator is cheap (cache hit) and uniform so
-    callers don't need to special-case the source.
-    """
-    for rec in recs:
-        try:
-            card = lookup_card(rec.card)
-        except Exception:
-            rec.name_known = None
-            continue
-        rec.name_known = card is not None
 
 
 def _role_for_card(card_name: str) -> str:
