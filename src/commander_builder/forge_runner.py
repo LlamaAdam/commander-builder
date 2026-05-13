@@ -94,11 +94,28 @@ def detect_forge_version(forge_dir: Path = VENDOR_FORGE) -> ForgeVersionInfo:
     if not forge_dir.exists() or not forge_dir.is_dir():
         return info
 
-    jars = sorted(forge_dir.glob("forge-gui-desktop-*.jar"))
-    fat = [j for j in jars if "jar-with-dependencies" in j.name]
-    jar = (fat or jars or [None])[0]
-    if jar is None:
+    # Rank candidates by parsed version (semver-ish) — lexicographic
+    # sort would put "2.0.10" before "2.0.12" because "0" < "2" at the
+    # relevant position, so the prior sorted(...)[0] picked the OLDER
+    # jar when a user kept both around after an upgrade.
+    # Fat jars ("jar-with-dependencies") win over thin within the same
+    # version because forge_runner.locate() runs the fat one.
+    candidates: list[tuple[tuple[int, ...], bool, Path]] = []
+    for jar_path in forge_dir.glob("forge-gui-desktop-*.jar"):
+        m = _FORGE_JAR_VERSION_RE.search(jar_path.name)
+        if not m:
+            continue
+        try:
+            version_tuple = tuple(int(part) for part in m.group(1).split("."))
+        except ValueError:
+            continue
+        is_fat = "jar-with-dependencies" in jar_path.name
+        candidates.append((version_tuple, is_fat, jar_path))
+    if not candidates:
         return info
+    # Highest version first; within a version, fat jar first.
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    _, _, jar = candidates[0]
     info.jar_path = jar
     m = _FORGE_JAR_VERSION_RE.search(jar.name)
     if m:

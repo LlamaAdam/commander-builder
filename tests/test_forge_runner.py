@@ -254,3 +254,50 @@ def test_detect_forge_version_returns_dataclass(tmp_path):
     info = detect_forge_version(tmp_path)
     assert isinstance(info, ForgeVersionInfo)
     assert is_dataclass(info)
+
+
+def test_detect_forge_version_picks_newest_when_multiple_jars_present(tmp_path):
+    """Regression: lexicographic sort puts "2.0.10" before "2.0.12"
+    because "0" < "2" at the relevant position, so the previous
+    sorted(...)[0] picked the *older* jar when a user kept both
+    around after an upgrade. The selector must rank by parsed
+    semver-ish version, not by alphabetical filename.
+    """
+    (tmp_path / "forge-gui-desktop-2.0.10-jar-with-dependencies.jar").write_bytes(b"PK")
+    (tmp_path / "forge-gui-desktop-2.0.12-jar-with-dependencies.jar").write_bytes(b"PK")
+    (tmp_path / "forge-gui-desktop-2.0.9-jar-with-dependencies.jar").write_bytes(b"PK")
+
+    info = detect_forge_version(tmp_path)
+    assert info.version == "2.0.12"
+    assert "2.0.12" in info.jar_path.name
+
+
+def test_detect_forge_version_double_digit_minor_sorts_correctly(tmp_path):
+    """Same class of bug: 2.0 vs 2.10 — alphabetical sort says
+    "2.0" < "2.10" but semver says the opposite."""
+    (tmp_path / "forge-gui-desktop-2.0-jar-with-dependencies.jar").write_bytes(b"PK")
+    (tmp_path / "forge-gui-desktop-2.10-jar-with-dependencies.jar").write_bytes(b"PK")
+
+    info = detect_forge_version(tmp_path)
+    assert info.version == "2.10"
+
+
+def test_detect_forge_version_prefers_fat_jar_over_thin(tmp_path):
+    """When both 'jar-with-dependencies' and a plain jar of the
+    *same* version exist, the fat jar must win (it's what
+    forge_runner.locate() runs). Pre-existing behavior — pin it."""
+    (tmp_path / "forge-gui-desktop-2.0.12.jar").write_bytes(b"PK")
+    (tmp_path / "forge-gui-desktop-2.0.12-jar-with-dependencies.jar").write_bytes(b"PK")
+
+    info = detect_forge_version(tmp_path)
+    assert "jar-with-dependencies" in info.jar_path.name
+
+
+def test_detect_forge_version_unparseable_filename_is_skipped(tmp_path):
+    """A stray jar that doesn't match the version regex shouldn't poison
+    the selection — pick the highest *parseable* version instead."""
+    (tmp_path / "forge-gui-desktop-CUSTOM-jar-with-dependencies.jar").write_bytes(b"PK")
+    (tmp_path / "forge-gui-desktop-2.0.12-jar-with-dependencies.jar").write_bytes(b"PK")
+
+    info = detect_forge_version(tmp_path)
+    assert info.version == "2.0.12"
