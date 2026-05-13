@@ -588,3 +588,150 @@ def test_fetch_commander_page_returns_none_after_exhausted_retries(
 
     page = fetch_commander_page("Sephiroth")
     assert page is None
+
+
+# --- Retry-After header handling + retry logging ---------------------------
+
+def _make_http_error_with_headers(code: int, headers: dict):
+    """HTTPError with a real headers dict (email.message-like .get())."""
+    import urllib.error
+    from email.message import Message
+    msg = Message()
+    for k, v in headers.items():
+        msg[k] = v
+    return urllib.error.HTTPError(
+        url="https://edhrec.com/x", code=code, msg="boom",
+        hdrs=msg, fp=None,
+    )
+
+
+def test_retry_respects_retry_after_seconds(monkeypatch):
+    """429 with `Retry-After: 5` → sleep 5s, not the exp-backoff 1s."""
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def rate_limited(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error_with_headers(429, {"Retry-After": "5"})
+        return "<html>ok</html>"
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", rate_limited)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    body = _http_get_text_with_retry(
+        "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+    )
+    assert body == "<html>ok</html>"
+    # First (and only) backoff respected the server's hint.
+    assert sleeps == [5.0]
+
+
+def test_retry_caps_retry_after(monkeypatch):
+    """A server saying `Retry-After: 999` should not block the user
+    for 16 minutes — clamp to the module-level cap."""
+    import commander_builder.edhrec_client as ec
+    from commander_builder.edhrec_client import MAX_RETRY_AFTER_SEC
+
+    def always_429(url):
+        raise _make_http_error_with_headers(429, {"Retry-After": "999"})
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", always_429)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError):
+        _http_get_text_with_retry(
+            "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+        )
+    # All three retries were clamped to the cap.
+    assert all(s <= MAX_RETRY_AFTER_SEC for s in sleeps)
+    assert sleeps == [MAX_RETRY_AFTER_SEC] * 3
+
+
+def test_retry_after_http_date_format(monkeypatch):
+    """Retry-After can be an HTTP-date — should be parsed as 'wait until
+    that timestamp', not as seconds."""
+    import commander_builder.edhrec_client as ec
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from email.utils import format_datetime
+
+    # 3 seconds from "now".
+    target = _dt.now(_tz.utc) + _td(seconds=3)
+    date_str = format_datetime(target, usegmt=True)
+    calls = {"n": 0}
+
+    def rate_limited(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error_with_headers(503, {"Retry-After": date_str})
+        return "<html>ok</html>"
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", rate_limited)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    body = _http_get_text_with_retry(
+        "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+    )
+    assert body == "<html>ok</html>"
+    # Should be ~3s (the Retry-After target). Lower bound deliberately
+    # above the 1.0s exp-backoff default so a no-op implementation
+    # cannot pass this test by coincidence.
+    assert 2.0 <= sleeps[0] <= 4.0
+
+
+def test_retry_after_malformed_falls_back_to_exp_backoff(monkeypatch):
+    """Garbage Retry-After header → ignore it, use exp backoff."""
+    import commander_builder.edhrec_client as ec
+
+    def always_503(url):
+        raise _make_http_error_with_headers(503, {"Retry-After": "not a number"})
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", always_503)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError):
+        _http_get_text_with_retry(
+            "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+        )
+    # Falls back to 1s, 2s, 4s.
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_retry_logs_each_attempt(monkeypatch, capsys):
+    """Every retry should emit a single-line log so the operator sees
+    'EDHREC was 503, retried' rather than silent slowdowns."""
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _make_http_error(503)
+        return "<html>ok</html>"
+
+    monkeypatch.setattr(ec, "_http_get_text", flaky)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+
+    out = capsys.readouterr().out
+    # Two retries fired (attempts 1 and 2 failed, attempt 3 succeeded).
+    assert out.count("[edhrec] retry") == 2
+    # Each log line names the status that triggered the retry.
+    assert "503" in out
+
+
+def test_no_log_when_first_attempt_succeeds(monkeypatch, capsys):
+    """Happy path stays quiet — log only fires on actual retries."""
+    import commander_builder.edhrec_client as ec
+    monkeypatch.setattr(ec, "_http_get_text", lambda url: "<html>ok</html>")
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    _http_get_text_with_retry("https://edhrec.com/x")
+    assert "[edhrec] retry" not in capsys.readouterr().out

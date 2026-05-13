@@ -127,6 +127,44 @@ def _http_get_text(url: str) -> str:
 # 404 / 429 means the request itself is wrong — don't retry.
 _RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 
+# Upper bound on Retry-After honor. EDHREC sits behind a CDN that
+# occasionally sends Retry-After: 300+ during incidents — long enough
+# that the user would rather see a degraded result than block. Cap so
+# a misbehaving server can't pin the audit forever.
+MAX_RETRY_AFTER_SEC = 30.0
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Parse a Retry-After header per RFC 7231 §7.1.3.
+
+    Returns the indicated delay in seconds, or None when the header is
+    missing or malformed. Supports both forms the spec allows:
+    ``delta-seconds`` (e.g., ``"60"``) and ``HTTP-date`` (e.g.,
+    ``"Wed, 21 Oct 2026 07:28:00 GMT"``). Negative deltas clamp to 0.
+    """
+    if value is None:
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    # delta-seconds form first — most common from CDNs.
+    try:
+        return max(0.0, float(s))
+    except ValueError:
+        pass
+    # HTTP-date form.
+    try:
+        from email.utils import parsedate_to_datetime
+        target = parsedate_to_datetime(s)
+        if target is None:
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        delta = (target - datetime.now(target.tzinfo)).total_seconds()
+        return max(0.0, delta)
+    except (TypeError, ValueError):
+        return None
+
 
 def _http_get_text_with_retry(
     url: str,
@@ -140,13 +178,19 @@ def _http_get_text_with_retry(
     miss is fatal — and propagates without retrying. Other 4xx (400,
     401, 403) are caller-bug class errors and also don't retry.
 
-    Backoff is ``base_delay * 2 ** attempt`` seconds between attempts,
-    so ``max_retries=3`` with ``base_delay=1.0`` yields sleeps of
-    1s, 2s, 4s between 4 total attempts. Raises the final exception
-    when retries are exhausted; callers downstream of ``fetch_*``
-    functions translate that into a graceful ``None`` return.
+    Backoff: when the server sends a ``Retry-After`` header (RFC 7231),
+    honor it (clamped to ``MAX_RETRY_AFTER_SEC`` so a 300+s instruction
+    can't pin the audit). Otherwise fall back to ``base_delay * 2 **
+    attempt``, so ``max_retries=3`` with ``base_delay=1.0`` yields
+    sleeps of 1s, 2s, 4s between 4 total attempts.
+
+    Each retry emits a single line to stdout so the operator sees
+    "EDHREC was 503, retried" instead of silent slowdowns. The happy
+    path stays quiet. Raises the final exception when retries are
+    exhausted; callers downstream of ``fetch_*`` functions translate
+    that into a graceful ``None`` return.
     """
-    last_exc: Exception
+    last_exc: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:
             return _http_get_text(url)
@@ -158,8 +202,32 @@ def _http_get_text_with_retry(
             last_exc = exc
         except TimeoutError as exc:
             last_exc = exc
-        if attempt < max_retries:
-            time.sleep(base_delay * (2 ** attempt))
+        if attempt >= max_retries:
+            break
+        # Prefer the server's own backoff hint over our exp curve.
+        delay: Optional[float] = None
+        if isinstance(last_exc, urllib.error.HTTPError):
+            hdrs = getattr(last_exc, "headers", None)
+            raw = hdrs.get("Retry-After") if hdrs is not None else None
+            hint = _parse_retry_after(raw)
+            if hint is not None:
+                delay = min(hint, MAX_RETRY_AFTER_SEC)
+        if delay is None:
+            delay = base_delay * (2 ** attempt)
+        # Single-line log so flaky EDHREC traffic is diagnosable from
+        # the server log. Match the rest of the codebase's print style.
+        reason = (
+            f"HTTP {last_exc.code}"
+            if isinstance(last_exc, urllib.error.HTTPError)
+            else type(last_exc).__name__
+        )
+        print(
+            f"[edhrec] retry {attempt + 1}/{max_retries} "
+            f"after {reason} — sleeping {delay:.1f}s",
+            flush=True,
+        )
+        time.sleep(delay)
+    assert last_exc is not None  # the loop only exits via return or here
     raise last_exc
 
 
