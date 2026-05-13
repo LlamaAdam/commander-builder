@@ -137,6 +137,18 @@ BOND_LANDS: dict[str, frozenset[str]] = {
     "vault of champions": frozenset({"B", "W"}),
 }
 
+# Universal mana fixers — colorless mana cost, produce any color.
+# Earn their slot in 3+ color decks where the consistency upside
+# outweighs the life loss / opponent-token cost. Below 3 colors,
+# Temple Garden / Bayou are strictly better than City of Brass.
+UTILITY_FIXING_LANDS: tuple[str, ...] = (
+    "City of Brass",       # any color, 1 damage to self when tapped
+    "Mana Confluence",     # any color, 1 life when used
+    "Reflecting Pool",     # color any other land in play produces
+    "Forbidden Orchard",   # any color, opp gets a 1/1 spirit
+)
+
+
 # Ravnica shock lands — 2-color "pay 2 life or it enters tapped" duals.
 # Cheaper than ABU duals but still archetype-defining in tuned decks.
 SHOCK_LANDS: dict[str, frozenset[str]] = {
@@ -153,22 +165,45 @@ SHOCK_LANDS: dict[str, frozenset[str]] = {
 }
 
 
+def utility_fixing_lands(color_identity) -> list[str]:
+    """Universal-fixer lands worth slotting in 3+ color decks.
+
+    Returns ``[]`` for mono- and 2-color decks because cheaper /
+    cleaner alternatives exist there (Temple Garden vs City of Brass
+    for a Selesnya deck). At 3+ colors, the consistency win from
+    "any color, always" outweighs the life loss or token-gift cost
+    of each.
+
+    Order is the static order in ``UTILITY_FIXING_LANDS``: most-
+    universally-played first (City of Brass > Mana Confluence >
+    Reflecting Pool > Forbidden Orchard).
+    """
+    if not color_identity:
+        return []
+    identity = {c.upper() for c in color_identity if isinstance(c, str)}
+    if len(identity) < 3:
+        return []
+    return list(UTILITY_FIXING_LANDS)
+
+
 def essential_manabase_for_colors(color_identity) -> list[str]:
     """Return canonical card names for the manabase essentials whose
     color identity is fully contained in ``color_identity``.
 
     ``color_identity`` is a set / iterable of WUBRG letters
     (case-insensitive). Includes ABU duals, fetch lands, bond lands,
-    and shock lands. A 2-color land is included only when BOTH of its
-    colors are inside the deck's identity — a mono-red deck won't see
-    Stomping Ground (RG) because the G slot is wasted.
+    shock lands, and (for 3+ color decks) universal utility fixers.
+    A 2-color land is included only when BOTH of its colors are
+    inside the deck's identity — a mono-red deck won't see Stomping
+    Ground (RG) because the G slot is wasted.
 
     Empty identity (colorless commander) → empty list. The caller
     can still surface colorless utility lands (Cavern of Souls,
     Strip Mine, etc.) separately via tribal / utility helpers.
 
-    Order: duals → fetches → shocks → bond lands. Within each tier,
-    alphabetical. Keeps the recommendation surface predictable.
+    Order: duals → fetches → shocks → bond lands → universal fixers
+    (when 3+ colors). Within each tier, alphabetical. Keeps the
+    recommendation surface predictable.
     """
     if not color_identity:
         return []
@@ -184,6 +219,9 @@ def essential_manabase_for_colors(color_identity) -> list[str]:
         # convention like "Misty Rainforest", "Sea of Clouds").
         # Cards in the static map use simple word casing.
         out.extend(_titlecase_card_name(name) for name in tier)
+    # Universal fixers — only for 3+ color decks (see
+    # utility_fixing_lands docstring for the rationale).
+    out.extend(utility_fixing_lands(identity))
     return out
 
 

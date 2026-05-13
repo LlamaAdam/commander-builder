@@ -525,3 +525,58 @@ def test_tribal_essential_lands_empty_for_none():
     """Non-tribal commander → empty list (no extra recommendations)."""
     from commander_builder.staples import tribal_essential_lands
     assert tribal_essential_lands(None) == []
+
+
+# ---------------------------------------------------------------------------
+# Utility fixing lands — colorless-mana-cost any-color lands for 3+ color decks
+# ---------------------------------------------------------------------------
+# Open backlog item from the resume session: City of Brass / Mana
+# Confluence / Reflecting Pool / Forbidden Orchard fix any color but
+# only earn their slot in 3+ color decks. Mono and 2-color decks
+# already have efficient duals; pain-fixers are slot inefficiency
+# there.
+
+
+def test_utility_fixing_lands_returns_canonical_set_for_three_color():
+    """3-color deck (Bant, Naya, etc.) should be told about City of
+    Brass + Mana Confluence + Reflecting Pool."""
+    from commander_builder.staples import utility_fixing_lands
+    out = utility_fixing_lands({"G", "W", "U"})
+    assert "City of Brass" in out
+    assert "Mana Confluence" in out
+    assert "Reflecting Pool" in out
+
+
+def test_utility_fixing_lands_empty_for_one_or_two_color_decks():
+    """Mono-color and 2-color decks don't benefit enough from
+    universal-fixers to justify the life loss / token gift."""
+    from commander_builder.staples import utility_fixing_lands
+    assert utility_fixing_lands({"R"}) == []
+    assert utility_fixing_lands({"G", "W"}) == []
+
+
+def test_utility_fixing_lands_for_five_color_full_set():
+    """5-color deck wants every utility fixer."""
+    from commander_builder.staples import utility_fixing_lands
+    out = utility_fixing_lands({"W", "U", "B", "R", "G"})
+    assert "City of Brass" in out
+    assert "Mana Confluence" in out
+    assert "Reflecting Pool" in out
+
+
+def test_essential_manabase_includes_utility_fixers_for_three_color():
+    """The main entry point surfaces utility fixers when applicable."""
+    from commander_builder.staples import essential_manabase_for_colors
+    out = essential_manabase_for_colors({"G", "W", "U"})
+    assert "City of Brass" in out
+    assert "Mana Confluence" in out
+
+
+def test_essential_manabase_excludes_utility_fixers_for_two_color():
+    """2-color WG (Selesnya) wants dual + fetch + shock + bond, but
+    NOT City of Brass (pain-fixer earns less than a Temple Garden)."""
+    from commander_builder.staples import essential_manabase_for_colors
+    out = essential_manabase_for_colors({"W", "G"})
+    assert "Savannah" in out          # 2-color duals stay
+    assert "Temple Garden" in out     # shocks stay
+    assert "City of Brass" not in out
