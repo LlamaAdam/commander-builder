@@ -393,3 +393,78 @@ def test_is_land_returns_false_on_lookup_failure(monkeypatch):
         lambda name: None,
     )
     assert is_land("Unknown Card") is False
+
+
+# ---------------------------------------------------------------------------
+# Manabase essentials — the canonical "your deck should have these" lands
+# ---------------------------------------------------------------------------
+# User feedback (2026-05-13): "tribal decks should have cavern of souls.
+# All decks should have dual lands and bond lands and fetch lands."
+# The advisor's heuristic + bracket_peers paths recommend lands when
+# they happen to appear in references/EDHREC. This adds a deterministic
+# safety net: regardless of source, surface missing color-identity-
+# appropriate manabase essentials.
+
+
+def test_essential_manabase_includes_all_abu_duals_for_five_color():
+    """A 5-color (WUBRG) deck should be told about every ABU dual it
+    doesn't already own — these are the canonical baseline manabase."""
+    from commander_builder.staples import essential_manabase_for_colors
+    essentials = essential_manabase_for_colors({"W", "U", "B", "R", "G"})
+    expected_duals = {
+        "Bayou", "Badlands", "Plateau", "Scrubland", "Savannah",
+        "Taiga", "Tundra", "Tropical Island", "Underground Sea",
+        "Volcanic Island",
+    }
+    assert expected_duals.issubset(set(essentials))
+
+
+def test_essential_manabase_includes_fetches_matching_colors():
+    """Fetch lands gate on whether their two target basic types lie
+    inside the deck's color identity. A WG deck wants Windswept Heath
+    (fetches Plains/Forest); it should NOT get Polluted Delta
+    (fetches Island/Swamp — neither in identity)."""
+    from commander_builder.staples import essential_manabase_for_colors
+    wg = essential_manabase_for_colors({"W", "G"})
+    assert "Windswept Heath" in wg          # plains/forest
+    assert "Polluted Delta" not in wg       # island/swamp
+
+
+def test_essential_manabase_includes_bond_lands_in_color_identity():
+    """Bond lands ('untapped if an opponent has an untapped creature')
+    are 2-color enemy + ally pairs. Surface only those that fit the
+    deck's identity."""
+    from commander_builder.staples import essential_manabase_for_colors
+    # Bountiful Promenade is GW; expect it for any deck containing
+    # both G and W.
+    wubrg = essential_manabase_for_colors({"W", "U", "B", "R", "G"})
+    assert "Bountiful Promenade" in wubrg
+
+
+def test_essential_manabase_excludes_off_color_lands_for_monocolor():
+    """Mono-red deck should not be recommended Bayou (BG)."""
+    from commander_builder.staples import essential_manabase_for_colors
+    mono_r = essential_manabase_for_colors({"R"})
+    assert "Bayou" not in mono_r
+    assert "Underground Sea" not in mono_r
+    # Mono-color decks don't benefit from 2-color fetches as much,
+    # so the function may legitimately return an empty list or only
+    # the colorless utility lands (e.g., no duals fit a mono-R deck).
+    # Pin only the negative assertion — we don't want a 1-color deck
+    # being told "you need Bayou".
+
+
+def test_essential_manabase_empty_for_colorless_identity():
+    """Colorless commander (no W/U/B/R/G) → no color-gated lands.
+    The function returns an empty list rather than crashing."""
+    from commander_builder.staples import essential_manabase_for_colors
+    assert essential_manabase_for_colors(set()) == []
+
+
+def test_essential_manabase_uppercase_color_letters():
+    """Color identity is conventionally upper-case WUBRG. Mixed-case
+    input shouldn't matter — we normalize."""
+    from commander_builder.staples import essential_manabase_for_colors
+    upper = essential_manabase_for_colors({"W", "G"})
+    lower = essential_manabase_for_colors({"w", "g"})
+    assert upper == lower

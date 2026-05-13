@@ -77,6 +77,134 @@ def is_basic_land(card_name: str) -> bool:
     return card_name.lower().strip() in BASIC_LANDS_LC
 
 
+# --- Manabase essentials (the "your deck should have these" lands) ------
+#
+# User feedback (2026-05-13): "tribal decks should have cavern of souls.
+# All decks should have dual lands and bond lands and fetch lands." The
+# advisor's heuristic + bracket_peers paths recommend lands only when
+# they happen to appear in references/EDHREC. This curated set is a
+# deterministic safety net: any color-identity-appropriate essential
+# that the deck doesn't already own surfaces as a recommended add,
+# regardless of what the references happen to include this week.
+#
+# Each map: lowercase-card-name → frozenset of WUBRG letters the land
+# spans. We treat color identity inclusively — Bountiful Promenade (GW)
+# only fits a deck that has BOTH G and W in its identity. A monocolor
+# deck won't see two-color cards in its essentials list because the
+# additional color is wasted there.
+
+ABU_DUAL_LANDS: dict[str, frozenset[str]] = {
+    "bayou": frozenset({"B", "G"}),
+    "badlands": frozenset({"B", "R"}),
+    "plateau": frozenset({"R", "W"}),
+    "scrubland": frozenset({"B", "W"}),
+    "savannah": frozenset({"G", "W"}),
+    "taiga": frozenset({"G", "R"}),
+    "tundra": frozenset({"U", "W"}),
+    "tropical island": frozenset({"G", "U"}),
+    "underground sea": frozenset({"B", "U"}),
+    "volcanic island": frozenset({"R", "U"}),
+}
+
+# Onslaught + Zendikar fetches. Each fetches one of two basic-land
+# types, so we encode the two colors those basic types produce.
+FETCH_LANDS: dict[str, frozenset[str]] = {
+    "arid mesa": frozenset({"R", "W"}),
+    "bloodstained mire": frozenset({"B", "R"}),
+    "flooded strand": frozenset({"U", "W"}),
+    "marsh flats": frozenset({"B", "W"}),
+    "misty rainforest": frozenset({"G", "U"}),
+    "polluted delta": frozenset({"B", "U"}),
+    "scalding tarn": frozenset({"R", "U"}),
+    "verdant catacombs": frozenset({"B", "G"}),
+    "windswept heath": frozenset({"G", "W"}),
+    "wooded foothills": frozenset({"G", "R"}),
+}
+
+# Battlebond + Commander Legends bond lands ("untapped if an opponent
+# controls an untapped creature" — perfect for multiplayer pods).
+BOND_LANDS: dict[str, frozenset[str]] = {
+    "bountiful promenade": frozenset({"G", "W"}),
+    "luxury suite": frozenset({"B", "R"}),
+    "morphic pool": frozenset({"B", "U"}),
+    "sea of clouds": frozenset({"U", "W"}),
+    "spectator seating": frozenset({"R", "W"}),
+    "spire garden": frozenset({"G", "R"}),
+    "training center": frozenset({"U", "R"}),
+    "rejuvenating springs": frozenset({"G", "U"}),
+    "undergrowth stadium": frozenset({"B", "G"}),
+    "vault of champions": frozenset({"B", "W"}),
+}
+
+# Ravnica shock lands — 2-color "pay 2 life or it enters tapped" duals.
+# Cheaper than ABU duals but still archetype-defining in tuned decks.
+SHOCK_LANDS: dict[str, frozenset[str]] = {
+    "godless shrine": frozenset({"B", "W"}),
+    "blood crypt": frozenset({"B", "R"}),
+    "overgrown tomb": frozenset({"B", "G"}),
+    "watery grave": frozenset({"B", "U"}),
+    "stomping ground": frozenset({"G", "R"}),
+    "temple garden": frozenset({"G", "W"}),
+    "breeding pool": frozenset({"G", "U"}),
+    "sacred foundry": frozenset({"R", "W"}),
+    "steam vents": frozenset({"R", "U"}),
+    "hallowed fountain": frozenset({"U", "W"}),
+}
+
+
+def essential_manabase_for_colors(color_identity) -> list[str]:
+    """Return canonical card names for the manabase essentials whose
+    color identity is fully contained in ``color_identity``.
+
+    ``color_identity`` is a set / iterable of WUBRG letters
+    (case-insensitive). Includes ABU duals, fetch lands, bond lands,
+    and shock lands. A 2-color land is included only when BOTH of its
+    colors are inside the deck's identity — a mono-red deck won't see
+    Stomping Ground (RG) because the G slot is wasted.
+
+    Empty identity (colorless commander) → empty list. The caller
+    can still surface colorless utility lands (Cavern of Souls,
+    Strip Mine, etc.) separately via tribal / utility helpers.
+
+    Order: duals → fetches → shocks → bond lands. Within each tier,
+    alphabetical. Keeps the recommendation surface predictable.
+    """
+    if not color_identity:
+        return []
+    identity = {c.upper() for c in color_identity if isinstance(c, str)}
+
+    out: list[str] = []
+    for source in (ABU_DUAL_LANDS, FETCH_LANDS, SHOCK_LANDS, BOND_LANDS):
+        tier = sorted(
+            (name for name, colors in source.items() if colors <= identity),
+            key=str.lower,
+        )
+        # Render display-cased names (title-case respects existing
+        # convention like "Misty Rainforest", "Sea of Clouds").
+        # Cards in the static map use simple word casing.
+        out.extend(_titlecase_card_name(name) for name in tier)
+    return out
+
+
+def _titlecase_card_name(lowercase_name: str) -> str:
+    """Reverse the lowercase-key convention used in the manabase maps.
+
+    'underground sea' → 'Underground Sea'; 'sea of clouds' →
+    'Sea of Clouds' (the 'of' stays lowercased to match Scryfall's
+    canonical capitalization for that specific land's name).
+    """
+    # Words that stay lowercase except when first.
+    minor_words = {"of", "the", "in", "on", "and"}
+    parts = lowercase_name.split()
+    out = []
+    for i, part in enumerate(parts):
+        if i > 0 and part in minor_words:
+            out.append(part)
+        else:
+            out.append(part.capitalize())
+    return " ".join(out)
+
+
 def is_land(card_name: str) -> bool:
     """Catch any land — basic, dual, fetch, shock, MDFC, utility, etc.
 
