@@ -1929,6 +1929,109 @@ def test_save_iteration_handles_missing_sim_report(save_client):
     assert detail["margin"] is None
 
 
+# --- /api/save_iteration — pricing snapshot for cost-evolution chart ------
+
+def test_save_iteration_captures_pricing_snapshot_into_manifest(save_client):
+    """Top-level total_price_usd lands inside audit_manifest.pricing so
+    the row's manifest carries cost data alongside the swap manifest.
+    Captured timestamp tags when the snapshot was taken (in case the
+    user later renames the deck or its on-disk price drifts)."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_manifest": {"added": [], "removed": []},
+        "total_price_usd": 142.37,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    new_id = resp.get_json()["id"]
+    detail = client.get(f"/api/iteration/{new_id}").get_json()
+    manifest = detail["audit_manifest"]
+    assert "pricing" in manifest
+    assert manifest["pricing"]["total_price_usd"] == 142.37
+    assert "captured_at" in manifest["pricing"]
+    # ISO timestamp surface for analytics.
+    assert manifest["pricing"]["captured_at"].startswith("20")
+
+
+def test_save_iteration_pricing_without_audit_manifest_synthesizes_one(save_client):
+    """Top-level total_price_usd should still land even when the caller
+    didn't pass an audit_manifest — endpoint creates a minimal one with
+    just the pricing block."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 95.0,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["audit_manifest"] is not None
+    assert detail["audit_manifest"]["pricing"]["total_price_usd"] == 95.0
+
+
+def test_save_iteration_omits_pricing_when_not_provided(save_client):
+    """No total_price_usd in payload → audit_manifest stays unchanged,
+    no pricing key fabricated. Avoids polluting legacy save flows."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_manifest": {"added": [], "removed": []},
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    manifest = detail["audit_manifest"]
+    assert "pricing" not in manifest
+
+
+def test_save_iteration_preserves_caller_supplied_pricing(save_client):
+    """If audit_manifest already carries a pricing block, the endpoint
+    leaves it alone — the caller is the source of truth."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_manifest": {
+            "added": [],
+            "pricing": {"total_price_usd": 200.0, "captured_at": "2025-01-01T00:00:00+00:00"},
+        },
+        # Top-level value should NOT overwrite the caller's explicit one.
+        "total_price_usd": 999.99,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    pricing = detail["audit_manifest"]["pricing"]
+    assert pricing["total_price_usd"] == 200.0
+    assert pricing["captured_at"] == "2025-01-01T00:00:00+00:00"
+
+
+def test_save_iteration_400_on_invalid_total_price_usd(save_client):
+    """Non-numeric total_price_usd → 400, not silent drop."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": "lots of money",
+        "verdict": "pending",
+    })
+    assert resp.status_code == 400
+    assert "total_price_usd" in resp.get_json()["error"]
+
+
+def test_save_iteration_accepts_zero_price(save_client):
+    """Zero is a legal price (jank deck, all basics) — must not be
+    treated as 'missing'."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 0.0,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["audit_manifest"]["pricing"]["total_price_usd"] == 0.0
+
+
 # --- /api/audit — card-name validation (hallucination defense) ------------
 
 def test_audit_payload_includes_name_known_for_each_rec(client, monkeypatch):

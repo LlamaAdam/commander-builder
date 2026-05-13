@@ -1347,6 +1347,36 @@ def create_app(
         if sim_report is not None and not isinstance(sim_report, dict):
             return jsonify({"error": "sim_report must be an object"}), 400
 
+        # Optional pricing snapshot — feeds the cost-evolution chart.
+        # Number type only (zero is a legal price); reject strings so
+        # silent type drift doesn't poison the analytics later.
+        total_price_usd = payload.get("total_price_usd")
+        if total_price_usd is not None and not isinstance(
+            total_price_usd, (int, float),
+        ):
+            return jsonify({
+                "error": "total_price_usd must be a number",
+            }), 400
+        # bool is a subclass of int in Python; reject it explicitly so
+        # `total_price_usd: true` doesn't silently land as 1.0.
+        if isinstance(total_price_usd, bool):
+            return jsonify({
+                "error": "total_price_usd must be a number",
+            }), 400
+
+        if total_price_usd is not None:
+            from datetime import datetime as _dt, timezone as _tz
+            if audit_manifest is None:
+                audit_manifest = {}
+            # Caller-supplied pricing wins — let downstream pipelines
+            # (iteration_loop, future re-syncs) own the field when they
+            # set it explicitly.
+            if "pricing" not in audit_manifest:
+                audit_manifest["pricing"] = {
+                    "total_price_usd": float(total_price_usd),
+                    "captured_at": _dt.now(_tz.utc).isoformat(),
+                }
+
         # Pull win-rate / margin out of sim_report if present so the
         # row is queryable without parsing the JSON blob every time.
         win_rate_old = None

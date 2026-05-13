@@ -457,6 +457,7 @@ function renderSaveIterationBlock(body) {
       sim_report: body,
       verdict,
       verdict_notes: notesText || null,
+      total_price_usd: _lastDashboardPriceUsd,
     };
     try {
       const resp = await fetch("/api/save_iteration", {
@@ -509,6 +510,13 @@ let _lastAuditManifest = null;
 // Most recent propose-swap response — needed by the "Save iteration"
 // button on the result panel so it can persist the sim_report blob.
 let _lastSimReport = null;
+
+// Snapshot of the dashboard's est_price_usd at the time the user last
+// loaded a deck. Travels into save_iteration as total_price_usd so the
+// knowledge log accumulates a cost-over-time series we can chart later.
+// Reset to null on deck switch so we never persist a stale price for
+// a deck the user moved away from.
+let _lastDashboardPriceUsd = null;
 
 // LLM-analyst preference + BYO API key. Stored in localStorage
 // (browser-local; never sent anywhere except the active /api/audit
@@ -824,6 +832,7 @@ function renderAuditResult(container, body) {
       sim_report: null,
       verdict: "pending",
       verdict_notes: "Audit-only save (no A/B sim run).",
+      total_price_usd: _lastDashboardPriceUsd,
     };
     try {
       const resp = await fetch("/api/save_iteration", {
@@ -938,6 +947,14 @@ function renderAuditResult(container, body) {
 function renderDashboard(data, iterations) {
   const dash = $("dashboard");
   dash.innerHTML = "";
+
+  // Snapshot pricing for save_iteration. Captured here (not at fetch
+  // time) so the value mirrors what the user is actually looking at —
+  // soft-refresh re-renders this function with fresh data.
+  _lastDashboardPriceUsd =
+    (data.stat_tiles && typeof data.stat_tiles.est_price_usd === "number")
+      ? data.stat_tiles.est_price_usd
+      : null;
 
   // Commander hero
   const hero = el("section", { class: "commander-hero" });
