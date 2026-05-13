@@ -2473,12 +2473,16 @@ def test_audit_endpoint_threads_budget_param_to_advise(client, monkeypatch):
         assert seen["budget"] is False, f"budget={v} should set False"
 
 
-def test_audit_payload_match_pct_zero_for_signal_less_evidence(client, monkeypatch):
-    """Regression: Claude recs only carry evidence={"source": "claude"}
-    — no EDHREC inclusion/synergy AND no peer references frequency.
-    The old _match_pct_from_evidence clamped these up to 1, displaying
-    a misleading '1%' in the UI. Now returns 0 so the pill is
-    suppressed entirely."""
+def test_audit_payload_match_pct_null_for_signal_less_evidence(client, monkeypatch):
+    """Regression (2026-05-13): Claude recs only carry
+    evidence={"source": "claude"} — no EDHREC inclusion/synergy AND
+    no peer references frequency. The original implementation
+    clamped these up to 1, displaying a misleading '1%' in the UI.
+    A later fix returned 0, which the UI rendered as "0%" — visually
+    identical to "this is a bad match." Now returns None (JSON null)
+    so the UI suppresses the pill entirely and renders a source-tag
+    badge ('Claude analyst') in its place.
+    """
     from types import SimpleNamespace
 
     def fake_advise(deck_path, bracket, **_kwargs):
@@ -2504,7 +2508,53 @@ def test_audit_payload_match_pct_zero_for_signal_less_evidence(client, monkeypat
                       headers={"X-Anthropic-API-Key": "sk-test"})
     body = resp.get_json()
     by_card = {a["card"]: a for a in body["added"]}
-    assert by_card["Cool Claude Pick"]["match_pct"] == 0
+    assert by_card["Cool Claude Pick"]["match_pct"] is None
+    # The source field must surface so the UI can pick a badge.
+    assert by_card["Cool Claude Pick"]["source"] == "claude"
+
+
+def test_audit_payload_match_pct_null_for_manabase_essentials(client, monkeypatch):
+    """Manabase essentials (Sacred Foundry, Cavern of Souls, etc.)
+    have no inclusion% or reference-frequency signal — they're added
+    by the curated ``_advisor_manabase`` source. The audit response
+    must surface match_pct=null + source='manabase_essentials' so the
+    UI shows a 'Manabase' badge instead of a misleading '0%' pill."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Sacred Foundry", action="add",
+                    reason="essential dual land for color identity",
+                    evidence={"source": "manabase_essentials"},
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Cavern of Souls", action="add",
+                    reason="essential tribal land",
+                    evidence={"source": "tribal_essentials"},
+                    name_known=True,
+                ),
+                # Two cuts so adds==cuts balancing keeps both adds.
+                SimpleNamespace(card="Cut A", action="cut", reason="",
+                                evidence={}, name_known=True),
+                SimpleNamespace(card="Cut B", action="cut", reason="",
+                                evidence={}, name_known=True),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    body = resp.get_json()
+    by_card = {a["card"]: a for a in body["added"]}
+    assert by_card["Sacred Foundry"]["match_pct"] is None
+    assert by_card["Sacred Foundry"]["source"] == "manabase_essentials"
+    assert by_card["Cavern of Souls"]["match_pct"] is None
+    assert by_card["Cavern of Souls"]["source"] == "tribal_essentials"
 
 
 def test_audit_payload_match_pct_from_reference_frequency(client, monkeypatch):

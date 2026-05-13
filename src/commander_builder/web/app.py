@@ -505,6 +505,14 @@ def create_app(
                 # name_known: True/False/None. Default True for legacy
                 # stubs/recs that predate the validator.
                 "name_known": getattr(rec, "name_known", True),
+                # Per-rec source so the UI can render a distinguishing
+                # badge when match_pct is null (manabase essentials,
+                # vanilla Claude recs). Values mirror evidence.source:
+                # "manabase_essentials" / "tribal_essentials" /
+                # "claude" / "bracket_peers" / "edhrec.*". The UI
+                # normalizes these to badge labels in
+                # ``_perCardSourceBadge``.
+                "source": (rec.evidence or {}).get("source"),
             }
             for rec in report.recommendations
             if rec.action == "add" and rec.card.lower() in applied_add_set
@@ -1699,7 +1707,7 @@ def _normalize_pasted_deck(text: str) -> str:
     return "[Main]\n" + "\n".join(body_lines) + "\n"
 
 
-def _match_pct_from_evidence(evidence: dict | None) -> int:
+def _match_pct_from_evidence(evidence: dict | None) -> int | None:
     """Mirror deck_dashboard.match_score combination so audit output
     uses the same 0..100 scale the suggestion panel renders.
 
@@ -1711,14 +1719,17 @@ def _match_pct_from_evidence(evidence: dict | None) -> int:
     pill meaningful across all sources without bracket_peers needing
     to fabricate EDHREC-shaped fields.
 
-    Returns 0 when evidence carries no usable scoring signal (e.g.
-    Claude recs that only set ``{"source": "claude"}``). Previously
-    a ``max(1, ...)`` clamp turned that into 1%, which displayed as
-    a misleading "1%" pill — better to render as 0/blank and let
-    the UI suppress the pill entirely.
+    Returns ``None`` (JSON ``null``) when evidence carries no usable
+    scoring signal — manabase essentials, vanilla Claude recs with
+    no peer-ref data, etc. The UI branches on null and shows a
+    source-specific badge (Manabase / Claude analyst) instead of a
+    misleading "0%" pill. Before 2026-05-13 we returned 0 here and
+    the UI rendered it as "0%", which looked identical to "this
+    card is a bad match" rather than "this card has no inclusion%
+    to score against."
     """
     if not evidence:
-        return 0
+        return None
     # Prefer reference-frequency math when bracket_peers fields are set.
     total = evidence.get("total_references")
     in_n = evidence.get("in_n_references")
@@ -1727,14 +1738,15 @@ def _match_pct_from_evidence(evidence: dict | None) -> int:
     inclusion = evidence.get("inclusion_pct")
     synergy = evidence.get("synergy_pct")
     # If neither inclusion nor synergy was provided, the rec carries
-    # no scoring signal — return 0 instead of clamping up to 1.
+    # no scoring signal — return None so the UI renders a
+    # source-tag badge instead of a confusing "0%" pill.
     if inclusion is None and synergy is None:
-        return 0
+        return None
     inclusion = float(inclusion or 0)
     synergy = min(float(synergy or 0), 20.0)
     raw = inclusion + synergy
     if raw <= 0:
-        return 0
+        return None
     return max(1, min(100, round(raw)))
 
 

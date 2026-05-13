@@ -614,6 +614,50 @@ function _sourcePill(source) {
   return { cls: "pill", text: "EDHREC heuristic" };
 }
 
+// Per-card source badge for the "Cards to add" rows. The audit
+// payload now carries a ``source`` string per rec; when match_pct
+// is null (manabase essentials, vanilla Claude recs with no peer
+// data), we render a compact badge here in place of the misleading
+// "0%" pill that used to leak through. Bracket-peers and EDHREC
+// heuristic recs DO have a numeric match_pct so they keep the
+// percentage pill; we only fall back to a badge when match_pct is
+// null. Returns null when no badge should render (the caller then
+// shows the numeric pill instead).
+//
+// Keep the values in sync with evidence.source strings emitted by:
+//   - _advisor_manabase    → "manabase_essentials" / "tribal_essentials"
+//   - _advisor_claude      → "claude"
+//   - _advisor_bracket_peers → "bracket_peers"
+//   - _advisor_heuristic   → "edhrec.high_synergy" / "edhrec.top_cards" / "edhrec.absence"
+function _perCardSourceBadge(source) {
+  if (!source) return null;
+  if (source === "manabase_essentials") {
+    return {
+      cls: "verdict pending",
+      text: "Manabase",
+      title: "Curated color-fixing essential — no inclusion% data applies",
+    };
+  }
+  if (source === "tribal_essentials") {
+    return {
+      cls: "verdict pending",
+      text: "Tribal",
+      title: "Tribal-essential land (e.g. Cavern of Souls) for this deck's tribe",
+    };
+  }
+  if (source === "claude") {
+    return {
+      cls: "verdict pending",
+      text: "Claude",
+      title: "Recommended by Claude analyst — no statistical signal score",
+    };
+  }
+  // EDHREC heuristic / bracket_peers DO carry a numeric match_pct,
+  // so we don't need a fallback badge for them. Caller renders the
+  // percentage pill in that case.
+  return null;
+}
+
 const _CLAUDE_MODEL_OPTIONS = [
   { value: "claude-haiku-4-5", label: "Haiku 4.5 (cheap, ~3-5× less than Sonnet)" },
   { value: "claude-sonnet-4-5", label: "Sonnet 4.5 (default, balanced)" },
@@ -1057,7 +1101,31 @@ function renderAuditResult(container, body) {
     const ul = el("ul", { class: "iteration-list" });
     for (const a of body.added) {
       const row = el("li", { class: "iteration" });
-      row.appendChild(el("span", { class: "verdict pending" }, `${a.match_pct}%`));
+      // Verdict cell: percentage pill when the rec has a numeric
+      // signal (EDHREC inclusion% / bracket_peers reference frequency),
+      // otherwise a source-specific badge ("Manabase" / "Tribal" /
+      // "Claude") so manabase essentials and signal-less Claude recs
+      // don't render as a confusing "0%". The server emits
+      // match_pct === null for those cases (2026-05-13 fix); 0 is
+      // reserved for "0/5 references" or "0% inclusion" — rare but
+      // legitimate signal that should still display.
+      if (typeof a.match_pct === "number") {
+        row.appendChild(el(
+          "span", { class: "verdict pending" }, `${a.match_pct}%`,
+        ));
+      } else {
+        const badge = _perCardSourceBadge(a.source);
+        if (badge) {
+          const badgeEl = el("span", { class: badge.cls }, badge.text);
+          if (badge.title) badgeEl.title = badge.title;
+          row.appendChild(badgeEl);
+        } else {
+          // Last-ditch fallback for legacy recs with no source field —
+          // render an empty placeholder so the row's flex layout
+          // stays aligned with sibling rows that do have a verdict.
+          row.appendChild(el("span", { class: "verdict pending" }, "—"));
+        }
+      }
       const wrap = el("div");
       const nameDiv = el("div", { class: "name" }, a.card);
       // Per-card hallucination flag — pill renders only on confirmed
