@@ -856,6 +856,39 @@ function renderAuditResult(container, body) {
     ));
   }
 
+  // Saturation-guard summary — when the deck already has enough cards
+  // in a role bucket (ramp/draw/etc.) the advisor drops redundant adds.
+  // Show the user what got filtered so a short list isn't mistaken for
+  // "the advisor gave up". Grouped by role for readability.
+  const skipped = body.skipped_for_saturation || [];
+  if (skipped.length > 0) {
+    // Group by role: { ramp: [{card,deck_count,threshold},...], draw: [...] }
+    const byRole = {};
+    for (const s of skipped) {
+      const r = s.role || "other";
+      if (!byRole[r]) byRole[r] = [];
+      byRole[r].push(s);
+    }
+    const parts = Object.entries(byRole).map(([role, items]) => {
+      // Every item in the same role bucket shares the same deck_count
+      // and threshold; just read the first.
+      const dc = items[0].deck_count;
+      const th = items[0].threshold;
+      return `${items.length} ${role} (you have ${dc}, threshold ${th})`;
+    });
+    const block = el(
+      "p",
+      { class: "muted", style: "font-size: 12px; margin-top: 4px;" },
+      `Skipped ${skipped.length} redundant add`
+      + (skipped.length === 1 ? "" : "s")
+      + `: ${parts.join("; ")}.`,
+    );
+    // Tooltip lists the actual card names that got filtered so power
+    // users can review without expanding the rec list.
+    block.title = skipped.map((s) => `${s.card} (${s.role})`).join("\n");
+    container.appendChild(block);
+  }
+
   // Sub-100 padding warning. When the source deck was short of legal
   // size, we top up with basic lands mirroring its color distribution
   // so Forge will load it. Tell the user that synthetic basics landed.

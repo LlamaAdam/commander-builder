@@ -974,3 +974,235 @@ def test_advise_bracket_peers_validates_card_names(tmp_path, monkeypatch):
     by_card = {r.card: r.name_known for r in report.recommendations}
     assert by_card.get("Real Card") is True
     assert by_card.get("Typo Card") is False
+
+
+# --- Role-saturation guard (the Ur-Dragon "stop suggesting more ramp" fix) -
+# Motivation: the 2026-05-13 Ur-Dragon B4 audit recommended 5 ramp/cost-
+# reducer adds to a deck already running 12+ ramp pieces. The advisor
+# was role-blind on the deck side. This filter sits in the rec pipeline
+# and drops add candidates whose role bucket is already saturated.
+
+
+def test_filter_for_saturation_drops_ramp_when_deck_has_too_much(monkeypatch):
+    """Adds tagged as 'ramp' get filtered out when the deck already has
+    ≥ROLE_SATURATION_THRESHOLDS['ramp'] ramp pieces."""
+    from commander_builder.improvement_advisor import _filter_for_saturation
+    from commander_builder.staples import ROLE_SATURATION_THRESHOLDS
+
+    threshold = ROLE_SATURATION_THRESHOLDS["ramp"]
+
+    candidates = [
+        SwapRecommendation(
+            card="Sol Ring",  # universal staple but rec'd anyway in this synth
+            action="add", reason="",
+            evidence={"role": "ramp"},
+        ),
+        SwapRecommendation(
+            card="Cyclonic Rift", action="add", reason="",
+            evidence={"role": "wipe"},
+        ),
+        SwapRecommendation(
+            card="Old Card", action="cut", reason="",
+            evidence={"role": "other"},
+        ),
+    ]
+    # Pretend the deck has saturated ramp but no wipes.
+    role_counts = {"ramp": threshold, "wipe": 2}
+
+    kept, skipped = _filter_for_saturation(candidates, role_counts)
+    kept_cards = {r.card for r in kept}
+    assert "Sol Ring" not in kept_cards     # dropped — ramp saturated
+    assert "Cyclonic Rift" in kept_cards    # kept — wipe not saturated
+    assert "Old Card" in kept_cards         # cut, never filtered
+    # The skipped record names the role + the count so the UI can show
+    # "skipped: you already have 12 ramp pieces".
+    assert any(
+        s["card"] == "Sol Ring" and s["role"] == "ramp"
+        and s["deck_count"] == threshold
+        and s["threshold"] == threshold
+        for s in skipped
+    )
+
+
+def test_filter_for_saturation_keeps_everything_when_no_role_saturated(
+    monkeypatch,
+):
+    """Backward-compat: when no role bucket is saturated, the filter is
+    a no-op."""
+    from commander_builder.improvement_advisor import _filter_for_saturation
+
+    candidates = [
+        SwapRecommendation(card="A", action="add", reason="",
+                           evidence={"role": "ramp"}),
+        SwapRecommendation(card="B", action="add", reason="",
+                           evidence={"role": "draw"}),
+    ]
+    role_counts = {"ramp": 4, "draw": 3}  # nowhere near threshold
+    kept, skipped = _filter_for_saturation(candidates, role_counts)
+    assert [r.card for r in kept] == ["A", "B"]
+    assert skipped == []
+
+
+def test_filter_for_saturation_treats_missing_role_as_other(monkeypatch):
+    """Old recs without evidence.role (legacy or stub) bucket as 'other'
+    which never saturates — they always pass through."""
+    from commander_builder.improvement_advisor import _filter_for_saturation
+    candidates = [
+        SwapRecommendation(card="A", action="add", reason="", evidence={}),
+    ]
+    kept, skipped = _filter_for_saturation(candidates, {"ramp": 99})
+    assert [r.card for r in kept] == ["A"]
+    assert skipped == []
+
+
+def test_advise_heuristic_drops_redundant_ramp_adds(tmp_path, monkeypatch):
+    """End-to-end through advise(): a deck with 12+ ramp shouldn't get
+    EDHREC's ramp recommendations applied. The Ur-Dragon failure mode."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    # Synthesize a deck text whose main cards will all classify as ramp.
+    ramp_card_names = [f"Ramp Piece {i}" for i in range(1, 14)]  # 13 ramp
+    deck = _write_dck(
+        deck_dir, "[USER] RampHeavy [B3].dck",
+        commanders=["Some Commander"],
+        main=ramp_card_names + ["Old Filler"],
+    )
+    # EDHREC offers two more ramp candidates and one wipe.
+    fake_page = _fake_edhrec_page(
+        top=[
+            ("Cultivate", 90.0),
+            ("Rampant Growth", 85.0),
+            ("Cyclonic Rift", 70.0),
+        ],
+        synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    # Tag every recommended/existing card with appropriate roles.
+    def fake_lookup(name):
+        if name in ("Cultivate", "Rampant Growth"):
+            return {
+                "oracle_text": "Search your library for a basic land card",
+                "type_line": "Sorcery",
+            }
+        if name == "Cyclonic Rift":
+            return {
+                "oracle_text": "destroy all nonland permanents",
+                "type_line": "Instant",
+            }
+        if name.startswith("Ramp Piece"):
+            return {
+                "oracle_text": "Add {G}",
+                "type_line": "Artifact",
+            }
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+
+    report = advise(deck, bracket=3,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_names = {r.card for r in report.recommendations if r.action == "add"}
+    # Ramp adds dropped (deck has 13 ramp pieces, threshold is 12).
+    assert "Cultivate" not in add_names
+    assert "Rampant Growth" not in add_names
+    # Wipe ad survives — that bucket isn't saturated.
+    assert "Cyclonic Rift" in add_names
+    # Saturation report names which roles got filtered.
+    assert hasattr(report, "skipped_for_saturation")
+    skipped_roles = {s["role"] for s in report.skipped_for_saturation}
+    assert "ramp" in skipped_roles
+
+
+def test_advise_bracket_peers_drops_redundant_ramp_adds(tmp_path, monkeypatch):
+    """Same redundancy guard, but in the bracket_peers source path."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    ramp_card_names = [f"Ramp Piece {i}" for i in range(1, 14)]
+    deck = _write_dck(
+        deck_dir, "[USER] RampHeavy [B4].dck",
+        commanders=["X"], main=ramp_card_names,
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Cultivate", "Cyclonic Rift"]),
+        _moxfield_deck_with_cards("d2", ["Cultivate", "Cyclonic Rift"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+
+    def fake_lookup(name):
+        if name == "Cultivate":
+            return {
+                "oracle_text": "Search your library for a basic land card",
+                "type_line": "Sorcery",
+            }
+        if name == "Cyclonic Rift":
+            return {
+                "oracle_text": "destroy all nonland permanents",
+                "type_line": "Instant",
+            }
+        if name.startswith("Ramp Piece"):
+            return {"oracle_text": "Add {G}", "type_line": "Artifact"}
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    add_names = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Cultivate" not in add_names
+    assert "Cyclonic Rift" in add_names
+
+
+def test_advise_saturation_filter_preserves_when_threshold_not_hit(
+    tmp_path, monkeypatch,
+):
+    """Don't break the existing happy path: a normal deck with 8 ramp
+    pieces (under the threshold of 12) should still receive ramp
+    recommendations."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] NormalDeck [B3].dck",
+        commanders=["Some Commander"],
+        main=[f"Ramp {i}" for i in range(1, 9)] + ["Filler"],  # 8 ramp
+    )
+    fake_page = _fake_edhrec_page(
+        top=[("Cultivate", 90.0)], synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    def fake_lookup(name):
+        if name == "Cultivate":
+            return {
+                "oracle_text": "Search your library for a basic land card",
+                "type_line": "Sorcery",
+            }
+        if name.startswith("Ramp "):
+            return {"oracle_text": "Add {G}", "type_line": "Artifact"}
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+    report = advise(deck, bracket=3,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_names = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Cultivate" in add_names  # not saturated, kept

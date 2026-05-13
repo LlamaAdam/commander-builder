@@ -81,16 +81,13 @@ predictor) still data-gated.
    2/3 v4 swaps." Reads from `knowledge_log`. ~1–2 h. *Source:
    2026-05-06 handoff item #7.*
 
-7. **Advisor: archetype-aware redundancy guard.** Real failure mode
-   discovered on the Ur-Dragon B4 audit (2026-05-13): the heuristic
-   recommended 5 ramp/cost-reducer adds to a deck that already had
-   12+ ramp pieces and a built-in commander discount engine.
-   `improvement_advisor` should down-rank an add when the deck
-   already has ≥N cards in the same role bucket. Specifically: for
-   each `evidence.role`, count how many cards in `deck_cards`
-   resolve to the same role via `staples.classify_role`. If
-   ≥`SATURATION_THRESHOLD` (8?), skip the add. ~1 h. *Source:
-   2026-05-13 Ur-Dragon swap loss analysis.*
+7. ~~**Advisor: archetype-aware redundancy guard.**~~ ✅ Shipped.
+   New `_filter_for_saturation()` + `staples.ROLE_SATURATION_THRESHOLDS`
+   (ramp=12, draw=12, removal=10, wipe=6, protection=7, tutor=8,
+   finisher=14). Applies in `advise()` after both heuristic and
+   bracket_peers paths. Dropped adds surface as
+   `AdviceReport.skipped_for_saturation` → `/api/audit` payload →
+   UI summary line grouped by role. 16 new tests.
 
 8. ~~**Advisor: bracket-peers reference mode.**~~ ✅ Shipped in
    commit `34dcfdb`. New `advise(source="bracket_peers")` path +

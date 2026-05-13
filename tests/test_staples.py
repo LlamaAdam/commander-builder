@@ -5,10 +5,13 @@ import pytest
 
 from commander_builder.staples import (
     BASIC_LANDS_LC,
+    ROLE_SATURATION_THRESHOLDS,
     UNIVERSAL_STAPLES_LC,
     classify_role,
     confidence_tier,
+    count_deck_roles,
     is_basic_land,
+    is_role_saturated,
     is_universal_staple,
     render_frequency_label,
 )
@@ -190,3 +193,132 @@ def test_confidence_tier_levels():
     assert confidence_tier(2, 7) == 1
     assert confidence_tier(0, 7) == 0
     assert confidence_tier(5, 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# count_deck_roles — feeds the advisor's saturation guard
+# ---------------------------------------------------------------------------
+# Motivation: the Ur-Dragon B4 audit (2026-05-13) recommended 5 ramp /
+# cost-reducer adds to a deck that already had 12+ ramp pieces. The
+# advisor was role-blind on the deck side — it tagged the recommended
+# *adds* with roles but never counted what the deck already had. This
+# function provides the count so the advisor can drop adds whose role
+# bucket is already saturated.
+
+
+def test_count_deck_roles_counts_per_role(monkeypatch):
+    """Each card resolves to its role via classify_role; the Counter
+    aggregates how many cards landed in each bucket."""
+    # Fake Scryfall: map name → oracle/type so the role classifier
+    # produces deterministic buckets.
+    fake_db = {
+        "sol ring": ("Add {C}{C}.", "Artifact"),
+        # Arcane Signet's real oracle reads "Add one mana of any color in
+        # your commander's color identity." which the classifier's strict
+        # `add \{X\}` regex doesn't catch — it falls through to "other".
+        # Use a fake-but-regex-friendly variant here so the test exercises
+        # the "this is a ramp card" path explicitly. Real-world Arcane
+        # Signet undercounting is tracked as a known classifier gap.
+        "arcane signet": ("Add {W} or {U}.", "Artifact"),
+        "rampant growth": (
+            "Search your library for a basic land card and put it onto the battlefield tapped.",
+            "Sorcery",
+        ),
+        "cultivate": (
+            "Search your library for two basic land cards, reveal them, "
+            "put one onto the battlefield tapped and the other into your hand.",
+            "Sorcery",
+        ),
+        "rhystic study": ("Whenever an opponent casts a spell, you may draw a card.", "Enchantment"),
+        "swords to plowshares": (
+            "Exile target creature.", "Instant",
+        ),
+        "wrath of god": ("Destroy all creatures.", "Sorcery"),
+    }
+
+    def fake_lookup(name):
+        entry = fake_db.get(name.lower())
+        if not entry:
+            return None
+        oracle, type_line = entry
+        return {"oracle_text": oracle, "type_line": type_line}
+
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+
+    counts = count_deck_roles([
+        "Sol Ring", "Arcane Signet", "Rampant Growth", "Cultivate",
+        "Rhystic Study", "Swords to Plowshares", "Wrath of God",
+    ])
+    assert counts["ramp"] == 4   # Sol Ring + Arcane Signet + Rampant + Cultivate
+    assert counts["draw"] == 1   # Rhystic Study
+    assert counts["removal"] == 1
+    assert counts["wipe"] == 1
+
+
+def test_count_deck_roles_handles_unknown_cards_as_other(monkeypatch):
+    """Cards Scryfall doesn't know about (typos, very new printings)
+    must not crash the count — bucket them as 'other' so the saturation
+    guard doesn't decide policy based on missing data."""
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card",
+        lambda name: None,  # All unresolved
+    )
+    counts = count_deck_roles(["Fake Card A", "Fake Card B"])
+    assert counts.get("other", 0) >= 2
+
+
+def test_count_deck_roles_swallows_lookup_exceptions(monkeypatch):
+    """A network error during lookup_card should not abort the count.
+    Treat the card as 'other' (unknown) and keep going."""
+    def boom(name):
+        raise RuntimeError("network blip")
+    monkeypatch.setattr("commander_builder.staples.lookup_card", boom)
+    counts = count_deck_roles(["Sol Ring", "Cultivate"])
+    # Two unknowns, both fell through to 'other'. Doesn't raise.
+    assert counts.get("other", 0) >= 2
+
+
+def test_count_deck_roles_empty_deck():
+    counts = count_deck_roles([])
+    assert dict(counts) == {}
+
+
+# ---------------------------------------------------------------------------
+# is_role_saturated + ROLE_SATURATION_THRESHOLDS
+# ---------------------------------------------------------------------------
+
+
+def test_role_saturation_thresholds_includes_common_buckets():
+    """The threshold table must cover at least ramp/draw/removal/wipe
+    since those are the most commonly-recommended roles. Missing
+    entries default to 'never saturate' (covered by is_role_saturated)."""
+    for role in ("ramp", "draw", "removal", "wipe"):
+        assert role in ROLE_SATURATION_THRESHOLDS
+        # Values should be in a sane range — 4 (boards) to 20 (heavy).
+        assert 4 <= ROLE_SATURATION_THRESHOLDS[role] <= 20
+
+
+def test_is_role_saturated_fires_above_threshold():
+    """Just above the threshold counts as saturated. Equal-to-threshold
+    is also saturated (a deck with exactly 12 ramp pieces doesn't need
+    a 13th)."""
+    threshold = ROLE_SATURATION_THRESHOLDS["ramp"]
+    assert is_role_saturated("ramp", count=threshold) is True
+    assert is_role_saturated("ramp", count=threshold + 5) is True
+
+
+def test_is_role_saturated_does_not_fire_below_threshold():
+    threshold = ROLE_SATURATION_THRESHOLDS["ramp"]
+    assert is_role_saturated("ramp", count=threshold - 1) is False
+    assert is_role_saturated("ramp", count=0) is False
+
+
+def test_is_role_saturated_unknown_role_never_fires():
+    """Roles without a configured threshold (e.g. 'other', 'land',
+    'threat') should never saturate — the function returns False
+    instead of crashing on KeyError. We don't want a typo in the
+    role string to silently drop all recommendations."""
+    assert is_role_saturated("not-a-real-role", count=999) is False
+    assert is_role_saturated("other", count=999) is False

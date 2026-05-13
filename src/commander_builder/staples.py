@@ -25,6 +25,13 @@ exercise them with synthetic ``oracle_text`` strings.
 from __future__ import annotations
 
 import re
+from collections import Counter
+
+# Imported at module level (despite being only used inside
+# ``count_deck_roles``) so tests can monkeypatch
+# ``commander_builder.staples.lookup_card`` to inject synthetic card
+# data without needing to know it lives in ``scryfall_client``.
+from .scryfall_client import lookup_card
 
 # Cards that show up in well over 50% of all decks regardless of commander.
 # Recommending these as adds is noise. Cutting them is also rarely correct.
@@ -199,3 +206,77 @@ def confidence_tier(count: int, total: int) -> int:
     if count * 2 >= total:
         return 2
     return 1
+
+
+# --- Role saturation thresholds (the advisor's redundancy guard) ---------
+
+# Tuned-deck saturation points per role. The advisor uses these to drop
+# adds whose role bucket is already full in the user's deck — the
+# Ur-Dragon B4 audit (2026-05-13) recommended 5 ramp/cost-reducer adds
+# to a deck already running 12+ ramp pieces, which empirically lost
+# the A/B sim. These numbers are conservative (high side) so the guard
+# only fires on genuinely-saturated buckets, not borderline ones.
+#
+# Roles not listed here NEVER saturate — see ``is_role_saturated``.
+# ``threat``/``land``/``other`` are deliberately excluded because they
+# don't pattern-match the "too many of these" failure mode.
+ROLE_SATURATION_THRESHOLDS: dict[str, int] = {
+    "ramp": 12,        # 8-10 is standard; 12+ is bloat
+    "draw": 12,        # similar shape to ramp
+    "removal": 10,     # 6-8 standard
+    "wipe": 6,         # 2-4 standard; 6 is the upper bound on most decks
+    "protection": 7,   # 3-5 standard
+    "tutor": 8,        # 1-4 standard; tutor-heavy decks go higher
+    "finisher": 14,    # finisher-tribal decks (dragons!) legitimately run many
+}
+
+
+def is_role_saturated(role: str, count: int) -> bool:
+    """True when ``count`` cards of ``role`` already in the deck exceeds
+    the threshold for that role. Roles with no configured threshold
+    never saturate — a typo in a role string would otherwise silently
+    drop every add."""
+    threshold = ROLE_SATURATION_THRESHOLDS.get(role)
+    if threshold is None:
+        return False
+    return count >= threshold
+
+
+# --- Count roles in a deck (for the saturation guard) --------------------
+
+# Imported lazily inside the helper because ``staples`` is already
+# imported by modules that don't want a scryfall round-trip surface
+# (forge_runner, web app at boot, etc.). Lazy import keeps the
+# top-level module dependency graph small.
+
+
+def count_deck_roles(card_names) -> "dict[str, int]":
+    """Resolve each card name via Scryfall + ``classify_role`` and return
+    a Counter of role → count.
+
+    Defensive against missing lookups and Scryfall exceptions: unknown
+    cards bucket into ``"other"`` rather than crashing the count. The
+    advisor reads this to decide whether a role bucket is already
+    saturated.
+
+    Cache pressure: each unique card name triggers at most one
+    ``lookup_card`` call (which is itself disk-cached). On a 99-card
+    deck the cost is ~99 dict lookups + maybe a handful of Scryfall
+    misses; both are cheap.
+    """
+    out: Counter = Counter()
+    for name in card_names:
+        try:
+            card = lookup_card(name)
+        except Exception:
+            out["other"] += 1
+            continue
+        if not card:
+            out["other"] += 1
+            continue
+        role = classify_role(
+            card.get("oracle_text", "") or "",
+            card.get("type_line", "") or "",
+        )
+        out[role] += 1
+    return out

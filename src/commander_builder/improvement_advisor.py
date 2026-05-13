@@ -56,8 +56,11 @@ from .knowledge_log import DEFAULT_DB_PATH, iterations_for_deck
 from .moxfield_import import find_top_liked_decks_for_commander
 from .scryfall_client import _parse_commander_names_from_dck, lookup_card
 from .staples import (
+    ROLE_SATURATION_THRESHOLDS,
     classify_role,
+    count_deck_roles,
     is_basic_land,
+    is_role_saturated,
     is_universal_staple,
     render_frequency_label,
 )
@@ -120,13 +123,20 @@ class AdviceReport:
     commander_names: list[str] = field(default_factory=list)
     diagnosis: DeckDiagnosis = field(default_factory=DeckDiagnosis)
     recommendations: list[SwapRecommendation] = field(default_factory=list)
-    source: str = "heuristic"         # "heuristic" | "claude" | "ollama"
+    source: str = "heuristic"         # "heuristic" | "claude" | "ollama" | "bracket_peers"
     timestamp: str = ""
     # When `source` falls back to "heuristic" because a requested LLM
     # backend was unavailable or threw, this captures the user-visible
     # reason. None on the happy path. Populated even on success when
     # the fallback was specifically requested.
     fallback_reason: Optional[str] = None
+    # Adds that the recommender produced but the saturation guard
+    # dropped (deck already has ≥ ROLE_SATURATION_THRESHOLDS[role]
+    # cards in that bucket). Each entry: {card, role, deck_count,
+    # threshold}. Surfaced so the UI can show "skipped 3 ramp adds —
+    # your deck already has 13 ramp pieces" rather than silently
+    # producing a short list.
+    skipped_for_saturation: list[dict] = field(default_factory=list)
 
     def to_manifest(self) -> dict:
         """Render as an audit_manifest.json-compatible dict so this feeds
@@ -314,6 +324,49 @@ def _signals_to_priority_roles(signals: list[str]) -> list[str]:
                         out.append(r)
                 break
     return out[:4]
+
+
+def _filter_for_saturation(
+    recs: list[SwapRecommendation],
+    role_counts: dict,
+) -> tuple[list[SwapRecommendation], list[dict]]:
+    """Drop add candidates whose role bucket is already saturated in
+    the user's deck.
+
+    Real failure mode this addresses (Ur-Dragon B4 audit, 2026-05-13):
+    the EDHREC heuristic and bracket-peers source both rank "what
+    other decks have a lot of" without checking what the user's deck
+    already has. A deck running 13 ramp pieces doesn't need a 14th
+    suggested; recommending one would either get applied (replacing
+    a stronger non-ramp card) or get balanced out by
+    ``_apply_swaps_to_dck``'s adds==cuts rule, wasting a slot.
+
+    Returns ``(kept_recs, skipped_records)``. Each skipped record:
+    ``{card, role, deck_count, threshold}``. Cuts are never filtered
+    (they're already in the deck — removing a 13th ramp piece IS the
+    user's decision). Recs without ``evidence.role`` bucket as
+    ``"other"`` which never saturates, so legacy stubs pass through
+    untouched.
+    """
+    kept: list[SwapRecommendation] = []
+    skipped: list[dict] = []
+    for rec in recs:
+        if rec.action != "add":
+            kept.append(rec)
+            continue
+        role = (rec.evidence or {}).get("role", "other") or "other"
+        deck_count = int(role_counts.get(role, 0))
+        if is_role_saturated(role, deck_count):
+            threshold = ROLE_SATURATION_THRESHOLDS.get(role, 0)
+            skipped.append({
+                "card": rec.card,
+                "role": role,
+                "deck_count": deck_count,
+                "threshold": threshold,
+            })
+            continue
+        kept.append(rec)
+    return kept, skipped
 
 
 def _validate_card_names(recs: list[SwapRecommendation]) -> None:
@@ -895,6 +948,15 @@ def advise(
     except OSError:
         pass
 
+    # Drop add recommendations whose role bucket is already saturated
+    # in the user's deck. The Ur-Dragon B4 audit (2026-05-13) lost an
+    # A/B sim partly because the advisor recommended 5 more ramp
+    # pieces to a deck already running 13. ``count_deck_roles`` is
+    # disk-cached behind ``lookup_card`` so this round-trip is
+    # near-free on repeat audits of the same deck.
+    role_counts = count_deck_roles(main_cards)
+    recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
+
     # Validate every recommended card name against Scryfall. Catches
     # Claude hallucinations before Forge silently rejects the deck.
     # Heuristic recs come from EDHREC and should all resolve; cache hits
@@ -911,6 +973,7 @@ def advise(
         source=source,
         timestamp=datetime.now(timezone.utc).isoformat(),
         fallback_reason=fallback_reason,
+        skipped_for_saturation=skipped_for_saturation,
     )
     if rationale_override:
         report.diagnosis.pattern_summary = rationale_override

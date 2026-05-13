@@ -2297,6 +2297,80 @@ def test_audit_source_param_overrides_llm_param(client, monkeypatch):
     assert seen["use_claude"] is False  # source overrode the llm param
 
 
+def test_audit_payload_includes_saturation_skips(client, monkeypatch):
+    """When the saturation guard drops ramp adds (deck over-saturated),
+    the dropped cards surface in body.skipped_for_saturation so the UI
+    can show 'skipped 3 ramp adds — your deck already has 13'."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add", reason="",
+                    evidence={"role": "ramp"}, name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut", reason="",
+                    evidence={}, name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+            fallback_reason=None,
+            skipped_for_saturation=[
+                {"card": "Rampant Growth", "role": "ramp",
+                 "deck_count": 13, "threshold": 12},
+                {"card": "Three Visits", "role": "ramp",
+                 "deck_count": 13, "threshold": 12},
+            ],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "skipped_for_saturation" in body
+    assert len(body["skipped_for_saturation"]) == 2
+    first = body["skipped_for_saturation"][0]
+    assert first["role"] == "ramp"
+    assert first["deck_count"] == 13
+    assert first["threshold"] == 12
+    assert first["card"] == "Rampant Growth"
+
+
+def test_audit_payload_skipped_for_saturation_defaults_empty(client, monkeypatch):
+    """Legacy stubs that don't set skipped_for_saturation must surface as
+    an empty list, not raise AttributeError."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        # SimpleNamespace WITHOUT skipped_for_saturation attribute —
+        # simulates old stubs / pre-v8 callers.
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add",
+                    reason="", evidence={}, name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut",
+                    reason="", evidence={}, name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+            fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    assert resp.get_json()["skipped_for_saturation"] == []
+
+
 def test_audit_payload_name_known_defaults_true_when_unset(client, monkeypatch):
     """Backward-compat: legacy advise() stubs that don't set name_known
     must not break the response (treat as known)."""

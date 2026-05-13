@@ -570,6 +570,14 @@ def create_app(
             # Hallucination defense — non-zero on Claude analyst path
             # when the LLM invented a card name Scryfall doesn't recognize.
             "unknown_card_count": unknown_card_count,
+            # Adds the saturation guard dropped because the deck
+            # already has enough cards in that role bucket. Each
+            # entry: {card, role, deck_count, threshold}. Lets the UI
+            # show "skipped 3 ramp adds — you already have 13" so a
+            # short list isn't mistaken for the advisor giving up.
+            "skipped_for_saturation": list(
+                getattr(report, "skipped_for_saturation", []) or []
+            ),
         })
 
     @app.route("/api/advise")
