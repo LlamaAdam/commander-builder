@@ -21,7 +21,14 @@
 │  Layer 3 — Phase 2: closed-loop iteration                       │
 │    iteration_loop.py        (orchestrator)                      │
 │    analyst.py               (verdict router)                    │
-│    improvement_advisor.py   (LLM/heuristic swap recommender)    │
+│    improvement_advisor.py   (orchestrator: routes to 7 sources) │
+│      ├─ _advisor_models.py  (shared dataclasses)                │
+│      ├─ _advisor_heuristic.py    (EDHREC-based)               │
+│      ├─ _advisor_bracket_peers.py (Moxfield peer refs)        │
+│      ├─ _advisor_claude.py       (LLM backend)                │
+│      ├─ _advisor_filters.py      (validation + saturation)    │
+│      ├─ _advisor_manabase.py     (curated essentials)         │
+│      └─ _advisor_role_helpers.py (role classifier wrapper)    │
 │    proposer.py              (programmatic LLM proposer)         │
 │    knowledge_log.py         (SQLite history)                    │
 │    report.py                (markdown reports of iteration chains)│
@@ -64,7 +71,13 @@
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 0 — web surface                                          │
-│    web/app.py               (Flask routes + endpoints)          │
+│    web/app.py               (Flask app orchestrator)            │
+│      ├─ _helpers.py         (pure Flask-independent helpers)   │
+│      ├─ routes_audit.py     (audit + advise endpoints)         │
+│      ├─ routes_sim.py       (propose-swap + iteration CRUD)    │
+│      ├─ routes_decks.py     (deck CRUD + import + GC)          │
+│      ├─ routes_dashboard.py (dashboard aggregation)            │
+│      └─ routes_meta.py      (health, version, error sink)      │
 │    web/static/app.js        (UI + error collector)              │
 │    web/static/app.css       (theme)                             │
 └─────────────────────────────────────────────────────────────────┘
@@ -84,7 +97,7 @@ layers never import higher.
 | `moxfield_push` | Render `.dck` as Moxfield textarea format (pipe→parens), clipboard copy | Authentication. `_api_push` is a typed stub (won't-do). |
 | `scryfall_client` | Card lookups, disk cache, color identity, forced refresh | Anything beyond card metadata (archetype is its own thing). |
 | `edhrec_client` | EDHREC commander page + average-deck fetch, schema-tolerant `__NEXT_DATA__` walk, retry-with-backoff (5xx/429/URLError, `Retry-After` honored, capped at 30 s) | What to do with the data. Heuristic advisor + meta-test consume. |
-| `staples` | `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`, `classify_role`, frequency labels, confidence tiers | Recommendation logic. Advisors use these. |
+| `staples` | `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`, `classify_role_extended` (canonical), frequency labels, confidence tiers, role saturation thresholds, manabase essentials, tribal essentials | Recommendation logic. Advisors use these. |
 | `archetype` | Heuristic deck-classifier (filename hint → keyword scan → midrange fallback) | LLM escalation. Stubs exist for Claude/Ollama. |
 | `game_changers` | WotC Game Changers list (HTML scrape, 7-day cache, bundled fallback) | Bracket-fitting. The advisor + dashboard consume. |
 | `pool_curator` | Round-robin tournament, candidate ranking, top-6 split with archetype/color diversity, persisted pool JSON | Picking candidates. That's the user / `moxfield_import`. |
@@ -92,7 +105,14 @@ layers never import higher.
 | `compare_versions` | Old-vs-new head-to-head A/B sim; parallel pod dispatch; adaptive early-stop; intra-pod abort; card-level diff | Whether the new version is "better". That's `analyst`. |
 | `snapshot_deck` | File-copy `.dck` to versioned filename; refuse-clobber semantics | What to do with the snapshot. Workflow / iteration_loop owns. |
 | `meta_test` | Pull top-likes Moxfield + EDHREC Average Deck for a commander; compare-versus-references; must-add / consider / off-meta | Acting on the recommendations. The user does. |
-| `improvement_advisor` | Heuristic + Claude-LLM swap recommender; pricing snapshot; name validation (Scryfall) | Running the sim. That's `compare_versions`. |
+| `improvement_advisor` (orchestrator) | Dispatch to multi-source recommenders; `advise()` entry point; `_advise_steps()` streaming generator; name validation + pricing snapshot | Running the sim. That's `compare_versions`. |
+| `_advisor_models` | `DeckDiagnosis`, `SwapRecommendation`, `AdviceReport`, `AdvicePhase` dataclasses | Serialization schema. JSON mapping is implicit. |
+| `_advisor_heuristic` | EDHREC inclusion%/synergy recommender (`_heuristic_swap_recommendations`) | Other sources. Multi-source dispatch is `improvement_advisor`. |
+| `_advisor_bracket_peers` | Top-N Moxfield peer recommender (`_bracket_peers_recommendations`) | Heuristic fallback. EDHREC handles that. |
+| `_advisor_claude` | LLM advisor (`_claude_swap_recommendations`) via anthropic SDK | Other backends. Router is `improvement_advisor`. |
+| `_advisor_filters` | Card-name validator + saturation guard (`_filter_for_saturation`, `_validate_card_names`) | Recommendation logic. Called post-advice. |
+| `_advisor_manabase` | Curated manabase essentials (`_missing_manabase_recommendations`) | Role-based adds. That's other advisor paths. |
+| `_advisor_role_helpers` | Thin role-classifier wrapper for advisor use | Core classification. That's `staples.classify_role_extended`. |
 | `analyst` | Verdict (`kept` / `reverted` / `neutral`) with confidence + reasoning + lessons | Running the comparison itself. |
 | `proposer` | Router for manual / Claude / Ollama proposers; falls back gracefully | Validating proposals. `compare_versions` + `analyst` do. |
 | `iteration_loop` | Wiring compare → analyst → knowledge_log; `propose_then_iterate()` | Multi-iteration loop (FP-012 territory). |
@@ -103,9 +123,15 @@ layers never import higher.
 | `ml_dataset` | Phase 3 feature schema (25 cols) + extraction + deck-level train/eval split | Training. No trainer until 200+ iterations. |
 | `doctor` | 10 environment checks; GREEN/YELLOW/RED status; `--json` output | Fixing problems. Reports only. |
 | `status` | Decks-per-bracket, curated pools, recent reports, knowledge_log stats | The work itself. Pure observation. |
-| `deck_dashboard` | Stat tiles, mana curve, categories, theme tags, suggested adds, est. price, inferred bracket | Mutation. The web app's audit endpoint does. |
+| `deck_dashboard` | Stat tiles, mana curve, categories, theme tags (incl. tribal type), suggested adds, est. price, inferred bracket | Mutation. The web app's audit endpoint does. |
 | `forge_py_correlation` | Paired-verdict logging (Forge vs forge_py); CSV append; agreement-rate summary | Driving forge_py. Imported lazily; opt-in via env var. |
-| `web/app.py` | Flask routes — `/api/health`, `/api/forge_version`, `/api/decks`, `/api/dashboard`, `/api/audit`, `/api/propose_swap`, `/api/save_iteration`, `/api/iteration/<id>`, `/api/forge_py/correlation_summary`, `/api/log_error` | Business logic. Routes call into the layers above. |
+| `web/app.py` (orchestrator) | Flask app creation; blueprint registration; `create_app()` entry point; stale file cleanup; deck listing; path resolution | Business logic. Blueprints call into the layers above. |
+| `web/_helpers.py` | Pure Flask-independent helpers (`_apply_swaps_to_dck`, `_normalize_pasted_deck`, `_format_added_line`, etc.); `_BASIC_LANDS` constant | Route-specific logic. Each blueprint uses as needed. |
+| `web/routes_audit.py` | Audit + streaming (`GET /api/audit`, `GET /api/audit/stream`, `GET /api/advise`); wires `improvement_advisor` | Other route groups. Each lives in its own blueprint. |
+| `web/routes_sim.py` | Propose-swap + iteration CRUD (`POST /api/propose_swap`, `POST /api/save_iteration`, `GET /api/iteration/<id>`, comparisons, snapshots) | Other endpoints. Organized by business domain. |
+| `web/routes_decks.py` | Deck CRUD + import/GC (`GET/PUT/DELETE /api/deck_text`, `POST /api/import_deck`, `GET/PUT /api/deck_source`, manabase verification, audit) | Other routes. Grouped by deck lifecycle. |
+| `web/routes_dashboard.py` | Dashboard data (`GET /api/decks`, `/api/dashboard`, `/api/iterations`, `/api/pricing_series`, `/api/verdict_breakdown`) | Audit/sim routes. Dashboard-specific aggregation. |
+| `web/routes_meta.py` | Meta/utility routes (`GET /`, `/api/health`, `/api/forge_version`, `/api/correlation_summary`, `POST /api/log_error`) | Business routes. Ops + topbar concerns. |
 | `prompts/moxfield_audit_v3.md` | Current LLM proposer (manual paste workflow) + audit_manifest.json writeback JS | Validation. `compare_versions` + `analyst` do. |
 
 ---
@@ -255,6 +281,143 @@ refresh.
 
 ---
 
+## 2026-05-13 refactors: modular advisor + web blueprints
+
+### Advisor module split (1,267-line orchestrator → 7 focused modules)
+
+The `improvement_advisor.py` orchestrator now routes swap-advice requests
+to per-source recommenders. This keeps each strategy (EDHREC heuristic,
+Moxfield peer ranking, Claude LLM) independent and testable.
+
+**Advisor module structure** (all import-safe; no circular deps):
+
+```
+improvement_advisor.py (orchestrator)
+├── advise()                           # Public entry point
+├── _advise_steps()                    # Streaming generator for SSE
+├── _aggregate_match_history()         # Read prior performance data
+├── main() + CLI                       # Entry point: commander-advise
+
+_advisor_models.py (dataclasses)
+├── DeckDiagnosis                      # Aggregated match history + signals
+├── SwapRecommendation                 # One source's proposal (adds/removes)
+├── AdviceReport                       # Final merged recommendation
+└── AdvicePhase                        # Streaming event (for SSE)
+
+_advisor_heuristic.py
+└── _heuristic_swap_recommendations()  # EDHREC inclusion%/synergy
+
+_advisor_bracket_peers.py
+└── _bracket_peers_recommendations()   # Top-N Moxfield peer refs
+
+_advisor_claude.py
+└── _claude_swap_recommendations()     # LLM-backed advisory
+
+_advisor_filters.py
+├── _validate_card_names()             # Hallucination defense
+└── _filter_for_saturation()           # Role-count guards
+
+_advisor_manabase.py
+└── _missing_manabase_recommendations() # Curated essentials
+
+_advisor_role_helpers.py
+└── _role_for_card()                   # Thin wrapper over staples
+```
+
+**Data flow**: `advise()` calls `_aggregate_match_history()` to read the
+deck's past performance, then dispatches to one of three sources
+(heuristic/bracket_peers/claude) based on the `source=` parameter.
+Each returns a `SwapRecommendation`. Filters run post-advice, then the
+final `AdviceReport` is assembled. The `_advise_steps()` generator yields
+`AdvicePhase` events for streaming endpoints (`GET /api/audit/stream`).
+
+### Web module split (2,368-line routes file → 5 blueprints + helpers)
+
+The Flask route handlers now live in per-group blueprints, each built via
+a `make_<group>_blueprint(...)` factory function that closes over the
+necessary state (deck_dir, knowledge_db, helper callbacks).
+
+**Web module structure**:
+
+```
+web/app.py (orchestrator)
+├── create_app(deck_dir, knowledge_db)  # Builds Flask app + registers 5 blueprints
+├── _cleanup_stale_staged_files()       # Sweep transient *.dck files
+├── _list_decks()                       # Enumerate [USER] decks
+└── _resolve_deck_path()                # Validate path against deck_dir
+
+web/_helpers.py (pure, Flask-independent)
+├── _apply_swaps_to_dck()               # Apply swap manifest to deck text
+├── _normalize_pasted_deck()            # Canonicalize deck format
+├── _format_added_line()                # Render added card for output
+├── _iteration_to_dict()                # Serialize iteration row to JSON
+├── _match_pct_from_evidence()          # Win/draw rate from records
+├── _pad_main_to_99()                   # Normalize deck to 99 cards
+├── _to_constructed_format()            # 1v1 / Constructed format
+└── _BASIC_LANDS constant               # Lands list
+
+web/routes_audit.py (blueprint: audit + advise)
+├── make_audit_blueprint(deck_dir, resolve_deck_path)
+├── GET  /api/audit                     # Heuristic/peer/Claude advisor
+├── GET  /api/audit/stream              # SSE: streaming AdvicePhase events
+└── GET  /api/advise                    # Alias for /api/audit (deprecated)
+
+web/routes_sim.py (blueprint: propose-swap + iteration CRUD)
+├── make_sim_blueprint(deck_dir, knowledge_db, resolve_deck_path)
+├── POST /api/propose_swap              # Stage A/B sim, return diffs
+├── POST /api/save_iteration            # Persist row to knowledge_log
+├── GET  /api/iteration/<id>            # Fetch one iteration
+├── GET  /api/compare/<old_id>/<new_id> # Comparison details
+└── GET  /api/iteration/<id>/snapshot   # Deck text at that iteration
+
+web/routes_decks.py (blueprint: deck CRUD + import + GC)
+├── make_decks_blueprint(deck_dir, resolve_deck_path)
+├── GET    /api/deck_text               # Read .dck file
+├── PUT    /api/deck_text               # Write .dck file
+├── DELETE /api/deck_text               # Remove .dck file
+├── POST   /api/import_deck             # Moxfield URL → .dck
+├── GET    /api/deck_source             # Moxfield publicId from .dck
+├── PUT    /api/deck_source             # Update Moxfield publicId metadata
+├── GET    /api/verify_against_source   # Check Moxfield sync
+├── GET    /api/moxfield_format         # Proposed-deck as Moxfield paste
+├── GET    /api/game_changers           # WotC latest banned/restricted
+└── GET    /api/deck_audit              # Full deck analysis
+
+web/routes_dashboard.py (blueprint: dashboard aggregation)
+├── make_dashboard_blueprint(deck_dir, knowledge_db, list_decks, resolve_deck_path)
+├── GET /api/decks                      # All decks: { id, name, path }[]
+├── GET /api/dashboard                  # DashboardData for one deck
+├── GET /api/iterations                 # Recent iterations (all or filtered)
+├── GET /api/pricing_series             # Sparkline data
+└── GET /api/verdict_breakdown          # Audit-version win/loss stats
+
+web/routes_meta.py (blueprint: meta + ops routes)
+├── make_meta_blueprint(deck_dir, list_decks, asset_version)
+├── GET  /                              # Root HTML
+├── GET  /api/health                    # { status, deck_dir, deck_count }
+├── GET  /api/forge_version             # Jar version + age check
+├── GET  /api/correlation_summary       # forge_py↔Forge agreement log
+└── POST /api/log_error                 # Browser error sink
+```
+
+**Blueprint factory pattern**: Each `make_<group>_blueprint(...)` returns
+a Flask Blueprint closing over the necessary state. This enables:
+
+- Clean separation of route groups by business domain (audit, sim, decks,
+  etc.)
+- Stateless blueprints; all deps passed in explicitly.
+- Easy testing via mocked dependencies.
+- No global Flask app import in route modules (keeps them pure).
+
+**Lazy-import pattern for test monkeypatches**: The web layer imports
+`detect_forge_version`, `build_dashboard`, and other Layer 1–2 functions
+lazily inside route handlers or via module re-import (e.g.,
+`from . import app as _app_mod; info = _app_mod.detect_forge_version()`).
+This ensures test patches applied to `commander_builder.web.app.*` remain
+in scope across the module boundary after the split.
+
+---
+
 ## Persistence locations
 
 | Path | Owner | What |
@@ -281,9 +444,9 @@ require changing module boundaries.
 
 | Seam | Default | Alternatives |
 |------|---------|--------------|
+| `improvement_advisor.advise(source=...)` | `"heuristic"` (EDHREC inclusion%/synergy) | `"bracket_peers"` (Moxfield peer rankings), `"claude"` (LLM-synthesized via `_advisor_claude`); each mapped to a different module |
 | `analyst.analyze()` router | `heuristic_verdict` | `claude_verdict` (anthropic SDK; `ANTHROPIC_API_KEY` or BYO-key header), `ollama_verdict` (HTTP POST to `localhost:11434/api/generate`) |
 | `proposer.propose()` router | `manual_propose` (read `audit_manifest.json`) | `claude_propose`, `ollama_propose` |
-| `improvement_advisor.advise()` LLM backend | heuristic (EDHREC inclusion%/synergy) | Claude analyst — `--use-claude` flag or `?llm=claude` query param |
 | `forge_runner` AI | Forge built-in heuristic AI | Phase 4 (out of scope today): Claude-as-pilot via decision-point hooks |
 | `moxfield_push._api_push` | `NotImplementedError` (WON'T-DO for personal-use scope) | — |
 | `forge_py_correlation` execution | OFF | `COMMANDER_BUILDER_CORRELATE_FORGE_PY=1` opts in to paired-verdict logging |
@@ -355,6 +518,20 @@ These are how sessions should operate on this project. Follow them.
 - **Naming.** `camelCase` for module-level helpers; `PascalCase` for
   dataclasses; `UPPER_SNAKE_CASE` for constants; `_underscore_prefix`
   for module-private helpers.
+
+- **Modular refactoring pattern.** When splitting a large module into
+  per-function or per-source modules, follow the 2026-05-13 improvement_advisor
+  and web blueprints patterns:
+  - Extract shared dataclasses into `_<module>_models.py` first (no circular deps).
+  - Extract per-source / per-group functions into `_<module>_<source>.py` modules.
+  - Keep the orchestrator module (`improvement_advisor.py`, `web/app.py`) light:
+    route to sub-modules, aggregate results, handle CLI/entry-point logic.
+  - Re-export public API from orchestrator so external imports stay stable.
+  - For Flask blueprints: use factory functions (`make_<group>_blueprint(...)`)
+    that close over dependencies; avoid global state.
+  - For lazy imports (e.g., test monkeypatches): import parent module by name
+    inside the function (`from . import app as _app_mod; _app_mod.func()`),
+    not at module top-level. This preserves patches across the split.
 
 ### When you add a module
 
