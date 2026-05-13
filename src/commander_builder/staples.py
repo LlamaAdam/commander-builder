@@ -592,24 +592,43 @@ def confidence_tier(count: int, total: int) -> int:
 
 # --- Role saturation thresholds (the advisor's redundancy guard) ---------
 
-# Tuned-deck saturation points per role. The advisor uses these to drop
-# adds whose role bucket is already full in the user's deck — the
-# Ur-Dragon B4 audit (2026-05-13) recommended 5 ramp/cost-reducer adds
-# to a deck already running 12+ ramp pieces, which empirically lost
-# the A/B sim. These numbers are conservative (high side) so the guard
-# only fires on genuinely-saturated buckets, not borderline ones.
+# Tuned-deck saturation points per role. The advisor uses these to
+# drop adds whose role bucket is already full in the user's deck.
+#
+# Recalibrated 2026-05-13 (Phase A gap #4): the original values were
+# padded UP to compensate for the role classifier's under-counting
+# (e.g. Cyclonic Rift mis-classified as "other" rather than wipe;
+# Crux of Fate ditto). With the wipe-pattern fixes + classify_role
+# consolidation now in (1.1 / 3.2), the classifier counts are
+# accurate, so the thresholds can drop back to the EDH tuned-deck
+# norms documented in STAPLES.md:
+#
+#   ramp: 8-10 standard, 12+ is bloat → threshold 10
+#   draw: 8-10 standard, 12+ is bloat → threshold 9
+#   removal: 6-8 standard             → threshold 8
+#   wipe: 2-4 standard                → threshold 4
+#   protection: 3-5 standard          → threshold 5
+#   tutor: 1-4 standard (heavy decks
+#     legitimately go higher)         → threshold 5
+#   finisher: 1-2 specific lose-the-game effects (Coalition
+#     Victory, Approach of the Second Sun). NOTE: post-consolidation
+#     this is DISTINCT from ``win_condition`` (Craterhoof,
+#     Insurrection, infect-pumps) which has its own bucket and
+#     never saturates — wincon cards are too heterogeneous to
+#     pattern-match a saturation curve.  → threshold 3
 #
 # Roles not listed here NEVER saturate — see ``is_role_saturated``.
-# ``threat``/``land``/``other`` are deliberately excluded because they
-# don't pattern-match the "too many of these" failure mode.
+# ``threat``/``land``/``other``/``win_condition``/``land_payoff``
+# are deliberately excluded because they don't pattern-match the
+# "too many of these" failure mode.
 ROLE_SATURATION_THRESHOLDS: dict[str, int] = {
-    "ramp": 12,        # 8-10 is standard; 12+ is bloat
-    "draw": 12,        # similar shape to ramp
-    "removal": 10,     # 6-8 standard
-    "wipe": 6,         # 2-4 standard; 6 is the upper bound on most decks
-    "protection": 7,   # 3-5 standard
-    "tutor": 8,        # 1-4 standard; tutor-heavy decks go higher
-    "finisher": 14,    # finisher-tribal decks (dragons!) legitimately run many
+    "ramp": 10,
+    "draw": 9,
+    "removal": 8,
+    "wipe": 4,
+    "protection": 5,
+    "tutor": 5,
+    "finisher": 3,
 }
 
 

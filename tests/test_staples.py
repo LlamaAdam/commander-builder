@@ -345,11 +345,44 @@ def test_count_deck_roles_empty_deck():
 def test_role_saturation_thresholds_includes_common_buckets():
     """The threshold table must cover at least ramp/draw/removal/wipe
     since those are the most commonly-recommended roles. Missing
-    entries default to 'never saturate' (covered by is_role_saturated)."""
+    entries default to 'never saturate' (covered by is_role_saturated).
+
+    Range 3..15 reflects the 2026-05-13 recalibration: post-1.1
+    role classifier fixes mean counts are accurate, so thresholds
+    align with EDH tuned-deck norms (ramp 10, wipe 4, finisher 3)
+    rather than the padded-up values that compensated for under-
+    counting bugs.
+    """
     for role in ("ramp", "draw", "removal", "wipe"):
         assert role in ROLE_SATURATION_THRESHOLDS
-        # Values should be in a sane range — 4 (boards) to 20 (heavy).
-        assert 4 <= ROLE_SATURATION_THRESHOLDS[role] <= 20
+        assert 3 <= ROLE_SATURATION_THRESHOLDS[role] <= 15
+
+
+def test_role_saturation_thresholds_match_tuned_deck_norms():
+    """Pin the recalibrated 2026-05-13 values so future drift surfaces
+    in CI. These reflect what tuned EDH decks actually run:
+
+      ramp: 8-10 standard, 12+ bloat
+      draw: 8-10 standard, 12+ bloat
+      removal: 6-8 standard
+      wipe: 2-4 standard
+      protection: 3-5 standard
+      tutor: 1-4 standard, heavier decks legitimately higher
+      finisher: 1-2 specific 'lose the game' effects
+
+    Bumping these requires a deliberate test update — exactly the
+    friction we want so the role-saturation guard's behavior doesn't
+    drift silently across releases.
+    """
+    assert ROLE_SATURATION_THRESHOLDS == {
+        "ramp": 10,
+        "draw": 9,
+        "removal": 8,
+        "wipe": 4,
+        "protection": 5,
+        "tutor": 5,
+        "finisher": 3,
+    }
 
 
 def test_is_role_saturated_fires_above_threshold():
