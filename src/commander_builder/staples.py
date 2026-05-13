@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from typing import Optional
 
 # Imported at module level (despite being only used inside
 # ``count_deck_roles``) so tests can monkeypatch
@@ -203,6 +204,71 @@ def _titlecase_card_name(lowercase_name: str) -> str:
         else:
             out.append(part.capitalize())
     return " ".join(out)
+
+
+# --- Tribal essentials (Cavern of Souls etc.) -----------------------------
+#
+# Canonical Magic creature types that appear often enough as tribal
+# archetypes to be worth detecting from a commander's oracle text.
+# Order matters loosely — we check in this order and return the first
+# match, so put the more-specific types before generic ones (e.g.
+# "Soldier" matches a lot of cards but it's rarely the *primary*
+# tribe; check more flavorful types first).
+_CANONICAL_TRIBAL_TYPES: tuple[str, ...] = (
+    "Dragon", "Sliver", "Elf", "Goblin", "Vampire", "Zombie", "Merfolk",
+    "Angel", "Demon", "Beast", "Wizard", "Knight", "Spirit", "Ninja",
+    "Pirate", "Dinosaur", "Faerie", "Eldrazi", "Werewolf", "Cat",
+    "Bird", "Hydra", "Treefolk", "Giant", "Minotaur", "Druid",
+    "Warrior", "Soldier", "Human",
+)
+
+
+def detect_tribal_type(oracle_text: str, type_line: str = "") -> Optional[str]:
+    """Best-effort guess at a commander's primary tribal type.
+
+    Looks for creature-type mentions in the oracle text (e.g. "Dragon
+    spells you cast cost 1 less", "Create a Goblin creature token").
+    Returns the matched type name (display-cased, singular) or None
+    when no canonical tribal type is mentioned.
+
+    Not exhaustive — covers the ~30 most-played tribes. Misses for
+    obscure tribal commanders (Frog, Otter, etc.) gracefully return
+    None, which the caller treats as "this isn't a tribal deck."
+    """
+    if not oracle_text:
+        return None
+    # Search for plural or singular forms; the regex word boundary
+    # avoids matching mid-word fragments like "Dwarven" → "Dwarf".
+    import re
+    for tribe in _CANONICAL_TRIBAL_TYPES:
+        # Match singular or plural at word boundaries.
+        pattern = rf"\b{re.escape(tribe)}s?\b"
+        if re.search(pattern, oracle_text):
+            return tribe
+    return None
+
+
+# Lands every tribal deck wants regardless of color identity. All are
+# colorless mana cost so they fit any deck.
+_TRIBAL_LANDS = (
+    "Cavern of Souls",      # mana of any color + uncounterable for the tribe
+    "Path of Ancestry",     # filter mana + scry 1 on tribe entry
+    "Secluded Courtyard",   # tribe-typed mana
+    "Unclaimed Territory",  # tribe-typed mana
+)
+
+
+def tribal_essential_lands(tribe: Optional[str]) -> list[str]:
+    """Return the canonical tribal-utility lands for ``tribe``.
+
+    Returns an empty list when ``tribe`` is None (deck isn't tribal).
+    All four lands are colorless mana cost, so they fit any color
+    identity — the manabase recommender appends them on top of the
+    color-gated ABU duals / fetches / shocks / bond lands.
+    """
+    if not tribe:
+        return []
+    return list(_TRIBAL_LANDS)
 
 
 def is_land(card_name: str) -> bool:

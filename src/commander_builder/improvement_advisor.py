@@ -60,12 +60,14 @@ from .staples import (
     ROLE_SATURATION_THRESHOLDS,
     classify_role,
     count_deck_roles,
+    detect_tribal_type,
     essential_manabase_for_colors,
     is_basic_land,
     is_land,
     is_role_saturated,
     is_universal_staple,
     render_frequency_label,
+    tribal_essential_lands,
 )
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
@@ -381,6 +383,7 @@ def _filter_for_saturation(
 def _missing_manabase_recommendations(
     deck_cards,
     color_identity,
+    tribe: Optional[str] = None,
 ) -> list[SwapRecommendation]:
     """Curated manabase-essentials safety net.
 
@@ -394,15 +397,23 @@ def _missing_manabase_recommendations(
 
     ``deck_cards`` is the set of card names currently in the deck.
     ``color_identity`` is a set/iterable of WUBRG letters (case-
-    insensitive). Empty/colorless identity → empty list.
+    insensitive). Empty/colorless identity → no color-gated lands
+    (but tribal essentials still surface if ``tribe`` is set).
+
+    ``tribe`` (optional) is the deck's primary creature type as
+    detected from the commander's oracle text. When set, appends
+    Cavern of Souls + Path of Ancestry + Secluded Courtyard +
+    Unclaimed Territory — colorless lands every tribal deck wants
+    regardless of color identity.
 
     Each rec carries ``evidence.role="land"`` so it groups cleanly
-    in the UI and ``evidence.source="manabase_essentials"`` so users
-    know the recommendation came from this curated safety net rather
-    than peer-reference frequency.
+    in the UI. Source identifies which arm produced it:
+    ``manabase_essentials`` for color-gated, ``tribal_essentials``
+    for the tribe-utility set.
     """
     essentials = essential_manabase_for_colors(color_identity)
-    if not essentials:
+    tribal = tribal_essential_lands(tribe)
+    if not essentials and not tribal:
         return []
     deck_lc = {c.lower() for c in deck_cards}
     recs: list[SwapRecommendation] = []
@@ -419,6 +430,22 @@ def _missing_manabase_recommendations(
             evidence={
                 "source": "manabase_essentials",
                 "role": "land",
+            },
+        ))
+    for name in tribal:
+        if name.lower() in deck_lc:
+            continue
+        recs.append(SwapRecommendation(
+            card=name,
+            action="add",
+            reason=(
+                f"tribal essential — colorless utility land for "
+                f"{tribe} decks (uncounterable / mana of any color)"
+            ),
+            evidence={
+                "source": "tribal_essentials",
+                "role": "land",
+                "tribe": tribe,
             },
         ))
     return recs
@@ -1176,13 +1203,21 @@ def advise(
     # when they happen to appear in references; this fills the gap
     # deterministically. Best-effort: a failed commander lookup falls
     # through silently — the existing recs are unaffected.
+    #
+    # Tribal lands (Cavern of Souls, Path of Ancestry, etc.) layer
+    # on top when detect_tribal_type identifies a primary creature
+    # type in the commander's oracle (e.g. The Ur-Dragon → "Dragon").
     try:
         commander_card = lookup_card(primary_commander)
         if commander_card:
             ci = commander_card.get("color_identity") or []
             ci_set = {c.upper() for c in ci if isinstance(c, str)}
+            tribe = detect_tribal_type(
+                commander_card.get("oracle_text", "") or "",
+                commander_card.get("type_line", "") or "",
+            )
             manabase_recs = _missing_manabase_recommendations(
-                main_cards, ci_set,
+                main_cards, ci_set, tribe=tribe,
             )
             # Prepend rather than append so manabase upgrades surface
             # at the top of the rec list — they're foundational, not

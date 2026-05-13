@@ -1684,6 +1684,79 @@ def test_missing_manabase_recs_tagged_as_land_role(monkeypatch):
         assert r.evidence.get("source") == "manabase_essentials"
 
 
+def test_missing_manabase_includes_tribal_lands_for_dragon_commander():
+    """Tribal commander → Cavern of Souls + Path of Ancestry + etc.
+    surface as adds alongside the color-gated duals/fetches/etc."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    recs = _missing_manabase_recommendations(
+        {"Mountain"}, {"W", "U", "B", "R", "G"}, tribe="Dragon",
+    )
+    add_cards = {r.card for r in recs}
+    assert "Cavern of Souls" in add_cards
+    assert "Path of Ancestry" in add_cards
+    # Tagged so the UI can group these separately.
+    tribal_recs = [r for r in recs
+                   if (r.evidence or {}).get("source") == "tribal_essentials"]
+    assert tribal_recs
+    assert all(r.evidence.get("tribe") == "Dragon" for r in tribal_recs)
+
+
+def test_missing_manabase_no_tribal_lands_when_tribe_none():
+    """Non-tribal commander → no Cavern of Souls / Path of Ancestry."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    recs = _missing_manabase_recommendations(
+        {"Mountain"}, {"R"}, tribe=None,
+    )
+    add_cards = {r.card for r in recs}
+    assert "Cavern of Souls" not in add_cards
+    assert "Path of Ancestry" not in add_cards
+
+
+def test_advise_recommends_cavern_of_souls_for_tribal_commander(
+    tmp_path, monkeypatch,
+):
+    """End-to-end: a 5-color Dragon-tribal commander (Ur-Dragon) →
+    Cavern of Souls surfaces in the recommendations. Pinning the
+    user's stated requirement: "tribal decks should have cavern of
+    souls.\""""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    # Commander oracle mentions "Dragon" multiple times → tribal.
+    ur_dragon_oracle = (
+        "Eminence — As long as The Ur-Dragon is in the command zone "
+        "or on the battlefield, other Dragon spells you cast cost 1 "
+        "less to cast. Flying. Whenever one or more Dragons you "
+        "control attack, draw a card for each."
+    )
+    def fake_lookup(name):
+        if name == "The Ur-Dragon":
+            return {
+                "oracle_text": ur_dragon_oracle,
+                "type_line": "Legendary Creature — Dragon Avatar",
+                "color_identity": ["W", "U", "B", "R", "G"],
+            }
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    report = advise(deck, bracket=4,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_cards = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Cavern of Souls" in add_cards
+
+
 def test_advise_appends_manabase_essentials_to_heuristic_path(
     tmp_path, monkeypatch,
 ):

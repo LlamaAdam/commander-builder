@@ -468,3 +468,60 @@ def test_essential_manabase_uppercase_color_letters():
     upper = essential_manabase_for_colors({"W", "G"})
     lower = essential_manabase_for_colors({"w", "g"})
     assert upper == lower
+
+
+# ---------------------------------------------------------------------------
+# Tribal essentials — Cavern of Souls etc.
+# ---------------------------------------------------------------------------
+
+
+def test_detect_tribal_type_finds_dragon_in_ur_dragon_oracle():
+    """The Ur-Dragon's oracle mentions 'Dragon' multiple times; the
+    detector should return 'Dragon' so the tribal-essentials helper
+    knows this is a Dragon-tribal commander."""
+    from commander_builder.staples import detect_tribal_type
+    oracle = (
+        "Eminence — As long as The Ur-Dragon is in the command zone "
+        "or on the battlefield, other Dragon spells you cast cost 1 "
+        "less to cast. Flying. Whenever one or more Dragons you "
+        "control attack, draw a card for each of those Dragons, then "
+        "you may put a permanent card from your hand onto the "
+        "battlefield."
+    )
+    assert detect_tribal_type(oracle, "Legendary Creature — Dragon Avatar") \
+        == "Dragon"
+
+
+def test_detect_tribal_type_returns_none_for_non_tribal_oracle():
+    """A goodstuff commander with no creature-type mention returns None."""
+    from commander_builder.staples import detect_tribal_type
+    oracle = (
+        "Whenever you draw a card, target opponent loses 1 life and "
+        "you gain 1 life."
+    )
+    assert detect_tribal_type(oracle, "Legendary Creature — Human") is None
+
+
+def test_detect_tribal_type_finds_goblin():
+    """Krenko commander text should resolve to 'Goblin'."""
+    from commander_builder.staples import detect_tribal_type
+    oracle = "{T}: Create X 1/1 red Goblin creature tokens, where X is..."
+    assert detect_tribal_type(oracle, "Legendary Creature — Goblin Warrior") \
+        == "Goblin"
+
+
+def test_tribal_essential_lands_returns_cavern_and_path():
+    """For any tribal commander, the essentials list should at minimum
+    include Cavern of Souls (uncounterable) and Path of Ancestry
+    (filter + scry for the tribe). Both are colorless mana costs so
+    they fit any color identity."""
+    from commander_builder.staples import tribal_essential_lands
+    out = tribal_essential_lands("Dragon")
+    assert "Cavern of Souls" in out
+    assert "Path of Ancestry" in out
+
+
+def test_tribal_essential_lands_empty_for_none():
+    """Non-tribal commander → empty list (no extra recommendations)."""
+    from commander_builder.staples import tribal_essential_lands
+    assert tribal_essential_lands(None) == []
