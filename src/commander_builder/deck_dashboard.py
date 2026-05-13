@@ -440,15 +440,26 @@ def build_dashboard(
             n for n in deck_card_names
             if n in gc_set and n.lower() not in UNIVERSAL_STAPLES_LC
         })
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on legality probes
+        # WotC game-changers CDN is occasionally flaky; logging
+        # surfaces the cause when in_deck_gcs comes back empty
+        # without forcing a dashboard 500.
+        print(
+            f"[dashboard] game-changers lookup failed "
+            f"({type(exc).__name__}: {exc}); skipping",
+            flush=True,
+        )
     try:
         from . import doctor as _doctor
         banned = getattr(_doctor, "BANNED_IN_COMMANDER", None)
         if banned:
             illegal = sorted(set(deck_card_names) & set(banned))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on legality probes
+        print(
+            f"[dashboard] banned-list probe failed "
+            f"({type(exc).__name__}: {exc}); skipping",
+            flush=True,
+        )
     # Total cards = main + commander section. Commander legality
     # requires exactly 100. Surface deficits in the banner so the
     # user sees "deck is short by N" before running an audit /
