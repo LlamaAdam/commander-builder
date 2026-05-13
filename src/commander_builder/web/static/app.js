@@ -4,6 +4,47 @@
 
 const $ = (id) => document.getElementById(id);
 
+// JS error collector — POSTs uncaught errors to /api/log_error so
+// silent failures (TDZ ReferenceError, async network errors, etc.)
+// land in a server-side log the user can grep / paste into chat.
+// Borrowed from prior session: the "Run A/B did nothing" bug was
+// exactly this category and took a code dive to find.
+function _reportJsError(kind, message, stack) {
+  try {
+    fetch("/api/log_error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind,
+        message: String(message || ""),
+        stack: String(stack || ""),
+        url: location.href,
+        user_agent: navigator.userAgent,
+      }),
+      keepalive: true,        // survives page-unload
+    }).then((r) => r.ok && r.json()).then((j) => {
+      if (j && j.ref) {
+        // Stash the ref token where a future devtools session can find
+        // it. Don't alert() — that's user-hostile.
+        window.__lastJsErrorRef = j.ref;
+        console.warn("[js-error reported, ref=" + j.ref + "]");
+      }
+    }).catch(() => { /* never let the reporter itself raise */ });
+  } catch (_e) { /* silent fail */ }
+}
+
+window.addEventListener("error", (e) => {
+  _reportJsError("error", e.message, (e.error && e.error.stack) || "");
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const reason = e.reason || {};
+  _reportJsError(
+    "unhandledrejection",
+    reason.message || String(e.reason),
+    reason.stack || "",
+  );
+});
+
 async function fetchJSON(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
@@ -27,7 +68,18 @@ function el(tag, attrs = {}, ...children) {
 async function loadHealth() {
   try {
     const h = await fetchJSON("/api/health");
-    $("health-badge").textContent = `${h.status} · ${h.deck_count} decks`;
+    let txt = `${h.status} · ${h.deck_count} decks`;
+    // Append correlation summary if the harness has produced rows.
+    // Best-effort — never block the health badge on this.
+    try {
+      const c = await fetchJSON("/api/correlation_summary");
+      if (c && c.rows > 0) {
+        txt += ` · forge_py ${(c.agreement_rate * 100).toFixed(0)}% agree (${c.rows})`;
+      } else if (c && c.enabled) {
+        txt += ` · correlation: collecting`;
+      }
+    } catch (_e) { /* ignore */ }
+    $("health-badge").textContent = txt;
   } catch (e) {
     $("health-badge").textContent = "API unreachable";
   }
@@ -59,11 +111,37 @@ function highlight(li) {
 
 let _activeDeckId = null;
 
-async function selectDeck(deckId, li) {
+async function selectDeck(deckId, li, opts) {
+  // ``opts.soft`` (default false) skips the blanking step: keeps the
+  // existing dashboard rendered while the new data is fetched, then
+  // swaps it in. Used by Edit-deck saves so the UI doesn't flicker
+  // through 5+ seconds of "Loading…" while Scryfall resolves any
+  // newly-added cards.
+  const soft = opts && opts.soft;
   _activeDeckId = deckId;
   highlight(li);
   const dash = $("dashboard");
-  dash.innerHTML = '<p class="empty-state">Loading…</p>';
+  if (!soft) {
+    dash.innerHTML = '<p class="empty-state">Loading…</p>';
+  } else {
+    // Add a translucent loading badge in-corner so the user knows
+    // a refresh is in flight without losing their place.
+    let badge = document.getElementById("_soft-refresh-badge");
+    if (!badge) {
+      badge = el(
+        "div",
+        {
+          id: "_soft-refresh-badge",
+          style: "position: fixed; top: 12px; right: 16px; "
+               + "background: var(--panel); color: var(--muted); "
+               + "border: 1px solid var(--border); border-radius: 6px; "
+               + "padding: 4px 10px; font-size: 12px; z-index: 200;",
+        },
+        "Refreshing…",
+      );
+      document.body.appendChild(badge);
+    }
+  }
   try {
     const [data, iters] = await Promise.all([
       fetchJSON(`/api/dashboard?deck=${encodeURIComponent(deckId)}`),
@@ -72,6 +150,9 @@ async function selectDeck(deckId, li) {
     renderDashboard(data, iters.iterations || []);
   } catch (e) {
     dash.innerHTML = `<p class="empty-state">Error loading: ${e.message}</p>`;
+  } finally {
+    const badge = document.getElementById("_soft-refresh-badge");
+    if (badge) badge.remove();
   }
 }
 
@@ -143,9 +224,11 @@ async function runProposeSwap() {
       }
       status.textContent = "Saved.";
       $("propose-modal").hidden = true;
-      // Reload dashboard so panels reflect the new deck contents.
+      // Soft-refresh: keep the prior dashboard visible while the new
+      // data fetches in background. Avoids the 5+s "Loading…" blank
+      // when Edit added cards Scryfall hasn't cached yet.
       const li = document.querySelector(`.deck-list li[data-id="${_activeDeckId}"]`);
-      selectDeck(_activeDeckId, li);
+      selectDeck(_activeDeckId, li, { soft: true });
     } catch (e) {
       status.textContent = `Save failed: ${e.message}`;
     } finally {
@@ -158,10 +241,23 @@ async function runProposeSwap() {
     document.querySelector('input[name="games"]:checked').value, 10,
   );
   result.innerHTML = "";
+  // Resolve mode first — used to pick the ETA copy below AND posted
+  // to /api/propose_swap. Reading it before declaration was a TDZ
+  // ReferenceError that silently killed the click handler.
+  const modeEl = document.querySelector('input[name="mode"]:checked');
+  const mode = modeEl ? modeEl.value : "pod";
   // Wall-time depends on mode. Pod (4-player commander) takes
   // ~30-60s/game; 1v1 constructed is ~5-10s/game.
-  const podSecs = { 5: 180, 10: 360, 20: 720 };
-  const duelSecs = { 5: 30, 10: 60, 20: 120 };
+  //
+  // Pod estimates assume the Sprint 1A+1B+1C+1E speedup stack:
+  //   - 1A: parallel pods (filler-pair pods run concurrently)
+  //   - 1B: skip late pods once the cumulative verdict is locked
+  //   - 1C: kill a pod when its in-pod margin is uncatchable
+  //   - 1E: filler_pairs auto-scales to min(4, cpu_count)
+  // On a 4-core box with 4 filler pairs running in parallel, the
+  // wall-time tracks the slowest pod, not their sum.
+  const podSecs = { 5: 75, 10: 150, 20: 300 };
+  const duelSecs = { 5: 20, 10: 45, 20: 90 };
   const eta = mode === "pod" ? podSecs[games] : duelSecs[games];
   status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} games via Forge — ~${eta}s…`;
   btn.disabled = true;
@@ -169,8 +265,6 @@ async function runProposeSwap() {
     // Pull the bracket from the filename's [B?] suffix; fall back to 3.
     const bracketMatch = (_activeDeckId || "").match(/\[B(\d)\]/);
     const bracket = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
-    const modeEl = document.querySelector('input[name="mode"]:checked');
-    const mode = modeEl ? modeEl.value : "pod";
     const resp = await fetch("/api/propose_swap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -190,6 +284,7 @@ async function runProposeSwap() {
       return;
     }
     status.textContent = `Done. ${body.total_games} games played.`;
+    _lastSimReport = body;
     renderProposeResult(result, body);
   } catch (e) {
     status.textContent = `Network error: ${e.message}`;
@@ -235,8 +330,162 @@ function renderProposeResult(container, body) {
   grid.appendChild(rowEl("Cards added", String((body.diff?.added || []).length)));
   grid.appendChild(rowEl("Cards removed", String((body.diff?.removed || []).length)));
   grid.appendChild(rowEl("Games per pod", String(body.games_per_pod)));
+  // Sprint 1B telemetry: show pod count and an early-stop note when
+  // adaptive early-stop cut the run short. The verdict is robust
+  // because the remaining pods couldn't have flipped it; we just
+  // saved wall-time.
+  if (body.pods_planned && body.pods_planned > 1) {
+    grid.appendChild(rowEl(
+      "Pods",
+      `${body.pods_completed} / ${body.pods_planned}`
+      + (body.stopped_early ? " (stopped early — verdict locked)" : ""),
+    ));
+  }
   wrap.appendChild(grid);
+
+  // Sprint 1C telemetry: list any pods whose intra-pod abort fired,
+  // so the user understands why some pods reported < games_per_pod
+  // games. This is informational — the verdict is unaffected.
+  if (Array.isArray(body.pod_summaries)) {
+    const aborted = body.pod_summaries.filter((p) => p.intra_pod_aborted);
+    if (aborted.length > 0) {
+      const note = el(
+        "p",
+        { class: "muted", style: "margin-top: 4px; font-size: 12px;" },
+      );
+      const pieces = aborted.map(
+        (p) => `Pod ${p.pod_index} stopped at ${p.games_actually_played}/${body.games_per_pod}`,
+      );
+      note.textContent =
+        "Intra-pod stop (verdict locked mid-pod): " + pieces.join("; ");
+      wrap.appendChild(note);
+    }
+  }
+
+  // Save-to-knowledge-log block. Persists the audit_manifest + sim_report
+  // + a manual verdict so Phase 3 ML has training rows. The default
+  // verdict is suggested by the sim outcome (winner: new → kept,
+  // winner: old → reverted, tie → neutral) but the user can override.
+  wrap.appendChild(renderSaveIterationBlock(body));
+
   container.appendChild(wrap);
+}
+
+function renderSaveIterationBlock(body) {
+  const block = el("div", { class: "save-iteration-block" });
+  block.appendChild(el("h4", { style: "margin-top: 16px;" }, "Save to knowledge log"));
+  if (!_lastAuditManifest || _lastAuditManifest.deck_id !== _activeDeckId) {
+    block.appendChild(el(
+      "p", { class: "muted" },
+      "Run an audit first so the saved iteration includes the full add/cut manifest. "
+      + "(You can still save without it; just the sim_report will be persisted.)",
+    ));
+  }
+  // Verdict radios.
+  const fs = el("fieldset", { class: "games-radio" });
+  fs.appendChild(el("legend", {}, "Verdict:"));
+  const defaultVerdict =
+    body.winner === "new" ? "kept"
+    : body.winner === "old" ? "reverted"
+    : "neutral";
+  for (const [val, label] of [
+    ["kept", "Kept (apply changes)"],
+    ["reverted", "Reverted (discard)"],
+    ["neutral", "Neutral (inconclusive)"],
+    ["pending", "Pending (decide later)"],
+  ]) {
+    const lbl = el("label");
+    const inp = el("input", { type: "radio", name: "save-verdict", value: val });
+    if (val === defaultVerdict) inp.checked = true;
+    lbl.appendChild(inp);
+    lbl.appendChild(document.createTextNode(" " + label));
+    fs.appendChild(lbl);
+  }
+  block.appendChild(fs);
+
+  // Notes textarea.
+  const notesLabel = el("label", { class: "muted" }, "Notes (optional)");
+  const notes = el("textarea", {
+    id: "save-iteration-notes",
+    rows: "2",
+    placeholder: "Why did you keep / revert? (free text)",
+    style: "width: 100%; margin-top: 4px;",
+  });
+  block.appendChild(notesLabel);
+  block.appendChild(notes);
+
+  // Save button + status line.
+  const saveBtn = el("button", { class: "advise-btn" }, "Save iteration");
+  const saveStatus = el("div", { class: "muted", style: "margin-top: 6px;" });
+  saveBtn.addEventListener("click", async () => {
+    const verdictEl = block.querySelector('input[name="save-verdict"]:checked');
+    const verdict = verdictEl ? verdictEl.value : "pending";
+    const notesText = (notes.value || "").trim();
+    saveBtn.disabled = true;
+    saveStatus.textContent = "Saving…";
+
+    // Compose audit_manifest from the most-recent audit (if any) plus
+    // the diff returned by propose_swap. The diff is always reliable;
+    // the manifest's rationale lines fall back to "" when no audit ran.
+    const manifest = _lastAuditManifest && _lastAuditManifest.deck_id === _activeDeckId
+      ? {
+          added: _lastAuditManifest.added,
+          removed: _lastAuditManifest.removed,
+          diagnosis: _lastAuditManifest.diagnosis,
+          weakness_signals: _lastAuditManifest.weakness_signals,
+          diff_added: (body.diff && body.diff.added) || [],
+          diff_removed: (body.diff && body.diff.removed) || [],
+        }
+      : {
+          added: [],
+          removed: [],
+          diff_added: (body.diff && body.diff.added) || [],
+          diff_removed: (body.diff && body.diff.removed) || [],
+        };
+
+    const deckName = (_activeDeckId || "")
+      .replace(/^\[USER\]\s*/, "")
+      .replace(/\s*\[B\d\]$/, "")
+      .trim() || _activeDeckId;
+
+    const payload = {
+      deck_id: _activeDeckId,
+      deck_name: deckName,
+      bracket: body.bracket || (_lastAuditManifest && _lastAuditManifest.bracket) || 3,
+      audit_version: (_lastAuditManifest && _lastAuditManifest.audit_version) || null,
+      audit_manifest: manifest,
+      sim_report: body,
+      verdict,
+      verdict_notes: notesText || null,
+    };
+    try {
+      const resp = await fetch("/api/save_iteration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const out = await resp.json();
+      if (!resp.ok) {
+        saveStatus.textContent = `Error: ${out.error || resp.status}${
+          out.detail ? " — " + out.detail : ""
+        }`;
+        saveBtn.disabled = false;
+        return;
+      }
+      const total = (out.stats && out.stats.total) || "?";
+      saveStatus.textContent =
+        `Saved iteration #${out.id} (verdict: ${out.verdict}). `
+        + `knowledge_log now has ${total} rows.`;
+      // Leave button disabled — the row is persisted; clicking again
+      // would write a duplicate.
+    } catch (e) {
+      saveStatus.textContent = `Network error: ${e.message}`;
+      saveBtn.disabled = false;
+    }
+  });
+  block.appendChild(saveBtn);
+  block.appendChild(saveStatus);
+  return block;
 }
 
 function rowEl(label, value) {
@@ -251,15 +500,86 @@ function rowEl(label, value) {
 // re-fetching.
 let _lastAuditProposed = null;
 
+// Most recent audit's structured manifest (added/removed/diagnosis/bracket).
+// Captured here so the post-sim "Save iteration" button can persist the
+// full audit→sim record to knowledge_log.sqlite without a second API call.
+// Keyed by deck id so switching decks mid-flow doesn't cross-contaminate.
+let _lastAuditManifest = null;
+
+// Most recent propose-swap response — needed by the "Save iteration"
+// button on the result panel so it can persist the sim_report blob.
+let _lastSimReport = null;
+
+// LLM-analyst preference + BYO API key. Stored in localStorage
+// (browser-local; never sent anywhere except the active /api/audit
+// request as the X-Anthropic-API-Key header). Per FP-011.
+const _LLM_PREF_KEY = "cb.audit.llm";
+const _ANTHROPIC_KEY = "cb.audit.anthropic_key";
+const _CLAUDE_MODEL_KEY = "cb.audit.claude_model";
+
+const _CLAUDE_MODEL_OPTIONS = [
+  { value: "claude-haiku-4-5", label: "Haiku 4.5 (cheap, ~3-5× less than Sonnet)" },
+  { value: "claude-sonnet-4-5", label: "Sonnet 4.5 (default, balanced)" },
+  { value: "claude-opus-4-5", label: "Opus 4.5 (deepest reasoning, $$$)" },
+];
+
+function getClaudeModel() {
+  try {
+    return localStorage.getItem(_CLAUDE_MODEL_KEY) || "claude-sonnet-4-5";
+  } catch (_e) { return "claude-sonnet-4-5"; }
+}
+function setClaudeModel(m) {
+  try { localStorage.setItem(_CLAUDE_MODEL_KEY, m); }
+  catch (_e) { /* ignore */ }
+}
+
+function getAuditLLMPref() {
+  try { return localStorage.getItem(_LLM_PREF_KEY) || "heuristic"; }
+  catch (_e) { return "heuristic"; }
+}
+function setAuditLLMPref(v) {
+  try { localStorage.setItem(_LLM_PREF_KEY, v); } catch (_e) { /* ignore */ }
+}
+function getAnthropicKey() {
+  try { return localStorage.getItem(_ANTHROPIC_KEY) || ""; }
+  catch (_e) { return ""; }
+}
+function setAnthropicKey(k) {
+  try {
+    if (k) localStorage.setItem(_ANTHROPIC_KEY, k);
+    else localStorage.removeItem(_ANTHROPIC_KEY);
+  } catch (_e) { /* ignore */ }
+}
+
 async function loadAdvise() {
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
   if (!sug) return;
+  const llm = getAuditLLMPref();          // "heuristic" | "claude"
+  const byoKey = llm === "claude" ? getAnthropicKey() : "";
+  if (llm === "claude" && !byoKey) {
+    const k = window.prompt(
+      "Paste your Anthropic API key (stored only in this browser; "
+      + "sent only on audit requests). Cancel to skip and use heuristic.",
+      "",
+    );
+    if (k && k.trim().startsWith("sk-")) {
+      setAnthropicKey(k.trim());
+    } else {
+      setAuditLLMPref("heuristic");
+    }
+  }
+  const llmFinal = getAuditLLMPref();
+  const keyFinal = llmFinal === "claude" ? getAnthropicKey() : "";
+
   // Restore the panel header (renderSuggestions strips children
   // beyond the <h3>; we want the header back when re-rendering).
   sug.innerHTML = "";
   sug.appendChild(el("h3", {}, "Audit — full proposed deck"));
-  sug.appendChild(el("p", { class: "muted" }, "Generating ideal deck (5–15s, hits EDHREC live)…"));
+  const statusMsg = llmFinal === "claude"
+    ? "Generating ideal deck via Claude analyst (10–30s, hits EDHREC + Anthropic)…"
+    : "Generating ideal deck (5–15s, hits EDHREC live)…";
+  sug.appendChild(el("p", { class: "muted" }, statusMsg));
   // Scroll the audit panel into view immediately so the user sees the
   // 'Generating…' status, not just an unresponsive Run audit button.
   sug.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -267,10 +587,37 @@ async function loadAdvise() {
   const bm = (_activeDeckId || "").match(/\[B(\d)\]/);
   const auditBracket = bm ? parseInt(bm[1], 10) : 3;
   try {
-    const body = await fetchJSON(
-      `/api/audit?deck=${encodeURIComponent(_activeDeckId)}&bracket=${auditBracket}`,
-    );
+    let url =
+      `/api/audit?deck=${encodeURIComponent(_activeDeckId)}`
+      + `&bracket=${auditBracket}`
+      + `&llm=${encodeURIComponent(llmFinal)}`;
+    if (llmFinal === "claude") {
+      url += `&model=${encodeURIComponent(getClaudeModel())}`;
+    }
+    const headers = {};
+    if (keyFinal) headers["X-Anthropic-API-Key"] = keyFinal;
+    const resp = await fetch(url, { headers });
+    if (!resp.ok) throw new Error(`${url} -> ${resp.status}`);
+    const body = await resp.json();
     _lastAuditProposed = body.proposed_text || null;
+    _lastAuditManifest = {
+      deck_id: _activeDeckId,
+      bracket: auditBracket,
+      audit_version: body.audit_version || (body.source === "claude" ? "v3-claude" : "v3"),
+      source: body.source || "heuristic",
+      added: (body.added || []).map((a) => ({
+        card: a.card,
+        rationale: a.rationale || "",
+        match_pct: a.match_pct,
+        price_usd: a.price_usd,
+      })),
+      removed: (body.removed || []).map((r) => ({
+        card: r.card,
+        rationale: r.rationale || "",
+      })),
+      diagnosis: body.diagnosis || "",
+      weakness_signals: body.weakness_signals || [],
+    };
     renderAuditResult(sug, body);
   } catch (e) {
     sug.innerHTML = "";
@@ -279,11 +626,93 @@ async function loadAdvise() {
   }
 }
 
+function renderAuditBackendRow(body) {
+  const row = el("div", { class: "audit-backend-row",
+    style: "display: flex; gap: 8px; align-items: center; "
+         + "flex-wrap: wrap; margin: 4px 0 10px;" });
+  // Source pill — shows what actually ran (heuristic vs. claude),
+  // independent of the requested backend so a fallback is visible.
+  const source = body.source || "heuristic";
+  row.appendChild(el(
+    "span",
+    { class: source === "claude" ? "pill good" : "pill" },
+    source === "claude" ? "Claude analyst" : "EDHREC heuristic",
+  ));
+
+  // Toggle: switch backend for the *next* audit (this run already
+  // produced `body`; running again with the new pref re-fetches).
+  const toggleLabel = el("label",
+    { style: "font-size: 12px; display: flex; gap: 4px; align-items: center;" });
+  const toggle = el("input", { type: "checkbox" });
+  toggle.checked = getAuditLLMPref() === "claude";
+  toggle.addEventListener("change", () => {
+    setAuditLLMPref(toggle.checked ? "claude" : "heuristic");
+  });
+  toggleLabel.appendChild(toggle);
+  toggleLabel.appendChild(document.createTextNode(
+    " Use Claude analyst on next audit (Moxfield audit prompt, costs Anthropic tokens)",
+  ));
+  row.appendChild(toggleLabel);
+
+  // Model dropdown — only meaningful when Claude is selected, but
+  // always visible so users discover it. The Haiku option is the
+  // cost-conscious default for routine audits.
+  const modelSelect = el("select",
+    { style: "font-size: 12px; padding: 2px 6px;" });
+  const currentModel = getClaudeModel();
+  for (const opt of _CLAUDE_MODEL_OPTIONS) {
+    const o = el("option", { value: opt.value }, opt.label);
+    if (opt.value === currentModel) o.selected = true;
+    modelSelect.appendChild(o);
+  }
+  modelSelect.addEventListener("change", () => {
+    setClaudeModel(modelSelect.value);
+  });
+  row.appendChild(modelSelect);
+
+  // Manage-key button — clears stored key or prompts for a new one.
+  const keyBtn = el("button",
+    { class: "advise-btn", style: "padding: 4px 10px; font-size: 12px;" },
+    getAnthropicKey() ? "Replace API key" : "Set API key",
+  );
+  keyBtn.addEventListener("click", () => {
+    const k = window.prompt(
+      "Anthropic API key (leave empty to forget). "
+      + "Stored in this browser only; sent only as the "
+      + "X-Anthropic-API-Key header on audit requests.",
+      "",
+    );
+    if (k === null) return;       // cancel
+    if (k.trim() === "") {
+      setAnthropicKey("");
+      keyBtn.textContent = "Set API key";
+    } else if (k.trim().startsWith("sk-")) {
+      setAnthropicKey(k.trim());
+      keyBtn.textContent = "Replace API key";
+    } else {
+      window.alert("API key should start with 'sk-'.");
+    }
+  });
+  row.appendChild(keyBtn);
+  return row;
+}
+
 function renderAuditResult(container, body) {
-  // Rebuild the panel — header + diagnosis + diff lists + "Use this list"
-  // button + collapsible full-deck preview.
+  // Rebuild the panel — header + LLM toggle + source pill +
+  // diagnosis + diff lists + "Use this list" + collapsible preview.
   container.innerHTML = "";
   container.appendChild(el("h3", {}, "Audit — full proposed deck"));
+
+  // Backend toggle row: shows current source + lets the user switch
+  // between EDHREC heuristic and Claude analyst (Moxfield audit prompt).
+  container.appendChild(renderAuditBackendRow(body));
+
+  if (body.warning) {
+    container.appendChild(el(
+      "p", { class: "pill bad", style: "display: inline-block;" },
+      body.warning,
+    ));
+  }
 
   if (body.diagnosis) {
     container.appendChild(el(
@@ -307,6 +736,24 @@ function renderAuditResult(container, body) {
   );
   container.appendChild(headline);
 
+  // Sub-100 padding warning. When the source deck was short of legal
+  // size, we top up with basic lands mirroring its color distribution
+  // so Forge will load it. Tell the user that synthetic basics landed.
+  if (body.basics_padded && body.basics_padded > 0) {
+    const breakdown = body.basics_padded_breakdown || {};
+    const parts = Object.entries(breakdown)
+      .filter(([_, n]) => n > 0)
+      .map(([name, n]) => `${n} ${name}`)
+      .join(", ");
+    container.appendChild(el(
+      "p",
+      { class: "muted", style: "font-size: 12px;" },
+      `Source deck was sub-100; padded with `
+      + (parts || `${body.basics_padded} basics`)
+      + ` to reach 99 mainboard.`,
+    ));
+  }
+
   // "Use this list" button → drops the proposed text into the Edit
   // modal so the user can preview / tweak before running A/B sim.
   const useBtn = el("button", { class: "advise-btn" }, "Use this list (open editor)");
@@ -321,6 +768,73 @@ function renderAuditResult(container, body) {
     });
   });
   container.appendChild(useBtn);
+
+  // "Save audit (no sim)" — persists the manifest as a pending row
+  // so Phase 3 ML has data even when the user inspects the audit
+  // and reverts before running an A/B sim. The verdict can be
+  // promoted later via /api/iteration/<id> if the user changes their
+  // mind. Composes with Save iteration on the propose-swap result
+  // panel — same row, just no sim_report yet.
+  const saveAuditBtn = el(
+    "button",
+    {
+      class: "advise-btn",
+      style: "margin-left: 8px; background: var(--bg); "
+           + "border: 1px solid var(--border); color: var(--text);",
+    },
+    "Save audit to log (no sim)",
+  );
+  const saveAuditStatus = el(
+    "span", { class: "muted", style: "margin-left: 8px; font-size: 12px;" },
+  );
+  saveAuditBtn.addEventListener("click", async () => {
+    if (!_lastAuditManifest || _lastAuditManifest.deck_id !== _activeDeckId) {
+      saveAuditStatus.textContent = "Run an audit first.";
+      return;
+    }
+    saveAuditBtn.disabled = true;
+    saveAuditStatus.textContent = "Saving…";
+    const deckName = (_activeDeckId || "")
+      .replace(/^\[USER\]\s*/, "")
+      .replace(/\s*\[B\d\]$/, "")
+      .trim() || _activeDeckId;
+    const payload = {
+      deck_id: _activeDeckId,
+      deck_name: deckName,
+      bracket: _lastAuditManifest.bracket || 3,
+      audit_version: _lastAuditManifest.audit_version || null,
+      audit_manifest: {
+        added: _lastAuditManifest.added,
+        removed: _lastAuditManifest.removed,
+        diagnosis: _lastAuditManifest.diagnosis,
+        weakness_signals: _lastAuditManifest.weakness_signals,
+      },
+      sim_report: null,
+      verdict: "pending",
+      verdict_notes: "Audit-only save (no A/B sim run).",
+    };
+    try {
+      const resp = await fetch("/api/save_iteration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const out = await resp.json();
+      if (!resp.ok) {
+        saveAuditStatus.textContent = `Error: ${out.error || resp.status}`;
+        saveAuditBtn.disabled = false;
+        return;
+      }
+      const total = (out.stats && out.stats.total) || "?";
+      saveAuditStatus.textContent =
+        `Saved audit #${out.id} (pending). knowledge_log: ${total} rows.`;
+    } catch (e) {
+      saveAuditStatus.textContent = `Network error: ${e.message}`;
+      saveAuditBtn.disabled = false;
+    }
+  });
+  container.appendChild(saveAuditBtn);
+  container.appendChild(saveAuditStatus);
 
   // Adds list (with rationale + price).
   if (body.added.length) {
@@ -619,9 +1133,10 @@ async function attachMoxfieldUrl() {
       return;
     }
     flashStatus(`Linked to ${body.moxfield_url}`);
-    // Reload the dashboard so the banner shows the new link.
+    // Soft-refresh so the banner reflects the new link without
+    // blanking the rest of the dashboard.
     const li = document.querySelector(`.deck-list li[data-id="${_activeDeckId}"]`);
-    selectDeck(_activeDeckId, li);
+    selectDeck(_activeDeckId, li, { soft: true });
   } catch (e) {
     flashStatus(`Network error: ${e.message}`);
   }
@@ -688,6 +1203,24 @@ function bracketTile(t) {
     t_node.appendChild(el(
       "div", { class: "sub" },
       `${t.n_game_changers} game changer${t.n_game_changers === 1 ? "" : "s"}`,
+    ));
+  }
+  // Bracket auto-inference divergence warning. When the heuristic
+  // disagrees with the user's declared bracket, surface that so they
+  // can update the filename or accept the mismatch knowingly. Only
+  // warn when inferred is HIGHER (deck is more powerful than declared)
+  // — under-declaring power level is the foot-gun; over-declaring is
+  // not.
+  if (
+    t.inferred_bracket != null
+    && t.bracket != null
+    && t.inferred_bracket > t.bracket
+  ) {
+    t_node.appendChild(el(
+      "div",
+      { class: "sub", style: "color: var(--warn, #d4a017);" },
+      `Heuristic suggests B${t.inferred_bracket} (this deck looks `
+      + `more powerful than declared)`,
     ));
   }
   // Override dropdown — change rebuilds dashboard with the new bracket.

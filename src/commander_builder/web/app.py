@@ -27,10 +27,55 @@ from typing import Optional
 from ..deck_dashboard import build_dashboard
 from ..knowledge_log import (
     DEFAULT_DB_PATH as _DEFAULT_KLOG_DB,
+    Iteration,
     get_iteration,
     iterations_for_deck,
     recent_iterations,
+    record_iteration,
+    stats_summary,
 )
+
+
+def _cleanup_stale_staged_files(
+    deck_dir: Path, age_threshold_sec: int = 60,
+) -> int:
+    """Sweep stale ``*_proposed_<ts>.dck`` / ``*_converted_<ts>.dck``
+    files left behind by interrupted propose-swap runs (Ctrl-C, server
+    crash, network failure).
+
+    Only files older than ``age_threshold_sec`` are removed — protects
+    against deleting files an in-flight Forge process is still
+    reading. Returns the number of files deleted. Best-effort: never
+    raises; logs failures for the caller to surface if it cares.
+    """
+    import re as _re
+    import time as _time
+    if not deck_dir.exists():
+        return 0
+    pattern = _re.compile(r"_(proposed|converted)_\d{8}_\d{6}\.dck$")
+    now = _time.time()
+    deleted = 0
+    # Sweep the commander folder + the parallel constructed folder
+    # used by 1v1 mode.
+    candidates = []
+    for sub in (deck_dir, deck_dir.parent / "constructed"):
+        if sub.exists() and sub.is_dir():
+            candidates.extend(sub.glob("*.dck"))
+    for p in candidates:
+        if not pattern.search(p.name):
+            continue
+        try:
+            age = now - p.stat().st_mtime
+        except OSError:
+            continue
+        if age < age_threshold_sec:
+            continue
+        try:
+            p.unlink()
+            deleted += 1
+        except OSError:
+            pass
+    return deleted
 
 
 def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
@@ -112,6 +157,19 @@ def create_app(
         knowledge_db = Path(env_db) if env_db else _DEFAULT_KLOG_DB
     knowledge_db = Path(knowledge_db)
 
+    # Sweep transient propose-swap staging files left over from
+    # interrupted prior runs. Stale-by-definition: their filenames
+    # carry timestamps so a fresh run never collides with live work.
+    try:
+        _stale_swept = _cleanup_stale_staged_files(deck_dir)
+        if _stale_swept:
+            print(
+                f"[startup] swept {_stale_swept} stale staging file(s)",
+                flush=True,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     app = Flask(__name__)
     app.config["DECK_DIR"] = deck_dir
     app.config["KNOWLEDGE_DB"] = knowledge_db
@@ -128,6 +186,28 @@ def create_app(
     def root():
         return render_template("index.html", asset_version=_ASSET_VERSION)
 
+    @app.route("/api/correlation_summary")
+    def correlation_summary_route():
+        """Read the forge_py↔Forge correlation log and return summary
+        stats. UI can show "forge_py agrees X% of the time across N
+        runs" so the user knows the Track-2 dataset is growing."""
+        from ..forge_py_correlation import correlation_summary
+        log_path = deck_dir.parent.parent / "_forge_py_correlation.csv"
+        try:
+            stats = correlation_summary(log_path)
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({
+                "error": "could not read correlation log",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 500
+        stats["log_path"] = str(log_path)
+        stats["enabled"] = bool(
+            os.environ.get(
+                "COMMANDER_BUILDER_CORRELATE_FORGE_PY", "",
+            ).strip().lower() in ("1", "true", "yes"),
+        )
+        return jsonify(stats)
+
     @app.route("/api/health")
     def health():
         return jsonify({
@@ -135,6 +215,54 @@ def create_app(
             "deck_dir": str(deck_dir),
             "deck_count": len(_list_decks(deck_dir)),
         })
+
+    # JS error collector. The browser-side window.onerror /
+    # unhandledrejection handlers POST here so silent failures
+    # (TDZ ReferenceErrors, async network errors, etc.) land
+    # in a server-readable log instead of vanishing in the user's
+    # devtools. Plain text — easy to grep, easy to copy into chat.
+    _JS_ERROR_LOG = deck_dir.parent.parent / "_js_errors.log"
+
+    @app.route("/api/log_error", methods=["POST"])
+    def log_error():
+        try:
+            payload = request.get_json(force=True) or {}
+        except Exception:
+            return jsonify({"error": "expected JSON body"}), 400
+        msg = (payload.get("message") or "").strip()
+        if not msg:
+            return jsonify({"error": "message is required"}), 400
+        # Cap fields so a runaway browser doesn't bloat the log.
+        msg = msg[:2000]
+        url = (payload.get("url") or "")[:512]
+        stack = (payload.get("stack") or "")[:4000]
+        ua = (payload.get("user_agent") or "")[:256]
+        kind = (payload.get("kind") or "error")[:40]
+        from datetime import datetime as _dt, timezone as _tz
+        ts = _dt.now(_tz.utc).isoformat()
+        # Append-only; never read from this endpoint.
+        try:
+            _JS_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with _JS_ERROR_LOG.open("a", encoding="utf-8") as f:
+                f.write(f"--- {ts} [{kind}] {url}\n")
+                f.write(f"UA: {ua}\n")
+                f.write(f"MSG: {msg}\n")
+                if stack:
+                    f.write(f"STACK:\n{stack}\n")
+                f.write("\n")
+        except OSError as exc:
+            return jsonify({
+                "error": "could not write log",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 500
+        # Hand the user a short reference token they can copy into chat.
+        # Format: ts + first 4 hex chars of message hash. Not crypto,
+        # just a "this is the one I'm complaining about" handle.
+        import hashlib as _hashlib
+        ref = ts.replace(":", "").replace("-", "")[:14] + "-" + (
+            _hashlib.sha1((msg + stack).encode("utf-8")).hexdigest()[:4]
+        )
+        return jsonify({"ok": True, "ref": ref})
 
     @app.route("/api/decks")
     def decks():
@@ -222,9 +350,43 @@ def create_app(
         if path is None:
             return jsonify({"error": "deck not found"}), 404
 
+        # Backend selection: heuristic (EDHREC ranking) or claude (LLM
+        # analyst running the Moxfield audit prompt). Heuristic is the
+        # default — no token cost. ?llm=claude opts in. The API key is
+        # NEVER stored server-side (FP-011 BYO-token plan): it arrives
+        # via the X-Anthropic-API-Key header and is injected into the
+        # process env only for the duration of this call.
+        llm = (request.args.get("llm") or "heuristic").strip().lower()
+        if llm not in ("heuristic", "claude"):
+            return jsonify({
+                "error": "llm must be 'heuristic' or 'claude'",
+            }), 400
+        use_claude = llm == "claude"
+        byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
+        # Optional model override. Accepts any string the SDK accepts;
+        # defaults to whatever DEFAULT_CLAUDE_MODEL is set to in
+        # improvement_advisor (Sonnet today). Most-cost-effective
+        # value: "claude-haiku-4-5" (~3-5x cheaper than Sonnet).
+        claude_model = (request.args.get("model") or "").strip() or None
+
         try:
-            from ..improvement_advisor import advise as _advise
-            report = _advise(path, bracket=bracket)
+            from ..improvement_advisor import advise as _advise, DEFAULT_CLAUDE_MODEL
+            saved_key = os.environ.get("ANTHROPIC_API_KEY")
+            if use_claude and byo_key:
+                os.environ["ANTHROPIC_API_KEY"] = byo_key
+            try:
+                report = _advise(
+                    path, bracket=bracket, use_claude=use_claude,
+                    claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
+                )
+            finally:
+                # Always restore env, even on raise — the BYO key must
+                # not linger in the process for unrelated requests.
+                if use_claude and byo_key:
+                    if saved_key is None:
+                        os.environ.pop("ANTHROPIC_API_KEY", None)
+                    else:
+                        os.environ["ANTHROPIC_API_KEY"] = saved_key
         except FileNotFoundError as exc:
             return jsonify({"error": str(exc)}), 404
         except Exception as exc:
@@ -236,6 +398,17 @@ def create_app(
         original = path.read_text(encoding="utf-8")
         proposed_text, added, removed, kept = _apply_swaps_to_dck(
             original, report.recommendations,
+        )
+        # Backlog item: pad sub-100 source decks. The advisor balances
+        # adds==cuts so any source-deck deficit (e.g. the Goblin deck's
+        # 71 mainboard) is preserved into the proposed deck and Forge
+        # refuses to load it. Top up with basics mirroring the deck's
+        # existing color distribution. `kept` stays truthful (cards
+        # from the source that survived cuts); `padded_count` is
+        # surfaced separately so the UI can show what we synthesized.
+        post_swap_main = kept + len(added)
+        proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
+            proposed_text, post_swap_main,
         )
         # Trim the rendered payloads to exactly the swaps that were
         # actually applied to the deck text. _apply_swaps_to_dck
@@ -259,6 +432,28 @@ def create_app(
             for rec in report.recommendations
             if rec.action == "cut" and rec.card.lower() in applied_cut_set
         ]
+        actual_source = getattr(report, "source", "heuristic")
+        fallback_reason = getattr(report, "fallback_reason", None)
+        warning = None
+        if use_claude and actual_source != "claude":
+            # advise() silently falls back to heuristic when no API
+            # key / SDK / network. Tell the UI exactly why so the user
+            # can fix it instead of guessing.
+            if fallback_reason:
+                warning = (
+                    "Claude analyst fell back to EDHREC heuristic. "
+                    f"Reason: {fallback_reason}"
+                )
+            elif not byo_key and not os.environ.get("ANTHROPIC_API_KEY"):
+                warning = (
+                    "Claude analyst was requested but no API key was "
+                    "provided. Click 'Set API key' (sk-…) and try again."
+                )
+            else:
+                warning = (
+                    "Claude analyst was requested but unavailable — "
+                    "falling back to EDHREC heuristic."
+                )
         return jsonify({
             "deck": deck_id,
             "bracket": bracket,
@@ -266,12 +461,18 @@ def create_app(
             "added": added_payload,
             "removed": removed_payload,
             "kept_count": kept,
-            "main_count": kept + len(added_payload),
+            "main_count": kept + len(added_payload) + padded_count,
             "diagnosis": getattr(report.diagnosis, "pattern_summary", ""),
             "weakness_signals": list(getattr(
                 report.diagnosis, "weakness_signals", [],
             ) or []),
-            "source": getattr(report, "source", "heuristic"),
+            "source": actual_source,
+            "requested_llm": llm,
+            "warning": warning,
+            # Backlog: padding info so the UI can warn if we synthesized
+            # basic lands to bring a sub-100 source deck up to legal size.
+            "basics_padded": padded_count,
+            "basics_padded_breakdown": padded_breakdown,
         })
 
     @app.route("/api/advise")
@@ -891,13 +1092,16 @@ def create_app(
             }), 503
 
         try:
+            from ..compare_versions import auto_filler_pairs
             report = compare(
                 old_deck=old_for_compare,
                 new_deck=new_path.name,
                 bracket=bracket,
                 games_per_pod=games,
-                # In pod mode, default 2 filler pairs is fine; 1v1 ignores it.
-                filler_pairs=2,
+                # Sprint 1E: scale filler pairs with CPU count so multi-
+                # core hosts get tighter verdicts at the same wall-time.
+                # 1v1 mode ignores this.
+                filler_pairs=auto_filler_pairs(),
                 mode=mode,
                 runner=runner,
                 # 1v1 mode stages files under userdata/decks/constructed/
@@ -917,6 +1121,59 @@ def create_app(
                 "error": "compare failed",
                 "detail": f"{type(exc).__name__}: {exc}",
             }), 500
+
+        # Track 2 prep — run the same A/B through forge_py.combat and
+        # append a paired row to the correlation log. Opt-in via the
+        # COMMANDER_BUILDER_CORRELATE_FORGE_PY=1 env var so the
+        # default propose-swap path doesn't pay forge_py's wall-time
+        # tax. Once the correlation log has enough rows to compute
+        # Pearson r per archetype, we can flip the default and use
+        # forge_py as a pre-filter.
+        _correlate_flag = os.environ.get(
+            "COMMANDER_BUILDER_CORRELATE_FORGE_PY", "",
+        ).strip().lower()
+        if _correlate_flag in ("1", "true", "yes"):
+            try:
+                from ..forge_py_correlation import (
+                    run_forge_py_ab, log_correlation_row,
+                )
+                old_for_py = (
+                    stage_dir / old_for_compare
+                    if mode == "1v1" else old_path
+                )
+                new_for_py = stage_dir / new_path.name
+                py_result = run_forge_py_ab(
+                    old_for_py, new_for_py,
+                    # Cap forge_py games at min(games, 5) — fast but not
+                    # free, we only need a comparable signal.
+                    games_per_pod=min(games, 5),
+                    mode=mode,
+                )
+                log_path = deck_dir.parent.parent / "_forge_py_correlation.csv"
+                log_correlation_row(
+                    log_path,
+                    old_deck=old_path.name,
+                    new_deck=new_path.name,
+                    bracket=bracket, mode=mode, games_per_pod=games,
+                    forge_old_wins=report.old_stats.wins,
+                    forge_new_wins=report.new_stats.wins,
+                    forge_draws=report.draws,
+                    forge_duration_sec=sum(
+                        p.get("duration_sec", 0) for p in report.pods
+                    ),
+                    py_old_wins=py_result.old_wins,
+                    py_new_wins=py_result.new_wins,
+                    py_draws=py_result.draws,
+                    py_duration_sec=py_result.duration_sec,
+                    py_error=py_result.error,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Never let the correlation harness break the user-facing
+                # response. Just log so we notice it later.
+                app.logger.warning(
+                    "forge_py correlation harness failed: %s: %s",
+                    type(exc).__name__, exc,
+                )
 
         # Drop the staged proposed_*.dck and converted-old (1v1 mode
         # only) now that Forge has finished with them. They exist
@@ -946,6 +1203,153 @@ def create_app(
             "margin": report.margin,
             "total_games": report.total_games,
             "timestamp": report.timestamp,
+            # Sprint 1B telemetry: tell the UI when adaptive early-stop
+            # cut the run short so the user knows the verdict is robust
+            # despite fewer pods running.
+            "pods_completed": len(report.pods),
+            "pods_planned": report.pods_planned or len(report.pods),
+            "stopped_early": bool(report.stopped_early),
+            # Sprint 1C telemetry: per-pod intra-pod abort summary so
+            # the UI can show "Pod 2 stopped at game 3/5 (decisive)".
+            "pod_summaries": [
+                {
+                    "pod_index": p.get("pod_index", i + 1),
+                    "intra_pod_aborted": bool(p.get("intra_pod_aborted")),
+                    "games_actually_played": int(
+                        p.get("games_actually_played") or 0
+                    ),
+                    "duration_sec": p.get("duration_sec", 0),
+                }
+                for i, p in enumerate(report.pods)
+            ],
+        })
+
+    @app.route("/api/save_iteration", methods=["POST"])
+    def save_iteration():
+        """Persist one audit→sim cycle to knowledge_log.sqlite.
+
+        Body::
+
+            {
+                "deck_id": "<filename stem or Moxfield publicId>",
+                "deck_name": "<display name>",
+                "bracket": 1..5,
+                "audit_version": "v3" (optional),
+                "audit_manifest": {"added": [...], "removed": [...],
+                                    "rationale": "..."} (optional),
+                "sim_report": { ...full propose_swap response... } (optional),
+                "verdict": "kept" | "reverted" | "neutral" | "pending",
+                "verdict_notes": "..." (optional),
+                "deck_snapshot": "<.dck text>" (optional),
+                "parent_id": int (optional)
+            }
+
+        Returns ``{"id": <new row id>, "stats": <stats_summary>}`` so the
+        UI can show "Saved iteration #N — knowledge_log now has X rows."
+        """
+        try:
+            payload = request.get_json(force=True) or {}
+        except Exception:
+            return jsonify({"error": "expected JSON body"}), 400
+
+        deck_id = (payload.get("deck_id") or "").strip()
+        deck_name = (payload.get("deck_name") or "").strip()
+        if not deck_id:
+            return jsonify({"error": "deck_id is required"}), 400
+        if not deck_name:
+            deck_name = deck_id
+
+        try:
+            bracket = int(payload.get("bracket", 3))
+        except (TypeError, ValueError):
+            return jsonify({"error": "bracket must be int"}), 400
+        if bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be 1..5"}), 400
+
+        verdict = (payload.get("verdict") or "pending").strip()
+        if verdict not in ("kept", "reverted", "neutral", "pending"):
+            return jsonify({
+                "error": "verdict must be one of kept, reverted, neutral, pending",
+            }), 400
+
+        audit_manifest = payload.get("audit_manifest")
+        if audit_manifest is not None and not isinstance(audit_manifest, dict):
+            return jsonify({"error": "audit_manifest must be an object"}), 400
+        sim_report = payload.get("sim_report")
+        if sim_report is not None and not isinstance(sim_report, dict):
+            return jsonify({"error": "sim_report must be an object"}), 400
+
+        # Pull win-rate / margin out of sim_report if present so the
+        # row is queryable without parsing the JSON blob every time.
+        win_rate_old = None
+        win_rate_new = None
+        margin = None
+        if isinstance(sim_report, dict):
+            try:
+                old_g = int(sim_report.get("old_games") or 0)
+                new_g = int(sim_report.get("new_games") or 0)
+                old_w = int(sim_report.get("old_wins") or 0)
+                new_w = int(sim_report.get("new_wins") or 0)
+                if old_g > 0:
+                    win_rate_old = old_w / old_g
+                if new_g > 0:
+                    win_rate_new = new_w / new_g
+                if "margin" in sim_report and sim_report["margin"] is not None:
+                    margin = int(sim_report["margin"])
+                else:
+                    margin = new_w - old_w
+            except (TypeError, ValueError):
+                pass
+
+        parent_id = payload.get("parent_id")
+        if parent_id is not None:
+            try:
+                parent_id = int(parent_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "parent_id must be int"}), 400
+
+        # Default deck_snapshot to the current on-disk .dck file when
+        # the caller didn't supply one explicitly. Lets the UI persist
+        # iterations without round-tripping the deck text through the
+        # browser.
+        deck_snapshot = payload.get("deck_snapshot")
+        if deck_snapshot is None:
+            path = _resolve_deck_path(deck_dir, deck_id, None)
+            if path is not None:
+                try:
+                    deck_snapshot = path.read_text(encoding="utf-8")
+                except OSError:
+                    deck_snapshot = None
+
+        it = Iteration(
+            deck_id=deck_id,
+            deck_name=deck_name,
+            bracket=bracket,
+            audit_version=payload.get("audit_version"),
+            audit_manifest=audit_manifest,
+            sim_report=sim_report,
+            verdict=verdict,
+            verdict_notes=payload.get("verdict_notes"),
+            win_rate_old=win_rate_old,
+            win_rate_new=win_rate_new,
+            margin=margin,
+            parent_id=parent_id,
+            deck_snapshot=deck_snapshot,
+        )
+
+        try:
+            new_id = record_iteration(it, db_path=knowledge_db)
+            stats = stats_summary(db_path=knowledge_db)
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({
+                "error": "could not save iteration",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 500
+
+        return jsonify({
+            "id": new_id,
+            "verdict": verdict,
+            "stats": stats,
         })
 
     @app.route("/api/iteration/<int:iteration_id>")
@@ -1202,6 +1606,93 @@ def _format_added_line(name: str) -> str:
     if set_code and cn:
         return f"1 {name}|{set_code}|{cn}"
     return f"1 {name}"
+
+
+_BASIC_LANDS = ("Forest", "Island", "Plains", "Swamp", "Mountain", "Wastes")
+
+
+def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, int]]:
+    """Top up the [Main] section with basic lands until it hits 99.
+
+    The user's source decks sometimes ship short of legal Commander
+    size (e.g. the Goblin deck is 71 mainboard). The advisor's adds==
+    cuts balance preserves any deficit, so the proposed deck inherits
+    it and Forge refuses to load it. Pad with basics matching the
+    distribution already present in the deck — preserves color balance
+    without us needing to round-trip Scryfall for the commander's color
+    identity.
+
+    Returns ``(padded_text, padding_added, breakdown)`` where breakdown
+    is ``{basic_name: count_added}``. If the deck is already at or above
+    99 mainboard, returns the input text and an empty breakdown.
+    """
+    import re as _re
+    if current_main >= 99:
+        return text, 0, {}
+    deficit = 99 - current_main
+
+    # Count basics currently in [Main] so we mirror the user's distribution.
+    counts: dict[str, int] = {b: 0 for b in _BASIC_LANDS}
+    in_main = False
+    qty_name_re = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_main = stripped.lower() == "[main]"
+            continue
+        if not in_main:
+            continue
+        m = qty_name_re.match(stripped)
+        if not m:
+            continue
+        name = m.group(2).strip()
+        if name in counts:
+            try:
+                counts[name] += int(m.group(1))
+            except (TypeError, ValueError):
+                counts[name] += 1
+
+    basics_present = {b: c for b, c in counts.items() if c > 0}
+    # No basics? Fall back to Wastes (colorless, legal in any color identity).
+    # Better than guessing colors blind.
+    if not basics_present:
+        basics_present = {"Wastes": 1}
+
+    total = sum(basics_present.values())
+    pad: dict[str, int] = {}
+    distributed = 0
+    # Largest share first (sorted descending) so floor-rounding leftovers
+    # gravitate to the dominant color.
+    for b, c in sorted(basics_present.items(), key=lambda kv: -kv[1]):
+        share = (c * deficit) // total
+        if share > 0:
+            pad[b] = share
+            distributed += share
+    leftover = deficit - distributed
+    if leftover > 0:
+        top = max(basics_present, key=lambda b: basics_present[b])
+        pad[top] = pad.get(top, 0) + leftover
+
+    # Render new lines and splice them at the end of [Main].
+    pad_lines = [f"{n} {b}" for b, n in pad.items() if n > 0]
+    out_lines: list[str] = []
+    in_main = False
+    inserted = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_main and not inserted:
+                out_lines.extend(pad_lines)
+                inserted = True
+            in_main = stripped.lower() == "[main]"
+        out_lines.append(raw)
+    if in_main and not inserted:
+        out_lines.extend(pad_lines)
+
+    new_text = "\n".join(out_lines)
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    return new_text, deficit, pad
 
 
 def _apply_swaps_to_dck(

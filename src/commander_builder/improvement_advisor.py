@@ -114,6 +114,11 @@ class AdviceReport:
     recommendations: list[SwapRecommendation] = field(default_factory=list)
     source: str = "heuristic"         # "heuristic" | "claude" | "ollama"
     timestamp: str = ""
+    # When `source` falls back to "heuristic" because a requested LLM
+    # backend was unavailable or threw, this captures the user-visible
+    # reason. None on the happy path. Populated even on success when
+    # the fallback was specifically requested.
+    fallback_reason: Optional[str] = None
 
     def to_manifest(self) -> dict:
         """Render as an audit_manifest.json-compatible dict so this feeds
@@ -461,15 +466,25 @@ Constraints:
 """
 
 
+DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-5"
+
+
 def _claude_swap_recommendations(
     deck_filename: str,
     bracket: int,
     deck_cards: set[str],
     diagnosis: DeckDiagnosis,
     edhrec_page: CommanderPage,
+    model: str = DEFAULT_CLAUDE_MODEL,
 ) -> tuple[list[SwapRecommendation], str]:
     """LLM-aided variant. Falls back via NotImplementedError when no API key
-    or SDK — caller catches and degrades to heuristic."""
+    or SDK — caller catches and degrades to heuristic.
+
+    ``model`` lets callers pick a tier (haiku for cheap, sonnet for default
+    quality, opus for deepest reasoning). The default tracks
+    ``DEFAULT_CLAUDE_MODEL`` so existing callers don't change behavior;
+    cost-sensitive runs can pass ``model='claude-haiku-4-5'`` for a
+    ~3-5x cheaper request."""
     if "ANTHROPIC_API_KEY" not in os.environ:
         raise NotImplementedError("claude advisor requires ANTHROPIC_API_KEY")
     try:
@@ -500,7 +515,7 @@ def _claude_swap_recommendations(
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
-        model="claude-sonnet-4-5",
+        model=model,
         max_tokens=2048,
         system=_CLAUDE_ADVISOR_SYSTEM,
         messages=[{"role": "user", "content": user_message}],
@@ -543,10 +558,15 @@ def advise(
     use_claude: bool = False,
     deck_dir: Path = DECK_DIR,
     match_dir: Path = MATCH_DIR,
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck. Default uses heuristic
     over EDHREC data; pass `use_claude=True` to escalate to LLM-aided
-    synthesis (falls back to heuristic if API unavailable)."""
+    synthesis (falls back to heuristic if API unavailable).
+
+    ``claude_model`` selects the Anthropic tier when ``use_claude=True``;
+    defaults to Sonnet for general quality. Pass ``"claude-haiku-4-5"``
+    to cut cost ~3-5x on routine audits."""
     if not deck_path.is_absolute():
         deck_path = deck_dir / deck_path
     if not deck_path.exists():
@@ -567,20 +587,29 @@ def advise(
     # Pick backend.
     source = "heuristic"
     rationale_override: Optional[str] = None
+    fallback_reason: Optional[str] = None
     recs: list[SwapRecommendation]
     if use_claude:
         try:
             recs, rationale_override = _claude_swap_recommendations(
                 deck_path.name, bracket, main_cards, diagnosis, edhrec_page,
+                model=claude_model,
             )
             source = "claude"
         except NotImplementedError as exc:
-            print(f"  WARN: claude advisor unavailable ({exc}); falling back to heuristic.",
+            fallback_reason = f"claude advisor unavailable: {exc}"
+            print(f"  WARN: {fallback_reason}; falling back to heuristic.",
                   flush=True)
             recs = _heuristic_swap_recommendations(main_cards, edhrec_page, diagnosis=diagnosis)
         except Exception as exc:  # noqa: BLE001
-            print(f"  WARN: claude advisor failed ({type(exc).__name__}); "
-                  f"falling back to heuristic.", flush=True)
+            # Concrete cause helps diagnose: AuthenticationError (bad
+            # key), APIConnectionError (network), JSONDecodeError
+            # (model returned non-JSON), etc.
+            fallback_reason = (
+                f"claude advisor failed ({type(exc).__name__}: {exc})"
+            )
+            print(f"  WARN: {fallback_reason}; falling back to heuristic.",
+                  flush=True)
             recs = _heuristic_swap_recommendations(main_cards, edhrec_page, diagnosis=diagnosis)
     else:
         recs = _heuristic_swap_recommendations(main_cards, edhrec_page)
@@ -605,6 +634,7 @@ def advise(
         recommendations=recs,
         source=source,
         timestamp=datetime.now(timezone.utc).isoformat(),
+        fallback_reason=fallback_reason,
     )
     if rationale_override:
         report.diagnosis.pattern_summary = rationale_override

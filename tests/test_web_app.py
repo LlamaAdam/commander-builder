@@ -563,18 +563,42 @@ def test_deck_text_404_on_missing_deck(client):
     assert resp.status_code == 404
 
 
-def _stub_compare(monkeypatch, winner="new", old_wins=4, new_wins=11, draws=0):
+def _stub_compare(
+    monkeypatch, winner="new", old_wins=4, new_wins=11, draws=0,
+    pods_planned=2, pods_completed=2, stopped_early=False,
+    pod_intra_aborts=None,
+):
     """Stub commander_builder.compare_versions.compare so the
-    A/B endpoint runs without Forge."""
+    A/B endpoint runs without Forge.
+
+    ``pod_intra_aborts`` is an optional list of (intra_pod_aborted,
+    games_actually_played) tuples for each pod, exercising the
+    Sprint 1C per-pod-abort telemetry path. Defaults to all-pods-ran-
+    full-length when None.
+    """
     from types import SimpleNamespace
 
     def fake_compare(old_deck, new_deck, bracket, games_per_pod,
                      filler_pairs=2, mode="1v1", runner=None,
-                     out_dir=None, deck_dir=None):
+                     out_dir=None, deck_dir=None,
+                     parallel=True, max_workers=None,
+                     early_stop=True):
         old_stats = SimpleNamespace(deck_filename=old_deck,
                                     wins=old_wins, games=old_wins + new_wins + draws)
         new_stats = SimpleNamespace(deck_filename=new_deck,
                                     wins=new_wins, games=old_wins + new_wins + draws)
+        if pod_intra_aborts:
+            pods = [
+                {
+                    "pod_index": i + 1,
+                    "intra_pod_aborted": aborted,
+                    "games_actually_played": played,
+                    "duration_sec": 30.0,
+                }
+                for i, (aborted, played) in enumerate(pod_intra_aborts)
+            ]
+        else:
+            pods = [{} for _ in range(pods_completed)]
         return SimpleNamespace(
             old_deck=old_deck, new_deck=new_deck,
             bracket=bracket, mode=mode, games_per_pod=games_per_pod,
@@ -583,6 +607,9 @@ def _stub_compare(monkeypatch, winner="new", old_wins=4, new_wins=11, draws=0):
             timestamp="2026-04-28T12:00:00",
             winner=winner,
             margin=abs(new_wins - old_wins),
+            pods=pods,
+            pods_planned=pods_planned,
+            stopped_early=stopped_early,
         )
     monkeypatch.setattr(
         "commander_builder.compare_versions.compare", fake_compare,
@@ -613,6 +640,57 @@ def test_propose_swap_runs_compare_and_returns_summary(client, monkeypatch):
     assert body["games_per_pod"] == 5
     # Diff was non-empty (Lotus Cobra added, Cultivate removed).
     assert any("Lotus Cobra" in s for s in body["diff"]["added"])
+
+
+def test_propose_swap_forwards_early_stop_metadata(client, monkeypatch):
+    """Sprint 1B: when compare() reports it stopped early, the
+    /api/propose_swap response surfaces pods_completed / pods_planned
+    / stopped_early so the UI can show the user."""
+    _stub_compare(
+        monkeypatch, winner="new", old_wins=15, new_wins=0,
+        pods_planned=4, pods_completed=3, stopped_early=True,
+    )
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["pods_planned"] == 4
+    assert body["pods_completed"] == 3
+    assert body["stopped_early"] is True
+
+
+def test_propose_swap_forwards_pod_summaries_with_intra_pod_abort(
+    client, monkeypatch,
+):
+    """Sprint 1C: per-pod abort telemetry surfaces in pod_summaries
+    so the UI can show 'Pod 2 stopped at game 3/5'."""
+    _stub_compare(
+        monkeypatch, winner="new", old_wins=2, new_wins=8,
+        pods_planned=2, pods_completed=2, stopped_early=False,
+        pod_intra_aborts=[(False, 5), (True, 3)],
+    )
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5,
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "pod_summaries" in body
+    assert len(body["pod_summaries"]) == 2
+    assert body["pod_summaries"][0]["intra_pod_aborted"] is False
+    assert body["pod_summaries"][0]["games_actually_played"] == 5
+    assert body["pod_summaries"][1]["intra_pod_aborted"] is True
+    assert body["pod_summaries"][1]["games_actually_played"] == 3
 
 
 def test_propose_swap_400_on_bad_games_value(client, monkeypatch):
@@ -966,6 +1044,218 @@ def test_format_added_line_falls_back_when_lookup_fails(monkeypatch):
     assert _format_added_line("Mystery Card") == "1 Mystery Card"
 
 
+# ---------------------------------------------------------------------------
+# Backlog: _pad_main_to_99 — bring sub-100 source decks up to legal size
+# ---------------------------------------------------------------------------
+
+def test_pad_main_to_99_passes_through_when_already_legal():
+    from commander_builder.web.app import _pad_main_to_99
+    text = "[metadata]\nName=X\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n"
+    out, padded, breakdown = _pad_main_to_99(text, current_main=99)
+    assert out == text
+    assert padded == 0
+    assert breakdown == {}
+
+
+def test_pad_main_to_99_distributes_basics_proportionally():
+    """Goblin-deck-style: 71 mainboard, all Mountains. We expect to add
+    28 Mountains (mono-color)."""
+    from commander_builder.web.app import _pad_main_to_99
+    text = (
+        "[metadata]\nName=Goblin\n"
+        "[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n"
+        "30 Mountain\n"
+        + "1 Goblin Bushwhacker\n" * 41
+    )
+    out, padded, breakdown = _pad_main_to_99(text, current_main=71)
+    assert padded == 28
+    assert breakdown == {"Mountain": 28}
+    # Padding line landed inside [Main].
+    assert "28 Mountain" in out
+
+
+def test_pad_main_to_99_distributes_across_two_colors():
+    from commander_builder.web.app import _pad_main_to_99
+    text = (
+        "[metadata]\nName=Simic\n"
+        "[Commander]\n1 Hakbal\n"
+        "[Main]\n10 Forest\n10 Island\n"
+        + "1 Cultivate\n" * 60
+    )
+    out, padded, breakdown = _pad_main_to_99(text, current_main=80)
+    assert padded == 19
+    # 10:10 split → roughly 9-10 split (or 10-9). Sum must equal 19.
+    assert sum(breakdown.values()) == 19
+    assert breakdown.get("Forest", 0) > 0
+    assert breakdown.get("Island", 0) > 0
+
+
+def test_pad_main_to_99_falls_back_to_wastes_when_no_basics():
+    """No basic lands in the deck (cEDH-style multi-color manabase) →
+    pad with Wastes since they're colorless and legal anywhere."""
+    from commander_builder.web.app import _pad_main_to_99
+    text = (
+        "[metadata]\nName=cEDH\n"
+        "[Commander]\n1 Thrasios\n"
+        "[Main]\n"
+        + "1 Tundra\n1 Underground Sea\n1 Tropical Island\n"
+        + "1 Sol Ring\n" * 90
+    )
+    out, padded, breakdown = _pad_main_to_99(text, current_main=93)
+    assert padded == 6
+    assert breakdown == {"Wastes": 6}
+
+
+def test_cleanup_stale_staged_files_deletes_old_proposed_files(tmp_path):
+    import os
+    import time
+    from commander_builder.web.app import _cleanup_stale_staged_files
+
+    deck_dir = tmp_path / "userdata" / "decks" / "commander"
+    deck_dir.mkdir(parents=True)
+    constructed = tmp_path / "userdata" / "decks" / "constructed"
+    constructed.mkdir()
+
+    # Old proposed file (should be deleted).
+    old_proposed = deck_dir / "Foo_proposed_20260101_120000.dck"
+    old_proposed.write_text("stale\n", encoding="utf-8")
+    # Backdate it so the age check fires.
+    past = time.time() - 3600
+    os.utime(old_proposed, (past, past))
+
+    # Old converted file in constructed/ (should also be deleted).
+    old_converted = constructed / "Bar_converted_20260101_120000.dck"
+    old_converted.write_text("stale\n", encoding="utf-8")
+    os.utime(old_converted, (past, past))
+
+    # User deck (should NOT be touched).
+    user_deck = deck_dir / "[USER] Real Deck [B3].dck"
+    user_deck.write_text("real\n", encoding="utf-8")
+
+    deleted = _cleanup_stale_staged_files(deck_dir)
+    assert deleted == 2
+    assert not old_proposed.exists()
+    assert not old_converted.exists()
+    assert user_deck.exists()
+
+
+def test_cleanup_stale_staged_files_skips_recent_files(tmp_path):
+    """Don't delete files newer than the age threshold — they might
+    belong to an in-flight Forge process."""
+    from commander_builder.web.app import _cleanup_stale_staged_files
+
+    deck_dir = tmp_path / "userdata" / "decks" / "commander"
+    deck_dir.mkdir(parents=True)
+
+    fresh = deck_dir / "Foo_proposed_20260429_010000.dck"
+    fresh.write_text("active\n", encoding="utf-8")
+    # mtime is 'now' by default, well within the 60s threshold.
+
+    deleted = _cleanup_stale_staged_files(deck_dir, age_threshold_sec=60)
+    assert deleted == 0
+    assert fresh.exists()
+
+
+def test_cleanup_stale_staged_files_handles_missing_dir(tmp_path):
+    from commander_builder.web.app import _cleanup_stale_staged_files
+    deleted = _cleanup_stale_staged_files(tmp_path / "nope")
+    assert deleted == 0
+
+
+def test_correlation_summary_endpoint_returns_zero_when_no_log(client, monkeypatch):
+    """When the correlation log doesn't exist yet, the endpoint
+    reports zero rows + agreement_rate=0 — UI can show 'no data yet'."""
+    monkeypatch.delenv("COMMANDER_BUILDER_CORRELATE_FORGE_PY", raising=False)
+    resp = client.get("/api/correlation_summary")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["rows"] == 0
+    assert body["agreement_rate"] == 0.0
+    assert "log_path" in body
+    assert body["enabled"] is False
+
+
+def test_correlation_summary_endpoint_reports_enabled_state(client, monkeypatch):
+    monkeypatch.setenv("COMMANDER_BUILDER_CORRELATE_FORGE_PY", "1")
+    resp = client.get("/api/correlation_summary")
+    assert resp.status_code == 200
+    assert resp.get_json()["enabled"] is True
+
+
+def test_log_error_writes_to_log_file(client, tmp_path, deck_dir):
+    """JS error collector appends to a server-side log; we don't read
+    it back via API (avoid making this an exfiltration vector), so
+    the test inspects the file directly."""
+    payload = {
+        "kind": "error",
+        "message": "ReferenceError: foo is not defined",
+        "stack": "at runProposeSwap (app.js:165)",
+        "url": "http://127.0.0.1:5000/",
+        "user_agent": "test-agent",
+    }
+    resp = client.post("/api/log_error", json=payload)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert "ref" in body and body["ref"]
+    # Log file lives next to the deck_dir's grandparent (vendor/forge → vendor).
+    log_path = deck_dir.parent.parent / "_js_errors.log"
+    assert log_path.exists()
+    contents = log_path.read_text(encoding="utf-8")
+    assert "ReferenceError: foo is not defined" in contents
+    assert "runProposeSwap" in contents
+    assert "test-agent" in contents
+
+
+def test_log_error_400_on_missing_message(client):
+    resp = client.post("/api/log_error", json={"kind": "error"})
+    assert resp.status_code == 400
+
+
+def test_log_error_caps_oversized_payload(client, deck_dir):
+    """Defense against runaway browser dumps — message capped at 2000
+    chars, stack at 4000."""
+    huge = "x" * 5000
+    resp = client.post("/api/log_error", json={
+        "message": huge, "stack": huge,
+    })
+    assert resp.status_code == 200
+    log_path = deck_dir.parent.parent / "_js_errors.log"
+    contents = log_path.read_text(encoding="utf-8")
+    # Should contain at most 2000 'x' in the MSG line and 4000 in STACK.
+    msg_line = next(
+        (line for line in contents.splitlines() if line.startswith("MSG:")),
+        "",
+    )
+    # MSG: prefix + up to 2000 chars
+    assert len(msg_line) <= len("MSG: ") + 2000
+
+
+def test_log_error_400_on_non_json(client):
+    resp = client.post("/api/log_error", data="not json",
+                       content_type="application/json")
+    assert resp.status_code == 400
+
+
+def test_pad_main_to_99_skips_quantities_in_other_sections():
+    """Sideboard / Considering basics shouldn't sway the [Main] padding
+    distribution."""
+    from commander_builder.web.app import _pad_main_to_99
+    text = (
+        "[metadata]\nName=X\n"
+        "[Commander]\n1 Cmdr\n"
+        "[Main]\n5 Forest\n"
+        + "1 Cultivate\n" * 60
+        + "[Sideboard]\n10 Mountain\n"
+    )
+    out, padded, breakdown = _pad_main_to_99(text, current_main=65)
+    # [Main] only sees Forest, so all padding is Forest. Mountain in
+    # sideboard must be ignored.
+    assert "Mountain" not in breakdown
+    assert breakdown == {"Forest": 34}
+
+
 def test_format_added_line_falls_back_when_set_missing(monkeypatch):
     from commander_builder.web.app import _format_added_line
     monkeypatch.setattr(
@@ -1067,6 +1357,206 @@ def test_audit_endpoint_503_when_advisor_fails(client, monkeypatch):
 def test_audit_endpoint_404_on_missing_deck(client):
     resp = client.get("/api/audit?deck=Ghost")
     assert resp.status_code == 404
+
+
+def _stub_advise_capturing(monkeypatch, source="heuristic", fallback_reason=None):
+    """Stub advise() and capture how it was invoked + what the env
+    looked like at call time. Returns the seen-args dict."""
+    from types import SimpleNamespace
+    seen = {}
+
+    def fake(deck_path, bracket, **kwargs):
+        import os as _os
+        seen["use_claude"] = kwargs.get("use_claude", False)
+        seen["api_key_in_env"] = _os.environ.get("ANTHROPIC_API_KEY")
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add",
+                    reason="ramp",
+                    evidence={"inclusion_pct": 78.0},
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut",
+                    reason="replaced",
+                    evidence={},
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source=source,
+            fallback_reason=fallback_reason,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake,
+    )
+    return seen
+
+
+def test_audit_defaults_to_heuristic_backend(client, monkeypatch):
+    seen = _stub_advise_capturing(monkeypatch, source="heuristic")
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert seen["use_claude"] is False
+    assert body["source"] == "heuristic"
+    assert body["requested_llm"] == "heuristic"
+    assert body["warning"] is None
+
+
+def test_audit_llm_claude_passes_use_claude_and_byo_key(client, monkeypatch):
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "sk-test-byo-12345"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert seen["use_claude"] is True
+    # BYO key was injected into env for the call's lifetime.
+    assert seen["api_key_in_env"] == "sk-test-byo-12345"
+    assert body["source"] == "claude"
+    assert body["requested_llm"] == "claude"
+    assert body["warning"] is None
+    # Env restored after the request — key must not linger.
+    import os as _os
+    assert "ANTHROPIC_API_KEY" not in _os.environ
+
+
+def test_audit_llm_claude_warns_when_advisor_falls_back(client, monkeypatch):
+    """When the user requests Claude but advise() returns source='heuristic'
+    (no key, no SDK, network failure), surface a UI-visible warning."""
+    _stub_advise_capturing(monkeypatch, source="heuristic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["source"] == "heuristic"
+    assert body["requested_llm"] == "claude"
+    assert body["warning"] is not None
+    # No key, so we expect the specific "no API key" hint, not the
+    # generic message.
+    assert "api key" in body["warning"].lower()
+
+
+def test_audit_warning_includes_fallback_reason_when_present(client, monkeypatch):
+    """If advise() returned a concrete fallback_reason (auth error,
+    JSON decode, etc.) the UI must surface that exact reason, not a
+    generic 'Claude unavailable' string."""
+    _stub_advise_capturing(
+        monkeypatch,
+        source="heuristic",
+        fallback_reason="claude advisor failed (AuthenticationError: 401 invalid api key)",
+    )
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "sk-bogus-but-present"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["warning"] is not None
+    assert "AuthenticationError" in body["warning"]
+    assert "401" in body["warning"]
+
+
+def test_audit_forwards_model_param_to_advise(client, monkeypatch):
+    """?model=claude-haiku-4-5 should be forwarded to advise()'s
+    claude_model kwarg so the SDK uses the cheaper tier."""
+    from types import SimpleNamespace
+    seen = {}
+
+    def fake(deck_path, bracket, **kwargs):
+        seen["claude_model"] = kwargs.get("claude_model")
+        seen["use_claude"] = kwargs.get("use_claude")
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="Lotus Cobra", action="add",
+                                reason="ramp", evidence={}),
+                SimpleNamespace(card="Cultivate", action="cut",
+                                reason="slow", evidence={}),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="claude",
+            fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake,
+    )
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude&model=claude-haiku-4-5",
+        headers={"X-Anthropic-API-Key": "sk-test"},
+    )
+    assert resp.status_code == 200
+    assert seen["use_claude"] is True
+    assert seen["claude_model"] == "claude-haiku-4-5"
+
+
+def test_audit_uses_default_model_when_none_specified(client, monkeypatch):
+    from types import SimpleNamespace
+    from commander_builder.improvement_advisor import DEFAULT_CLAUDE_MODEL
+    seen = {}
+
+    def fake(deck_path, bracket, **kwargs):
+        seen["claude_model"] = kwargs.get("claude_model")
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="Lotus Cobra", action="add",
+                                reason="ramp", evidence={}),
+                SimpleNamespace(card="Cultivate", action="cut",
+                                reason="slow", evidence={}),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="claude",
+            fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake,
+    )
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "sk-test"},
+    )
+    assert resp.status_code == 200
+    assert seen["claude_model"] == DEFAULT_CLAUDE_MODEL
+
+
+def test_audit_warning_when_claude_succeeded_is_none(client, monkeypatch):
+    _stub_advise_capturing(monkeypatch, source="claude", fallback_reason=None)
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "sk-test-key"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["warning"] is None
+    assert body["source"] == "claude"
+
+
+def test_audit_400_on_invalid_llm_value(client, monkeypatch):
+    _stub_advise_capturing(monkeypatch)
+    resp = client.get("/api/audit?deck=Alpha&llm=ollama-but-not-supported-yet")
+    assert resp.status_code == 400
+    assert "llm" in resp.get_json()["error"]
+
+
+def test_audit_does_not_leak_byo_key_to_subsequent_call(client, monkeypatch):
+    """The header-injected key only lives for the duration of the
+    current request. A follow-up audit without the header must not
+    inherit it."""
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    r1 = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "sk-first-call"},
+    )
+    assert r1.status_code == 200
+    assert seen["api_key_in_env"] == "sk-first-call"
+
+    seen.clear()
+    r2 = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")
+    assert r2.status_code == 200
+    assert seen.get("api_key_in_env") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1248,3 +1738,130 @@ def test_compare_iterations_handles_added_cards(seeded_client):
     body = resp.get_json()
     assert isinstance(body["added"], list)
     assert isinstance(body["removed"], list)
+
+
+# ---------------------------------------------------------------------------
+# /api/save_iteration
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def save_client(deck_dir, tmp_path, monkeypatch):
+    """Fresh empty knowledge_log + a deck dir with an Alpha deck."""
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda name: {"type_line": "Basic Land", "cmc": 0.0,
+                      "color_identity": ["G"], "prices": {"usd": "0.05"}},
+    )
+    db = tmp_path / "save_klog.sqlite"
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    return client, db
+
+
+def test_save_iteration_persists_row(save_client):
+    client, db = save_client
+    payload = {
+        "deck_id": "Alpha",
+        "deck_name": "Alpha",
+        "bracket": 3,
+        "audit_version": "v3",
+        "audit_manifest": {
+            "added": [{"card": "Lotus Cobra", "rationale": "ramp"}],
+            "removed": [{"card": "Cultivate", "rationale": "slow"}],
+        },
+        "sim_report": {
+            "winner": "new", "old_wins": 4, "new_wins": 6,
+            "old_games": 10, "new_games": 10, "draws": 0,
+            "margin": 2, "total_games": 20, "mode": "pod", "bracket": 3,
+        },
+        "verdict": "kept",
+        "verdict_notes": "Cobra was the right call.",
+    }
+    resp = client.post("/api/save_iteration", json=payload)
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert isinstance(body["id"], int) and body["id"] >= 1
+    assert body["verdict"] == "kept"
+    assert body["stats"]["total"] == 1
+    assert body["stats"]["kept"] == 1
+
+    # Read back through /api/iteration to confirm it landed.
+    detail = client.get(f"/api/iteration/{body['id']}").get_json()
+    assert detail["deck_id"] == "Alpha"
+    assert detail["bracket"] == 3
+    assert detail["verdict"] == "kept"
+    assert detail["margin"] == 2
+    assert abs(detail["win_rate_old"] - 0.4) < 1e-9
+    assert abs(detail["win_rate_new"] - 0.6) < 1e-9
+    # audit_manifest survives the round-trip.
+    assert detail["audit_manifest"]["added"][0]["card"] == "Lotus Cobra"
+
+
+def test_save_iteration_defaults_deck_snapshot_from_disk(save_client):
+    client, db = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha",
+        "deck_name": "Alpha",
+        "bracket": 3,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    new_id = resp.get_json()["id"]
+    detail = client.get(f"/api/iteration/{new_id}/snapshot")
+    assert detail.status_code == 200
+    text = detail.get_data(as_text=True)
+    assert "Name=Alpha" in text
+
+
+def test_save_iteration_400_on_missing_deck_id(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={"verdict": "pending"})
+    assert resp.status_code == 400
+    assert "deck_id" in resp.get_json()["error"]
+
+
+def test_save_iteration_400_on_invalid_verdict(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "lgtm",
+    })
+    assert resp.status_code == 400
+    assert "verdict" in resp.get_json()["error"]
+
+
+def test_save_iteration_400_on_invalid_bracket(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 9,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 400
+    assert "bracket" in resp.get_json()["error"]
+
+
+def test_save_iteration_400_on_non_object_audit_manifest(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_manifest": "not-an-object", "verdict": "pending",
+    })
+    assert resp.status_code == 400
+    assert "audit_manifest" in resp.get_json()["error"]
+
+
+def test_save_iteration_handles_missing_sim_report(save_client):
+    """Save should succeed even when the user persists an audit-only
+    record (no sim_report yet). win_rate columns stay NULL."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    new_id = resp.get_json()["id"]
+    detail = client.get(f"/api/iteration/{new_id}").get_json()
+    assert detail["win_rate_old"] is None
+    assert detail["win_rate_new"] is None
+    assert detail["margin"] is None
