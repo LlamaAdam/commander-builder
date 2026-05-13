@@ -218,8 +218,16 @@ def find_top_liked_deck_for_commander(
         if pid:
             try:
                 return fetch_deck(pid)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Match the verbose-logging shape of the strict-match
+                # loop above — without this, the fallback path was the
+                # only silent failure in the whole resolver.
+                if verbose:
+                    print(
+                        f"  [moxfield] fallback fetch_deck({pid}) failed: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
     return None
 
 
