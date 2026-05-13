@@ -523,6 +523,15 @@ def create_app(
         actual_source = getattr(report, "source", "heuristic")
         fallback_reason = getattr(report, "fallback_reason", None)
         warning = None
+        # Human-readable backend names for warning text — underscore
+        # IDs read awkwardly in user-facing prose ("bracket_peers
+        # backend fell back" → "Bracket-peers backend fell back").
+        _SOURCE_LABEL = {
+            "heuristic": "EDHREC heuristic",
+            "claude": "Claude analyst",
+            "bracket_peers": "Bracket-peers",
+        }
+        requested_label = _SOURCE_LABEL.get(requested, requested)
         if actual_source != requested:
             # advise() silently falls back to heuristic when the
             # requested backend can't run (no Claude API key, no
@@ -531,7 +540,7 @@ def create_app(
             # degraded source instead of guessing.
             if fallback_reason:
                 warning = (
-                    f"{requested} backend fell back to EDHREC heuristic. "
+                    f"{requested_label} fell back to EDHREC heuristic. "
                     f"Reason: {fallback_reason}"
                 )
             elif (requested == "claude"
@@ -543,7 +552,7 @@ def create_app(
                 )
             else:
                 warning = (
-                    f"{requested} backend was requested but unavailable — "
+                    f"{requested_label} was requested but unavailable — "
                     "falling back to EDHREC heuristic."
                 )
         return jsonify({
