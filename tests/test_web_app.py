@@ -1474,6 +1474,212 @@ def test_audit_endpoint_404_on_missing_deck(client):
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# /api/audit/stream  (Server-Sent Events)
+# ---------------------------------------------------------------------------
+
+def _parse_sse(body_bytes: bytes) -> list[tuple[str, dict]]:
+    """Parse an SSE response body into ``[(event_name, data_dict), ...]``.
+
+    Robust to multi-line ``data:`` chunks but tests only emit single-
+    line JSON, so the loose parser here is sufficient. Used by the
+    streaming-endpoint tests below.
+    """
+    text = body_bytes.decode("utf-8")
+    events = []
+    for block in text.strip().split("\n\n"):
+        if not block.strip():
+            continue
+        event_name = None
+        data_str = None
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event_name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_str = line[len("data:"):].strip()
+        if event_name and data_str is not None:
+            events.append((event_name, json.loads(data_str)))
+    return events
+
+
+def test_audit_stream_emits_phase_events_in_order(client, monkeypatch):
+    """The SSE endpoint must drive ``_advise_steps()`` and emit one
+    event per phase in this order: diagnosis → manabase → primary →
+    complete. The complete event carries the same payload shape as
+    the sync ``/api/audit`` endpoint so the UI can reuse its render
+    code without further branching.
+    """
+    from types import SimpleNamespace
+    from commander_builder._advisor_models import AdvicePhase
+
+    def fake_steps(deck_path, bracket, **_kwargs):
+        # Mimic the real generator shape.
+        yield AdvicePhase("diagnosis", {
+            "deck_filename": deck_path.name,
+            "bracket": bracket,
+            "commander_names": ["The Ur-Dragon"],
+            "diagnosis": {
+                "pattern_summary": "aggressive dragons",
+                "weakness_signals": ["no closer"],
+            },
+        })
+        yield AdvicePhase("manabase", {
+            "recommendations": [
+                {"card": "Sacred Foundry", "action": "add",
+                 "reason": "essential dual",
+                 "evidence": {"source": "manabase_essentials"},
+                 "name_known": True},
+            ],
+            "tribe": "Dragon",
+        })
+        yield AdvicePhase("primary", {
+            "recommendations": [
+                {"card": "Lotus Cobra", "action": "add",
+                 "reason": "EDHREC top",
+                 "evidence": {"inclusion_pct": 70.0, "synergy_pct": 10.0},
+                 "name_known": True},
+                {"card": "Cultivate", "action": "cut",
+                 "reason": "off-archetype",
+                 "evidence": {}, "name_known": True},
+            ],
+            "requested_source": "heuristic",
+            "effective_source": "heuristic",
+            "fallback_reason": None,
+            "rationale_override": None,
+            "bracket_peer_ref_count": 0,
+        })
+        # complete carries the AdviceReport itself; the SSE endpoint
+        # re-runs _apply_swaps_to_dck on it, so the report must have
+        # ``recommendations`` shaped like real SwapRecommendation.
+        from commander_builder._advisor_models import (
+            AdviceReport, DeckDiagnosis, SwapRecommendation,
+        )
+        rep = AdviceReport(
+            deck_filename=deck_path.name,
+            deck_id=None,
+            bracket=bracket,
+            commander_names=["The Ur-Dragon"],
+            diagnosis=DeckDiagnosis(
+                pattern_summary="aggressive dragons",
+                weakness_signals=["no closer"],
+            ),
+            recommendations=[
+                SwapRecommendation(
+                    card="Lotus Cobra", action="add",
+                    reason="EDHREC top",
+                    evidence={"inclusion_pct": 70.0, "synergy_pct": 10.0,
+                              "source": "edhrec.top_cards"},
+                    name_known=True,
+                ),
+                SwapRecommendation(
+                    card="Cultivate", action="cut",
+                    reason="off-archetype",
+                    evidence={}, name_known=True,
+                ),
+            ],
+            source="heuristic",
+            timestamp="2026-05-13T12:00:00",
+        )
+        yield AdvicePhase("complete", {"report": rep})
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", fake_steps,
+    )
+    resp = client.get("/api/audit/stream?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/event-stream"
+    events = _parse_sse(resp.data)
+    event_names = [e[0] for e in events]
+    assert event_names == ["diagnosis", "manabase", "primary", "complete"]
+    # Diagnosis carries enough to render the panel immediately.
+    diag_payload = dict(events)["diagnosis"]
+    assert diag_payload["bracket"] == 3
+    assert "The Ur-Dragon" in diag_payload["commander_names"]
+    # Manabase phase surfaces the curated essentials.
+    manabase_payload = dict(events)["manabase"]
+    assert manabase_payload["tribe"] == "Dragon"
+    assert any(
+        r["card"] == "Sacred Foundry"
+        for r in manabase_payload["recommendations"]
+    )
+    # Complete event mirrors the sync /api/audit payload shape.
+    complete = dict(events)["complete"]
+    assert complete["bracket"] == 3
+    assert complete["source"] == "heuristic"
+    assert "proposed_text" in complete
+    assert any(a["card"] == "Lotus Cobra" for a in complete["added"])
+    assert any(r["card"] == "Cultivate" for r in complete["removed"])
+
+
+def test_audit_stream_emits_error_on_missing_deck(client, monkeypatch):
+    """Missing-deck input validation must return 404 BEFORE the SSE
+    stream opens — the streaming endpoint reuses the sync endpoint's
+    early-return path so the response is a plain JSON 404 rather
+    than an SSE stream with an error event. This lets the client's
+    fetch() handle the error normally."""
+    resp = client.get("/api/audit/stream?deck=Ghost&bracket=3")
+    assert resp.status_code == 404
+
+
+def test_audit_stream_emits_error_event_on_mid_stream_exception(
+    client, monkeypatch,
+):
+    """If ``_advise_steps`` raises after the stream opens (Claude API
+    blew up, EDHREC slug mismatch, etc.), the endpoint must emit a
+    final ``error`` event rather than letting the exception bubble.
+    The UI uses the error event to show a toast and reset the
+    in-flight state."""
+    def boom(*_args, **_kwargs):
+        # Yield one phase, then raise to simulate a mid-stream crash.
+        from commander_builder._advisor_models import AdvicePhase
+        yield AdvicePhase("diagnosis", {
+            "deck_filename": "x", "bracket": 3,
+            "commander_names": ["X"],
+            "diagnosis": {},
+        })
+        raise RuntimeError("EDHREC scraper crashed")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", boom,
+    )
+    resp = client.get("/api/audit/stream?deck=Alpha&bracket=3")
+    events = _parse_sse(resp.data)
+    # diagnosis was emitted, then the error halted the stream.
+    assert [e[0] for e in events] == ["diagnosis", "error"]
+    err = dict(events)["error"]
+    assert err["error"] == "audit failed"
+    assert "RuntimeError" in err["detail"]
+
+
+def test_audit_stream_no_buffering_headers(client, monkeypatch):
+    """SSE responses must include Cache-Control: no-cache and
+    X-Accel-Buffering: no so reverse proxies (nginx/Apache) flush
+    each event to the client immediately. Without these, the
+    streaming benefit disappears in production."""
+    from commander_builder._advisor_models import AdvicePhase
+    from commander_builder._advisor_models import (
+        AdviceReport, DeckDiagnosis,
+    )
+
+    def trivial_steps(deck_path, bracket, **_kwargs):
+        yield AdvicePhase("complete", {
+            "report": AdviceReport(
+                deck_filename=deck_path.name,
+                deck_id=None, bracket=bracket,
+                commander_names=["X"],
+                diagnosis=DeckDiagnosis(),
+                recommendations=[],
+                source="heuristic", timestamp="2026-05-13",
+            ),
+        })
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", trivial_steps,
+    )
+    resp = client.get("/api/audit/stream?deck=Alpha&bracket=3")
+    assert resp.headers.get("Cache-Control") == "no-cache"
+    assert resp.headers.get("X-Accel-Buffering") == "no"
+
+
 def _stub_advise_capturing(monkeypatch, source="heuristic", fallback_reason=None):
     """Stub advise() and capture how it was invoked + what the env
     looked like at call time. Returns the seen-args dict."""

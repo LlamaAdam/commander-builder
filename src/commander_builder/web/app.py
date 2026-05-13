@@ -20,6 +20,7 @@ Notes:
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -611,6 +612,255 @@ def create_app(
                 getattr(report, "bracket_peer_ref_count", 0) or 0,
             ),
         })
+
+    @app.route("/api/audit/stream")
+    def audit_stream_route():
+        """Server-Sent Events variant of ``/api/audit``.
+
+        Streams audit progress as four event types so the UI can
+        render partial results while the slow source-specific
+        recommender (Claude can take 6-8s) is still running:
+
+        - ``event: diagnosis`` (~10ms) — commanders + DeckDiagnosis
+          so the UI shows the weakness/category panel immediately.
+        - ``event: manabase`` (~50ms) — curated manabase essentials
+          (shocks / fetches / bond / tribal lands) for the deck's
+          color identity.
+        - ``event: primary`` (100ms-8s) — the source-specific recs
+          (heuristic / bracket_peers / claude) with effective source
+          + fallback_reason populated.
+        - ``event: complete`` — the final assembled payload (same
+          shape as ``/api/audit``) ready to drop into the existing
+          UI render code.
+        - ``event: error`` — emitted on input-validation failure or
+          unrecoverable mid-stream exception. Carries
+          ``{error, detail}``.
+
+        Query params and headers mirror ``/api/audit`` so the client
+        can switch endpoints by URL alone. Default Cache-Control: no
+        — SSE responses should never be cached.
+        """
+        from flask import Response, stream_with_context
+
+        # --- Parse query params (same shape as the sync endpoint) ----
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        try:
+            bracket_raw = request.args.get("bracket")
+            bracket = int(bracket_raw) if bracket_raw else None
+        except ValueError:
+            return jsonify({"error": "bracket must be int"}), 400
+        if bracket is None:
+            bracket = _bracket_from_filename(deck_id) or 3
+
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({"error": "deck not found"}), 404
+
+        source = (request.args.get("source") or "").strip().lower()
+        llm = (request.args.get("llm") or "heuristic").strip().lower()
+        if source:
+            if source not in ("heuristic", "claude", "bracket_peers"):
+                return jsonify({
+                    "error": (
+                        "source must be 'heuristic', 'claude', "
+                        "or 'bracket_peers'"
+                    ),
+                }), 400
+            requested = source
+        else:
+            if llm not in ("heuristic", "claude"):
+                return jsonify({
+                    "error": "llm must be 'heuristic' or 'claude'",
+                }), 400
+            requested = llm
+        use_claude = requested == "claude"
+        byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
+        budget_raw = (request.args.get("budget") or "").strip().lower()
+        budget = budget_raw in ("1", "true", "yes")
+        claude_model = (request.args.get("model") or "").strip() or None
+
+        # --- Stream generator -----------------------------------------
+        def event_stream():
+            """Drive ``_advise_steps()`` and emit one SSE block per
+            phase. The complete-phase block carries the same payload
+            shape the sync ``/api/audit`` endpoint returns so the
+            client can reuse its render code with no further branching.
+            """
+            from ..improvement_advisor import (
+                _advise_steps, DEFAULT_CLAUDE_MODEL,
+            )
+            from dataclasses import asdict as _asdict
+
+            def _sse(event_name: str, payload: dict) -> str:
+                # SSE wire format: "event: <name>\ndata: <json>\n\n".
+                # Splitting data on newlines is the spec — we always
+                # emit one ``data:`` line (single-line JSON) so the
+                # client's EventSource can parse it cleanly.
+                return (
+                    f"event: {event_name}\n"
+                    f"data: {json.dumps(payload)}\n\n"
+                )
+
+            saved_key = os.environ.get("ANTHROPIC_API_KEY")
+            if use_claude and byo_key:
+                os.environ["ANTHROPIC_API_KEY"] = byo_key
+            try:
+                for phase in _advise_steps(
+                    path, bracket=bracket,
+                    source=requested,
+                    use_claude=use_claude,
+                    claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
+                    budget=budget,
+                ):
+                    if phase.phase == "error":
+                        yield _sse("error", {
+                            "error": phase.data.get("reason", "unknown"),
+                            "detail": phase.data.get("type", "RuntimeError"),
+                            "where": phase.data.get("where"),
+                        })
+                        return
+                    if phase.phase == "complete":
+                        # Re-do the same post-assembly the sync endpoint
+                        # does so the client gets a drop-in payload. We
+                        # keep this duplicated rather than factoring it
+                        # out because the SSE path needs to emit JSON,
+                        # not a Flask Response, and the surrounding
+                        # control flow is different (generators vs.
+                        # returns).
+                        report = phase.data["report"]
+                        original = path.read_text(encoding="utf-8")
+                        proposed_text, added, removed, kept = (
+                            _apply_swaps_to_dck(
+                                original, report.recommendations,
+                            )
+                        )
+                        post_swap_main = kept + len(added)
+                        proposed_text, padded_count, padded_breakdown = (
+                            _pad_main_to_99(proposed_text, post_swap_main)
+                        )
+                        applied_add_set = {n.lower() for n in added}
+                        applied_cut_set = {n.lower() for n in removed}
+                        added_payload = [
+                            {
+                                "card": rec.card,
+                                "rationale": rec.reason or "",
+                                "match_pct": _match_pct_from_evidence(
+                                    rec.evidence,
+                                ),
+                                "price_usd": (rec.evidence or {}).get(
+                                    "price_usd",
+                                ),
+                                "name_known": getattr(
+                                    rec, "name_known", True,
+                                ),
+                                "source": (rec.evidence or {}).get("source"),
+                            }
+                            for rec in report.recommendations
+                            if rec.action == "add"
+                            and rec.card.lower() in applied_add_set
+                        ]
+                        removed_payload = [
+                            {
+                                "card": rec.card,
+                                "rationale": rec.reason or "",
+                                "name_known": getattr(
+                                    rec, "name_known", True,
+                                ),
+                            }
+                            for rec in report.recommendations
+                            if rec.action == "cut"
+                            and rec.card.lower() in applied_cut_set
+                        ]
+                        unknown_card_count = sum(
+                            1 for entry in added_payload + removed_payload
+                            if entry["name_known"] is False
+                        )
+                        actual_source = getattr(report, "source", "heuristic")
+                        fallback_reason = getattr(
+                            report, "fallback_reason", None,
+                        )
+                        warning = None
+                        if actual_source != requested and fallback_reason:
+                            _SOURCE_LABEL = {
+                                "heuristic": "EDHREC heuristic",
+                                "claude": "Claude analyst",
+                                "bracket_peers": "Bracket-peers",
+                            }
+                            warning = (
+                                f"{_SOURCE_LABEL.get(requested, requested)} "
+                                f"fell back to EDHREC heuristic. "
+                                f"Reason: {fallback_reason}"
+                            )
+                        yield _sse("complete", {
+                            "deck": deck_id,
+                            "bracket": bracket,
+                            "proposed_text": proposed_text,
+                            "added": added_payload,
+                            "removed": removed_payload,
+                            "kept_count": kept,
+                            "main_count": kept + len(added) + padded_count,
+                            "rationale": (
+                                getattr(report.diagnosis, "pattern_summary", "")
+                                or ""
+                            ),
+                            "weakness_signals": list(getattr(
+                                report.diagnosis, "weakness_signals", [],
+                            ) or []),
+                            "source": actual_source,
+                            "requested_llm": requested,
+                            "requested_source": requested,
+                            "warning": warning,
+                            "basics_padded": padded_count,
+                            "basics_padded_breakdown": padded_breakdown,
+                            "unknown_card_count": unknown_card_count,
+                            "skipped_for_saturation": list(
+                                getattr(
+                                    report, "skipped_for_saturation", [],
+                                ) or []
+                            ),
+                            "bracket_peer_ref_count": int(
+                                getattr(
+                                    report, "bracket_peer_ref_count", 0,
+                                ) or 0,
+                            ),
+                        })
+                        continue
+                    # Intermediate phases (diagnosis / manabase / primary)
+                    # — emit the phase's data dict as-is. The client
+                    # branches on the event name. Keep these payloads
+                    # JSON-serializable (they already are because
+                    # _advise_steps asdict'd the dataclasses).
+                    yield _sse(phase.phase, phase.data)
+            except Exception as exc:  # noqa: BLE001
+                # Last-ditch — generator raised after work began. The
+                # client treats this the same as the input-validation
+                # error phase (close the stream, show the message).
+                yield _sse("error", {
+                    "error": "audit failed",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                })
+            finally:
+                # Always restore the BYO Anthropic key — the env mutation
+                # must not linger across requests.
+                if use_claude and byo_key:
+                    if saved_key is None:
+                        os.environ.pop("ANTHROPIC_API_KEY", None)
+                    else:
+                        os.environ["ANTHROPIC_API_KEY"] = saved_key
+
+        return Response(
+            stream_with_context(event_stream()),
+            mimetype="text/event-stream",
+            headers={
+                # Disable proxy buffering so events flush to the client
+                # as soon as ``yield`` runs. Without this, nginx /
+                # Apache will batch the response and the streaming
+                # benefit disappears.
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.route("/api/advise")
     def advise_route():
