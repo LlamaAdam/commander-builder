@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +61,19 @@ COMPARE_OUT_DIR = DECK_DIR / "_compare"
 # Default filler pairs per comparison run. Two pairs averages out single-pair
 # bias (an unlucky filler choice that happens to counter one version).
 DEFAULT_FILLER_PAIRS = 2
+
+
+def auto_filler_pairs() -> int:
+    """Sprint 1E — pick a filler-pair count that scales with the host's
+    CPU. Pods run in parallel (Sprint 1A) so spawning N JVMs on an N-core
+    box is roughly the same wall-time as 1 JVM. Bump the default to 4
+    on 4+ core systems for tighter verdicts; cap there because extra
+    pods past the core count just queue up.
+
+    Bottom-clamped at 2 so single-/dual-core users keep at least one
+    extra pod for filler-pair averaging."""
+    cores = os.cpu_count() or 2
+    return max(2, min(4, cores))
 # Default games per pod. Ten is the realistic floor for swap-level signal —
 # below that, variance from the other 2 seats drowns the comparison.
 DEFAULT_GAMES_PER_POD = 10
@@ -93,6 +108,14 @@ class ComparisonReport:
     new_stats: VersionStats = field(default_factory=lambda: VersionStats(deck_filename=""))
     pods: list[dict] = field(default_factory=list)
     card_diff: dict[str, list[str]] = field(default_factory=dict)
+    # Sprint 1B — adaptive early-stop. When a pod completes and the
+    # cumulative margin is so large that the remaining pods can't
+    # possibly flip the verdict, we skip dispatching them. Reports
+    # ``stopped_early=True`` and ``pods_completed < len(pods_planned)``.
+    # ``pods_planned`` is the number we *would* have run; ``pods``'
+    # length is what actually ran.
+    stopped_early: bool = False
+    pods_planned: int = 0
 
     @property
     def winner(self) -> str:
@@ -283,6 +306,198 @@ def _aggregate_pod(
                 lost_turns[target].append(game.end_turn)
 
 
+def _is_decisive(
+    old_wins: int,
+    new_wins: int,
+    games_remaining: int,
+) -> bool:
+    """Could ``games_remaining`` more games swing the current margin
+    enough to flip or tie the verdict? If not, the current winner is
+    locked in and we can stop running pods.
+
+    Examples (games_remaining=10):
+      old=10 new=0 → margin 10, can't be caught → decisive (True)
+      old=6  new=4 → margin 2, could swing 10 → not decisive (False)
+      old=8  new=2 → margin 6, max swing 10 → not decisive (the
+                     remaining games could go 10-0 for new, ending
+                     6-12 → margin 6 the other way, so still
+                     NOT decisive)
+
+    The conservative rule: decisive iff
+      |margin| > games_remaining
+    (strictly greater, so a tie remains in play if equal).
+    """
+    if games_remaining <= 0:
+        return True
+    margin = abs(new_wins - old_wins)
+    return margin > games_remaining
+
+
+_PER_GAME_WIN_RE = re.compile(
+    r"^Game Result:\s*Game\s+(\d+)\s+ended in\s+\d+\s*ms\.\s*"
+    r"Ai\((\d+)\)-(.+?)\s+has won!\s*$",
+    re.IGNORECASE,
+)
+
+
+def _make_pod_abort_check(
+    pod: list[str],
+    old_deck: str,
+    new_deck: str,
+    games_per_pod: int,
+):
+    """Build the abort-check callback for one pod (Sprint 1C).
+
+    Forge emits one ``Game Result: Game N ended... Ai(X)-Name has won!``
+    per game. We parse those incrementally to track old vs new wins
+    within this pod; once the in-pod margin exceeds the remaining
+    games, the pod's verdict is locked and we kill the JVM. Filler
+    decks' wins are tracked so we know when "remaining games in this
+    pod" reaches zero, but they don't contribute to the abort margin.
+
+    Returns ``(abort_check, state)`` so the caller can read the final
+    counts after the run (used to synthesize a Match Result line if
+    Forge was killed before printing its own).
+    """
+    old_norm = _normalize(old_deck)
+    new_norm = _normalize(new_deck)
+    state = {
+        "old_wins": 0,
+        "new_wins": 0,
+        # Wins by normalized deck name → seat number map (for synthesizing
+        # a Match Result line if we kill the subprocess before Forge prints
+        # its own).
+        "wins_by_seat_name": {},   # (seat:int, name:str) -> int
+        "games_seen": 0,
+        "aborted": False,
+    }
+
+    def abort_check(line: str) -> bool:
+        m = _PER_GAME_WIN_RE.match(line)
+        if not m:
+            return False
+        seat = int(m.group(2))
+        name = m.group(3).strip()
+        norm = _normalize(name)
+        key = (seat, name)
+        state["wins_by_seat_name"][key] = state["wins_by_seat_name"].get(key, 0) + 1
+        state["games_seen"] += 1
+        if norm == old_norm:
+            state["old_wins"] += 1
+        elif norm == new_norm:
+            state["new_wins"] += 1
+        # Otherwise: a filler deck won this game; doesn't affect the
+        # old-vs-new margin but it is one game further along.
+        games_remaining = games_per_pod - state["games_seen"]
+        # Only fire when there's still a game we could skip; the
+        # last-game case naturally satisfies margin > 0 with
+        # games_remaining == 0, but there's nothing left to abort.
+        if games_remaining <= 0:
+            return False
+        margin = abs(state["new_wins"] - state["old_wins"])
+        if margin > games_remaining:
+            state["aborted"] = True
+            return True
+        return False
+
+    return abort_check, state
+
+
+def _synthesize_match_result(state: dict) -> str:
+    """When we abort a pod mid-flight, Forge doesn't print its trailing
+    ``Match Result:`` summary line that ``log_parser.parse()`` keys on.
+    Build one ourselves from the per-game winners we observed so the
+    downstream parser sees the same shape it normally would.
+    """
+    if not state["wins_by_seat_name"]:
+        return ""
+    # Stable order: sort by seat.
+    parts = []
+    for (seat, name), wins in sorted(
+        state["wins_by_seat_name"].items(), key=lambda kv: kv[0][0],
+    ):
+        parts.append(f"Ai({seat})-{name}: {wins}")
+    return "Match Result: " + " ".join(parts) + "\n"
+
+
+def _run_one_pod(
+    runner: ForgeRunner,
+    pod: list[str],
+    mode: str,
+    games_per_pod: int,
+    pod_index: int,
+    total_pods: int,
+    *,
+    intra_pod_abort: bool = True,
+) -> dict:
+    """Worker: run one Forge sim, parse, return a structured pod result.
+
+    Pulled out of ``compare()``'s loop so the same code path can serve
+    both sequential (``parallel=False``) and threaded execution. Each
+    invocation is wholly self-contained — Forge writes nothing to the
+    install dir during sim, so concurrent calls don't race on shared
+    state.
+
+    ``intra_pod_abort`` (Sprint 1C, default True) enables per-game
+    abort: as soon as the in-pod margin exceeds the games left in this
+    pod, the JVM is killed. We then synthesize the ``Match Result``
+    line from observed per-game winners so log_parser can score the
+    truncated run.
+    """
+    print(
+        f"--- Pod {pod_index + 1}/{total_pods} starting: {pod} ---",
+        flush=True,
+    )
+    abort_check = None
+    abort_state = None
+    if intra_pod_abort and len(pod) >= 2:
+        old_deck, new_deck = pod[0], pod[1]
+        abort_check, abort_state = _make_pod_abort_check(
+            pod, old_deck, new_deck, games_per_pod,
+        )
+    if mode == "1v1":
+        result = runner.run(
+            pod, num_games=games_per_pod, game_format="constructed",
+            abort_check=abort_check,
+        )
+    else:
+        result = runner.run(
+            pod, num_games=games_per_pod, abort_check=abort_check,
+        )
+    stdout = result.stdout
+    pod_aborted = bool(abort_state and abort_state.get("aborted"))
+    if pod_aborted and "Match Result:" not in stdout:
+        # The abort killed Forge before its trailing summary fired.
+        # Stitch in a synthetic one so log_parser can attribute wins.
+        stdout = stdout + _synthesize_match_result(abort_state)
+    parsed = parse(stdout)
+    ma = analyze(stdout)
+    print(
+        f"--- Pod {pod_index + 1}/{total_pods} done in "
+        f"{result.duration_sec:.1f}s"
+        + (f" (intra-pod abort, {abort_state['games_seen']}/{games_per_pod} games)"
+           if pod_aborted else "")
+        + " ---",
+        flush=True,
+    )
+    return {
+        "pod_index": pod_index,
+        "pod": pod,
+        "duration_sec": round(result.duration_sec, 1),
+        "returncode": result.returncode,
+        "timed_out": result.timed_out,
+        "intra_pod_aborted": pod_aborted,
+        "games_actually_played": (
+            abort_state["games_seen"] if abort_state else games_per_pod
+        ),
+        "match": ma.to_dict(),
+        # Keep parsed + analyzer outputs around so the parent can run
+        # the per-pod aggregator without re-parsing.
+        "_parsed": parsed,
+        "_analyzed": ma,
+    }
+
+
 def compare(
     old_deck: str,
     new_deck: str,
@@ -293,6 +508,9 @@ def compare(
     runner: Optional[ForgeRunner] = None,
     out_dir: Path = COMPARE_OUT_DIR,
     deck_dir: Optional[Path] = None,
+    parallel: bool = True,
+    max_workers: Optional[int] = None,
+    early_stop: bool = True,
 ) -> ComparisonReport:
     """Run the head-to-head comparison and persist the report.
 
@@ -301,6 +519,26 @@ def compare(
     web endpoint's 1v1 mode stages converted decks under
     ``userdata/decks/constructed/`` so Forge's ``-f constructed``
     can find them).
+
+    ``parallel`` (default True) dispatches multi-pod runs concurrently.
+    Pods are I/O-bound (each spawns a Forge JVM as a subprocess) so a
+    threaded executor is sufficient; the GIL is released while the
+    subprocess executes. With 2 filler pairs on a 4-core machine,
+    expect ~2× wall-clock improvement on pod-mode A/B sims. Pass
+    ``parallel=False`` to force the sequential path (used by tests
+    that need deterministic logging or by callers that want stable
+    progress output).
+
+    ``max_workers`` caps the threadpool size; defaults to
+    ``min(len(pods), os.cpu_count() or 4)`` which avoids spawning more
+    JVMs than there are CPU cores.
+
+    ``early_stop`` (default True) skips remaining pods once the
+    cumulative margin is too large for them to possibly flip the
+    verdict (see ``_is_decisive``). With the default 2 filler pairs
+    the saving is small because both pods already run in parallel;
+    the value grows once ``filler_pairs`` is bumped above the core
+    count or sequential mode is forced.
     """
     if mode not in {"pod", "1v1"}:
         raise ValueError(f"mode must be 'pod' or '1v1', got {mode!r}")
@@ -344,31 +582,99 @@ def compare(
         report.filler_pairs_used = pairs
         pods = [[old_deck, new_deck, *pair] for pair in pairs]
 
-    for i, pod in enumerate(pods):
-        print(f"\n--- Pod {i + 1}/{len(pods)}: {pod} ---", flush=True)
-        if mode == "1v1":
-            result = runner.run(pod, num_games=games_per_pod, game_format="constructed")
-        else:
-            result = runner.run(pod, num_games=games_per_pod)
-        parsed = parse(result.stdout)
-        ma = analyze(result.stdout)
+    # Dispatch pods. With parallel=True we run all pods concurrently in
+    # a threadpool — each one spawns its own Forge subprocess so the
+    # GIL doesn't bottleneck. With parallel=False (or len(pods)==1) we
+    # run sequentially for deterministic logging / test stability.
+    #
+    # Aggregation happens as each pod completes (instead of in a
+    # second pass after all pods finish) so the early-stop check can
+    # see cumulative wins after every pod and skip remaining work.
+    report.pods_planned = len(pods)
+    completed_pods: dict[int, dict] = {}
+    use_parallel = parallel and len(pods) > 1
 
-        report.pods.append({
-            "pod_index": i + 1,
-            "pod": pod,
-            "duration_sec": round(result.duration_sec, 1),
-            "returncode": result.returncode,
-            "timed_out": result.timed_out,
-            "match": ma.to_dict(),
-        })
+    def _absorb(pr: dict) -> None:
+        """Apply one pod result to the cumulative report. Returns nothing
+        — mutates `report`, `won_turns`, `lost_turns`, `ending_lives`,
+        `damages` in place."""
+        parsed = pr.pop("_parsed")
+        ma = pr.pop("_analyzed")
+        pr["pod_index"] = pr["pod_index"] + 1   # display is 1-based
+        completed_pods[pr["pod_index"] - 1] = pr
         report.total_games += parsed.games_completed
         report.draws += parsed.draws
-
         _aggregate_pod(
             report.old_stats, report.new_stats,
             parsed, ma, old_norm, new_norm,
             won_turns, lost_turns, ending_lives, damages,
         )
+
+    def _check_early_stop() -> bool:
+        """True if the verdict is locked in and no remaining pod could
+        flip it. Skipped on the first pod to avoid early-stopping on
+        a single noisy result."""
+        if not early_stop:
+            return False
+        if len(completed_pods) <= 1:
+            return False
+        remaining = len(pods) - len(completed_pods)
+        games_remaining = remaining * games_per_pod
+        return _is_decisive(
+            report.old_stats.wins, report.new_stats.wins, games_remaining,
+        )
+
+    if use_parallel:
+        workers = max_workers or min(len(pods), os.cpu_count() or 4)
+        print(
+            f"\n--- Dispatching {len(pods)} pods in parallel "
+            f"(workers={workers}) ---",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {
+                ex.submit(
+                    _run_one_pod, runner, pod, mode, games_per_pod, i, len(pods),
+                ): i
+                for i, pod in enumerate(pods)
+            }
+            for fut in as_completed(futures):
+                _absorb(fut.result())
+                if _check_early_stop():
+                    # Cancel any still-queued pods. Already-running pods
+                    # can't be interrupted (Forge subprocess won't honor
+                    # a thread cancel), but unstarted pods stay unstarted.
+                    canceled = sum(1 for f in futures if f.cancel())
+                    if canceled:
+                        report.stopped_early = True
+                        print(
+                            f"--- Early stop: verdict locked in, "
+                            f"canceled {canceled} pending pod(s) ---",
+                            flush=True,
+                        )
+                        break
+    else:
+        for i, pod in enumerate(pods):
+            _absorb(
+                _run_one_pod(runner, pod, mode, games_per_pod, i, len(pods)),
+            )
+            remaining = len(pods) - len(completed_pods)
+            # Only flag early-stop when there are still pods we can
+            # actually skip; otherwise the decisive check just
+            # confirms we ran the planned number.
+            if remaining > 0 and _check_early_stop():
+                report.stopped_early = True
+                print(
+                    f"--- Early stop: verdict locked in, "
+                    f"skipped {remaining} remaining pod(s) ---",
+                    flush=True,
+                )
+                break
+
+    # Order completed pods by their original index so the report's
+    # `pods` list lines up with `filler_pairs_used`.
+    for idx in sorted(completed_pods):
+        report.pods.append(completed_pods[idx])
 
     # Finalize derived averages.
     for stats, target in [(report.old_stats, "old"), (report.new_stats, "new")]:

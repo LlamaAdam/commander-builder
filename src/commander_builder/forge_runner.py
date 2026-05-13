@@ -109,12 +109,20 @@ def _run_streaming(
     *,
     stream: bool = True,
     on_line: Optional[Callable[[str], None]] = None,
+    abort_check: Optional[Callable[[str], bool]] = None,
 ) -> tuple[str, str, Optional[int], bool, Optional[str]]:
     """Streaming variant: spawn the process with `Popen`, read stdout
     line-by-line on a worker thread, optionally echoing each line to stdout
     or feeding it to `on_line`. The full captured output is returned at the
     end so downstream parsers (log_parser, game_analyzer) see exactly what
     they would have seen from the blocking path.
+
+    ``abort_check`` (Sprint 1C) lets a caller terminate the subprocess
+    based on the streaming output. Called once per stdout line; when it
+    returns True the worker thread kills the Forge subprocess and exits.
+    The captured stdout is whatever was emitted up to the abort point;
+    callers downstream are expected to handle a partial sim (e.g. by
+    synthesizing a Match Result from per-game winner lines).
 
     Stderr is captured to a separate buffer in the same thread so we don't
     deadlock on a full pipe. Timeout enforcement uses `proc.wait(timeout=)`
@@ -140,6 +148,8 @@ def _run_streaming(
         error = f"{type(exc).__name__}: {exc}"
         return "", "", None, False, error
 
+    aborted = {"flag": False}
+
     def _consume_stdout():
         for line in proc.stdout:  # type: ignore[union-attr]
             stdout_lines.append(line)
@@ -153,11 +163,27 @@ def _run_streaming(
                 except UnicodeEncodeError:
                     sys.stdout.buffer.write(line.encode("utf-8", errors="replace"))
                     sys.stdout.flush()
+            stripped = line.rstrip("\n")
             if on_line is not None:
                 try:
-                    on_line(line.rstrip("\n"))
+                    on_line(stripped)
                 except Exception:  # noqa: BLE001
                     # Don't let a buggy callback take down the sim.
+                    pass
+            if abort_check is not None and not aborted["flag"]:
+                try:
+                    if abort_check(stripped):
+                        aborted["flag"] = True
+                        # Kill the JVM child. The pipe will EOF and the
+                        # outer wait() will return.
+                        try:
+                            proc.kill()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        # Don't break — drain the rest of the pipe so the
+                        # buffered lines emitted before kill() took effect
+                        # land in stdout_lines for downstream parsing.
+                except Exception:  # noqa: BLE001
                     pass
 
     def _consume_stderr():
@@ -227,6 +253,7 @@ class ForgeRunner:
         timeout_sec: Optional[int] = None,
         stream: bool = False,
         on_line: Optional["Callable[[str], None]"] = None,
+        abort_check: Optional["Callable[[str], bool]"] = None,
     ) -> SimResult:
         """Run one Forge sim. Returns a SimResult with full stdout captured.
 
@@ -240,8 +267,13 @@ class ForgeRunner:
         arrives. Use this to drive a progress bar or log to a file without
         echoing to the terminal.
 
-        When neither `stream` nor `on_line` is set, falls back to the
-        battle-tested `subprocess.run` path."""
+        `abort_check` (Sprint 1C) is invoked per stdout line; when it
+        returns True the worker thread kills the Forge subprocess. Used by
+        compare_versions to terminate a pod early when its in-pod margin
+        becomes uncatchable. Implies the streaming path.
+
+        When neither `stream` nor `on_line` nor `abort_check` is set, falls
+        back to the battle-tested `subprocess.run` path."""
         if not deck_filenames:
             raise ValueError("deck_filenames must contain at least 2 decks.")
         if game_format == "commander" and len(deck_filenames) != 4:
@@ -270,9 +302,10 @@ class ForgeRunner:
         timeout = timeout_sec or max(MIN_TIMEOUT_SEC, num_games * DEFAULT_TIMEOUT_PER_GAME_SEC)
         started = datetime.now()
 
-        if stream or on_line is not None:
+        if stream or on_line is not None or abort_check is not None:
             stdout, stderr, returncode, timed_out, error = _run_streaming(
-                cmd, timeout, str(self.forge_dir), stream=stream, on_line=on_line,
+                cmd, timeout, str(self.forge_dir),
+                stream=stream, on_line=on_line, abort_check=abort_check,
             )
         else:
             stdout, stderr, returncode, timed_out, error = _run_blocking(

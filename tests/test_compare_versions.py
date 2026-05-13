@@ -12,6 +12,7 @@ from commander_builder.compare_versions import (
     ComparisonReport,
     VersionStats,
     _format_summary,
+    _is_decisive,
     _pick_filler_pairs,
     _read_main_section,
     diff_decks,
@@ -376,3 +377,615 @@ def test_format_summary_shows_head_to_head_line():
     assert "OLD 8 - 10 NEW" in s
     assert "winner: NEW" in s
     assert "margin 2" in s
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1A — parallel pod execution
+# ---------------------------------------------------------------------------
+
+def _staged_deck_min(path):
+    """Lightweight .dck stub used by the parallelism tests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "[metadata]\nName=" + path.stem + "\n[Commander]\n1 X\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+
+
+def _make_pod_stdout(old_wins: int, new_wins: int) -> str:
+    """Build Forge stdout that the log_parser will read as the given W/L."""
+    head = (
+        f"Match Result: Ai(1)-Old: {old_wins} Ai(2)-New: {new_wins} "
+        "Ai(3)-FillerA: 0 Ai(4)-FillerB: 0\n"
+    )
+    games = []
+    for _ in range(old_wins):
+        games.append(
+            "Game Result: Game ended in 60000 ms. Ai(1)-Old has won!\n"
+        )
+    for _ in range(new_wins):
+        games.append(
+            "Game Result: Game ended in 60000 ms. Ai(2)-New has won!\n"
+        )
+    return head + "".join(games)
+
+
+def _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2):
+    from commander_builder import compare_versions
+    deck_dir = tmp_path / "decks" / "commander"
+    decks = ["[USER] Old [B3].dck", "[USER] New [B3].dck"]
+    for i in range(num_filler_pairs * 2):
+        decks.append(f"Filler{i} [B3].dck")
+    for n in decks:
+        _staged_deck_min(deck_dir / n)
+    monkeypatch.setattr(compare_versions, "DECK_DIR", deck_dir)
+    monkeypatch.setattr(compare_versions, "COMPARE_OUT_DIR", tmp_path / "_compare")
+    monkeypatch.setattr("commander_builder.run_match.DECK_DIR", deck_dir)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions._load_pool",
+        lambda bracket: [],
+    )
+    return compare_versions, deck_dir
+
+
+def test_compare_parallel_aggregates_pod_results_in_input_order(
+    tmp_path, monkeypatch,
+):
+    """Parallel pods complete in arbitrary order. The aggregated report
+    must still list pods in their original input order so
+    `report.pods[i]` lines up with `report.filler_pairs_used[i]`."""
+    import time
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+
+    # Pod 0 sleeps long, pod 1 sleeps short — pod 1 will FINISH first
+    # but must still land in slot 1 of report.pods.
+    sleeps = [0.3, 0.05]
+    pod_outputs = [_make_pod_stdout(2, 0), _make_pod_stdout(0, 2)]
+    call_count = {"n": 0}
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            # The deck list identifies which pod we're in: pod 0 has
+            # Filler0/Filler1, pod 1 has Filler2/Filler3.
+            idx = 0 if "Filler0 [B3].dck" in pod else 1
+            call_count["n"] += 1
+            time.sleep(sleeps[idx])
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=sleeps[idx],
+                stdout=pod_outputs[idx], stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3,
+        games_per_pod=2,
+        filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=True,
+    )
+
+    assert call_count["n"] == 2
+    assert len(report.pods) == 2
+    # Pod 0 (Old wins both) and Pod 1 (New wins both) → final tie.
+    assert report.old_stats.wins == 2
+    assert report.new_stats.wins == 2
+    # Order check: pod 0 in report.pods uses Filler0/Filler1.
+    assert "Filler0 [B3].dck" in report.pods[0]["pod"]
+    assert "Filler2 [B3].dck" in report.pods[1]["pod"]
+    # Pod indexes are 1-based and ordered.
+    assert report.pods[0]["pod_index"] == 1
+    assert report.pods[1]["pod_index"] == 2
+
+
+def test_compare_parallel_runs_pods_concurrently(tmp_path, monkeypatch):
+    """Two pods that each sleep S seconds should complete in roughly
+    S seconds total when run in parallel, not 2S. Use a generous
+    margin (1.6×) to keep this stable on slow CI."""
+    import time
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+
+    SLEEP = 0.4
+    stdout = _make_pod_stdout(1, 1)
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            time.sleep(SLEEP)
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=SLEEP,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    t0 = time.monotonic()
+    cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=True,
+    )
+    elapsed_parallel = time.monotonic() - t0
+
+    # Sequential would be ~2× SLEEP. Parallel should be much closer to SLEEP.
+    # Allow generous slack for thread-pool overhead.
+    assert elapsed_parallel < SLEEP * 1.6, (
+        f"parallel wall-time {elapsed_parallel:.2f}s, expected < "
+        f"{SLEEP * 1.6:.2f}s — pods may not be running concurrently"
+    )
+
+
+def test_compare_sequential_fallback_used_when_parallel_false(
+    tmp_path, monkeypatch,
+):
+    """parallel=False forces sequential execution; useful for
+    deterministic logging / debug. Verify by checking elapsed time
+    grows linearly with pod count."""
+    import time
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+
+    SLEEP = 0.2
+    stdout = _make_pod_stdout(1, 1)
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            time.sleep(SLEEP)
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=SLEEP,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    t0 = time.monotonic()
+    cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+    )
+    elapsed_seq = time.monotonic() - t0
+    # Sequential 2 pods × SLEEP each → expect ~2 × SLEEP, allow slop.
+    assert elapsed_seq >= SLEEP * 1.8, (
+        f"sequential wall-time {elapsed_seq:.2f}s, expected >= "
+        f"{SLEEP * 1.8:.2f}s — pods seem to have run concurrently"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1B — adaptive early-stop
+# ---------------------------------------------------------------------------
+
+def test_is_decisive_locks_when_margin_exceeds_remaining_games():
+    # 5 wins to 0 with 4 games remaining → can't be flipped → decisive.
+    assert _is_decisive(old_wins=5, new_wins=0, games_remaining=4) is True
+
+
+def test_is_decisive_not_decisive_when_remaining_could_flip():
+    # 5 wins to 0 with 5 games remaining → could end 5-5 (tie). Not decisive.
+    assert _is_decisive(old_wins=5, new_wins=0, games_remaining=5) is False
+
+
+def test_is_decisive_close_match_is_not_decisive():
+    assert _is_decisive(old_wins=3, new_wins=2, games_remaining=10) is False
+
+
+def test_is_decisive_zero_remaining_is_always_decisive():
+    assert _is_decisive(old_wins=0, new_wins=0, games_remaining=0) is True
+
+
+def test_compare_early_stops_when_first_two_pods_decisive(tmp_path, monkeypatch):
+    """Run 4 pods sequentially. After pod 2, cumulative is 10-0 with 10
+    games remaining (2 pods × 5 games) — that's NOT yet decisive
+    (margin equals remaining). After pod 3 it would be 15-0 with 5
+    remaining, decisive. Test that pod 4 is skipped."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=4)
+
+    # Each pod: Old wins all 5 games. After 3 pods cumulative is 15-0
+    # with 5 remaining → margin 15 > 5 → decisive → cancel pod 4.
+    stdout = _make_pod_stdout(5, 0)
+    calls = {"n": 0}
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            calls["n"] += 1
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=4,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+        early_stop=True,
+    )
+    # Sequential + early-stop: should stop after pod 3 (not run pod 4).
+    assert calls["n"] == 3
+    assert report.stopped_early is True
+    assert report.pods_planned == 4
+    assert len(report.pods) == 3
+    assert report.old_stats.wins == 15
+    assert report.new_stats.wins == 0
+
+
+def test_compare_does_not_early_stop_on_close_results(tmp_path, monkeypatch):
+    """3-2 split per pod, 4 pods. Margin never exceeds remaining games
+    so no early stop fires."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=4)
+
+    stdout = _make_pod_stdout(3, 2)
+    calls = {"n": 0}
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            calls["n"] += 1
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=4,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+        early_stop=True,
+    )
+    # All 4 pods ran.
+    assert calls["n"] == 4
+    assert report.stopped_early is False
+    assert len(report.pods) == 4
+
+
+def test_compare_early_stop_disabled_runs_all_pods(tmp_path, monkeypatch):
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=4)
+    stdout = _make_pod_stdout(5, 0)
+    calls = {"n": 0}
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            calls["n"] += 1
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=4,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+        early_stop=False,
+    )
+    # Even though decisive after pod 3, all 4 pods ran because
+    # early_stop=False.
+    assert calls["n"] == 4
+    assert report.stopped_early is False
+    assert len(report.pods) == 4
+
+
+def test_compare_never_stops_on_first_pod_alone(tmp_path, monkeypatch):
+    """Even if pod 1 is 5-0, we don't early-stop after a single pod —
+    too noisy to trust without a second sample."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=4)
+    # First pod massively decisive (5-0), but 3 pods × 5 = 15 games
+    # remaining; margin is 5, so the "can it be flipped" check is True
+    # (5 < 15). Even if it weren't, the explicit "skip first-pod" guard
+    # in _check_early_stop() would block early-stop. Verify pod 2
+    # always runs at minimum.
+    stdout = _make_pod_stdout(5, 0)
+    calls = {"n": 0}
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            calls["n"] += 1
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=4,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+        early_stop=True,
+    )
+    assert calls["n"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1C — per-pod adaptive game-stop (intra-pod abort)
+# ---------------------------------------------------------------------------
+
+def test_pod_abort_check_fires_when_in_pod_margin_uncatchable():
+    """Once in-pod margin > games-remaining, the abort callback returns
+    True so the runner can kill the JVM."""
+    from commander_builder.compare_versions import _make_pod_abort_check
+    pod = ["[USER] Old [B3].dck", "[USER] New [B3].dck",
+           "Filler1.dck", "Filler2.dck"]
+    abort_check, state = _make_pod_abort_check(
+        pod, pod[0], pod[1], games_per_pod=5,
+    )
+    # Game 1: New wins.
+    assert abort_check(
+        "Game Result: Game 1 ended in 60000 ms. Ai(2)-New has won!"
+    ) is False
+    # Game 2: New wins.
+    assert abort_check(
+        "Game Result: Game 2 ended in 60000 ms. Ai(2)-New has won!"
+    ) is False
+    # Game 3: New wins. After this margin=3, games_remaining=2 →
+    # 3 > 2 → abort.
+    assert abort_check(
+        "Game Result: Game 3 ended in 60000 ms. Ai(2)-New has won!"
+    ) is True
+    assert state["new_wins"] == 3
+    assert state["old_wins"] == 0
+    assert state["aborted"] is True
+
+
+def test_pod_abort_check_doesnt_fire_when_close():
+    from commander_builder.compare_versions import _make_pod_abort_check
+    pod = ["[USER] Old [B3].dck", "[USER] New [B3].dck"]
+    abort_check, state = _make_pod_abort_check(
+        pod, pod[0], pod[1], games_per_pod=5,
+    )
+    # Three games with 2-1 split → margin 1, remaining 2 → not decisive.
+    assert abort_check(
+        "Game Result: Game 1 ended in 60000 ms. Ai(1)-Old has won!"
+    ) is False
+    assert abort_check(
+        "Game Result: Game 2 ended in 60000 ms. Ai(2)-New has won!"
+    ) is False
+    assert abort_check(
+        "Game Result: Game 3 ended in 60000 ms. Ai(1)-Old has won!"
+    ) is False
+    assert state["aborted"] is False
+
+
+def test_pod_abort_check_ignores_non_game_lines():
+    from commander_builder.compare_versions import _make_pod_abort_check
+    pod = ["[USER] Old [B3].dck", "[USER] New [B3].dck"]
+    abort_check, _ = _make_pod_abort_check(pod, pod[0], pod[1], games_per_pod=5)
+    assert abort_check("Phase: Ai(1)-Old A Untap") is False
+    assert abort_check("Turn: Turn 5 (Ai(2)-New)") is False
+    assert abort_check("") is False
+
+
+def test_pod_abort_check_handles_filler_wins():
+    """Filler wins consume games-remaining but don't shift the
+    old-vs-new margin; verify the math stays consistent."""
+    from commander_builder.compare_versions import _make_pod_abort_check
+    pod = ["[USER] Old [B3].dck", "[USER] New [B3].dck",
+           "Filler1.dck", "Filler2.dck"]
+    abort_check, state = _make_pod_abort_check(
+        pod, pod[0], pod[1], games_per_pod=5,
+    )
+    # 3 filler wins, 1 New win. Margin 1, remaining 1 → still possible
+    # to flip (Old could win the last one) → not aborted.
+    abort_check("Game Result: Game 1 ended in 60000 ms. Ai(3)-Filler1 has won!")
+    abort_check("Game Result: Game 2 ended in 60000 ms. Ai(3)-Filler1 has won!")
+    abort_check("Game Result: Game 3 ended in 60000 ms. Ai(3)-Filler1 has won!")
+    res = abort_check("Game Result: Game 4 ended in 60000 ms. Ai(2)-New has won!")
+    assert res is False
+    assert state["games_seen"] == 4
+    assert state["new_wins"] == 1
+    assert state["old_wins"] == 0
+
+
+def test_synthesize_match_result_builds_parseable_line():
+    """When abort kills Forge before the trailing Match Result, the
+    synthesized one must be in the format log_parser.parse() expects."""
+    from commander_builder.compare_versions import _synthesize_match_result
+    from commander_builder.log_parser import parse
+    state = {
+        "wins_by_seat_name": {
+            (1, "Old"): 0, (2, "New"): 3,
+            (3, "Filler1"): 0, (4, "Filler2"): 0,
+        },
+    }
+    line = _synthesize_match_result(state)
+    assert line.startswith("Match Result:")
+    parsed = parse(line)
+    by_name = {dr.name: dr.wins for dr in parsed.deck_results}
+    assert by_name == {"Old": 0, "New": 3, "Filler1": 0, "Filler2": 0}
+
+
+def test_compare_intra_pod_abort_synthesizes_results_when_killed(
+    tmp_path, monkeypatch,
+):
+    """Full-pod simulation: stub a runner that emits per-game winner
+    lines via on_line/abort_check, gets killed mid-pod, and verify
+    the report counts the games that were actually played."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=1)
+
+    # Build streaming output that the runner would produce: 3 games
+    # where New wins all. After game 3 the abort_check fires (margin
+    # 3 > remaining 2 in a 5-game pod).
+    per_game_lines = [
+        f"Game Result: Game {i} ended in 60000 ms. Ai(2)-New has won!\n"
+        for i in (1, 2, 3)
+    ]
+
+    class StreamingFakeRunner:
+        def run(self, pod, num_games, game_format="commander",
+                timeout_sec=None, stream=False, on_line=None,
+                abort_check=None):
+            # Stream each per-game line through abort_check; stop when
+            # it returns True. Don't append a Match Result line —
+            # compare_versions._run_one_pod should synthesize one.
+            stdout_emitted = ""
+            killed = False
+            for line in per_game_lines:
+                stdout_emitted += line
+                if abort_check is not None and abort_check(line.rstrip("\n")):
+                    killed = True
+                    break
+            return SimResult(
+                cmd=["x"], returncode=0 if not killed else -9,
+                duration_sec=0.5,
+                stdout=stdout_emitted, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=1,
+        runner=StreamingFakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+    )
+    # New won 3 games and the pod was aborted; report should reflect it.
+    assert report.pods[0]["intra_pod_aborted"] is True
+    assert report.pods[0]["games_actually_played"] == 3
+    assert report.new_stats.wins == 3
+    assert report.old_stats.wins == 0
+    # total_games counts what Forge actually played, not what we
+    # asked for.
+    assert report.total_games == 3
+
+
+def test_compare_intra_pod_abort_disabled_runs_full_pod(tmp_path, monkeypatch):
+    """When intra-pod abort doesn't fire (close match), the full pod
+    runs and the trailing Match Result line is honored."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=1)
+
+    full_stdout = (
+        "Game Result: Game 1 ended in 60000 ms. Ai(1)-Old has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(2)-New has won!\n"
+        "Game Result: Game 3 ended in 60000 ms. Ai(1)-Old has won!\n"
+        "Game Result: Game 4 ended in 60000 ms. Ai(2)-New has won!\n"
+        "Game Result: Game 5 ended in 60000 ms. Ai(2)-New has won!\n"
+        "Match Result: Ai(1)-Old: 2 Ai(2)-New: 3 Ai(3)-Filler0: 0 Ai(4)-Filler1: 0\n"
+    )
+
+    class StreamingFakeRunner:
+        def run(self, pod, num_games, game_format="commander",
+                timeout_sec=None, stream=False, on_line=None,
+                abort_check=None):
+            for line in full_stdout.splitlines(True):
+                if abort_check is not None:
+                    abort_check(line.rstrip("\n"))
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.5,
+                stdout=full_stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=1,
+        runner=StreamingFakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+    )
+    assert report.pods[0]["intra_pod_aborted"] is False
+    assert report.pods[0]["games_actually_played"] == 5
+    assert report.old_stats.wins == 2
+    assert report.new_stats.wins == 3
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1E — auto-tuned filler_pairs by CPU count
+# ---------------------------------------------------------------------------
+
+def test_auto_filler_pairs_scales_with_cores(monkeypatch):
+    from commander_builder.compare_versions import auto_filler_pairs
+    monkeypatch.setattr("commander_builder.compare_versions.os.cpu_count",
+                        lambda: 8)
+    # 8 cores → cap at 4.
+    assert auto_filler_pairs() == 4
+
+
+def test_auto_filler_pairs_caps_at_four():
+    """Capped to avoid spawning more JVMs than reasonable on a beefy box."""
+    from commander_builder.compare_versions import auto_filler_pairs
+    # 16 cores still returns 4 — pods past the cap just queue up.
+    import unittest.mock as _m
+    with _m.patch(
+        "commander_builder.compare_versions.os.cpu_count", return_value=16,
+    ):
+        assert auto_filler_pairs() == 4
+
+
+def test_auto_filler_pairs_floors_at_two(monkeypatch):
+    from commander_builder.compare_versions import auto_filler_pairs
+    # 1-core box should still get 2 pairs so the filler-pair averaging
+    # has something to average. The pods will run sequentially.
+    monkeypatch.setattr("commander_builder.compare_versions.os.cpu_count",
+                        lambda: 1)
+    assert auto_filler_pairs() == 2
+
+
+def test_auto_filler_pairs_handles_none_cpu_count(monkeypatch):
+    """os.cpu_count() returns None on some platforms; we should still
+    produce a sane default."""
+    from commander_builder.compare_versions import auto_filler_pairs
+    monkeypatch.setattr("commander_builder.compare_versions.os.cpu_count",
+                        lambda: None)
+    assert auto_filler_pairs() == 2
+
+
+def test_compare_single_pod_skips_threadpool(tmp_path, monkeypatch):
+    """1v1 mode runs a single pod. We don't need a threadpool for that;
+    verify it still works and the threadpool short-circuits."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch)
+
+    stdout = _make_pod_stdout(2, 0)
+
+    class FakeRunner:
+        def __init__(self):
+            self.calls = 0
+        def run(self, *args, **kwargs):
+            self.calls += 1
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    fr = FakeRunner()
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=2,
+        mode="1v1",
+        runner=fr,
+        out_dir=tmp_path / "_compare",
+        parallel=True,
+    )
+    assert fr.calls == 1
+    assert len(report.pods) == 1
+    assert report.old_stats.wins == 2
+    assert report.new_stats.wins == 0
