@@ -55,7 +55,6 @@ from typing import Optional
 from .archetype import classify as _classify_archetype_path
 from .scryfall_client import lookup_card, _parse_commander_names_from_dck
 from .staples import (
-    BASIC_LANDS_LC,
     UNIVERSAL_STAPLES_LC,
     classify_role as _classify_role_text,
 )

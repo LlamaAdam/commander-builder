@@ -54,7 +54,6 @@ from typing import Optional
 
 from .edhrec_client import CardEntry, CommanderPage, fetch_commander_page
 from .forge_runner import VENDOR_FORGE
-from .knowledge_log import DEFAULT_DB_PATH, iterations_for_deck
 from .moxfield_import import find_top_liked_decks_for_commander
 from .scryfall_client import _parse_commander_names_from_dck, lookup_card
 from .staples import (
