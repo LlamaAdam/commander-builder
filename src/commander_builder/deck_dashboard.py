@@ -64,6 +64,7 @@ from .staples import (
     classify_role_extended,
     _LAND_PAYOFF_PATTERNS,
     _WIN_CONDITION_PATTERNS,
+    detect_tribal_type,
 )
 
 
@@ -322,6 +323,14 @@ def build_dashboard(
     cards_with_price = 0
     role_counts: dict[str, int] = {}
     curve_buckets: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+    # Per-deck creature-subtype frequency. We piggyback on the main
+    # iteration so the tribal detection doesn't cost an extra
+    # Scryfall round-trip. Each card's type_line contributes its
+    # subtypes (Creature — Dragon Wizard → +1 to Dragon, +1 to
+    # Wizard) so a deck with 20 Dragons surfaces "Dragon" even when
+    # the commander itself isn't explicitly tribal (e.g. a 5-color
+    # goodstuff commander running a Dragon package).
+    subtype_counts: dict[str, int] = {}
     for name, qty in main_with_qty:
         try:
             data = lookup_card(name)
@@ -354,6 +363,21 @@ def build_dashboard(
             role = classify_role_extended(oracle_text, type_line)
             if role in DISPLAY_CATEGORIES:
                 role_counts[role] = role_counts.get(role, 0) + qty
+        # Tribal-subtype counting: extract creature subtypes from
+        # the type_line. Scryfall renders these as "Creature —
+        # Dragon Wizard"; everything after the em-dash is a list
+        # of subtypes separated by spaces. We only count creatures
+        # (and tribal-instant/sorcery cards) because their subtype
+        # IS the tribe we care about. Non-creature types
+        # (Artifact — Equipment, Enchantment — Aura) don't carry
+        # tribal signal.
+        if "creature" in (type_line or "").lower() and "—" in type_line:
+            try:
+                subtypes_raw = type_line.split("—", 1)[1].strip()
+                for sub in subtypes_raw.split():
+                    subtype_counts[sub] = subtype_counts.get(sub, 0) + qty
+            except (IndexError, AttributeError):
+                pass
 
     avg_cmc = round(sum(cmcs) / len(cmcs), 2) if cmcs else 0.0
     n_game_changers = _count_game_changers(deck_card_names)
@@ -362,10 +386,50 @@ def build_dashboard(
     except Exception:
         archetype = "unknown"
 
-    # Theme tags — current archetype + any "*-tribal" subtypes if dominant.
+    # Theme tags — archetype + dominant tribal type (if any).
     theme_tags: list[str] = []
     if archetype and archetype != "unknown":
         theme_tags.append(archetype.title())
+    # Tribal detection: prefer the commander's oracle-text signal
+    # (Lathliss, The Ur-Dragon, Edgar Markov explicitly name their
+    # tribe) and fall back to deck creature-subtype frequency for
+    # generic commanders running tribal packages. The fallback
+    # threshold (≥6 of the same subtype) is conservative — random
+    # creature decks won't get spuriously tagged, but a real tribal
+    # deck (typically 15-25 of one tribe) easily clears it.
+    #
+    # The 2026-05-13 chrome audit caught the Ur-Dragon deck showing
+    # only "Aggro" in its theme pills, no "Dragon" — the dashboard's
+    # theme aggregator only used the archetype classifier and
+    # ignored the (already-implemented) ``detect_tribal_type``
+    # helper. This wires it in.
+    tribe: Optional[str] = None
+    if commander_data:
+        tribe = detect_tribal_type(
+            commander_data.get("oracle_text", "") or "",
+            commander_data.get("type_line", "") or "",
+        )
+    if not tribe and subtype_counts:
+        # Pick the canonical tribe with the most deck-creature
+        # representation. Canonical-list filtering rules out
+        # non-tribal subtype noise ("Bear", "Soldier" technically
+        # match but rarely indicate intentional tribal builds).
+        from .staples import _CANONICAL_TRIBAL_TYPES
+        best_tribe = None
+        best_count = 0
+        for canonical in _CANONICAL_TRIBAL_TYPES:
+            count = subtype_counts.get(canonical, 0)
+            if count > best_count:
+                best_count = count
+                best_tribe = canonical
+        if best_count >= 6:
+            tribe = best_tribe
+    if tribe:
+        # Append as "<Tribe> tribal" so it's distinct from archetype
+        # tags (Aggro / Combo / Control / Midrange). The UI styling
+        # for tribal pills can branch on the trailing word if it
+        # wants to highlight tribal decks specifically.
+        theme_tags.append(f"{tribe} tribal")
 
     # Categories panel — guarantee every UI slot is present (zeros OK).
     categories = {cat: role_counts.get(cat, 0) for cat in DISPLAY_CATEGORIES}

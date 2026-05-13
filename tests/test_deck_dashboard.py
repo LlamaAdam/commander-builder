@@ -395,3 +395,194 @@ def test_build_dashboard_to_dict_serializable(tmp_path, monkeypatch):
     serialized = json.dumps(result.to_dict())
     assert "commander" in serialized
     assert "stat_tiles" in serialized
+
+
+# ---------------------------------------------------------------------------
+# theme_tags — tribal detection wired into dashboard (2026-05-13 fix)
+# ---------------------------------------------------------------------------
+
+def _write_dragon_tribal_deck(tmp_path: Path) -> Path:
+    """Synthetic Dragon-tribal deck: The Ur-Dragon commander + 8
+    Dragon creatures + filler. Mirrors the Wyrm Sovereign B4 deck
+    shape that surfaced the original 2026-05-13 bug (theme pill
+    showed only "Aggro", not "Dragon")."""
+    p = tmp_path / "[USER] Wyrm Sovereign [B4].dck"
+    main = (
+        "1 Mountain\n" * 30
+        + "".join(f"1 Dragon{i}\n" for i in range(8))
+        + "1 Sol Ring\n"
+        + "1 Lightning Bolt\n"
+    )
+    p.write_text(
+        "[metadata]\nMoxfield=ur-dragon-test\n"
+        "[Commander]\n1 The Ur-Dragon\n"
+        "[Main]\n" + main,
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_build_dashboard_surfaces_tribe_from_commander_oracle(
+    tmp_path, monkeypatch,
+):
+    """Regression (2026-05-13 chrome audit): the Ur-Dragon deck
+    rendered with only "Aggro" in the theme pills, no "Dragon",
+    even though detect_tribal_type would have caught it from the
+    commander's oracle text. The dashboard's theme_tags aggregator
+    didn't call detect_tribal_type — fixed by wiring it in
+    alongside the archetype classifier.
+    """
+    deck = _write_dragon_tribal_deck(tmp_path)
+
+    def fake_lookup(name):
+        if name == "The Ur-Dragon":
+            # Real oracle text mentions Dragon several times.
+            return {
+                "type_line": "Legendary Creature — Elder Dragon Avatar",
+                "color_identity": ["W", "U", "B", "R", "G"],
+                "cmc": 9.0,
+                "oracle_text": (
+                    "Eminence — As long as The Ur-Dragon is in the command "
+                    "zone or on the battlefield, other Dragon spells you cast "
+                    "cost {1} less to cast. Flying. Whenever one or more "
+                    "Dragons you control attack, draw that many cards, then "
+                    "you may put a permanent card from your hand onto the "
+                    "battlefield."
+                ),
+            }
+        if name == "Mountain":
+            return {
+                "type_line": "Basic Land — Mountain",
+                "oracle_text": "{T}: Add {R}.",
+                "cmc": 0.0,
+            }
+        if name.startswith("Dragon"):
+            return {
+                "type_line": "Creature — Dragon",
+                "oracle_text": "Flying.",
+                "cmc": 5.0,
+            }
+        return None
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    result = build_dashboard(deck, bracket=4)
+    # Tribal tag must appear, distinct from the archetype tag.
+    assert any("Dragon tribal" in t for t in result.theme_tags), (
+        f"expected 'Dragon tribal' in theme_tags, got {result.theme_tags!r}"
+    )
+
+
+def test_build_dashboard_tribe_falls_back_to_deck_subtype_frequency(
+    tmp_path, monkeypatch,
+):
+    """When the commander itself isn't explicitly tribal (e.g.
+    Maelstrom Wanderer goodstuff commander) but the deck runs a
+    heavy tribal package, the dashboard should still surface the
+    tribe — caught by the secondary subtype-frequency pass over
+    the actual deck creatures. The ≥6-of-one-subtype floor is
+    high enough that random toolbox decks don't get spuriously
+    tagged but low enough that a real tribal deck always lands.
+    """
+    deck = tmp_path / "tribal-goodstuff.dck"
+    deck.write_text(
+        "[metadata]\nMoxfield=tribal-test\n"
+        "[Commander]\n1 Generic Commander\n"
+        "[Main]\n"
+        + ("1 Mountain\n" * 30)
+        + "".join(f"1 Goblin{i}\n" for i in range(8)),
+        encoding="utf-8",
+    )
+
+    def fake_lookup(name):
+        if name == "Generic Commander":
+            # Oracle has zero tribal references.
+            return {
+                "type_line": "Legendary Creature — Human Wizard",
+                "color_identity": ["R"],
+                "cmc": 4.0,
+                "oracle_text": "Draw a card.",
+            }
+        if name == "Mountain":
+            return {
+                "type_line": "Basic Land — Mountain",
+                "oracle_text": "{T}: Add {R}.",
+                "cmc": 0.0,
+            }
+        if name.startswith("Goblin"):
+            return {
+                "type_line": "Creature — Goblin",
+                "oracle_text": "Haste.",
+                "cmc": 2.0,
+            }
+        return None
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+    result = build_dashboard(deck, bracket=3)
+    assert any("Goblin tribal" in t for t in result.theme_tags), (
+        f"expected 'Goblin tribal' fallback, got {result.theme_tags!r}"
+    )
+
+
+def test_build_dashboard_no_tribal_tag_for_random_creature_mix(
+    tmp_path, monkeypatch,
+):
+    """Conservative floor: a deck with ≤5 of any single creature
+    subtype shouldn't get a tribal tag — that's just a normal
+    toolbox of creatures, not an intentional tribal build. Without
+    this floor, every deck running 5 spell-slingers would
+    spuriously read "Wizard tribal."
+    """
+    deck = tmp_path / "toolbox.dck"
+    deck.write_text(
+        "[metadata]\nMoxfield=toolbox-test\n"
+        "[Commander]\n1 Generic Commander\n"
+        "[Main]\n"
+        + ("1 Mountain\n" * 30)
+        # 3 goblins, 3 elves, 3 wizards — no clear tribal signal.
+        + "1 Goblin1\n1 Goblin2\n1 Goblin3\n"
+        + "1 Elf1\n1 Elf2\n1 Elf3\n"
+        + "1 Wiz1\n1 Wiz2\n1 Wiz3\n",
+        encoding="utf-8",
+    )
+
+    def fake_lookup(name):
+        if name == "Generic Commander":
+            return {
+                "type_line": "Legendary Creature — Human",
+                "color_identity": ["R"],
+                "cmc": 4.0,
+                "oracle_text": "",
+            }
+        if name == "Mountain":
+            return {
+                "type_line": "Basic Land — Mountain",
+                "oracle_text": "{T}: Add {R}.",
+                "cmc": 0.0,
+            }
+        if name.startswith("Goblin"):
+            return {"type_line": "Creature — Goblin", "cmc": 2.0,
+                    "oracle_text": ""}
+        if name.startswith("Elf"):
+            return {"type_line": "Creature — Elf", "cmc": 2.0,
+                    "oracle_text": ""}
+        if name.startswith("Wiz"):
+            return {"type_line": "Creature — Human Wizard", "cmc": 3.0,
+                    "oracle_text": ""}
+        return None
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+    result = build_dashboard(deck, bracket=3)
+    # No tribal tag should fire.
+    tribal_tags = [t for t in result.theme_tags if "tribal" in t]
+    assert tribal_tags == [], (
+        f"expected no tribal tag, got {tribal_tags!r}"
+    )
