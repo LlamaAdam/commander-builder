@@ -8,6 +8,7 @@ from commander_builder.moxfield_push import (
     dck_to_textarea,
     parse_dck_lines,
     prepare_push,
+    to_moxfield_line,
 )
 
 
@@ -106,3 +107,62 @@ def test_prepare_push_returns_blob_even_without_clipboard(tmp_path, monkeypatch,
 def test_api_push_is_unimplemented():
     with pytest.raises(NotImplementedError):
         _api_push("any-id", {"foo": "bar"})
+
+
+# ---------------------------------------------------------------------------
+# to_moxfield_line — rewrites Forge "1 Name|SET|CN" → Moxfield "1 Name (SET) CN"
+# ---------------------------------------------------------------------------
+
+def test_to_moxfield_line_converts_pipe_suffix_to_parens():
+    assert to_moxfield_line("1 Arcane Signet|MIC|157") == "1 Arcane Signet (MIC) 157"
+
+
+def test_to_moxfield_line_preserves_bare_card_lines():
+    assert to_moxfield_line("1 Forest") == "1 Forest"
+    assert to_moxfield_line("3 Forest") == "3 Forest"
+
+
+def test_to_moxfield_line_handles_dfc_split_names():
+    line = "1 Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel|FIN|115"
+    assert to_moxfield_line(line) == (
+        "1 Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel (FIN) 115"
+    )
+
+
+def test_to_moxfield_line_uppercases_set_code():
+    # Forge sometimes writes set codes in mixed case; Moxfield expects upper.
+    assert to_moxfield_line("1 Sol Ring|c17|223") == "1 Sol Ring (C17) 223"
+
+
+def test_to_moxfield_line_passes_through_high_quantities():
+    assert to_moxfield_line("20 Swamp|J25|89") == "20 Swamp (J25) 89"
+
+
+def test_to_moxfield_line_handles_collector_with_letters():
+    # Promo / variant collector numbers can include letters (e.g., 161p).
+    assert to_moxfield_line("1 The Great Henge|PELD|161p") == (
+        "1 The Great Henge (PELD) 161p"
+    )
+
+
+def test_to_moxfield_line_returns_unchanged_on_garbage():
+    assert to_moxfield_line("# comment line") == "# comment line"
+
+
+def test_dck_to_textarea_converts_pipe_format(tmp_path):
+    """Whole-deck integration: every line in the output should be
+    Moxfield-paste-compatible (no pipes)."""
+    p = _write(tmp_path, "x.dck", "\n".join([
+        "[Commander]",
+        "1 Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel|FIN|115",
+        "[Main]",
+        "1 Arcane Signet|MIC|157",
+        "20 Swamp|J25|89",
+        "1 Forest",   # already bare
+    ]))
+    out = dck_to_textarea(p)
+    assert "|" not in out, "Moxfield rejects pipe-suffixed lines"
+    assert "1 Arcane Signet (MIC) 157" in out
+    assert "20 Swamp (J25) 89" in out
+    assert "1 Forest" in out
+    assert "Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel (FIN) 115" in out
