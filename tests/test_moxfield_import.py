@@ -214,3 +214,163 @@ def test_uniquify_raises_after_99_collisions(tmp_path):
         (tmp_path / f"Foo ({n}).dck").write_text(str(n))
     with pytest.raises(RuntimeError):
         _uniquify(p)
+
+
+# --- find_top_liked_decks_for_commander (multi-deck variant) ---------------
+# This is the top-N fetcher that the bracket-peers advisor mode needs:
+# given a commander, return up to N highest-liked decks at the requested
+# bracket. The singular variant returns 1; this one supports N so the
+# frequency-across-references math has signal.
+
+def test_find_top_liked_decks_returns_top_n_when_search_has_more(monkeypatch):
+    """When the search returns >N hits, we fetch the first N (likes desc)."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+
+    card_search_response = {"data": [
+        {"id": "card-uuid-1", "name": "Hakbal of the Surging Soul"},
+    ]}
+    # 7 deck results, all matching the commander; we ask for top 5.
+    deck_search_response = {"data": [
+        {"publicId": f"deck-{i}",
+         "commanders": [{"name": "Hakbal of the Surging Soul"}]}
+        for i in range(1, 8)
+    ]}
+    fetched_pids: list[str] = []
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return card_search_response
+        if "/decks/search" in url:
+            return deck_search_response
+        # fetch_deck path — URL ends with /{publicId}
+        pid = url.rstrip("/").rsplit("/", 1)[-1]
+        fetched_pids.append(pid)
+        return {"publicId": pid, "name": f"Hakbal #{pid}"}
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    out = find_top_liked_decks_for_commander(
+        "Hakbal of the Surging Soul", bracket=3, n=5,
+    )
+    assert len(out) == 5
+    # First five publicIds, in the order Moxfield returned them.
+    assert [d["publicId"] for d in out] == ["deck-1", "deck-2", "deck-3", "deck-4", "deck-5"]
+    assert fetched_pids == ["deck-1", "deck-2", "deck-3", "deck-4", "deck-5"]
+
+
+def test_find_top_liked_decks_returns_fewer_when_search_returns_few(monkeypatch):
+    """If the search only finds 2 decks and we asked for 5, return 2."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return {"data": [{"id": "c1", "name": "Hakbal of the Surging Soul"}]}
+        if "/decks/search" in url:
+            return {"data": [
+                {"publicId": "a", "commanders": [{"name": "Hakbal of the Surging Soul"}]},
+                {"publicId": "b", "commanders": [{"name": "Hakbal of the Surging Soul"}]},
+            ]}
+        pid = url.rstrip("/").rsplit("/", 1)[-1]
+        return {"publicId": pid, "name": f"Deck {pid}"}
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    out = find_top_liked_decks_for_commander("Hakbal of the Surging Soul", n=5)
+    assert len(out) == 2
+
+
+def test_find_top_liked_decks_empty_when_card_id_unresolved(monkeypatch):
+    """No exact card match → empty list, never raises."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json",
+        lambda url: {"data": [{"id": "x", "name": "Different Card"}]},
+    )
+    assert find_top_liked_decks_for_commander("Hakbal") == []
+
+
+def test_find_top_liked_decks_empty_on_network_error(monkeypatch):
+    """Network failure during search → empty list (caller falls back)."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+    def boom(url):
+        raise OSError("network down")
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", boom,
+    )
+    assert find_top_liked_decks_for_commander("Whatever") == []
+
+
+def test_find_top_liked_decks_skips_failed_fetches(monkeypatch):
+    """If one publicId's fetch_deck fails, the others still come back."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return {"data": [{"id": "c1", "name": "Hakbal"}]}
+        if "/decks/search" in url:
+            return {"data": [
+                {"publicId": "good-1", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "broken", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "good-2", "commanders": [{"name": "Hakbal"}]},
+            ]}
+        pid = url.rstrip("/").rsplit("/", 1)[-1]
+        if pid == "broken":
+            raise OSError("403 on this one")
+        return {"publicId": pid, "name": pid}
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    out = find_top_liked_decks_for_commander("Hakbal", n=3)
+    # The middle fetch failed; the other two still returned.
+    assert [d["publicId"] for d in out] == ["good-1", "good-2"]
+
+
+def test_find_top_liked_decks_passes_bracket_to_search(monkeypatch):
+    """The bracket filter actually lands in the search URL params."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+    seen_search_url = {}
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return {"data": [{"id": "c1", "name": "Hakbal"}]}
+        if "/decks/search" in url:
+            seen_search_url["url"] = url
+            return {"data": []}
+        return {"publicId": url.rsplit("/", 1)[-1]}
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    find_top_liked_decks_for_commander("Hakbal", bracket=4, n=3)
+    assert "bracket=4" in seen_search_url["url"]
+    # Sort by likes desc so the highest-engagement decks come first.
+    assert "sortColumn=likes" in seen_search_url["url"]
+    assert "sortDirection=descending" in seen_search_url["url"]
+
+
+def test_find_top_liked_decks_dedupes_duplicate_public_ids(monkeypatch):
+    """Defensive: if Moxfield returns the same deck twice (paging glitch),
+    don't double-count it in the references."""
+    from commander_builder.moxfield_import import find_top_liked_decks_for_commander
+
+    def fake_get(url):
+        if "/cards/search" in url:
+            return {"data": [{"id": "c1", "name": "Hakbal"}]}
+        if "/decks/search" in url:
+            return {"data": [
+                {"publicId": "abc", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "abc", "commanders": [{"name": "Hakbal"}]},
+                {"publicId": "xyz", "commanders": [{"name": "Hakbal"}]},
+            ]}
+        pid = url.rsplit("/", 1)[-1]
+        return {"publicId": pid, "name": pid}
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import._http_get_json", fake_get,
+    )
+    out = find_top_liked_decks_for_commander("Hakbal", n=5)
+    pids = [d["publicId"] for d in out]
+    assert pids == ["abc", "xyz"]  # second "abc" dropped

@@ -662,3 +662,315 @@ def test_advise_flags_hallucinated_claude_card(tmp_path, monkeypatch):
     by_card = {r.card: r.name_known for r in report.recommendations}
     assert by_card.get("Sol Ring") is True
     assert by_card.get("Accursed Marauder") is False
+
+
+# --- _bracket_peers_recommendations — N highest-liked decks at bracket -----
+# This is the alternative to the EDHREC aggregate path. The Ur-Dragon B4
+# audit (2026-05-13) revealed EDHREC's cross-bracket average produced
+# generic ramp adds for a deck that already had 12+ ramp pieces, while
+# missing archetype-specific cards like Moat. Bracket-peers sources
+# recommendations from other tuned builds of the same commander at the
+# same bracket — should be archetype-appropriate by construction.
+
+def _moxfield_deck_with_cards(public_id: str, cards: list[str]) -> dict:
+    """Synthesize a Moxfield deck JSON shape with the given main cards."""
+    return {
+        "publicId": public_id,
+        "name": f"Deck {public_id}",
+        "boards": {
+            "mainboard": {
+                "cards": {
+                    f"card-{i}": {"card": {"name": name}, "quantity": 1}
+                    for i, name in enumerate(cards)
+                }
+            },
+        },
+    }
+
+
+def test_bracket_peers_recommends_must_add_cards(monkeypatch):
+    """Cards appearing in ALL references that the user is missing
+    surface as add recommendations with full confidence ('unanimous')."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    deck_cards = {"Sol Ring", "Forest"}  # user is missing the staples below
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", [
+            "Sol Ring", "Moat", "Last March of the Ents", "Forest",
+        ]),
+        _moxfield_deck_with_cards("d2", [
+            "Sol Ring", "Moat", "Last March of the Ents", "Mountain",
+        ]),
+        _moxfield_deck_with_cards("d3", [
+            "Sol Ring", "Moat", "Last March of the Ents", "Plains",
+        ]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda name, bracket=None, n=5, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    recs, ref_count = _bracket_peers_recommendations(
+        commander_name="The Ur-Dragon",
+        bracket=4,
+        deck_cards=deck_cards,
+    )
+    assert ref_count == 3
+    add_names = {r.card for r in recs if r.action == "add"}
+    # Both cards appeared in all 3 references; user is missing both.
+    assert "Moat" in add_names
+    assert "Last March of the Ents" in add_names
+    # Universal staples (Sol Ring) must NOT surface as must-add even
+    # when they appear in all references.
+    assert "Sol Ring" not in add_names
+
+
+def test_bracket_peers_recommends_cut_for_truly_off_meta(monkeypatch):
+    """Cards in user's deck that appear in NO references AND aren't
+    universal staples are cut candidates."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    deck_cards = {"Sol Ring", "Forest", "Goofy Janky Card"}
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Sol Ring", "Moat", "Forest"]),
+        _moxfield_deck_with_cards("d2", ["Sol Ring", "Moat", "Mountain"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda name, bracket=None, n=5, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="The Ur-Dragon", bracket=4, deck_cards=deck_cards,
+    )
+    cut_names = {r.card for r in recs if r.action == "cut"}
+    assert "Goofy Janky Card" in cut_names
+    # Sol Ring is universal — never cut even if absent from refs.
+    assert "Sol Ring" not in cut_names
+
+
+def test_bracket_peers_carries_frequency_evidence(monkeypatch):
+    """Each add rec should tag in_n_references / total_references so the
+    UI can show 'in 5/5 reference decks' for ranking. The frequency
+    label feeds the existing render_frequency_label helper."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Mana Crypt"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Other Card"]),
+        _moxfield_deck_with_cards("d3", ["Moat", "Other Card"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda name, bracket=None, n=5, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(),
+    )
+    by_card = {r.card: r for r in recs if r.action == "add"}
+    # Moat appeared in all 3, "Other Card" in 2/3 ("majority"),
+    # Mana Crypt is a universal staple so it's filtered.
+    assert by_card["Moat"].evidence.get("in_n_references") == 3
+    assert by_card["Moat"].evidence.get("total_references") == 3
+    assert "in 3/3 reference decks" in by_card["Moat"].reason \
+        or "unanimous" in by_card["Moat"].reason
+    if "Other Card" in by_card:
+        assert by_card["Other Card"].evidence.get("in_n_references") == 2
+
+
+def test_bracket_peers_returns_empty_when_no_references(monkeypatch):
+    """When the Moxfield fetch returns no decks (commander too obscure,
+    network down), the recommender returns empty — caller falls back."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+    recs, ref_count = _bracket_peers_recommendations(
+        commander_name="Obscure Commander", bracket=3, deck_cards={"Foo"},
+    )
+    assert recs == []
+    assert ref_count == 0
+
+
+def test_bracket_peers_tags_role_on_adds(monkeypatch):
+    """Adds inherit role classification so the UI can group them
+    consistently with the heuristic / claude paths."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat"]),
+        _moxfield_deck_with_cards("d2", ["Moat"]),
+    ]
+
+    def fake_lookup(name):
+        if name == "Moat":
+            return {
+                "oracle_text": "Creatures without flying can't attack.",
+                "type_line": "Enchantment",
+            }
+        return None
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(),
+    )
+    moat = next(r for r in recs if r.card == "Moat")
+    # role tagging via staples.classify_role — Moat is "protection"
+    # (creatures without flying can't attack). Whatever the classifier
+    # returns, the field must be present so the UI render isn't lossy.
+    assert "role" in moat.evidence
+    assert moat.evidence["role"] != ""
+
+
+def test_bracket_peers_excludes_user_cards_from_adds(monkeypatch):
+    """A card already in the user's deck must NEVER appear as an add
+    even if it's in every reference — that's a no-op recommendation."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Cyclonic Rift"]),
+        _moxfield_deck_with_cards("d2", ["Cyclonic Rift"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards={"Cyclonic Rift"},
+    )
+    assert all(r.card != "Cyclonic Rift" for r in recs)
+
+
+# --- advise(source="bracket_peers") integration ----------------------------
+
+def test_advise_with_bracket_peers_source_routes_through_new_path(
+    tmp_path, monkeypatch,
+):
+    """advise(source='bracket_peers') skips EDHREC entirely and uses
+    the bracket-peers recommender."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring", "Old Card"],
+    )
+    # EDHREC must NOT be called when source=bracket_peers — pin it.
+    def edhrec_should_not_fire(*a, **kw):
+        raise AssertionError("EDHREC fetch must not run in bracket_peers mode")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        edhrec_should_not_fire,
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Sol Ring"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Sol Ring"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    assert report.source == "bracket_peers"
+    add_cards = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Moat" in add_cards
+
+
+def test_advise_bracket_peers_falls_back_to_heuristic_on_empty_refs(
+    tmp_path, monkeypatch,
+):
+    """When Moxfield returns no references (obscure commander, network),
+    fall back to the EDHREC heuristic so the audit still produces output.
+    fallback_reason names the cause for UI surfacing."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Obscure"], main=["Sol Ring"],
+    )
+    fake_page = _fake_edhrec_page(
+        top=[("Coat of Arms", 60.0)], synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    # Fell back to heuristic when no refs found.
+    assert report.source == "heuristic"
+    assert report.fallback_reason is not None
+    assert "no bracket-peer references" in report.fallback_reason.lower() \
+        or "no references" in report.fallback_reason.lower()
+
+
+def test_advise_bracket_peers_validates_card_names(tmp_path, monkeypatch):
+    """The hallucination-defense pass still runs in bracket-peers mode —
+    if a reference deck somehow has a typo, the name_known flag surfaces
+    it. (Less likely than Claude inventing names, but the pipeline shape
+    stays uniform across all sources.)"""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["X"], main=["Sol Ring"],
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Real Card", "Typo Card"]),
+        _moxfield_deck_with_cards("d2", ["Real Card", "Typo Card"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: ({"oracle_text": "", "type_line": ""}
+                      if name == "Real Card" else None),
+    )
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    by_card = {r.card: r.name_known for r in report.recommendations}
+    assert by_card.get("Real Card") is True
+    assert by_card.get("Typo Card") is False

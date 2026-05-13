@@ -53,11 +53,13 @@ from typing import Optional
 from .edhrec_client import CardEntry, CommanderPage, fetch_commander_page
 from .forge_runner import VENDOR_FORGE
 from .knowledge_log import DEFAULT_DB_PATH, iterations_for_deck
+from .moxfield_import import find_top_liked_decks_for_commander
 from .scryfall_client import _parse_commander_names_from_dck, lookup_card
 from .staples import (
     classify_role,
     is_basic_land,
     is_universal_staple,
+    render_frequency_label,
 )
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
@@ -474,6 +476,166 @@ def _heuristic_swap_recommendations(
     return recs
 
 
+# --- Bracket-peers recommender (sources from other tuned builds) ----------
+
+# How many reference decks to pull when sourcing from Moxfield's
+# top-liked decks at the user's bracket. Five is the sweet spot:
+# enough that frequency math has signal ("in 5/5 references" reads
+# as 'unanimous'), not so many that one cluster of similar builds
+# dominates. Configurable via the public function signature.
+DEFAULT_BRACKET_PEERS_N = 5
+
+
+def _extract_main_cards_from_moxfield_json(deck_json: dict) -> list[str]:
+    """Pull the mainboard card names out of a Moxfield deck JSON.
+
+    Moxfield's response shape is ``boards.mainboard.cards`` keyed by
+    internal card UUIDs, each value an object whose ``card.name`` field
+    is the canonical card name. We don't care about quantity here — each
+    name counts once (multi-copies aren't a thing in singleton
+    Commander anyway, except for basics, which the staples filter
+    drops).
+    """
+    boards = deck_json.get("boards") or {}
+    mainboard = (boards.get("mainboard") or {}).get("cards") or {}
+    out: list[str] = []
+    for entry in mainboard.values():
+        if not isinstance(entry, dict):
+            continue
+        card = entry.get("card") or {}
+        name = (card.get("name") or "").strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _bracket_peers_recommendations(
+    commander_name: str,
+    bracket: int,
+    deck_cards: set[str],
+    n: int = DEFAULT_BRACKET_PEERS_N,
+    add_limit: int = DEFAULT_ADD_LIMIT,
+    cut_limit: int = DEFAULT_CUT_LIMIT,
+) -> tuple[list[SwapRecommendation], int]:
+    """Source swap recommendations from the top-N highest-liked Moxfield
+    decks for ``commander_name`` at ``bracket``.
+
+    The Ur-Dragon B4 audit (2026-05-13) surfaced why this exists: EDHREC's
+    commander page averages inclusion% across all brackets and includes
+    precons, so it recommended generic ramp for a deck that was already
+    swimming in ramp and cut archetype-specific tools (Moat in a
+    flying-tribal deck, Last March of the Ents as the deck's card draw).
+    Sourcing from other tuned builds at the same bracket produces
+    archetype-appropriate suggestions by construction — what 5 other
+    people who've tuned this commander at this bracket consider
+    essential.
+
+    Returns ``(recommendations, ref_count)``. Empty list + ``0`` when no
+    references could be fetched (caller falls back to a sparser source).
+
+    Frequency thresholds:
+      - **Adds** include cards present in any reference but missing
+        from the user's deck. Each rec carries ``in_n_references`` so
+        callers rank by confidence; the reason string already names the
+        ratio.
+      - **Cuts** are user-deck cards absent from every reference.
+        Universal staples and basic lands are excluded from both
+        directions (they're noise in either).
+    """
+    decks = find_top_liked_decks_for_commander(
+        commander_name, bracket=bracket, n=n,
+    )
+    if not decks:
+        return [], 0
+
+    # Parse the reference cardlists upfront so the frequency math is
+    # plain Python set ops. Lower-case throughout to match the existing
+    # case-insensitive comparisons in `_heuristic_swap_recommendations`.
+    ref_cardlists: list[list[str]] = [
+        _extract_main_cards_from_moxfield_json(d) for d in decks
+    ]
+    ref_sets_lc: list[set[str]] = [{c.lower() for c in cs} for cs in ref_cardlists]
+    total_refs = len(ref_sets_lc)
+
+    deck_cards_lc = {c.lower() for c in deck_cards}
+
+    # Frequency: how many references contain each card.
+    from collections import Counter
+    freq: Counter[str] = Counter()
+    for s in ref_sets_lc:
+        for c in s:
+            freq[c] += 1
+
+    # Map lowercase → display-cased name (preserve first-seen capitalization
+    # to match how the source decks render the card).
+    case_map: dict[str, str] = {}
+    for cardlist in ref_cardlists + [list(deck_cards)]:
+        for c in cardlist:
+            if c.lower() not in case_map:
+                case_map[c.lower()] = c
+
+    # Adds: any card appearing in a reference, missing from user, not
+    # a universal staple. Sort by frequency desc, then alphabetical.
+    add_candidates_lc = [
+        lc for lc in freq
+        if lc not in deck_cards_lc
+        and not is_universal_staple(case_map[lc])
+        and not is_basic_land(case_map[lc])
+    ]
+    add_candidates_lc.sort(
+        key=lambda lc: (-freq[lc], case_map[lc].lower()),
+    )
+
+    recs: list[SwapRecommendation] = []
+    for lc in add_candidates_lc[:add_limit]:
+        name = case_map[lc]
+        n_refs = freq[lc]
+        role = _role_for_card(name)
+        label = render_frequency_label(n_refs, total_refs)
+        recs.append(SwapRecommendation(
+            card=name,
+            action="add",
+            reason=(
+                f"in {n_refs}/{total_refs} reference decks "
+                f"({label}) for {commander_name} at B{bracket}"
+            ),
+            evidence={
+                "in_n_references": n_refs,
+                "total_references": total_refs,
+                "frequency_label": label,
+                "role": role,
+                "source": "bracket_peers",
+            },
+        ))
+
+    # Cuts: user cards absent from every reference, with the universal-
+    # staples filter applied so we don't recommend cutting Sol Ring.
+    any_ref_lc = set(freq.keys())
+    cut_candidates = [
+        case_map[lc] for lc in (deck_cards_lc - any_ref_lc)
+        if lc in case_map
+        and not is_universal_staple(case_map[lc])
+        and not is_basic_land(case_map[lc])
+    ]
+    cut_candidates.sort(key=str.lower)
+    for name in cut_candidates[:cut_limit]:
+        recs.append(SwapRecommendation(
+            card=name,
+            action="cut",
+            reason=(
+                f"absent from all {total_refs} reference decks for "
+                f"{commander_name} at B{bracket}"
+            ),
+            evidence={
+                "in_n_references": 0,
+                "total_references": total_refs,
+                "source": "bracket_peers",
+            },
+        ))
+
+    return recs, total_refs
+
+
 # --- LLM-aided variant (Claude) -------------------------------------------
 
 _CLAUDE_ADVISOR_SYSTEM = """You are a deck-tuning advisor for Magic: the Gathering Commander. \
@@ -592,27 +754,58 @@ def advise(
     deck_path: Path,
     bracket: int,
     use_claude: bool = False,
+    source: Optional[str] = None,
     deck_dir: Path = DECK_DIR,
     match_dir: Path = MATCH_DIR,
     claude_model: str = DEFAULT_CLAUDE_MODEL,
 ) -> AdviceReport:
-    """Generate swap recommendations for one deck. Default uses heuristic
-    over EDHREC data; pass `use_claude=True` to escalate to LLM-aided
-    synthesis (falls back to heuristic if API unavailable).
+    """Generate swap recommendations for one deck.
 
-    ``claude_model`` selects the Anthropic tier when ``use_claude=True``;
-    defaults to Sonnet for general quality. Pass ``"claude-haiku-4-5"``
-    to cut cost ~3-5x on routine audits."""
+    ``source`` selects the recommendation backend:
+
+    - ``"heuristic"`` (default when neither ``use_claude`` nor
+      ``source`` is set) — EDHREC inclusion% / synergy% over the
+      commander's aggregate page. Fast, deterministic, no LLM token
+      cost. Worst on tuned high-bracket decks because EDHREC averages
+      across all brackets.
+    - ``"bracket_peers"`` — top-N highest-liked Moxfield decks for
+      this commander **at this bracket**, frequency-ranked. Stays
+      archetype-appropriate because the source decks are by definition
+      tuned for the same goal. Falls back to heuristic when no
+      references can be fetched.
+    - ``"claude"`` (or legacy ``use_claude=True``) — LLM-aided
+      synthesis. Most expressive; requires ``ANTHROPIC_API_KEY``.
+
+    ``claude_model`` selects the Anthropic tier when source is
+    ``"claude"``; defaults to Sonnet. Pass ``"claude-haiku-4-5"`` to
+    cut cost ~3-5x on routine audits.
+
+    ``use_claude=True`` is preserved as a legacy alias for
+    ``source="claude"`` so existing callers don't break.
+    """
+    # Resolve the effective backend. Explicit ``source`` wins; otherwise
+    # ``use_claude=True`` maps to claude; otherwise heuristic.
+    if source is None:
+        source = "claude" if use_claude else "heuristic"
+    if source not in ("heuristic", "claude", "bracket_peers"):
+        raise ValueError(
+            f"source must be one of heuristic/claude/bracket_peers, "
+            f"got {source!r}",
+        )
+
     if not deck_path.is_absolute():
         deck_path = deck_dir / deck_path
     if not deck_path.exists():
         raise FileNotFoundError(f"deck not found: {deck_path}")
 
-    # Resolve commander names + EDHREC page.
+    # Resolve commander names + EDHREC page. We always fetch the page
+    # because heuristic and claude both consume it, AND because
+    # bracket_peers may need it as a fallback when no Moxfield
+    # references are returned.
     commanders = _parse_commander_names_from_dck(deck_path)
     if not commanders:
         raise ValueError(f"no commanders found in {deck_path.name}")
-    edhrec_page = fetch_commander_page(commanders[0])
+    primary_commander = commanders[0]
 
     # Build diagnosis from prior matches.
     diagnosis = _aggregate_match_history(deck_path.name, match_dir=match_dir)
@@ -621,22 +814,59 @@ def advise(
     main_cards = set(_read_main_cards(deck_path))
 
     # Pick backend.
-    source = "heuristic"
     rationale_override: Optional[str] = None
     fallback_reason: Optional[str] = None
+    edhrec_page: Optional[CommanderPage] = None
     recs: list[SwapRecommendation]
-    if use_claude:
+
+    def _fetch_edhrec_lazy() -> Optional[CommanderPage]:
+        """Lazy-fetch EDHREC only when a backend that needs it actually
+        runs. bracket_peers avoids the round-trip on the happy path."""
+        nonlocal edhrec_page
+        if edhrec_page is None:
+            edhrec_page = fetch_commander_page(primary_commander)
+        return edhrec_page
+
+    if source == "bracket_peers":
+        peer_recs, ref_count = _bracket_peers_recommendations(
+            commander_name=primary_commander,
+            bracket=bracket,
+            deck_cards=main_cards,
+        )
+        if peer_recs:
+            recs = peer_recs
+            # source stays "bracket_peers"
+        else:
+            # No references — fall back to heuristic so we still emit
+            # something useful. Surface the cause so the UI can show
+            # the user why the better backend wasn't used.
+            fallback_reason = (
+                f"no bracket-peer references found for "
+                f"{primary_commander!r} at B{bracket} — "
+                f"falling back to EDHREC heuristic"
+            )
+            print(f"  WARN: {fallback_reason}.", flush=True)
+            page = _fetch_edhrec_lazy()
+            recs = _heuristic_swap_recommendations(
+                main_cards, page, diagnosis=diagnosis,
+            )
+            source = "heuristic"
+    elif source == "claude":
+        page = _fetch_edhrec_lazy()
         try:
             recs, rationale_override = _claude_swap_recommendations(
-                deck_path.name, bracket, main_cards, diagnosis, edhrec_page,
+                deck_path.name, bracket, main_cards, diagnosis, page,
                 model=claude_model,
             )
-            source = "claude"
+            # source stays "claude"
         except NotImplementedError as exc:
             fallback_reason = f"claude advisor unavailable: {exc}"
             print(f"  WARN: {fallback_reason}; falling back to heuristic.",
                   flush=True)
-            recs = _heuristic_swap_recommendations(main_cards, edhrec_page, diagnosis=diagnosis)
+            recs = _heuristic_swap_recommendations(
+                main_cards, page, diagnosis=diagnosis,
+            )
+            source = "heuristic"
         except Exception as exc:  # noqa: BLE001
             # Concrete cause helps diagnose: AuthenticationError (bad
             # key), APIConnectionError (network), JSONDecodeError
@@ -646,9 +876,13 @@ def advise(
             )
             print(f"  WARN: {fallback_reason}; falling back to heuristic.",
                   flush=True)
-            recs = _heuristic_swap_recommendations(main_cards, edhrec_page, diagnosis=diagnosis)
+            recs = _heuristic_swap_recommendations(
+                main_cards, page, diagnosis=diagnosis,
+            )
+            source = "heuristic"
     else:
-        recs = _heuristic_swap_recommendations(main_cards, edhrec_page)
+        page = _fetch_edhrec_lazy()
+        recs = _heuristic_swap_recommendations(main_cards, page)
 
     # Resolve deck_id from the .dck Moxfield= line if present.
     deck_id: Optional[str] = None

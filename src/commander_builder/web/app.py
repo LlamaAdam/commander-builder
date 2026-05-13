@@ -410,18 +410,28 @@ def create_app(
         if path is None:
             return jsonify({"error": "deck not found"}), 404
 
-        # Backend selection: heuristic (EDHREC ranking) or claude (LLM
-        # analyst running the Moxfield audit prompt). Heuristic is the
-        # default — no token cost. ?llm=claude opts in. The API key is
-        # NEVER stored server-side (FP-011 BYO-token plan): it arrives
-        # via the X-Anthropic-API-Key header and is injected into the
-        # process env only for the duration of this call.
+        # Backend selection. Two query params, listed in priority order:
+        #   ?source=heuristic|claude|bracket_peers  (preferred)
+        #   ?llm=heuristic|claude                   (legacy alias)
+        # ``source`` is the newer, more expressive parameter; if both
+        # are passed, source wins (it can name the bracket_peers backend
+        # that llm can't). Defaults to heuristic — no token cost,
+        # always available.
+        source = (request.args.get("source") or "").strip().lower()
         llm = (request.args.get("llm") or "heuristic").strip().lower()
-        if llm not in ("heuristic", "claude"):
-            return jsonify({
-                "error": "llm must be 'heuristic' or 'claude'",
-            }), 400
-        use_claude = llm == "claude"
+        if source:
+            if source not in ("heuristic", "claude", "bracket_peers"):
+                return jsonify({
+                    "error": "source must be 'heuristic', 'claude', or 'bracket_peers'",
+                }), 400
+            requested = source
+        else:
+            if llm not in ("heuristic", "claude"):
+                return jsonify({
+                    "error": "llm must be 'heuristic' or 'claude'",
+                }), 400
+            requested = llm
+        use_claude = requested == "claude"
         byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
         # Optional model override. Accepts any string the SDK accepts;
         # defaults to whatever DEFAULT_CLAUDE_MODEL is set to in
@@ -436,7 +446,9 @@ def create_app(
                 os.environ["ANTHROPIC_API_KEY"] = byo_key
             try:
                 report = _advise(
-                    path, bracket=bracket, use_claude=use_claude,
+                    path, bracket=bracket,
+                    source=requested,
+                    use_claude=use_claude,
                     claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
                 )
             finally:
@@ -509,23 +521,27 @@ def create_app(
         actual_source = getattr(report, "source", "heuristic")
         fallback_reason = getattr(report, "fallback_reason", None)
         warning = None
-        if use_claude and actual_source != "claude":
-            # advise() silently falls back to heuristic when no API
-            # key / SDK / network. Tell the UI exactly why so the user
-            # can fix it instead of guessing.
+        if actual_source != requested:
+            # advise() silently falls back to heuristic when the
+            # requested backend can't run (no Claude API key, no
+            # bracket-peer references found, network blip). Tell the
+            # UI exactly why so the user can fix it or accept the
+            # degraded source instead of guessing.
             if fallback_reason:
                 warning = (
-                    "Claude analyst fell back to EDHREC heuristic. "
+                    f"{requested} backend fell back to EDHREC heuristic. "
                     f"Reason: {fallback_reason}"
                 )
-            elif not byo_key and not os.environ.get("ANTHROPIC_API_KEY"):
+            elif (requested == "claude"
+                  and not byo_key
+                  and not os.environ.get("ANTHROPIC_API_KEY")):
                 warning = (
                     "Claude analyst was requested but no API key was "
                     "provided. Click 'Set API key' (sk-…) and try again."
                 )
             else:
                 warning = (
-                    "Claude analyst was requested but unavailable — "
+                    f"{requested} backend was requested but unavailable — "
                     "falling back to EDHREC heuristic."
                 )
         return jsonify({
@@ -541,7 +557,11 @@ def create_app(
                 report.diagnosis, "weakness_signals", [],
             ) or []),
             "source": actual_source,
-            "requested_llm": llm,
+            # The originally-requested backend. Older clients read
+            # `requested_llm`; new clients can read `requested_source`.
+            # Both populated to the same value for transition.
+            "requested_llm": requested,
+            "requested_source": requested,
             "warning": warning,
             # Backlog: padding info so the UI can warn if we synthesized
             # basic lands to bring a sub-100 source deck up to legal size.

@@ -2180,6 +2180,123 @@ def test_audit_payload_reports_unknown_card_count(client, monkeypatch):
     assert body["unknown_card_count"] >= 0
 
 
+def test_audit_routes_source_bracket_peers_to_advise(client, monkeypatch):
+    """?source=bracket_peers must reach advise() as source='bracket_peers'.
+    Mirrors the existing claude routing test."""
+    from types import SimpleNamespace
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        seen["use_claude"] = kwargs.get("use_claude", False)
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Moat", action="add",
+                    reason="in 5/5 reference decks (unanimous)",
+                    evidence={
+                        "in_n_references": 5,
+                        "total_references": 5,
+                        "frequency_label": "unanimous",
+                        "role": "protection",
+                        "source": "bracket_peers",
+                    },
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut",
+                    reason="absent from all 5 reference decks",
+                    evidence={"source": "bracket_peers"},
+                    name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="bracket_peers",
+            fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&source=bracket_peers")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert seen["source"] == "bracket_peers"
+    assert body["source"] == "bracket_peers"
+    assert body["requested_llm"] == "bracket_peers"
+
+
+def test_audit_bracket_peers_surfaces_fallback_reason(client, monkeypatch):
+    """When advise() falls back to heuristic (no refs found), the UI
+    needs to know — surface fallback_reason in body.warning so the
+    user sees why they got the EDHREC heuristic instead."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="Sol Ring", action="add",
+                                reason="r", evidence={}, name_known=True),
+                SimpleNamespace(card="Cultivate", action="cut",
+                                reason="r", evidence={}, name_known=True),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+            fallback_reason="no bracket-peer references found for "
+                            "'Obscure' at B3 — falling back to EDHREC heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&source=bracket_peers")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["source"] == "heuristic"  # fell back
+    assert body["warning"] is not None
+    assert "no bracket-peer references" in body["warning"]
+
+
+def test_audit_400_on_unknown_source(client):
+    """Unrecognized source value should 400, not silently fall through."""
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&source=garbage_value",
+    )
+    assert resp.status_code == 400
+    assert "source" in resp.get_json()["error"]
+
+
+def test_audit_source_param_overrides_llm_param(client, monkeypatch):
+    """When BOTH ?llm=claude AND ?source=bracket_peers are passed,
+    source wins. (Old UI shipped llm=; new UI ships source=. Don't
+    break existing bookmarks but let the newer name be authoritative.)"""
+    from types import SimpleNamespace
+    seen = {}
+
+    def fake(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        seen["use_claude"] = kwargs.get("use_claude", False)
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="X", action="add", reason="",
+                                evidence={}, name_known=True),
+                SimpleNamespace(card="Y", action="cut", reason="",
+                                evidence={}, name_known=True),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="bracket_peers",
+            fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake,
+    )
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3"
+        "&llm=claude&source=bracket_peers",
+    )
+    assert resp.status_code == 200
+    assert seen["source"] == "bracket_peers"
+    assert seen["use_claude"] is False  # source overrode the llm param
+
+
 def test_audit_payload_name_known_defaults_true_when_unset(client, monkeypatch):
     """Backward-compat: legacy advise() stubs that don't set name_known
     must not break the response (treat as known)."""

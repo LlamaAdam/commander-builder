@@ -552,12 +552,48 @@ let _lastSimReport = null;
 // a deck the user moved away from.
 let _lastDashboardPriceUsd = null;
 
-// LLM-analyst preference + BYO API key. Stored in localStorage
+// Audit-backend preference + BYO API key. Stored in localStorage
 // (browser-local; never sent anywhere except the active /api/audit
 // request as the X-Anthropic-API-Key header). Per FP-011.
+// The localStorage key keeps its legacy name "cb.audit.llm" so users
+// who already toggled Claude don't lose their preference, but the
+// accepted values expanded from "heuristic"/"claude" to also include
+// "bracket_peers" (top-N highest-liked Moxfield decks at the same
+// commander + bracket — see improvement_advisor._bracket_peers_recommendations).
 const _LLM_PREF_KEY = "cb.audit.llm";
 const _ANTHROPIC_KEY = "cb.audit.anthropic_key";
 const _CLAUDE_MODEL_KEY = "cb.audit.claude_model";
+
+const _AUDIT_SOURCE_OPTIONS = [
+  {
+    value: "heuristic",
+    label: "EDHREC heuristic (default, free, all brackets averaged)",
+  },
+  {
+    value: "bracket_peers",
+    label: "Bracket-peers (top-5 same-bracket Moxfield decks, archetype-aware)",
+  },
+  {
+    value: "claude",
+    label: "Claude analyst (LLM, costs Anthropic tokens)",
+  },
+];
+
+function _auditSourceLabel(value) {
+  const opt = _AUDIT_SOURCE_OPTIONS.find((o) => o.value === value);
+  return opt ? opt.label : value;
+}
+
+function _sourcePill(source) {
+  // Pill colors:
+  //   bracket_peers — good (the highest-quality default for tuned decks)
+  //   claude        — good (LLM, but expensive)
+  //   heuristic     — neutral (free baseline)
+  if (source === "claude") return { cls: "pill good", text: "Claude analyst" };
+  if (source === "bracket_peers")
+    return { cls: "pill good", text: "Bracket-peers" };
+  return { cls: "pill", text: "EDHREC heuristic" };
+}
 
 const _CLAUDE_MODEL_OPTIONS = [
   { value: "claude-haiku-4-5", label: "Haiku 4.5 (cheap, ~3-5× less than Sonnet)" },
@@ -576,8 +612,14 @@ function setClaudeModel(m) {
 }
 
 function getAuditLLMPref() {
-  try { return localStorage.getItem(_LLM_PREF_KEY) || "heuristic"; }
+  // Returns one of "heuristic" | "bracket_peers" | "claude".
+  // Unknown values (legacy or corrupt localStorage) fall back to
+  // heuristic so a bad write can't lock the user out of the audit.
+  let stored;
+  try { stored = localStorage.getItem(_LLM_PREF_KEY) || "heuristic"; }
   catch (_e) { return "heuristic"; }
+  const valid = _AUDIT_SOURCE_OPTIONS.map((o) => o.value);
+  return valid.includes(stored) ? stored : "heuristic";
 }
 function setAuditLLMPref(v) {
   try { localStorage.setItem(_LLM_PREF_KEY, v); } catch (_e) { /* ignore */ }
@@ -597,9 +639,11 @@ async function loadAdvise() {
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
   if (!sug) return;
-  const llm = getAuditLLMPref();          // "heuristic" | "claude"
-  const byoKey = llm === "claude" ? getAnthropicKey() : "";
-  if (llm === "claude" && !byoKey) {
+  const sourcePref = getAuditLLMPref();   // heuristic | bracket_peers | claude
+  // Only the Claude path needs a BYO key. Bracket-peers + heuristic
+  // are key-free, so don't prompt the user for one.
+  const byoKey = sourcePref === "claude" ? getAnthropicKey() : "";
+  if (sourcePref === "claude" && !byoKey) {
     const k = window.prompt(
       "Paste your Anthropic API key (stored only in this browser; "
       + "sent only on audit requests). Cancel to skip and use heuristic.",
@@ -611,16 +655,23 @@ async function loadAdvise() {
       setAuditLLMPref("heuristic");
     }
   }
-  const llmFinal = getAuditLLMPref();
-  const keyFinal = llmFinal === "claude" ? getAnthropicKey() : "";
+  const sourceFinal = getAuditLLMPref();
+  const keyFinal = sourceFinal === "claude" ? getAnthropicKey() : "";
 
   // Restore the panel header (renderSuggestions strips children
   // beyond the <h3>; we want the header back when re-rendering).
   sug.innerHTML = "";
   sug.appendChild(el("h3", {}, "Audit — full proposed deck"));
-  const statusMsg = llmFinal === "claude"
-    ? "Generating ideal deck via Claude analyst (10–30s, hits EDHREC + Anthropic)…"
-    : "Generating ideal deck (5–15s, hits EDHREC live)…";
+  let statusMsg;
+  if (sourceFinal === "claude") {
+    statusMsg = "Generating ideal deck via Claude analyst (10–30s, "
+              + "hits EDHREC + Anthropic)…";
+  } else if (sourceFinal === "bracket_peers") {
+    statusMsg = "Generating ideal deck from top-5 Moxfield decks at "
+              + "this bracket (10–20s, hits Moxfield + Scryfall)…";
+  } else {
+    statusMsg = "Generating ideal deck (5–15s, hits EDHREC live)…";
+  }
   sug.appendChild(el("p", { class: "muted" }, statusMsg));
   // Scroll the audit panel into view immediately so the user sees the
   // 'Generating…' status, not just an unresponsive Run audit button.
@@ -632,8 +683,8 @@ async function loadAdvise() {
     let url =
       `/api/audit?deck=${encodeURIComponent(_activeDeckId)}`
       + `&bracket=${auditBracket}`
-      + `&llm=${encodeURIComponent(llmFinal)}`;
-    if (llmFinal === "claude") {
+      + `&source=${encodeURIComponent(sourceFinal)}`;
+    if (sourceFinal === "claude") {
       url += `&model=${encodeURIComponent(getClaudeModel())}`;
     }
     const headers = {};
@@ -672,29 +723,44 @@ function renderAuditBackendRow(body) {
   const row = el("div", { class: "audit-backend-row",
     style: "display: flex; gap: 8px; align-items: center; "
          + "flex-wrap: wrap; margin: 4px 0 10px;" });
-  // Source pill — shows what actually ran (heuristic vs. claude),
-  // independent of the requested backend so a fallback is visible.
+  // Source pill — shows what actually ran (independent of the
+  // *requested* backend, so a silent fallback to heuristic is visible).
   const source = body.source || "heuristic";
-  row.appendChild(el(
-    "span",
-    { class: source === "claude" ? "pill good" : "pill" },
-    source === "claude" ? "Claude analyst" : "EDHREC heuristic",
-  ));
+  const pill = _sourcePill(source);
+  row.appendChild(el("span", { class: pill.cls }, pill.text));
 
-  // Toggle: switch backend for the *next* audit (this run already
-  // produced `body`; running again with the new pref re-fetches).
-  const toggleLabel = el("label",
-    { style: "font-size: 12px; display: flex; gap: 4px; align-items: center;" });
-  const toggle = el("input", { type: "checkbox" });
-  toggle.checked = getAuditLLMPref() === "claude";
-  toggle.addEventListener("change", () => {
-    setAuditLLMPref(toggle.checked ? "claude" : "heuristic");
+  // Requested-vs-actual disclosure: when the user asked for X but
+  // got Y (e.g. bracket_peers found no references → fell back to
+  // heuristic), show a small note next to the pill. The full reason
+  // is also surfaced as body.warning above the diff list.
+  const requested = body.requested_source || body.requested_llm;
+  if (requested && requested !== source) {
+    row.appendChild(el(
+      "span",
+      { class: "muted", style: "font-size: 11px;" },
+      `(requested ${requested})`,
+    ));
+  }
+
+  // Selector — switch backend for the *next* audit. This run already
+  // produced `body`; rerunning with the new pref re-fetches.
+  const selectLabel = el("label",
+    { style: "font-size: 12px; display: flex; gap: 4px; "
+           + "align-items: center;" });
+  selectLabel.appendChild(document.createTextNode("Source:"));
+  const selector = el("select",
+    { style: "font-size: 12px; padding: 2px 6px;" });
+  const currentPref = getAuditLLMPref();
+  for (const opt of _AUDIT_SOURCE_OPTIONS) {
+    const o = el("option", { value: opt.value }, opt.label);
+    if (opt.value === currentPref) o.selected = true;
+    selector.appendChild(o);
+  }
+  selector.addEventListener("change", () => {
+    setAuditLLMPref(selector.value);
   });
-  toggleLabel.appendChild(toggle);
-  toggleLabel.appendChild(document.createTextNode(
-    " Use Claude analyst on next audit (Moxfield audit prompt, costs Anthropic tokens)",
-  ));
-  row.appendChild(toggleLabel);
+  selectLabel.appendChild(selector);
+  row.appendChild(selectLabel);
 
   // Model dropdown — only meaningful when Claude is selected, but
   // always visible so users discover it. The Haiku option is the

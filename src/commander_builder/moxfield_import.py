@@ -223,6 +223,94 @@ def find_top_liked_deck_for_commander(
     return None
 
 
+def find_top_liked_decks_for_commander(
+    commander_name: str,
+    bracket: Optional[int] = None,
+    n: int = 5,
+    verbose: bool = False,
+) -> list[dict]:
+    """Find up to ``n`` highest-liked Moxfield decks for ``commander_name``.
+
+    Multi-deck variant of ``find_top_liked_deck_for_commander``. Used by
+    the bracket-peers advisor mode in ``improvement_advisor`` to source
+    the references whose card overlap drives the recommendation.
+
+    Strategy mirrors the singular variant:
+      1. Resolve commander → Moxfield card ID via card-search.
+      2. Search decks filtered by ``commanderCardId`` + sort by likes
+         desc, optionally narrowed to a bracket.
+      3. Walk the result list, fetching each deck's full JSON until we
+         have ``n`` distinct decks. Skip duplicate ``publicId`` (paging
+         glitches occasionally return the same deck twice) and individual
+         fetch failures (one 4xx shouldn't kill the whole set).
+
+    Returns ``[]`` on any unrecoverable failure (no card-ID, search
+    error, all fetches failed). Callers fall back to a sparser source.
+    """
+    if n <= 0:
+        return []
+    card_id = lookup_moxfield_card_id(commander_name)
+    if not card_id:
+        if verbose:
+            print(f"  [moxfield] could not resolve card ID for {commander_name!r}.",
+                  flush=True)
+        return []
+
+    params = {
+        "pageNumber": "1",
+        # Pull a bigger search window than ``n`` so duplicates and
+        # commander-mismatches don't shrink the result below the goal.
+        "pageSize": str(max(n * 3, 15)),
+        "sortColumn": "likes",
+        "sortDirection": "descending",
+        "fmt": "commander",
+        "commanderCardId": card_id,
+    }
+    if bracket and 1 <= bracket <= 5:
+        params["bracket"] = str(bracket)
+    url = f"{SEARCH_BASE}?{urllib.parse.urlencode(params)}"
+    try:
+        payload = _http_get_json(url)
+    except Exception as exc:
+        if verbose:
+            print(f"  [moxfield] search HTTP failed: {type(exc).__name__}: {exc}",
+                  flush=True)
+        return []
+    results = payload.get("data", []) or []
+    if verbose:
+        print(f"  [moxfield] search returned {len(results)} candidate(s).",
+              flush=True)
+
+    decks: list[dict] = []
+    seen_ids: set[str] = set()
+    target_lower = commander_name.lower()
+    for entry in results:
+        if len(decks) >= n:
+            break
+        pid = entry.get("publicId") or entry.get("id")
+        if not pid or pid in seen_ids:
+            continue
+        # Best-effort commander match. If the search already filtered by
+        # commanderCardId, a near-miss here is rare; when it does happen
+        # the deck is probably still close enough, but we prefer strict
+        # matches first.
+        commanders = entry.get("commanders", []) or []
+        names = [(c.get("name") or "").lower() for c in commanders]
+        if names and not (target_lower in names
+                          or any(target_lower in n2 for n2 in names)):
+            continue
+        try:
+            deck_json = fetch_deck(pid)
+        except Exception as exc:
+            if verbose:
+                print(f"  [moxfield] fetch_deck({pid}) failed: {exc}",
+                      flush=True)
+            continue
+        seen_ids.add(pid)
+        decks.append(deck_json)
+    return decks
+
+
 def card_line(entry: dict) -> str:
     """Render one Forge `.dck` card line: `<qty> <Name>|<SET>|<CN>`.
 
