@@ -36,7 +36,9 @@ CLI:
 
     commander-advise --user "[USER] Hakbal of the Surging Soul [B3].dck" --bracket 3
     commander-advise --user "..." --bracket 3 --output advice.json
-    commander-advise --user "..." --bracket 3 --use-claude
+    commander-advise --user "..." --bracket 3 --source bracket_peers
+    commander-advise --user "..." --bracket 3 --source claude
+    commander-advise --user "..." --bracket 3 --source claude --claude-model claude-haiku-4-5
 """
 
 from __future__ import annotations
@@ -1193,12 +1195,43 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument("--user", required=True, help="Filename of the user deck (under commander/).")
     p.add_argument("--bracket", type=int, required=True)
-    p.add_argument("--use-claude", action="store_true",
-                   help="Synthesize via Claude API rather than heuristic.")
+    p.add_argument(
+        "--source",
+        choices=("heuristic", "bracket_peers", "claude"),
+        default=None,
+        help=(
+            "Recommendation backend. 'heuristic' (default): EDHREC "
+            "aggregate. 'bracket_peers': top-5 Moxfield decks at this "
+            "bracket. 'claude': LLM-aided synthesis (needs "
+            "ANTHROPIC_API_KEY)."
+        ),
+    )
+    p.add_argument(
+        "--use-claude", action="store_true",
+        help="Legacy alias for --source claude.",
+    )
+    p.add_argument(
+        "--claude-model", default=None,
+        help=(
+            "When --source claude, pick the Anthropic tier. Default "
+            "is Sonnet 4.5; use 'claude-haiku-4-5' for ~3-5x cheaper "
+            "routine audits."
+        ),
+    )
     p.add_argument("--output", help="Write JSON manifest here (audit_manifest schema).")
     args = p.parse_args(argv)
 
-    report = advise(Path(args.user), args.bracket, use_claude=args.use_claude)
+    # If both --source and --use-claude are passed, --source wins
+    # (it can name backends --use-claude can't). Otherwise the legacy
+    # flag falls through to source=claude.
+    effective_source = args.source
+    if effective_source is None and args.use_claude:
+        effective_source = "claude"
+
+    advise_kwargs = {"source": effective_source}
+    if args.claude_model:
+        advise_kwargs["claude_model"] = args.claude_model
+    report = advise(Path(args.user), args.bracket, **advise_kwargs)
     text = _format_report_text(report)
     try:
         print(text)

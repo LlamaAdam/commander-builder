@@ -13,6 +13,7 @@ from commander_builder.improvement_advisor import (
     _heuristic_swap_recommendations,
     _validate_card_names,
     advise,
+    main as _advise_main,
 )
 
 
@@ -1564,3 +1565,135 @@ def test_advise_saturation_filter_preserves_when_threshold_not_hit(
                     deck_dir=deck_dir, match_dir=deck_dir)
     add_names = {r.card for r in report.recommendations if r.action == "add"}
     assert "Cultivate" in add_names  # not saturated, kept
+
+
+# --- commander-advise CLI flags --------------------------------------------
+
+def test_cli_source_flag_routes_to_bracket_peers(tmp_path, monkeypatch, capsys):
+    """`commander-advise --source bracket_peers` must call advise()
+    with source='bracket_peers' so the CLI matches the web-app
+    Source dropdown's expressive power. Was a gap from the original
+    #8 self-audit."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        seen["claude_model"] = kwargs.get("claude_model")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # Ensure relative-path resolution finds the test deck.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    rc = _advise_main([
+        "--user", deck.name,
+        "--bracket", "3",
+        "--source", "bracket_peers",
+    ])
+    assert rc == 0
+    assert seen["source"] == "bracket_peers"
+
+
+def test_cli_use_claude_legacy_flag_still_maps_to_claude(
+    tmp_path, monkeypatch,
+):
+    """The legacy --use-claude flag continues to work — existing
+    scripts shouldn't break."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    _advise_main([
+        "--user", deck.name, "--bracket", "3", "--use-claude",
+    ])
+    assert seen["source"] == "claude"
+
+
+def test_cli_source_overrides_use_claude_when_both_passed(
+    tmp_path, monkeypatch,
+):
+    """When both --source and --use-claude appear, --source wins —
+    it's the more expressive new-style argument."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    _advise_main([
+        "--user", deck.name, "--bracket", "3",
+        "--use-claude", "--source", "bracket_peers",
+    ])
+    assert seen["source"] == "bracket_peers"
+
+
+def test_cli_claude_model_flag_forwards_to_advise(tmp_path, monkeypatch):
+    """--claude-model claude-haiku-4-5 must flow to advise() so users
+    can pick the cheap tier from the CLI."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["claude_model"] = kwargs.get("claude_model")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    _advise_main([
+        "--user", deck.name, "--bracket", "3",
+        "--source", "claude",
+        "--claude-model", "claude-haiku-4-5",
+    ])
+    assert seen["claude_model"] == "claude-haiku-4-5"
