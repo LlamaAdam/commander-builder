@@ -265,9 +265,17 @@ def detect_tribal_type(oracle_text: str, type_line: str = "") -> Optional[str]:
     """Best-effort guess at a commander's primary tribal type.
 
     Looks for creature-type mentions in the oracle text (e.g. "Dragon
-    spells you cast cost 1 less", "Create a Goblin creature token").
-    Returns the matched type name (display-cased, singular) or None
-    when no canonical tribal type is mentioned.
+    spells you cast cost 1 less", "Create a Goblin creature token")
+    and returns the **most-mentioned** canonical tribe. Frequency
+    wins over canonical-list order — Lathliss mentioning "Spirit"
+    twice and "Dragon" once would return Dragon (the more meaningful
+    tribal signal there), but a synthetic oracle with "Spirit"
+    twice and "Dragon" once returns Spirit because the text
+    emphasizes Spirit more.
+
+    Ties break by canonical-list order (more-played tribes first)
+    so the result is deterministic. None when no canonical tribal
+    type is mentioned at all.
 
     Not exhaustive — covers the ~30 most-played tribes. Misses for
     obscure tribal commanders (Frog, Otter, etc.) gracefully return
@@ -275,15 +283,22 @@ def detect_tribal_type(oracle_text: str, type_line: str = "") -> Optional[str]:
     """
     if not oracle_text:
         return None
-    # Search for plural or singular forms; the regex word boundary
-    # avoids matching mid-word fragments like "Dwarven" → "Dwarf".
     import re
+    # Count occurrences of each canonical tribe. Singular + plural
+    # both count at word boundaries (so "Dragons" hits Dragon).
+    counts: list[tuple[str, int]] = []
     for tribe in _CANONICAL_TRIBAL_TYPES:
-        # Match singular or plural at word boundaries.
         pattern = rf"\b{re.escape(tribe)}s?\b"
-        if re.search(pattern, oracle_text):
-            return tribe
-    return None
+        n = len(re.findall(pattern, oracle_text))
+        if n > 0:
+            counts.append((tribe, n))
+    if not counts:
+        return None
+    # Most-frequent wins; ties break by canonical order (the
+    # original list order is preserved in ``counts``, so a stable
+    # sort by -count keeps canonical-earlier first on ties).
+    counts.sort(key=lambda pair: -pair[1])
+    return counts[0][0]
 
 
 # Lands every tribal deck wants regardless of color identity. All are

@@ -510,6 +510,35 @@ def test_detect_tribal_type_finds_goblin():
         == "Goblin"
 
 
+def test_detect_tribal_type_picks_most_frequent_when_multiple_match():
+    """Frequency wins over canonical-list order when the oracle
+    mentions multiple tribes. Synthetic example: oracle mentions
+    'Spirit' twice and 'Dragon' once. Without a frequency tiebreaker,
+    first-match returns Dragon (canonical-order-earlier). The
+    frequency-aware detector returns Spirit instead — the tribe
+    actually most-emphasized in the text."""
+    from commander_builder.staples import detect_tribal_type
+    oracle = (
+        "Whenever a Spirit enters the battlefield under your control, "
+        "you may pay {1}{W}. If you do, create a Spirit token. "
+        "Whenever a Dragon you control attacks, draw a card."
+    )
+    assert detect_tribal_type(oracle, "Legendary Creature — Spirit") \
+        == "Spirit"
+
+
+def test_detect_tribal_type_uses_canonical_order_when_frequencies_tie():
+    """When two tribes both appear exactly N times, fall back to the
+    canonical-list order (more-played tribes first). Avoids
+    nondeterminism on edge cases."""
+    from commander_builder.staples import detect_tribal_type
+    # Oracle mentions exactly one Dragon and one Goblin. Dragon is
+    # earlier in _CANONICAL_TRIBAL_TYPES → Dragon wins.
+    oracle = "Whenever a Dragon you control attacks, target Goblin gets +1/+1."
+    assert detect_tribal_type(oracle, "Legendary Creature — Dragon") \
+        == "Dragon"
+
+
 def test_tribal_essential_lands_returns_cavern_and_path():
     """For any tribal commander, the essentials list should at minimum
     include Cavern of Souls (uncounterable) and Path of Ancestry
