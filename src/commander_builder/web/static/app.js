@@ -1209,6 +1209,61 @@ function renderDashboard(data, iterations) {
     }
     dash.appendChild(panel("Iteration history", ul));
   }
+
+  // Per-audit-version verdict breakdown. Only show when the deck has
+  // ≥5 iterations — below that, sample sizes are too small to draw
+  // any per-version conclusion. Fires after the rest of the dashboard
+  // renders so a slow knowledge_log query never blocks the first paint.
+  if (iterations.length >= 5) {
+    loadVerdictBreakdown(_activeDeckId, dash);
+  }
+}
+
+
+async function loadVerdictBreakdown(deckId, dashContainer) {
+  if (!deckId) return;
+  try {
+    const body = await fetchJSON(
+      `/api/verdict_breakdown?deck=${encodeURIComponent(deckId)}`,
+    );
+    const breakdown = body.breakdown || {};
+    const versions = Object.keys(breakdown);
+    if (versions.length === 0) return;
+    const ul = el("ul", { class: "iteration-list" });
+    // Sort by total descending so the most-sampled version reads first.
+    versions.sort((a, b) =>
+      (breakdown[b].total || 0) - (breakdown[a].total || 0));
+    for (const v of versions) {
+      const b = breakdown[v];
+      const total = b.total || 0;
+      const kept = b.kept || 0;
+      const reverted = b.reverted || 0;
+      const neutral = b.neutral || 0;
+      const row = el("li", { class: "iteration" });
+      row.appendChild(el("span", { class: "name" }, v));
+      // Color the verdict count pills like the iteration list.
+      const pills = el("div", { style: "display: flex; gap: 4px;" });
+      if (kept) pills.appendChild(el(
+        "span", { class: "verdict kept" }, `${kept} kept`,
+      ));
+      if (reverted) pills.appendChild(el(
+        "span", { class: "verdict reverted" }, `${reverted} reverted`,
+      ));
+      if (neutral) pills.appendChild(el(
+        "span", { class: "verdict neutral" }, `${neutral} neutral`,
+      ));
+      row.appendChild(pills);
+      const keptPct = total ? Math.round((kept / total) * 100) : 0;
+      row.appendChild(el(
+        "span", { class: "delta" },
+        `${kept}/${total} kept (${keptPct}%)`,
+      ));
+      ul.appendChild(row);
+    }
+    dashContainer.appendChild(panel("Verdict by audit version", ul));
+  } catch (_e) {
+    // Best-effort — never block the dashboard on the breakdown query.
+  }
 }
 
 function renderSuggestions(container, suggestions) {

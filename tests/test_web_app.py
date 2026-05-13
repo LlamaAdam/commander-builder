@@ -1957,6 +1957,49 @@ def test_save_iteration_400_on_non_object_audit_manifest(save_client):
     assert "audit_manifest" in resp.get_json()["error"]
 
 
+def test_verdict_breakdown_empty_deck(save_client):
+    """No iterations → breakdown is an empty dict; total_iterations=0."""
+    client, _ = save_client
+    resp = client.get("/api/verdict_breakdown?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["deck_id"] == "Alpha"
+    assert body["total_iterations"] == 0
+    assert body["breakdown"] == {}
+
+
+def test_verdict_breakdown_groups_by_audit_version(save_client):
+    """After saving iterations under multiple audit_versions, the
+    breakdown groups them and reports per-group verdict counts."""
+    client, _ = save_client
+    # Two v3 saves (one kept, one reverted) + one v4 kept.
+    for verdict in ["kept", "reverted"]:
+        client.post("/api/save_iteration", json={
+            "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+            "audit_version": "v3", "verdict": verdict,
+        })
+    client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_version": "v4", "verdict": "kept",
+    })
+
+    resp = client.get("/api/verdict_breakdown?deck=Alpha")
+    body = resp.get_json()
+    assert body["total_iterations"] == 3
+    assert body["breakdown"]["v3"]["kept"] == 1
+    assert body["breakdown"]["v3"]["reverted"] == 1
+    assert body["breakdown"]["v3"]["total"] == 2
+    assert body["breakdown"]["v4"]["kept"] == 1
+    assert body["breakdown"]["v4"]["total"] == 1
+
+
+def test_verdict_breakdown_400_without_deck_param(save_client):
+    client, _ = save_client
+    resp = client.get("/api/verdict_breakdown")
+    assert resp.status_code == 400
+    assert "deck" in resp.get_json()["error"]
+
+
 def test_save_iteration_handles_missing_sim_report(save_client):
     """Save should succeed even when the user persists an audit-only
     record (no sim_report yet). win_rate columns stay NULL."""

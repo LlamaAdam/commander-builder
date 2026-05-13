@@ -298,6 +298,42 @@ def stats_summary(db_path: Path = DEFAULT_DB_PATH) -> dict:
     return rows
 
 
+def verdict_breakdown_for_deck(
+    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+) -> dict:
+    """Per-audit-version verdict counts for one deck.
+
+    Returns ``{audit_version: {kept, reverted, neutral, pending, total}}``.
+    Rows with NULL ``audit_version`` bucket under ``"unknown"`` so the
+    report doesn't crash on legacy / partial saves. Every bucket is
+    zero-padded across all four verdict labels so the UI can index
+    directly without guarding against KeyError.
+
+    Backlog #6: once a deck has ≥5 iterations the UI shows "kept 4/5
+    v3 swaps, 2/3 v4 swaps" so the user can spot which audit prompt
+    (or advisor source) is producing landings vs. reverts.
+    """
+    init_db(db_path)
+    out: dict[str, dict[str, int]] = {}
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT audit_version, verdict FROM iterations "
+            "WHERE deck_id = ?",
+            (deck_id,),
+        )
+        for row in cur.fetchall():
+            key = row["audit_version"] or "unknown"
+            bucket = out.setdefault(key, {
+                "kept": 0, "reverted": 0,
+                "neutral": 0, "pending": 0, "total": 0,
+            })
+            verdict = row["verdict"] or "pending"
+            if verdict in bucket:
+                bucket[verdict] += 1
+            bucket["total"] += 1
+    return out
+
+
 if __name__ == "__main__":
     # Smoke entry: print stats for the default DB.
     s = stats_summary()

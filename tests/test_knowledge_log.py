@@ -13,6 +13,7 @@ from commander_builder.knowledge_log import (
     record_iteration,
     stats_summary,
     update_verdict,
+    verdict_breakdown_for_deck,
 )
 
 
@@ -251,3 +252,100 @@ def test_migrate_leaves_already_migrated_rows_alone(db):
     result = migrate_legacy_deck_ids(db_path=db)
     assert result["updated"] == 0
     assert result["details"] == []
+
+
+# ---------------------------------------------------------------------------
+# verdict_breakdown_for_deck — per-audit-version verdict ratios
+# ---------------------------------------------------------------------------
+# Backlog item #6: when the user has ≥5 iterations for a deck, the UI
+# should show "kept verdict in 4/5 v3 swaps, kept in 2/3 v4 swaps."
+# Group iterations by audit_version, count each verdict per group.
+
+
+def test_verdict_breakdown_empty_deck_returns_empty(db):
+    """No iterations → empty dict, not an error."""
+    out = verdict_breakdown_for_deck("never-saved", db_path=db)
+    assert out == {}
+
+
+def test_verdict_breakdown_groups_by_audit_version(db):
+    """Two audit versions, mixed verdicts. Each group reports its own
+    {kept, reverted, neutral, pending, total}."""
+    for _ in range(4):
+        record_iteration(
+            Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                      audit_version="v3", verdict="kept"),
+            db_path=db,
+        )
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="reverted"),
+        db_path=db,
+    )
+    for _ in range(2):
+        record_iteration(
+            Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                      audit_version="v4", verdict="kept"),
+            db_path=db,
+        )
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v4", verdict="reverted"),
+        db_path=db,
+    )
+
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert out["v3"]["kept"] == 4
+    assert out["v3"]["reverted"] == 1
+    assert out["v3"]["total"] == 5
+    assert out["v4"]["kept"] == 2
+    assert out["v4"]["reverted"] == 1
+    assert out["v4"]["total"] == 3
+
+
+def test_verdict_breakdown_unknown_audit_version_bucketed_as_unknown(db):
+    """A row with NULL audit_version (legacy import, missing manifest)
+    gets bucketed as 'unknown' instead of crashing the report."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version=None, verdict="kept"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert "unknown" in out
+    assert out["unknown"]["kept"] == 1
+
+
+def test_verdict_breakdown_scoped_to_one_deck(db):
+    """Iterations under a different deck_id don't leak into the report."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept"),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(deck_id="d2", deck_name="d2", bracket=3,
+                  audit_version="v3", verdict="reverted"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert out["v3"]["kept"] == 1
+    assert out["v3"]["reverted"] == 0  # d2's row excluded
+
+
+def test_verdict_breakdown_includes_all_verdicts_zeroed(db):
+    """Every group reports counts for all four verdicts (zero-padded)
+    so the UI doesn't have to guard against KeyError when displaying
+    'kept / reverted / neutral / pending'."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    bucket = out["v3"]
+    assert bucket["kept"] == 1
+    assert bucket["reverted"] == 0
+    assert bucket["neutral"] == 0
+    assert bucket["pending"] == 0
+    assert bucket["total"] == 1

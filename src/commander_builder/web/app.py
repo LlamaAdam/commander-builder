@@ -34,6 +34,7 @@ from ..knowledge_log import (
     recent_iterations,
     record_iteration,
     stats_summary,
+    verdict_breakdown_for_deck,
 )
 
 
@@ -636,6 +637,31 @@ def create_app(
             "iterations": [_iteration_to_dict(r) for r in rows],
             "deck_id": deck_id,
             "count": len(rows),
+        })
+
+    @app.route("/api/verdict_breakdown")
+    def verdict_breakdown_route():
+        """Per-audit-version verdict counts for one deck.
+
+        Returns ``{deck_id, total_iterations, breakdown: {<version>:
+        {kept, reverted, neutral, pending, total}}}``. UI consumes this
+        to show "kept 4/5 v3 swaps, kept 2/3 v4 swaps" when the deck
+        has accumulated enough iterations to be meaningful (≥5).
+        """
+        deck_id = request.args.get("deck")
+        if not deck_id:
+            return jsonify({"error": "deck is required"}), 400
+        try:
+            breakdown = verdict_breakdown_for_deck(
+                deck_id, db_path=knowledge_db,
+            )
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({"error": str(exc)}), 500
+        total = sum(b.get("total", 0) for b in breakdown.values())
+        return jsonify({
+            "deck_id": deck_id,
+            "total_iterations": total,
+            "breakdown": breakdown,
         })
 
     @app.route("/api/deck_text", methods=["GET", "PUT", "DELETE"])
