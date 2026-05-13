@@ -56,7 +56,14 @@ from .archetype import classify as _classify_archetype_path
 from .scryfall_client import lookup_card, _parse_commander_names_from_dck
 from .staples import (
     UNIVERSAL_STAPLES_LC,
-    classify_role as _classify_role_text,
+    # ``classify_role_extended`` and its underlying pattern lists are
+    # the canonical role classifier — imported here so the dashboard
+    # Categories panel and the advisor's role-tagger share one entry
+    # point. Re-exported below for backward compat with tests that
+    # imported these names directly from ``deck_dashboard``.
+    classify_role_extended,
+    _LAND_PAYOFF_PATTERNS,
+    _WIN_CONDITION_PATTERNS,
 )
 
 
@@ -66,44 +73,16 @@ DISPLAY_CATEGORIES = (
 )
 
 
-# --- Expanded role taxonomy (additions to staples.classify_role) -------
-
-_LAND_PAYOFF_PATTERNS = [
-    re.compile(r"whenever a land enters", re.IGNORECASE),
-    re.compile(r"whenever .*land .* enters", re.IGNORECASE),
-    re.compile(r"landfall", re.IGNORECASE),
-    re.compile(r"for each land you control", re.IGNORECASE),
-    re.compile(r"whenever you play a land", re.IGNORECASE),
+# Re-exports so ``from commander_builder.deck_dashboard import
+# classify_role_extended`` (the original location before the
+# 2026-05-13 consolidation) keeps working. The canonical home is
+# now ``commander_builder.staples``.
+__all__ = [
+    "classify_role_extended",
+    "_LAND_PAYOFF_PATTERNS",
+    "_WIN_CONDITION_PATTERNS",
+    "DISPLAY_CATEGORIES",
 ]
-
-_WIN_CONDITION_PATTERNS = [
-    re.compile(r"target opponent loses the game", re.IGNORECASE),
-    re.compile(r"each opponent loses \d+ life", re.IGNORECASE),
-    re.compile(r"deals damage equal to .* to each opponent", re.IGNORECASE),
-    re.compile(r"each opponent's life total becomes", re.IGNORECASE),
-    re.compile(r"infect", re.IGNORECASE),
-    re.compile(r"poison counter", re.IGNORECASE),
-    # Big-trample finishers
-    re.compile(r"creatures you control get \+\d+/\+\d+ and gain trample",
-               re.IGNORECASE),
-    re.compile(r"craterhoof", re.IGNORECASE),
-]
-
-
-def classify_role_extended(oracle_text: str, type_line: str = "") -> str:
-    """Expanded role taxonomy. Tries the new (UI-relevant) categories
-    first; falls back to the base ``staples.classify_role`` taxonomy.
-
-    Returns one of: ``land_payoff``, ``win_condition``, or whatever
-    ``staples.classify_role`` returns (ramp / draw / removal / wipe /
-    protection / tutor / finisher / threat / land / other).
-    """
-    text = (oracle_text or "").lower()
-    if any(p.search(text) for p in _LAND_PAYOFF_PATTERNS):
-        return "land_payoff"
-    if any(p.search(text) for p in _WIN_CONDITION_PATTERNS):
-        return "win_condition"
-    return _classify_role_text(oracle_text, type_line)
 
 
 # --- Price extraction --------------------------------------------------

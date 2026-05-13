@@ -170,6 +170,46 @@ def test_heuristic_role_lookup_handles_offline_gracefully(monkeypatch):
     assert adds[0].evidence.get("role") == "unknown"
 
 
+def test_role_for_card_surfaces_extended_taxonomy_win_condition(monkeypatch):
+    """The advisor's role tagger must agree with the dashboard's
+    categories panel: a card with a "target opponent loses the game"
+    finisher line should bucket as ``win_condition`` (extended
+    taxonomy), not the base ``finisher`` role. Without consolidation,
+    the dashboard panel reads win_condition=1 while the advisor's
+    evidence pill reads "finisher" for the same card — confusing
+    drift the chrome audit (2026-05-13) flagged.
+    """
+    from commander_builder.improvement_advisor import _role_for_card
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "Target opponent loses the game.",
+            "type_line": "Sorcery",
+        },
+    )
+    assert _role_for_card("Coalition Victory") == "win_condition"
+
+
+def test_role_for_card_surfaces_extended_taxonomy_land_payoff(monkeypatch):
+    """Same consolidation contract for landfall-style payoffs. A card
+    matching ``classify_role_extended``'s land_payoff patterns should
+    surface as ``land_payoff`` through the advisor too — not as
+    ``threat`` (the base taxonomy's creature fallback).
+    """
+    from commander_builder.improvement_advisor import _role_for_card
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "Landfall — Whenever a land enters the battlefield "
+                           "under your control, create a 2/2 Cat token.",
+            "type_line": "Creature — Cat",
+        },
+    )
+    assert _role_for_card("Felidar Retreat") == "land_payoff"
+
+
 def test_signals_to_priority_roles_high_draw_rate():
     """'high draw rate' should map to finisher first (deck can't close)."""
     from commander_builder.improvement_advisor import _signals_to_priority_roles
@@ -252,12 +292,19 @@ def test_heuristic_reranks_by_diagnosis_priority(monkeypatch):
         "commander_builder.improvement_advisor.lookup_card", fake_lookup
     )
 
-    # Diagnosis says: deck can't close (priority: finisher first).
-    diag = DeckDiagnosis(priority_roles=["finisher", "wipe", "tutor"])
+    # Diagnosis says: deck can't close (priority: closer-buckets first).
+    # After the 2026-05-13 role-classifier consolidation, Craterhoof
+    # tags as ``win_condition`` (its "each opponent loses 10 life"
+    # text matches the wincon patterns) rather than the older base
+    # ``finisher`` bucket. priority_roles lists both so any
+    # closer-shape card surfaces — this matches the
+    # ``_SIGNAL_TO_ROLES`` mapping the orchestrator builds.
+    diag = DeckDiagnosis(priority_roles=["finisher", "win_condition", "wipe", "tutor"])
     recs = _heuristic_swap_recommendations(deck, page, add_limit=10, diagnosis=diag)
     adds = [r for r in recs if r.action == "add"]
-    # Craterhoof (finisher) should now be first, even though Cultivate (ramp)
-    # came first in the original synergy/inclusion ordering.
+    # Craterhoof (win_condition / finisher synonym) should now be
+    # first, even though Cultivate (ramp) came first in the original
+    # synergy/inclusion ordering.
     assert adds[0].card == "Craterhoof Behemoth"
 
 
@@ -1318,18 +1365,20 @@ def test_bracket_peers_reranks_by_diagnosis_priority_roles(monkeypatch):
         "commander_builder.improvement_advisor.lookup_card", fake_lookup,
     )
 
-    # Diagnosis says deck has no closer → finisher role should surface first.
-    diagnosis = DeckDiagnosis(priority_roles=["finisher", "wipe"])
+    # Diagnosis says deck has no closer → finisher / win_condition role
+    # should surface first. After the 2026-05-13 role-classifier
+    # consolidation, "Target opponent loses the game" tags as
+    # ``win_condition`` (more specific than the base ``finisher``).
+    # priority_roles includes both so the rerank floats either label.
+    diagnosis = DeckDiagnosis(priority_roles=["win_condition", "finisher", "wipe"])
     recs, _ = _bracket_peers_recommendations(
         commander_name="X", bracket=4, deck_cards=set(),
         diagnosis=diagnosis, min_refs=1,
     )
     adds = [r for r in recs if r.action == "add"]
-    # First add must be the finisher because diagnosis priority kicks it
-    # ahead of ramp (which would otherwise sort by frequency-desc and
-    # alphabet, putting Finisher before Ramp anyway... but the assertion
-    # here pins the priority_roles influence specifically).
-    assert adds[0].evidence.get("role") == "finisher"
+    # First add must be a closer (win_condition is the consolidated
+    # label) because diagnosis priority kicks it ahead of ramp.
+    assert adds[0].evidence.get("role") == "win_condition"
 
 
 def test_peer_card_frequency_counts_each_deck_once_per_card():

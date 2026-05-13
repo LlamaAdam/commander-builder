@@ -38,21 +38,30 @@ MIN_SYNERGY_PCT = 25.0
 # Map diagnosis weakness keywords to the role buckets that address them.
 # Order in each tuple matters — leftmost role is the strongest match
 # for that weakness, used to break ties in priority ranking.
+#
+# Both ``finisher`` and ``win_condition`` are listed together for
+# closer-related diagnoses because they're synonyms from the user's
+# perspective ("this deck can't close games"). Before the
+# 2026-05-13 role-classifier consolidation only the base
+# ``finisher`` taxonomy was in play; after consolidation cards
+# like Coalition Victory / Insurrection / Triumph of the Hordes
+# now tag as ``win_condition`` and would have been ignored by the
+# rerank if we listed only ``finisher`` here.
 _SIGNAL_TO_ROLES: list[tuple[str, tuple[str, ...]]] = [
-    # "no closer / finisher" → bring in finishers, then wipes
-    ("closer", ("finisher", "wipe")),
-    ("finisher", ("finisher", "wipe")),
+    # "no closer / finisher" → bring in finishers/wincons, then wipes
+    ("closer", ("finisher", "win_condition", "wipe")),
+    ("finisher", ("finisher", "win_condition", "wipe")),
     # "low win rate" → assume offense problem; finishers + draw to dig
-    ("low win rate", ("finisher", "draw", "tutor")),
+    ("low win rate", ("finisher", "win_condition", "draw", "tutor")),
     # "offense, not defense" → finisher + draw (survives, just doesn't close)
-    ("offense, not defense", ("finisher", "tutor", "draw")),
+    ("offense, not defense", ("finisher", "win_condition", "tutor", "draw")),
     # "defense / sustain is weak" → wipe (clear board) + protection
     ("defense", ("wipe", "protection", "removal")),
     # "early aggression / no T1-T3 interaction" → cheap removal + ramp + protection
     ("early aggression", ("removal", "ramp", "protection")),
     ("T1-T3", ("removal", "ramp", "protection")),
     # "high draw rate" (signal text) → finisher / closer
-    ("high draw rate", ("finisher", "wipe", "tutor")),
+    ("high draw rate", ("finisher", "win_condition", "wipe", "tutor")),
 ]
 
 

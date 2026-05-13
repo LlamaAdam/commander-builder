@@ -406,6 +406,43 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"exile all (?:creatures|permanents)", None, 90),
         (r"return all .* to (?:its|their) owners' hands", None, 80),
         (r"deals \d+ damage to each (?:creature|player)", None, 75),
+        # "Destroy each <typed> creature" / "destroy each <subtype>" —
+        # Crux of Fate, In Garruk's Wake, Dusk // Dawn, etc. The
+        # "each <typed>" idiom is modern templating for board-scoped
+        # removal. Score above single-target removal (70-75) but at
+        # the same tier as the "destroy all" wipe so plain "destroy
+        # each creature" + "destroy each <subtype>" classify alongside
+        # Wrath/Damnation.
+        (r"destroy each (?:creature|non-?\w+ creature|\w+)", None, 90),
+        (r"exile each (?:creature|non-?\w+ creature|\w+)", None, 90),
+        # Overload bounce wipes — Cyclonic Rift, Evacuation when read
+        # via the overload-rewritten "each" form. The "you don't
+        # control" qualifier disambiguates from generic single-target
+        # bounce; "owner's hand" (singular) is the post-overload
+        # phrasing while the unmodified Evacuation reads "their
+        # owners' hands" (plural, already covered above).
+        (r"return each .*?(?:you don't control|nonland permanent).*? to (?:its|their) owner(?:'s|s')? hands?", None, 85),
+        # Overload-mechanic catch-all: Scryfall's printed oracle text
+        # for Cyclonic Rift et al. keeps the "target" wording and
+        # only describes the overload rewrite in a parenthetical, so
+        # the "return each ..." pattern above misses the printed
+        # text. Anything with a single-target bounce/destroy clause
+        # AND an "overload {" mana cost in the same text is a
+        # board-wide wipe at the overload cost. Score equal to the
+        # "destroy all" wipe — it IS a wipe at overload cost, with a
+        # cheap targeted mode pre-overload.
+        #
+        # NOTE: oracle text places the targeted clause BEFORE the
+        # overload reminder in printed templating, so the regex
+        # threads target-clause → overload-mention. ``re.search`` is
+        # not DOTALL by default, so ``.*`` won't cross a true newline
+        # — that's fine because Scryfall's text for these cards puts
+        # the overload clause on the same line as the target clause
+        # when read as a single oracle string (verified for
+        # Cyclonic Rift, Vandalblast, Mizzium Mortars).
+        (r"return target.*?to (?:its|their) owner(?:'s|s')? hands?.*overload\s*\{", None, 85),
+        (r"destroy target (?:creature|permanent|artifact|enchantment).*overload\s*\{", None, 85),
+        (r"exile target (?:creature|permanent|artifact|enchantment).*overload\s*\{", None, 85),
     ]),
     ("protection", [
         (r"hexproof", None, 50),
@@ -425,6 +462,61 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"infect", None, 40),
     ]),
 ]
+
+
+# --- Extended taxonomy (land_payoff / win_condition) ----------------------
+#
+# Two role buckets that the base ``classify_role`` taxonomy doesn't
+# cover. They were originally defined in ``deck_dashboard`` because the
+# UI's Categories panel surfaces them, but the advisor also wants to
+# tag recommendations consistently — when the dashboard reports
+# "win_condition=1" the advisor's evidence pill on the same card
+# should read "win_condition", not the base ``finisher`` it would
+# otherwise return. ``classify_role_extended`` (below) is the
+# canonical entry point both callers should use; ``deck_dashboard``
+# re-exports for backward compat with existing test imports.
+
+_LAND_PAYOFF_PATTERNS = [
+    re.compile(r"whenever a land enters", re.IGNORECASE),
+    re.compile(r"whenever .*land .* enters", re.IGNORECASE),
+    re.compile(r"landfall", re.IGNORECASE),
+    re.compile(r"for each land you control", re.IGNORECASE),
+    re.compile(r"whenever you play a land", re.IGNORECASE),
+]
+
+_WIN_CONDITION_PATTERNS = [
+    re.compile(r"target opponent loses the game", re.IGNORECASE),
+    re.compile(r"each opponent loses \d+ life", re.IGNORECASE),
+    re.compile(r"deals damage equal to .* to each opponent", re.IGNORECASE),
+    re.compile(r"each opponent's life total becomes", re.IGNORECASE),
+    re.compile(r"infect", re.IGNORECASE),
+    re.compile(r"poison counter", re.IGNORECASE),
+    # Big-trample finishers
+    re.compile(r"creatures you control get \+\d+/\+\d+ and gain trample",
+               re.IGNORECASE),
+    re.compile(r"craterhoof", re.IGNORECASE),
+]
+
+
+def classify_role_extended(oracle_text: str, type_line: str = "") -> str:
+    """Expanded role taxonomy. Tries the new (UI-relevant) categories
+    first; falls back to the base ``classify_role`` taxonomy.
+
+    Returns one of: ``land_payoff``, ``win_condition``, or whatever
+    ``classify_role`` returns (ramp / draw / removal / wipe /
+    protection / tutor / finisher / threat / land / other).
+
+    This is the canonical role classifier — both the dashboard's
+    Categories panel and the advisor's per-recommendation role tag
+    should route through here so the two surfaces never disagree
+    about what bucket a card belongs in.
+    """
+    text = (oracle_text or "").lower()
+    if any(p.search(text) for p in _LAND_PAYOFF_PATTERNS):
+        return "land_payoff"
+    if any(p.search(text) for p in _WIN_CONDITION_PATTERNS):
+        return "win_condition"
+    return classify_role(oracle_text, type_line)
 
 
 def classify_role(oracle_text: str, type_line: str = "") -> str:

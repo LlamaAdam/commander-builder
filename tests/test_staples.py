@@ -119,6 +119,58 @@ def test_classify_role_wipe_takes_priority_over_removal():
     assert role == "wipe"
 
 
+def test_classify_role_wipe_crux_of_fate_destroy_each_typed():
+    # Real failure mode caught in the 2026-05-13 Ur-Dragon B4 chrome
+    # test: Crux of Fate (a textbook wipe) was being classified as
+    # ``other`` because the original pattern only matched the
+    # "destroy all <type>" phrasing. Crux uses "destroy each ..."
+    # with a typed clause. If this regresses, the dashboard's
+    # categories panel reports wipe=0 for a deck that's clearly
+    # running a wipe, and the saturation guard fires incorrectly.
+    role = classify_role(
+        "Choose one — Destroy each Dragon. Or — Destroy each non-Dragon "
+        "creature.",
+        "Sorcery",
+    )
+    assert role == "wipe"
+
+
+def test_classify_role_wipe_destroy_each_creature():
+    # Generic "destroy each creature" phrasing (e.g. Damnation flavored
+    # variants). The "each" idiom is the modern-templating equivalent
+    # of "all" and should classify the same way.
+    role = classify_role("Destroy each creature.", "Sorcery")
+    assert role == "wipe"
+
+
+def test_classify_role_wipe_cyclonic_rift_overload_bounce():
+    # Cyclonic Rift's overload mode: "Return each nonland permanent
+    # you don't control to its owner's hand." Same category as
+    # Evacuation / Devastation Tide — a board-wide bounce wipe.
+    # Before the fix this matched the "return target ..." removal
+    # pattern instead, classifying as removal.
+    role = classify_role(
+        "Return target nonland permanent you don't control to its owner's "
+        "hand. Overload {1}{U}{U}{U} (You may cast this spell for its "
+        "overload cost. If you do, change its text by replacing all "
+        "instances of \"target\" with \"each.\")",
+        "Instant",
+    )
+    assert role == "wipe"
+
+
+def test_classify_role_wipe_evacuation_style_bounce():
+    # Evacuation: "Return all creatures to their owners' hands."
+    # This already passed via the "return all ... to ... owners'
+    # hands" pattern; keeping the test guards against the broader
+    # pattern rewrite below regressing it.
+    role = classify_role(
+        "Return all creatures to their owners' hands.",
+        "Instant",
+    )
+    assert role == "wipe"
+
+
 def test_classify_role_finisher():
     role = classify_role("Target opponent loses the game.", "Sorcery")
     assert role == "finisher"
