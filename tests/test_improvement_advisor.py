@@ -1624,6 +1624,104 @@ def test_claude_prompt_omits_peer_section_when_no_refs(tmp_path, monkeypatch):
     assert "Last March" not in user_payload
 
 
+def test_missing_manabase_recommendations_for_five_color(monkeypatch):
+    """5-color deck missing ABU duals → all 10 surface as adds."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    # Deck contains only Sol Ring — none of the ABU duals.
+    deck_cards = {"Sol Ring"}
+    recs = _missing_manabase_recommendations(deck_cards, {"W", "U", "B", "R", "G"})
+    add_cards = {r.card for r in recs}
+    for dual in ["Bayou", "Savannah", "Tropical Island", "Volcanic Island"]:
+        assert dual in add_cards
+
+
+def test_missing_manabase_skips_already_owned_lands(monkeypatch):
+    """The user's existing duals shouldn't surface as adds. Case-
+    insensitive matching so `bayou` in the deck matches `Bayou` in
+    the essentials map."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    deck_cards = {"Bayou", "Badlands", "Plateau"}  # owns 3 duals
+    recs = _missing_manabase_recommendations(deck_cards, {"W", "U", "B", "R", "G"})
+    add_cards = {r.card for r in recs}
+    assert "Bayou" not in add_cards
+    assert "Badlands" not in add_cards
+    assert "Plateau" not in add_cards
+    # But missing duals still surface.
+    assert "Tundra" in add_cards
+
+
+def test_missing_manabase_off_color_lands_filtered(monkeypatch):
+    """Mono-red deck shouldn't see Bayou (BG) or Plateau (RW) but
+    SHOULD see no duals at all (all are 2-color, and red+anything-
+    else isn't in mono-red's identity)."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    deck_cards = {"Mountain"}
+    recs = _missing_manabase_recommendations(deck_cards, {"R"})
+    add_cards = {r.card for r in recs}
+    assert "Bayou" not in add_cards
+    assert "Plateau" not in add_cards
+
+
+def test_missing_manabase_recs_tagged_as_land_role(monkeypatch):
+    """Each manabase rec should carry evidence.role='land' so the UI
+    can group it with other land suggestions, and evidence.source so
+    the user knows it came from the curated safety net (not a peer
+    reference)."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    recs = _missing_manabase_recommendations({}, {"W", "G"})
+    assert recs, "Expected some recs for WG deck"
+    for r in recs:
+        assert r.action == "add"
+        assert r.evidence.get("role") == "land"
+        assert r.evidence.get("source") == "manabase_essentials"
+
+
+def test_advise_appends_manabase_essentials_to_heuristic_path(
+    tmp_path, monkeypatch,
+):
+    """Integration: advise(source='heuristic') should now include the
+    color-identity-appropriate manabase essentials in its
+    recommendations, prepended before / mixed with EDHREC adds."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    # 5-color Ur-Dragon deck missing every dual.
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring", "Some Filler"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            top=[("Coat of Arms", 60.0)], synergy=[],
+        ),
+    )
+    # Stub the commander color-identity lookup → WUBRG.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "",
+            "type_line": "Creature — Dragon Avatar",
+            "color_identity": ["W", "U", "B", "R", "G"],
+        },
+    )
+    report = advise(deck, bracket=3,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_cards = {r.card for r in report.recommendations if r.action == "add"}
+    # At least one ABU dual should surface — pinning the integration,
+    # not enumerating all 10 (_apply_swaps_to_dck balancing may trim).
+    assert any(d in add_cards for d in [
+        "Bayou", "Savannah", "Tropical Island", "Volcanic Island",
+    ])
+
+
 def test_advise_saturation_filter_preserves_when_threshold_not_hit(
     tmp_path, monkeypatch,
 ):

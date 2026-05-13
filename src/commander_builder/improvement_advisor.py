@@ -60,6 +60,7 @@ from .staples import (
     ROLE_SATURATION_THRESHOLDS,
     classify_role,
     count_deck_roles,
+    essential_manabase_for_colors,
     is_basic_land,
     is_land,
     is_role_saturated,
@@ -375,6 +376,52 @@ def _filter_for_saturation(
             continue
         kept.append(rec)
     return kept, skipped
+
+
+def _missing_manabase_recommendations(
+    deck_cards,
+    color_identity,
+) -> list[SwapRecommendation]:
+    """Curated manabase-essentials safety net.
+
+    User feedback (2026-05-13): "tribal decks should have cavern of
+    souls. All decks should have dual lands and bond lands and fetch
+    lands." The heuristic + bracket_peers paths only surface lands
+    when they happen to appear in references/EDHREC. This helper
+    runs alongside those paths to deterministically recommend any
+    color-identity-appropriate ABU dual / fetch / shock / bond land
+    that the deck doesn't already own.
+
+    ``deck_cards`` is the set of card names currently in the deck.
+    ``color_identity`` is a set/iterable of WUBRG letters (case-
+    insensitive). Empty/colorless identity → empty list.
+
+    Each rec carries ``evidence.role="land"`` so it groups cleanly
+    in the UI and ``evidence.source="manabase_essentials"`` so users
+    know the recommendation came from this curated safety net rather
+    than peer-reference frequency.
+    """
+    essentials = essential_manabase_for_colors(color_identity)
+    if not essentials:
+        return []
+    deck_lc = {c.lower() for c in deck_cards}
+    recs: list[SwapRecommendation] = []
+    for name in essentials:
+        if name.lower() in deck_lc:
+            continue
+        recs.append(SwapRecommendation(
+            card=name,
+            action="add",
+            reason=(
+                "manabase essential — high-impact land for this "
+                "color identity (dual / fetch / shock / bond)"
+            ),
+            evidence={
+                "source": "manabase_essentials",
+                "role": "land",
+            },
+        ))
+    return recs
 
 
 def _validate_card_names(recs: list[SwapRecommendation]) -> None:
@@ -1119,6 +1166,30 @@ def advise(
         if m:
             deck_id = m.group(1).strip()
     except OSError:
+        pass
+
+    # Curated manabase safety net — prepend any color-identity-
+    # appropriate ABU dual / fetch / shock / bond land the user is
+    # missing. User feedback (2026-05-13): "all decks should have
+    # dual lands and bond lands and fetch lands." The source-specific
+    # paths (heuristic / bracket_peers / claude) recommend lands only
+    # when they happen to appear in references; this fills the gap
+    # deterministically. Best-effort: a failed commander lookup falls
+    # through silently — the existing recs are unaffected.
+    try:
+        commander_card = lookup_card(primary_commander)
+        if commander_card:
+            ci = commander_card.get("color_identity") or []
+            ci_set = {c.upper() for c in ci if isinstance(c, str)}
+            manabase_recs = _missing_manabase_recommendations(
+                main_cards, ci_set,
+            )
+            # Prepend rather than append so manabase upgrades surface
+            # at the top of the rec list — they're foundational, not
+            # speculative.
+            recs = list(manabase_recs) + list(recs)
+    except Exception:  # noqa: BLE001
+        # Commander lookup failure shouldn't break the audit.
         pass
 
     # Drop add recommendations whose role bucket is already saturated
