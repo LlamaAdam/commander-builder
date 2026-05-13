@@ -1679,7 +1679,7 @@ def _normalize_pasted_deck(text: str) -> str:
 
 def _match_pct_from_evidence(evidence: dict | None) -> int:
     """Mirror deck_dashboard.match_score combination so audit output
-    uses the same 1..100 scale the suggestion panel renders.
+    uses the same 0..100 scale the suggestion panel renders.
 
     Bracket-peers recs (source="bracket_peers") only set
     ``in_n_references`` / ``total_references`` rather than the EDHREC
@@ -1688,6 +1688,12 @@ def _match_pct_from_evidence(evidence: dict | None) -> int:
     references shows 100, 3/5 shows 60. This keeps the UI's match-pct
     pill meaningful across all sources without bracket_peers needing
     to fabricate EDHREC-shaped fields.
+
+    Returns 0 when evidence carries no usable scoring signal (e.g.
+    Claude recs that only set ``{"source": "claude"}``). Previously
+    a ``max(1, ...)`` clamp turned that into 1%, which displayed as
+    a misleading "1%" pill — better to render as 0/blank and let
+    the UI suppress the pill entirely.
     """
     if not evidence:
         return 0
@@ -1695,10 +1701,18 @@ def _match_pct_from_evidence(evidence: dict | None) -> int:
     total = evidence.get("total_references")
     in_n = evidence.get("in_n_references")
     if isinstance(total, int) and total > 0 and isinstance(in_n, int):
-        return max(1, min(100, round(100 * in_n / total)))
-    inclusion = float(evidence.get("inclusion_pct") or 0)
-    synergy = min(float(evidence.get("synergy_pct") or 0), 20.0)
+        return max(0, min(100, round(100 * in_n / total)))
+    inclusion = evidence.get("inclusion_pct")
+    synergy = evidence.get("synergy_pct")
+    # If neither inclusion nor synergy was provided, the rec carries
+    # no scoring signal — return 0 instead of clamping up to 1.
+    if inclusion is None and synergy is None:
+        return 0
+    inclusion = float(inclusion or 0)
+    synergy = min(float(synergy or 0), 20.0)
     raw = inclusion + synergy
+    if raw <= 0:
+        return 0
     return max(1, min(100, round(raw)))
 
 

@@ -2378,6 +2378,40 @@ def test_audit_source_param_overrides_llm_param(client, monkeypatch):
     assert seen["use_claude"] is False  # source overrode the llm param
 
 
+def test_audit_payload_match_pct_zero_for_signal_less_evidence(client, monkeypatch):
+    """Regression: Claude recs only carry evidence={"source": "claude"}
+    — no EDHREC inclusion/synergy AND no peer references frequency.
+    The old _match_pct_from_evidence clamped these up to 1, displaying
+    a misleading '1%' in the UI. Now returns 0 so the pill is
+    suppressed entirely."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Cool Claude Pick", action="add", reason="LLM said so",
+                    evidence={"source": "claude"},  # nothing else
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut", reason="",
+                    evidence={}, name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="claude", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&source=claude",
+                      headers={"X-Anthropic-API-Key": "sk-test"})
+    body = resp.get_json()
+    by_card = {a["card"]: a for a in body["added"]}
+    assert by_card["Cool Claude Pick"]["match_pct"] == 0
+
+
 def test_audit_payload_match_pct_from_reference_frequency(client, monkeypatch):
     """Phase A gap #2 from the bracket-peers self-audit: bracket_peers
     recs only set in_n_references / total_references, not inclusion_pct
