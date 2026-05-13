@@ -39,6 +39,7 @@ CLI:
     commander-advise --user "..." --bracket 3 --source bracket_peers
     commander-advise --user "..." --bracket 3 --source claude
     commander-advise --user "..." --bracket 3 --source claude --claude-model claude-haiku-4-5
+    commander-advise --user "..." --bracket 3 --budget          # skip ABU duals + fetches
 """
 
 from __future__ import annotations

@@ -17,27 +17,34 @@ predictor) still data-gated.
 
 ## State of the tree
 
-- **Tests:** 674 passing, ~25s offline.
-- **Branch:** `feature/2026-04-28-session`
-- **Recent commits** (oldest first, on this feature branch):
+- **Tests:** 792 passing, ~33s offline. Zero warnings under
+  `python -W default`.
+- **Branch:** `feature/2026-04-28-session` (~50 commits ahead of
+  `master`).
+- **Notable feature branches landed this run** (most-recent first):
 
   ```
-  95e3197 feat(speedup): Track 1 — parallel pods, early-stop, intra-pod abort
-  db89514 feat(track2): forge_py correlation harness (opt-in)
-  8564195 fix(moxfield): convert pipe-delimited lines to parens format
-  728be3f feat(ux): bracket auto-inference + modal scroll fix
-  49f0e5c feat(web): LLM analyst, knowledge log, padding, error collector, UI surface
-  e3e5a88 feat(audit): card-name validator flags Claude hallucinations
-  8d2b694 feat(edhrec): retry transient HTTP failures with exponential backoff
-  4ebb8a9 feat(forge): detect bundled jar version + warn when stale
-  6d92fd1 feat(klog): capture deck pricing snapshot in iteration manifest
-  5fa772c feat(edhrec): honor Retry-After header + log each retry
-  <doc consolidation commit>
+  47de382 feat(cli): commander-advise gains --budget flag
+  066a346 feat(advisor): budget mode skips ABU duals + fetches
+  84d3ca7 fix(tests): narrow ResourceWarning filter, fix surfaced leaks
+  46299a0 fix(staples): tribal-type detection picks most-frequent mention
+  e625055 feat(staples): utility fixing lands for 3+ color decks
+  7407867 refactor(advisor): extract _peer_card_frequency helper
+  c107666 feat(advisor): tribal-essential lands (Cavern of Souls etc.)
+  14bd1a9 feat(advisor): recommend missing manabase essentials
+  78b2ba5 feat(staples): curated manabase essentials by color identity
+  dccd1dd fix(advisor): never recommend cutting any land
+  5899e65 feat(advisor): enrich Claude prompt with bracket-peer refs
+  fd8920a feat(advisor): role-saturation guard drops redundant adds
+  34dcfdb feat(advisor): bracket-peers source — top-N tuned decks
+  e3e5a88 feat(audit): card-name validator flags hallucinations
   ```
 
 - **Modules:** ~30 production. Recent additions: `forge_py_correlation`,
-  `improvement_advisor` (Claude analyst path), web app expansion.
-- **CLI entry points:** 14. See [README.md](README.md#cli-commands).
+  manabase + tribal helpers in `staples`, multi-source advisor in
+  `improvement_advisor`.
+- **CLI entry points:** 14. `commander-advise` gained `--source`,
+  `--claude-model`, `--budget`.
 - **Knowledge log:** few rows (mix of integration tests + real saves).
   Phase 3 ML still gated on volume.
 
@@ -275,8 +282,8 @@ For older decisions see [docs/architecture.md](docs/architecture.md#key-decision
 ## Stats
 
 - **Modules**: ~30 production
-- **Tests**: 674 / 674 across ~30 test files
-- **Test wall time**: ~25s offline
+- **Tests**: 792 / 792 across ~30 test files
+- **Test wall time**: ~33s offline
 - **CLI entry points**: 14
 - **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache
   (`MTG_CARDS_DIR` env var override available); ~32k per-card snapshots
