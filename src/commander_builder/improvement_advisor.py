@@ -1362,6 +1362,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             "routine audits."
         ),
     )
+    p.add_argument(
+        "--budget", action="store_true",
+        help=(
+            "Skip $200+ ABU duals + $25-60 fetch lands from manabase "
+            "recommendations. Shocks, bond lands, and utility fixers "
+            "still surface. For users explicitly opting out of the "
+            "most expensive cards."
+        ),
+    )
     p.add_argument("--output", help="Write JSON manifest here (audit_manifest schema).")
     args = p.parse_args(argv)
 
@@ -1375,6 +1384,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     advise_kwargs = {"source": effective_source}
     if args.claude_model:
         advise_kwargs["claude_model"] = args.claude_model
+    if args.budget:
+        advise_kwargs["budget"] = True
     report = advise(Path(args.user), args.bracket, **advise_kwargs)
     text = _format_report_text(report)
     try:

@@ -1974,6 +1974,38 @@ def test_cli_source_overrides_use_claude_when_both_passed(
     assert seen["source"] == "bracket_peers"
 
 
+def test_cli_budget_flag_forwards_to_advise(tmp_path, monkeypatch):
+    """--budget on the CLI should set advise(budget=True) so users can
+    opt out of expensive manabase recommendations without touching the
+    web UI."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["budget"] = kwargs.get("budget", False)
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    # Without --budget → False.
+    _advise_main(["--user", deck.name, "--bracket", "3"])
+    assert seen["budget"] is False
+    # With --budget → True.
+    _advise_main(["--user", deck.name, "--bracket", "3", "--budget"])
+    assert seen["budget"] is True
+
+
 def test_cli_claude_model_flag_forwards_to_advise(tmp_path, monkeypatch):
     """--claude-model claude-haiku-4-5 must flow to advise() so users
     can pick the cheap tier from the CLI."""
