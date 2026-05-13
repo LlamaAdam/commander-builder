@@ -1469,6 +1469,104 @@ def test_claude_prompt_includes_bracket_peer_data_when_available(
         or "reference deck" in captured_message["system"].lower()
 
 
+def test_advise_claude_records_peer_ref_count_on_report(tmp_path, monkeypatch):
+    """When the Claude path successfully attaches bracket-peer refs to
+    its prompt, the AdviceReport exposes how many references were used.
+    Lets the UI disclose 'Claude analyst (5 peer refs)' so users can
+    tell when the LLM had archetype data vs. just EDHREC averages."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards(f"d{i}", ["Card A"]) for i in range(3)
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    report = advise(deck, bracket=4, source="claude",
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    assert report.bracket_peer_ref_count == 3
+
+
+def test_advise_claude_peer_ref_count_zero_when_no_refs(tmp_path, monkeypatch):
+    """Obscure commander → no Moxfield references → count stays 0,
+    matches the dataclass default. UI can then suppress the
+    '(N peer refs)' suffix entirely."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Obscure"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    report = advise(deck, bracket=4, source="claude",
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    assert report.bracket_peer_ref_count == 0
+
+
 def test_claude_prompt_omits_peer_section_when_no_refs(tmp_path, monkeypatch):
     """When Moxfield returns no references, Claude still runs — just
     without the peer-data section. Backward-compat for obscure

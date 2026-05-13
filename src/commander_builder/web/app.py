@@ -580,6 +580,14 @@ def create_app(
             "skipped_for_saturation": list(
                 getattr(report, "skipped_for_saturation", []) or []
             ),
+            # Non-zero only when source=claude AND the LLM call shipped
+            # bracket-peer references in the prompt. Lets the UI render
+            # 'Claude analyst (5 peer refs)' so users can tell when
+            # archetype data informed the recommendations vs. just
+            # EDHREC averages.
+            "bracket_peer_ref_count": int(
+                getattr(report, "bracket_peer_ref_count", 0) or 0,
+            ),
         })
 
     @app.route("/api/advise")

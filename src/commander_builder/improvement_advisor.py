@@ -140,6 +140,12 @@ class AdviceReport:
     # your deck already has 13 ramp pieces" rather than silently
     # producing a short list.
     skipped_for_saturation: list[dict] = field(default_factory=list)
+    # Non-zero only when ``source="claude"`` AND the Claude path
+    # successfully fetched bracket-peer references before the LLM
+    # call. Lets the UI disclose 'Claude analyst (5 peer refs)' on
+    # the source pill so users can tell when the LLM had archetype-
+    # specific data vs. just EDHREC averages.
+    bracket_peer_ref_count: int = 0
 
     def to_manifest(self) -> dict:
         """Render as an audit_manifest.json-compatible dict so this feeds
@@ -1012,6 +1018,7 @@ def advise(
     rationale_override: Optional[str] = None
     fallback_reason: Optional[str] = None
     edhrec_page: Optional[CommanderPage] = None
+    bracket_peer_ref_count: int = 0  # set by claude path when refs shipped
     recs: list[SwapRecommendation]
 
     def _fetch_edhrec_lazy() -> Optional[CommanderPage]:
@@ -1070,6 +1077,14 @@ def advise(
                 model=claude_model,
                 bracket_peers_summary=peer_summary,
             )
+            # Record how many peer refs actually shipped to Claude so
+            # the UI can disclose 'Claude analyst (N peer refs)' on
+            # the source pill. Only set when the LLM call succeeded —
+            # a fallback to heuristic shouldn't claim peer enrichment.
+            if peer_summary:
+                bracket_peer_ref_count = int(
+                    peer_summary.get("ref_count", 0) or 0,
+                )
             # source stays "claude"
         except NotImplementedError as exc:
             fallback_reason = f"claude advisor unavailable: {exc}"
@@ -1133,6 +1148,7 @@ def advise(
         timestamp=datetime.now(timezone.utc).isoformat(),
         fallback_reason=fallback_reason,
         skipped_for_saturation=skipped_for_saturation,
+        bracket_peer_ref_count=bracket_peer_ref_count,
     )
     if rationale_override:
         report.diagnosis.pattern_summary = rationale_override

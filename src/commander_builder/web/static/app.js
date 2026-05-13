@@ -736,7 +736,20 @@ function renderAuditBackendRow(body) {
   // *requested* backend, so a silent fallback to heuristic is visible).
   const source = body.source || "heuristic";
   const pill = _sourcePill(source);
-  row.appendChild(el("span", { class: pill.cls }, pill.text));
+  // Disclose peer-enrichment when Claude actually shipped bracket-peer
+  // references in its prompt. Lets users tell "Claude saw 5 tuned
+  // same-bracket decks" apart from "Claude only had EDHREC averages."
+  const peerRefs = body.bracket_peer_ref_count || 0;
+  const pillText = (source === "claude" && peerRefs > 0)
+    ? `${pill.text} (${peerRefs} peer ref${peerRefs === 1 ? "" : "s"})`
+    : pill.text;
+  const pillEl = el("span", { class: pill.cls }, pillText);
+  if (source === "claude" && peerRefs > 0) {
+    pillEl.title = `Claude's prompt included ${peerRefs} top-liked `
+      + `Moxfield deck${peerRefs === 1 ? "" : "s"} at this bracket as `
+      + `archetype-specific reference data.`;
+  }
+  row.appendChild(pillEl);
 
   // Requested-vs-actual disclosure: when the user asked for X but
   // got Y (e.g. bracket_peers found no references → fell back to

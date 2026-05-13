@@ -2378,6 +2378,58 @@ def test_audit_source_param_overrides_llm_param(client, monkeypatch):
     assert seen["use_claude"] is False  # source overrode the llm param
 
 
+def test_audit_payload_surfaces_bracket_peer_ref_count(client, monkeypatch):
+    """When advise() reports peer references were attached to a Claude
+    request, the audit response carries the count so the UI can render
+    'Claude analyst (5 peer refs)' on the source pill."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="Lotus Cobra", action="add", reason="",
+                                evidence={}, name_known=True),
+                SimpleNamespace(card="Cultivate", action="cut", reason="",
+                                evidence={}, name_known=True),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="claude",
+            fallback_reason=None,
+            bracket_peer_ref_count=5,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&source=claude",
+                      headers={"X-Anthropic-API-Key": "sk-test"})
+    body = resp.get_json()
+    assert body["bracket_peer_ref_count"] == 5
+
+
+def test_audit_payload_bracket_peer_ref_count_defaults_zero(client, monkeypatch):
+    """Legacy stubs without the field render as 0, never raise."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        # No bracket_peer_ref_count attr at all.
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="Lotus Cobra", action="add", reason="",
+                                evidence={}, name_known=True),
+                SimpleNamespace(card="Cultivate", action="cut", reason="",
+                                evidence={}, name_known=True),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+            fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.get_json()["bracket_peer_ref_count"] == 0
+
+
 def test_audit_payload_match_pct_zero_for_signal_less_evidence(client, monkeypatch):
     """Regression: Claude recs only carry evidence={"source": "claude"}
     — no EDHREC inclusion/synergy AND no peer references frequency.
