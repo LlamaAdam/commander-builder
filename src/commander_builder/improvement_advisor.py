@@ -736,6 +736,60 @@ def _bracket_peers_recommendations(
     return recs, total_refs
 
 
+def _collect_bracket_peer_summary_for_prompt(
+    commander_name: str,
+    bracket: int,
+    n: int = DEFAULT_BRACKET_PEERS_N,
+) -> Optional[dict]:
+    """Pull top-N bracket-matched references and produce a compact
+    frequency summary suitable for inclusion in the Claude prompt.
+
+    Sourced from ``find_top_liked_decks_for_commander`` (same fetcher
+    powering the standalone bracket_peers source). The summary shape
+    is designed for LLM consumption — minimal metadata + a sorted
+    frequency table — so Claude can reason about "this card is in
+    5/5 references but missing from this deck" at a glance, without
+    parsing full decklists.
+
+    Returns ``None`` when no references could be fetched (caller's
+    Claude prompt falls back to EDHREC-only context).
+    """
+    decks = find_top_liked_decks_for_commander(
+        commander_name, bracket=bracket, n=n,
+    )
+    if not decks:
+        return None
+
+    ref_cardlists = [_extract_main_cards_from_moxfield_json(d) for d in decks]
+    from collections import Counter
+    freq: Counter[str] = Counter()
+    case_map: dict[str, str] = {}
+    for cardlist in ref_cardlists:
+        for c in cardlist:
+            lc = c.lower()
+            freq[lc] += 1
+            if lc not in case_map:
+                case_map[lc] = c
+
+    # Top-100 most frequent cards is a generous cap — keeps the
+    # prompt compact while covering virtually every relevant card
+    # across 5 references.
+    sorted_lc = sorted(freq, key=lambda lc: (-freq[lc], case_map[lc].lower()))
+    cards_by_frequency = [
+        {"name": case_map[lc], "in_n_refs": freq[lc]}
+        for lc in sorted_lc[:100]
+    ]
+    ref_metadata = [
+        {"public_id": d.get("publicId"), "name": d.get("name", "")}
+        for d in decks
+    ]
+    return {
+        "ref_count": len(decks),
+        "ref_metadata": ref_metadata,
+        "cards_by_frequency": cards_by_frequency,
+    }
+
+
 # --- LLM-aided variant (Claude) -------------------------------------------
 
 _CLAUDE_ADVISOR_SYSTEM = """You are a deck-tuning advisor for Magic: the Gathering Commander. \
@@ -743,24 +797,45 @@ Given:
   - The deck's commander(s)
   - The current decklist
   - Performance signals from prior simulations (win rate, draw rate, fastest loss, etc.)
-  - EDHREC inclusion% / synergy% data for this commander
+  - EDHREC inclusion% / synergy% data for this commander (aggregate across all brackets)
+  - When available: `bracket_peer_references` — top-N highest-liked
+    Moxfield decks for the same commander **at the same bracket**.
+    These are tuned builds. Their card overlap is the strongest
+    signal for what belongs in a deck at this power level.
 
-Recommend a structured set of swaps that addresses the weakness signals. \
+Think in two passes:
+
+1. **Adds — what's missing?** Scan `bracket_peer_references.cards_by_frequency`.
+   Cards appearing in a majority of the references but NOT in the
+   `current_decklist` are the strongest add candidates. EDHREC data
+   is a fallback when peer references aren't available or the peer
+   set is small. Don't recommend universal staples (Sol Ring, Arcane
+   Signet, Command Tower, basic lands) — they're either already
+   present or deliberately excluded.
+
+2. **Cuts — what's not pulling weight?** Cards in `current_decklist`
+   that don't appear in any peer reference AND aren't role-essential
+   are candidates. **NEVER cut any land** (basic, dual, fetch,
+   shock, MDFC, utility) — manabase decisions are deliberate.
+   **NEVER cut universal staples**. Cut card-disadvantage pieces or
+   off-archetype slots first.
+
 Return JSON ONLY (no prose, no markdown):
 
 {
-  "rationale": "one paragraph diagnosing the weakness and explaining the swap strategy",
+  "rationale": "one paragraph diagnosing the weakness and explaining the swap strategy, citing references by name when relevant",
   "added": ["Card A", "Card B", ...],
   "removed": ["Card X", "Card Y", ...]
 }
 
 Constraints:
 - Recommend 4-8 adds and 4-8 removes (the deck must stay at 99 cards in the [Main]).
-- Each `added` card SHOULD appear in EDHREC's data unless you have strong synergy reason.
+- Each `added` card SHOULD appear in `bracket_peer_references` when present, OR in EDHREC's data; rare deviations need strong synergy reason in the rationale.
 - Each `removed` card MUST be in the current decklist.
-- Don't recommend cutting basic lands, Sol Ring, Arcane Signet, or Command Tower.
+- **Don't recommend cutting ANY land** (basic, dual, fetch, shock, MDFC, utility).
+- Don't recommend cutting Sol Ring, Arcane Signet, Command Tower, or other universal staples.
 - Match adds and removes 1-for-1 by count.
-- Focus the rationale on the weakness signals, not generic deck-building advice.
+- Focus the rationale on the weakness signals + reference-deck consensus, not generic deck-building advice.
 """
 
 
@@ -774,6 +849,7 @@ def _claude_swap_recommendations(
     diagnosis: DeckDiagnosis,
     edhrec_page: CommanderPage,
     model: str = DEFAULT_CLAUDE_MODEL,
+    bracket_peers_summary: Optional[dict] = None,
 ) -> tuple[list[SwapRecommendation], str]:
     """LLM-aided variant. Falls back via NotImplementedError when no API key
     or SDK — caller catches and degrades to heuristic.
@@ -782,7 +858,17 @@ def _claude_swap_recommendations(
     quality, opus for deepest reasoning). The default tracks
     ``DEFAULT_CLAUDE_MODEL`` so existing callers don't change behavior;
     cost-sensitive runs can pass ``model='claude-haiku-4-5'`` for a
-    ~3-5x cheaper request."""
+    ~3-5x cheaper request.
+
+    ``bracket_peers_summary`` (optional) carries a compact
+    frequency-keyed view of the top-N highest-liked Moxfield decks
+    for this commander at this bracket. When present, Claude is
+    instructed to prioritize adds from cards in the majority of peer
+    references that are missing from the user's deck — strongest
+    archetype-specific signal available. Add ~3-4K input tokens to
+    the request (~$0.01 extra on Sonnet) but produces materially
+    better recommendations than EDHREC-only context.
+    """
     if "ANTHROPIC_API_KEY" not in os.environ:
         raise NotImplementedError("claude advisor requires ANTHROPIC_API_KEY")
     try:
@@ -803,13 +889,20 @@ def _claude_swap_recommendations(
             for c in edhrec_page.high_synergy_cards[:30]
         ],
     }
-    user_message = json.dumps({
+    user_payload = {
         "deck_filename": deck_filename,
         "bracket": bracket,
         "current_decklist": sorted(deck_cards),
         "performance": asdict(diagnosis),
         "edhrec_signals": edhrec_compact,
-    }, indent=2)
+    }
+    # Include bracket-peer references only when actually available.
+    # Omitting the key entirely (rather than sending an empty/null
+    # value) keeps the prompt smaller for obscure commanders where
+    # no references could be fetched.
+    if bracket_peers_summary:
+        user_payload["bracket_peer_references"] = bracket_peers_summary
+    user_message = json.dumps(user_payload, indent=2)
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
@@ -954,10 +1047,26 @@ def advise(
             source = "heuristic"
     elif source == "claude":
         page = _fetch_edhrec_lazy()
+        # Enrich Claude's context with top-N bracket-peer references.
+        # Best-effort — when Moxfield can't return references (obscure
+        # commander, network blip), Claude falls back to EDHREC-only
+        # context. The peer data is what lets the LLM reason about
+        # "what does this deck have vs. tuned same-bracket peers?"
+        # rather than just "what does EDHREC's all-bracket average
+        # say?" — the same fix that drove the standalone bracket_peers
+        # source.
+        try:
+            peer_summary = _collect_bracket_peer_summary_for_prompt(
+                primary_commander, bracket=bracket,
+                n=DEFAULT_BRACKET_PEERS_N,
+            )
+        except Exception:  # noqa: BLE001
+            peer_summary = None
         try:
             recs, rationale_override = _claude_swap_recommendations(
                 deck_path.name, bracket, main_cards, diagnosis, page,
                 model=claude_model,
+                bracket_peers_summary=peer_summary,
             )
             # source stays "claude"
         except NotImplementedError as exc:

@@ -1331,6 +1331,200 @@ def test_bracket_peers_reranks_by_diagnosis_priority_roles(monkeypatch):
     assert adds[0].evidence.get("role") == "finisher"
 
 
+def test_collect_bracket_peer_summary_builds_frequency_map(monkeypatch):
+    """The summary used by the Claude prompt is a compact frequency
+    representation — for each card that appears in any reference, the
+    count of references containing it. Lets Claude see at a glance
+    'this card is in 5/5 references but missing here' without parsing
+    full decklists."""
+    from commander_builder.improvement_advisor import (
+        _collect_bracket_peer_summary_for_prompt,
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Last March", "Sol Ring"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Last March"]),
+        _moxfield_deck_with_cards("d3", ["Moat"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    summary = _collect_bracket_peer_summary_for_prompt(
+        "The Ur-Dragon", bracket=4, n=5,
+    )
+    assert summary is not None
+    assert summary["ref_count"] == 3
+    by_name = {c["name"]: c["in_n_refs"] for c in summary["cards_by_frequency"]}
+    assert by_name["Moat"] == 3
+    assert by_name["Last March"] == 2
+    assert by_name["Sol Ring"] == 1
+
+
+def test_collect_bracket_peer_summary_returns_none_when_no_refs(monkeypatch):
+    """Empty references → None so callers can detect 'no peer data
+    available' and skip enrichment."""
+    from commander_builder.improvement_advisor import (
+        _collect_bracket_peer_summary_for_prompt,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+    assert _collect_bracket_peer_summary_for_prompt(
+        "X", bracket=4, n=5,
+    ) is None
+
+
+def test_collect_bracket_peer_summary_includes_ref_metadata(monkeypatch):
+    """The summary should carry minimal reference-deck metadata
+    (publicId + name) so Claude can cite which references support a
+    recommendation in its rationale."""
+    from commander_builder.improvement_advisor import (
+        _collect_bracket_peer_summary_for_prompt,
+    )
+    fake_refs = [
+        {"publicId": "abc-123", "name": "The Ur-Dragon Strawman",
+         "boards": {"mainboard": {"cards": {
+             "x": {"card": {"name": "Moat"}, "quantity": 1},
+         }}}},
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    summary = _collect_bracket_peer_summary_for_prompt(
+        "X", bracket=4, n=5,
+    )
+    assert len(summary["ref_metadata"]) == 1
+    assert summary["ref_metadata"][0]["public_id"] == "abc-123"
+    assert summary["ref_metadata"][0]["name"] == "The Ur-Dragon Strawman"
+
+
+def test_claude_prompt_includes_bracket_peer_data_when_available(
+    tmp_path, monkeypatch,
+):
+    """End-to-end: when source='claude' and bracket-peer references
+    are fetchable, the request body sent to Anthropic includes them
+    so Claude can reason about 'what's missing from this deck vs.
+    same-bracket peers'. Pinning this prevents a future refactor
+    from silently dropping the enrichment."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Ur-Dragon"], main=["Sol Ring", "Cultivate"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            top=[("Coat of Arms", 60.0)], synergy=[],
+        ),
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Last March"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Last March"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+
+    captured_message = {}
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            captured_message["user"] = kw["messages"][0]["content"]
+            captured_message["system"] = kw.get("system", "")
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    advise(deck, bracket=4, source="claude",
+           deck_dir=deck_dir, match_dir=deck_dir)
+
+    # User message must include bracket-peer reference data.
+    user_payload = captured_message["user"]
+    assert "bracket_peer_references" in user_payload
+    assert "Moat" in user_payload
+    # System prompt must mention how to use the references.
+    assert "bracket_peer_references" in captured_message["system"] \
+        or "reference deck" in captured_message["system"].lower()
+
+
+def test_claude_prompt_omits_peer_section_when_no_refs(tmp_path, monkeypatch):
+    """When Moxfield returns no references, Claude still runs — just
+    without the peer-data section. Backward-compat for obscure
+    commanders + the graceful degradation case."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Obscure"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],   # no references found
+    )
+
+    captured_message = {}
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            captured_message["user"] = kw["messages"][0]["content"]
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    advise(deck, bracket=4, source="claude",
+           deck_dir=deck_dir, match_dir=deck_dir)
+    user_payload = captured_message["user"]
+    # The user payload should not include a non-empty peer section.
+    # We're tolerant of an explicit None / "null" — what matters is
+    # that the absence isn't accompanied by spurious peer card names.
+    # Specifically: no card names from the synthetic ref fixtures used
+    # in other tests should leak through.
+    assert "Moat" not in user_payload
+    assert "Last March" not in user_payload
+
+
 def test_advise_saturation_filter_preserves_when_threshold_not_hit(
     tmp_path, monkeypatch,
 ):
