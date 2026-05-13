@@ -892,6 +892,50 @@ def test_import_deck_400_when_no_content(client):
     assert resp.status_code == 400
 
 
+def test_import_deck_creates_parent_dir_when_missing(tmp_path, monkeypatch):
+    """Regression: a fresh checkout (or web app started before the canonical
+    deck dir exists) used to fail import with ENOENT. The endpoint now
+    auto-creates the parent so the write succeeds and the deck shows up
+    in the sidebar."""
+    nonexistent = tmp_path / "fresh" / "decks"
+    assert not nonexistent.exists()  # precondition
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda name: {"type_line": "Basic Land", "cmc": 0.0,
+                      "color_identity": ["G"], "prices": {"usd": "0.05"}},
+    )
+    app = create_app(deck_dir=nonexistent)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    resp = client.post("/api/import_deck", json={
+        "name": "Dragon Rawr",
+        "paste_text": "1 Sol Ring\n1 Forest\n",
+        "bracket": 4,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert nonexistent.exists()
+    assert (nonexistent / "[USER] Dragon Rawr [B4].dck").exists()
+
+
+def test_create_app_default_deck_dir_resolves_to_vendor_forge(monkeypatch):
+    """The default deck_dir should point at the canonical Forge userdata
+    location so import + audit + compare all share the same source of
+    truth. Was previously `Path.cwd() / 'decks'`, which split the world
+    when the web app was launched from the repo root."""
+    import os as _os
+    from commander_builder.forge_runner import VENDOR_FORGE
+    monkeypatch.delenv("COMMANDER_BUILDER_DECK_DIR", raising=False)
+    app = create_app()
+    expected = (VENDOR_FORGE / "userdata" / "decks" / "commander").resolve()
+    assert Path(app.config["DECK_DIR"]).resolve() == expected
+    # Defensive: confirm we're not falling through to the old CWD/decks
+    # behavior (the regression we're guarding against).
+    assert not str(app.config["DECK_DIR"]).endswith(
+        str(Path("commander_builder") / "decks"),
+    )
+
+
 def test_import_deck_via_moxfield_url(client, deck_dir, monkeypatch):
     """Stubs fetch_deck so we don't hit Moxfield."""
     fake_json = {

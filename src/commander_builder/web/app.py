@@ -150,7 +150,16 @@ def create_app(
 
     if deck_dir is None:
         env_dir = os.environ.get("COMMANDER_BUILDER_DECK_DIR")
-        deck_dir = Path(env_dir) if env_dir else Path.cwd() / "decks"
+        if env_dir:
+            deck_dir = Path(env_dir)
+        else:
+            # Canonical location every other module reads/writes from.
+            # Forge's `sim` mode requires decks live under
+            # `userdata/decks/commander/`; pointing the web app
+            # elsewhere split the world (import would land in
+            # CWD/decks/ but compare/audit would look here).
+            from ..forge_runner import VENDOR_FORGE
+            deck_dir = VENDOR_FORGE / "userdata" / "decks" / "commander"
     deck_dir = deck_dir.resolve()
 
     if knowledge_db is None:
@@ -722,6 +731,10 @@ def create_app(
                 "filename": filename,
             }), 409
         try:
+            # Defensive: a fresh checkout or first-run-after-config-change
+            # may not have created the deck dir yet. Create parents so
+            # the import doesn't fail with ENOENT on a missing parent.
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(deck_text_out, encoding="utf-8")
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
