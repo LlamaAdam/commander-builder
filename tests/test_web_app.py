@@ -1957,6 +1957,44 @@ def test_save_iteration_400_on_non_object_audit_manifest(save_client):
     assert "audit_manifest" in resp.get_json()["error"]
 
 
+def test_pricing_series_empty_deck(save_client):
+    """No iterations → empty points list."""
+    client, _ = save_client
+    resp = client.get("/api/pricing_series?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["deck_id"] == "Alpha"
+    assert body["count"] == 0
+    assert body["points"] == []
+
+
+def test_pricing_series_chronological_points(save_client):
+    """Iterations saved with total_price_usd appear in the series in
+    chronological order, with iteration_id + captured_at + the price."""
+    client, _ = save_client
+    # 3 iterations at different prices.
+    for price in [142.37, 138.50, 95.00]:
+        client.post("/api/save_iteration", json={
+            "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+            "total_price_usd": price, "verdict": "pending",
+        })
+    resp = client.get("/api/pricing_series?deck=Alpha")
+    body = resp.get_json()
+    assert body["count"] == 3
+    prices = [p["total_price_usd"] for p in body["points"]]
+    assert prices == [142.37, 138.50, 95.00]
+    # Each point carries iteration_id + captured_at.
+    for point in body["points"]:
+        assert isinstance(point["iteration_id"], int)
+        assert point["captured_at"]
+
+
+def test_pricing_series_400_without_deck_param(save_client):
+    client, _ = save_client
+    resp = client.get("/api/pricing_series")
+    assert resp.status_code == 400
+
+
 def test_verdict_breakdown_empty_deck(save_client):
     """No iterations → breakdown is an empty dict; total_iterations=0."""
     client, _ = save_client

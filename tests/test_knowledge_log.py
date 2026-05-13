@@ -9,6 +9,7 @@ from commander_builder.knowledge_log import (
     get_iteration,
     init_db,
     iterations_for_deck,
+    pricing_series_for_deck,
     recent_iterations,
     record_iteration,
     stats_summary,
@@ -331,6 +332,104 @@ def test_verdict_breakdown_scoped_to_one_deck(db):
     out = verdict_breakdown_for_deck("d1", db_path=db)
     assert out["v3"]["kept"] == 1
     assert out["v3"]["reverted"] == 0  # d2's row excluded
+
+
+def test_pricing_series_returns_empty_for_no_iterations(db):
+    """No iterations → empty list. Caller renders 'no data' state."""
+    assert pricing_series_for_deck("no-such-deck", db_path=db) == []
+
+
+def test_pricing_series_extracts_from_audit_manifest_pricing(db):
+    """Each iteration with audit_manifest.pricing.total_price_usd
+    contributes a point ordered by iteration id (chronological)."""
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_version="v3", verdict="pending",
+            audit_manifest={"pricing": {
+                "total_price_usd": 142.37,
+                "captured_at": "2026-05-13T20:04:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_version="v3", verdict="kept",
+            audit_manifest={"pricing": {
+                "total_price_usd": 95.00,
+                "captured_at": "2026-05-14T20:04:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    series = pricing_series_for_deck("d1", db_path=db)
+    assert len(series) == 2
+    assert series[0]["total_price_usd"] == 142.37
+    assert series[0]["captured_at"] == "2026-05-13T20:04:00+00:00"
+    assert series[1]["total_price_usd"] == 95.00
+    # Each point also carries iteration_id so the UI can link back to
+    # the row for inspection.
+    assert isinstance(series[0]["iteration_id"], int)
+
+
+def test_pricing_series_skips_iterations_without_pricing(db):
+    """An iteration with no audit_manifest or no pricing block doesn't
+    contribute a point — the chart only shows data points we actually
+    captured."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_manifest=None),  # no manifest
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_manifest={"added": [], "removed": []},  # no pricing key
+        ),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_manifest={"pricing": {
+                "total_price_usd": 50.0,
+                "captured_at": "2026-05-15T00:00:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    series = pricing_series_for_deck("d1", db_path=db)
+    assert len(series) == 1
+    assert series[0]["total_price_usd"] == 50.0
+
+
+def test_pricing_series_scoped_to_one_deck(db):
+    """Other decks' pricing data must not leak into this deck's series."""
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_manifest={"pricing": {
+                "total_price_usd": 100.0,
+                "captured_at": "2026-05-13T00:00:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d2", deck_name="d2", bracket=3,
+            audit_manifest={"pricing": {
+                "total_price_usd": 999.0,
+                "captured_at": "2026-05-13T00:00:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    series = pricing_series_for_deck("d1", db_path=db)
+    assert len(series) == 1
+    assert series[0]["total_price_usd"] == 100.0
 
 
 def test_verdict_breakdown_includes_all_verdicts_zeroed(db):

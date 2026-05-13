@@ -1217,6 +1217,103 @@ function renderDashboard(data, iterations) {
   if (iterations.length >= 5) {
     loadVerdictBreakdown(_activeDeckId, dash);
   }
+
+  // Cost-evolution sparkline. Renders only when ≥2 iterations have
+  // captured pricing snapshots (one point is a single dot, not a
+  // line). Best-effort background fetch — never blocks the dashboard.
+  if (iterations.length >= 2) {
+    loadPricingSparkline(_activeDeckId, dash);
+  }
+}
+
+
+async function loadPricingSparkline(deckId, dashContainer) {
+  if (!deckId) return;
+  try {
+    const body = await fetchJSON(
+      `/api/pricing_series?deck=${encodeURIComponent(deckId)}`,
+    );
+    const points = body.points || [];
+    if (points.length < 2) return;  // can't draw a line from one point
+
+    const W = 280;
+    const H = 60;
+    const PAD = 4;
+    const prices = points.map((p) => p.total_price_usd);
+    const minP = Math.min(...prices);
+    const maxP = Math.max(...prices);
+    const range = Math.max(1e-6, maxP - minP);
+
+    // Map each point to (x, y) in the SVG viewBox.
+    const coords = prices.map((p, i) => {
+      const x = PAD + (i / (prices.length - 1)) * (W - PAD * 2);
+      const y = H - PAD - ((p - minP) / range) * (H - PAD * 2);
+      return [x, y];
+    });
+    const pathD = coords
+      .map(([x, y], i) => `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`)
+      .join(" ");
+
+    // Build the SVG. Using innerHTML for the path keeps the code
+    // compact — `el()` doesn't have ergonomic SVG support.
+    const svg = document.createElementNS(
+      "http://www.w3.org/2000/svg", "svg",
+    );
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("width", String(W));
+    svg.setAttribute("height", String(H));
+    svg.setAttribute("style", "display: block;");
+    // Line
+    const path = document.createElementNS(
+      "http://www.w3.org/2000/svg", "path",
+    );
+    path.setAttribute("d", pathD);
+    path.setAttribute("stroke", "var(--accent, #88c0ff)");
+    path.setAttribute("stroke-width", "1.5");
+    path.setAttribute("fill", "none");
+    svg.appendChild(path);
+    // Dots at each point with tooltip showing price + captured_at.
+    for (let i = 0; i < coords.length; i++) {
+      const [cx, cy] = coords[i];
+      const c = document.createElementNS(
+        "http://www.w3.org/2000/svg", "circle",
+      );
+      c.setAttribute("cx", cx.toFixed(1));
+      c.setAttribute("cy", cy.toFixed(1));
+      c.setAttribute("r", "2.5");
+      c.setAttribute("fill", "var(--accent, #88c0ff)");
+      const title = document.createElementNS(
+        "http://www.w3.org/2000/svg", "title",
+      );
+      title.textContent =
+        `$${prices[i].toFixed(2)}`
+        + (points[i].captured_at
+            ? ` @ ${String(points[i].captured_at).slice(0, 10)}`
+            : "");
+      c.appendChild(title);
+      svg.appendChild(c);
+    }
+
+    const first = prices[0];
+    const last = prices[prices.length - 1];
+    const delta = last - first;
+    const deltaPct = first > 0 ? (delta / first) * 100 : 0;
+    const trend = delta >= 0 ? "▲" : "▼";
+    const label = el(
+      "p", { class: "muted", style: "font-size: 12px; margin: 4px 0;" },
+      `Cost: $${first.toFixed(2)} → $${last.toFixed(2)} `
+      + `(${trend} $${Math.abs(delta).toFixed(2)}, `
+      + `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}% over `
+      + `${points.length} iteration${points.length === 1 ? "" : "s"})`,
+    );
+
+    const container = el("div", {});
+    container.appendChild(label);
+    container.appendChild(svg);
+    dashContainer.appendChild(panel("Cost over time", container));
+  } catch (_e) {
+    // Best-effort — never block the dashboard on the pricing query.
+  }
 }
 
 

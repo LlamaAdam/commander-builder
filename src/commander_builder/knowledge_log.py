@@ -298,6 +298,52 @@ def stats_summary(db_path: Path = DEFAULT_DB_PATH) -> dict:
     return rows
 
 
+def pricing_series_for_deck(
+    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+) -> list[dict]:
+    """Walk one deck's iterations chronologically and extract the
+    pricing snapshots saved on each.
+
+    Each iteration's ``audit_manifest.pricing`` (added by the
+    ``save_iteration`` enrichment in 2026-05-12) carries
+    ``{total_price_usd, captured_at}``. This function pulls those
+    points out for charting deck-cost evolution over time. Iterations
+    without a pricing block are skipped (the chart only shows points
+    we actually captured).
+
+    Returns ``[{iteration_id, captured_at, total_price_usd}, ...]``
+    in iteration-id order (== chronological).
+    """
+    init_db(db_path)
+    series: list[dict] = []
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT id, audit_manifest FROM iterations "
+            "WHERE deck_id = ? ORDER BY id ASC",
+            (deck_id,),
+        )
+        for row in cur.fetchall():
+            manifest_raw = row["audit_manifest"]
+            if not manifest_raw:
+                continue
+            try:
+                manifest = json.loads(manifest_raw)
+            except (ValueError, TypeError):
+                continue
+            pricing = (manifest or {}).get("pricing")
+            if not isinstance(pricing, dict):
+                continue
+            price = pricing.get("total_price_usd")
+            if not isinstance(price, (int, float)):
+                continue
+            series.append({
+                "iteration_id": row["id"],
+                "captured_at": pricing.get("captured_at"),
+                "total_price_usd": float(price),
+            })
+    return series
+
+
 def verdict_breakdown_for_deck(
     deck_id: str, db_path: Path = DEFAULT_DB_PATH,
 ) -> dict:

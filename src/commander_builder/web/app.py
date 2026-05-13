@@ -31,6 +31,7 @@ from ..knowledge_log import (
     Iteration,
     get_iteration,
     iterations_for_deck,
+    pricing_series_for_deck,
     recent_iterations,
     record_iteration,
     stats_summary,
@@ -637,6 +638,31 @@ def create_app(
             "iterations": [_iteration_to_dict(r) for r in rows],
             "deck_id": deck_id,
             "count": len(rows),
+        })
+
+    @app.route("/api/pricing_series")
+    def pricing_series_route():
+        """Time-series of total deck cost across one deck's iteration
+        chain. Powers the dashboard sparkline that surfaces cost
+        evolution over time.
+
+        Returns ``{deck_id, count, points: [{iteration_id, captured_at,
+        total_price_usd}, ...]}``. Empty points list when the deck
+        has no iterations OR none of them captured a pricing snapshot.
+        """
+        deck_id = request.args.get("deck")
+        if not deck_id:
+            return jsonify({"error": "deck is required"}), 400
+        try:
+            points = pricing_series_for_deck(
+                deck_id, db_path=knowledge_db,
+            )
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({
+            "deck_id": deck_id,
+            "count": len(points),
+            "points": points,
         })
 
     @app.route("/api/verdict_breakdown")
