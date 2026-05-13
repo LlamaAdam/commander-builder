@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..deck_dashboard import build_dashboard
+from ..forge_runner import detect_forge_version
 from ..knowledge_log import (
     DEFAULT_DB_PATH as _DEFAULT_KLOG_DB,
     Iteration,
@@ -170,6 +171,39 @@ def create_app(
     except Exception:  # noqa: BLE001
         pass
 
+    # Forge jar version + age check. New MTG sets ship every 4-6 weeks;
+    # errata-sensitive cards (Sephiroth, Vivi) silently misbehave on
+    # old jars. Surface the version at boot so the operator can decide
+    # whether to grab a fresh build from github.com/Card-Forge/forge/
+    # releases. Best-effort: never raises.
+    try:
+        _forge_info = detect_forge_version()
+        if _forge_info.version:
+            age_str = (
+                f"{_forge_info.age_days}d old"
+                if _forge_info.age_days is not None
+                else "age unknown"
+            )
+            if _forge_info.is_stale:
+                print(
+                    f"[startup] WARN: Forge jar {_forge_info.version} is "
+                    f"{age_str} — consider updating from "
+                    f"github.com/Card-Forge/forge/releases",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[startup] Forge jar {_forge_info.version} ({age_str})",
+                    flush=True,
+                )
+        else:
+            print(
+                "[startup] WARN: no Forge jar found in vendor/forge/",
+                flush=True,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     app = Flask(__name__)
     app.config["DECK_DIR"] = deck_dir
     app.config["KNOWLEDGE_DB"] = knowledge_db
@@ -214,6 +248,23 @@ def create_app(
             "status": "ok",
             "deck_dir": str(deck_dir),
             "deck_count": len(_list_decks(deck_dir)),
+        })
+
+    @app.route("/api/forge_version")
+    def forge_version_route():
+        """Surface the bundled Forge jar's version + age so the UI can
+        warn when the install is stale enough to misbehave on errata-
+        sensitive cards. is_stale=False when age can't be determined
+        (no build.txt) — don't alarm on unknowable state."""
+        info = detect_forge_version()
+        return jsonify({
+            "version": info.version,
+            "jar_path": str(info.jar_path) if info.jar_path else None,
+            "build_date": (
+                info.build_date.isoformat() if info.build_date else None
+            ),
+            "age_days": info.age_days,
+            "is_stale": info.is_stale,
         })
 
     # JS error collector. The browser-side window.onerror /

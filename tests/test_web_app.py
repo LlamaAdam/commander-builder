@@ -253,6 +253,68 @@ def test_health_reports_ok_and_deck_count(client):
     assert body["deck_count"] == 0
 
 
+def test_forge_version_endpoint_returns_version_info(client, monkeypatch):
+    """Surfaces version + age so the UI can show a "Forge 2.0.12
+    (19d old)" badge and warn when stale."""
+    from datetime import datetime, timezone
+    from commander_builder.forge_runner import ForgeVersionInfo
+    fake_info = ForgeVersionInfo(
+        jar_path=Path("/fake/forge-gui-desktop-2.0.12-jar-with-dependencies.jar"),
+        version="2.0.12",
+        build_date=datetime(2026, 4, 23, 19, 50, 58, tzinfo=timezone.utc),
+        age_days=19,
+        is_stale=False,
+    )
+    monkeypatch.setattr(
+        "commander_builder.web.app.detect_forge_version",
+        lambda *a, **kw: fake_info,
+    )
+    resp = client.get("/api/forge_version")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["version"] == "2.0.12"
+    assert body["age_days"] == 19
+    assert body["is_stale"] is False
+    assert body["build_date"] is not None
+    assert body["jar_path"].endswith("forge-gui-desktop-2.0.12-jar-with-dependencies.jar")
+
+
+def test_forge_version_endpoint_flags_stale_install(client, monkeypatch):
+    """When the jar is older than the stale threshold, is_stale=True."""
+    from datetime import datetime, timezone
+    from commander_builder.forge_runner import ForgeVersionInfo
+    fake_info = ForgeVersionInfo(
+        jar_path=Path("/fake/jar.jar"),
+        version="1.9.0",
+        build_date=datetime(2025, 8, 1, tzinfo=timezone.utc),
+        age_days=285,
+        is_stale=True,
+    )
+    monkeypatch.setattr(
+        "commander_builder.web.app.detect_forge_version",
+        lambda *a, **kw: fake_info,
+    )
+    resp = client.get("/api/forge_version")
+    body = resp.get_json()
+    assert body["is_stale"] is True
+    assert body["age_days"] == 285
+
+
+def test_forge_version_endpoint_handles_missing_jar(client, monkeypatch):
+    """No jar found → all fields null but endpoint still 200s."""
+    from commander_builder.forge_runner import ForgeVersionInfo
+    monkeypatch.setattr(
+        "commander_builder.web.app.detect_forge_version",
+        lambda *a, **kw: ForgeVersionInfo(),
+    )
+    resp = client.get("/api/forge_version")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["version"] is None
+    assert body["jar_path"] is None
+    assert body["is_stale"] is False
+
+
 def test_decks_endpoint_lists_available(client):
     resp = client.get("/api/decks?all=1")
     assert resp.status_code == 200

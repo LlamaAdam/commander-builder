@@ -26,12 +26,13 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 import threading
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -43,6 +44,83 @@ VENDOR_FORGE = REPO_ROOT / "vendor" / "forge"
 # gives ~50% headroom and surfaces hung sims faster than the old 240s budget.
 DEFAULT_TIMEOUT_PER_GAME_SEC = 180
 MIN_TIMEOUT_SEC = 300
+
+# Days after which the bundled Forge jar is considered stale and worth
+# replacing. New MTG sets ship roughly every 4-6 weeks; 90 days gives
+# enough headroom that most installs don't bounce in and out of the
+# warning, but not so much that errata-sensitive cards (Sephiroth, Vivi)
+# silently misbehave.
+FORGE_STALE_AGE_DAYS = 90
+
+_FORGE_JAR_VERSION_RE = re.compile(
+    r"forge-gui-desktop-(\d+(?:\.\d+)+)",
+)
+
+
+def _utcnow(tz=timezone.utc):
+    """Indirection so tests can pin "now" deterministically."""
+    return datetime.now(tz)
+
+
+@dataclass
+class ForgeVersionInfo:
+    """Snapshot of the bundled Forge jar — version, build date, age.
+
+    ``is_stale`` is conservative: True only when ``age_days`` is known
+    AND exceeds ``FORGE_STALE_AGE_DAYS``. Missing build.txt or
+    malformed timestamps leave ``is_stale=False`` so we don't alarm
+    the user about unknowable state.
+    """
+    jar_path: Optional[Path] = None
+    version: Optional[str] = None
+    build_date: Optional[datetime] = None
+    age_days: Optional[int] = None
+    is_stale: bool = False
+
+
+def detect_forge_version(forge_dir: Path = VENDOR_FORGE) -> ForgeVersionInfo:
+    """Inspect the vendor/forge directory and return version metadata.
+
+    Looks for ``forge-gui-desktop-*.jar`` and parses the version out of
+    the filename (the only place the bundle reliably exposes it). Reads
+    the optional ``build.txt`` for a real build timestamp; falls back
+    to ``age_days=None`` when build.txt is missing or malformed.
+
+    Always returns a ForgeVersionInfo — never raises. A missing jar
+    surfaces as ``version=None, jar_path=None`` so callers can render a
+    "Forge install not found" warning without try/except boilerplate.
+    """
+    info = ForgeVersionInfo()
+    if not forge_dir.exists() or not forge_dir.is_dir():
+        return info
+
+    jars = sorted(forge_dir.glob("forge-gui-desktop-*.jar"))
+    fat = [j for j in jars if "jar-with-dependencies" in j.name]
+    jar = (fat or jars or [None])[0]
+    if jar is None:
+        return info
+    info.jar_path = jar
+    m = _FORGE_JAR_VERSION_RE.search(jar.name)
+    if m:
+        info.version = m.group(1)
+
+    build_txt = forge_dir / "build.txt"
+    if build_txt.exists():
+        try:
+            text = build_txt.read_text(encoding="utf-8").strip()
+            # Forge bundles a "YYYY-MM-DD HH:MM:SS" timestamp.
+            info.build_date = datetime.strptime(
+                text, "%Y-%m-%d %H:%M:%S",
+            ).replace(tzinfo=timezone.utc)
+        except (OSError, ValueError):
+            info.build_date = None
+
+    if info.build_date is not None:
+        delta = _utcnow() - info.build_date
+        info.age_days = max(0, int(delta.total_seconds() // 86400))
+        info.is_stale = info.age_days > FORGE_STALE_AGE_DAYS
+
+    return info
 
 
 @dataclass

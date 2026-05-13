@@ -10,9 +10,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from commander_builder.forge_runner import (
+    ForgeVersionInfo,
     SimResult,
     _run_blocking,
     _run_streaming,
+    detect_forge_version,
 )
 
 
@@ -126,3 +128,129 @@ def test_sim_result_to_dict_includes_streaming_metadata():
     assert d["returncode"] == 0
     assert d["duration_sec"] == 1.5
     assert d["timed_out"] is False
+
+
+# --- detect_forge_version — startup staleness check ------------------------
+
+def _write_fake_forge(tmp_path, jar_name: str, build_text: str | None = None):
+    """Create a fake vendor/forge/ layout: a jar with the given name and an
+    optional build.txt."""
+    (tmp_path / jar_name).write_bytes(b"PK\x03\x04")  # zip header — content irrelevant
+    if build_text is not None:
+        (tmp_path / "build.txt").write_text(build_text, encoding="utf-8")
+    return tmp_path
+
+
+def test_detect_forge_version_parses_version_from_filename(tmp_path):
+    _write_fake_forge(
+        tmp_path,
+        "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        build_text="2026-04-23 19:50:58",
+    )
+    info = detect_forge_version(tmp_path)
+    assert info.version == "2.0.12"
+    assert info.jar_path is not None
+    assert info.jar_path.name == "forge-gui-desktop-2.0.12-jar-with-dependencies.jar"
+
+
+def test_detect_forge_version_reads_build_date(tmp_path):
+    _write_fake_forge(
+        tmp_path,
+        "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        build_text="2026-04-23 19:50:58",
+    )
+    info = detect_forge_version(tmp_path)
+    assert info.build_date is not None
+    assert info.build_date.year == 2026
+    assert info.build_date.month == 4
+    assert info.build_date.day == 23
+
+
+def test_detect_forge_version_computes_age_days(tmp_path, monkeypatch):
+    """age_days is computed from build_date relative to now()."""
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    _write_fake_forge(
+        tmp_path,
+        "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        build_text="2026-02-01 00:00:00",  # ~100 days before May 12
+    )
+
+    # Pin "now" to a known value so the test is deterministic.
+    class _FixedNow:
+        @staticmethod
+        def now(tz=None):
+            return _dt(2026, 5, 12, 0, 0, 0, tzinfo=_tz.utc)
+    monkeypatch.setattr(
+        "commander_builder.forge_runner._utcnow", _FixedNow.now,
+    )
+
+    info = detect_forge_version(tmp_path)
+    assert info.age_days is not None
+    # Feb 1 → May 12 = 100 days.
+    assert 99 <= info.age_days <= 101
+    assert info.is_stale is True  # > 90 days
+
+
+def test_detect_forge_version_not_stale_when_recent(tmp_path, monkeypatch):
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+    _write_fake_forge(
+        tmp_path,
+        "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        build_text="2026-04-23 19:50:58",
+    )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner._utcnow",
+        lambda tz=None: _dt(2026, 5, 12, 0, 0, 0, tzinfo=_tz.utc),
+    )
+    info = detect_forge_version(tmp_path)
+    assert info.age_days is not None
+    assert info.age_days < 90
+    assert info.is_stale is False
+
+
+def test_detect_forge_version_missing_jar(tmp_path):
+    """No jar in dir → version=None, jar_path=None, is_stale=False."""
+    info = detect_forge_version(tmp_path)
+    assert info.version is None
+    assert info.jar_path is None
+    assert info.build_date is None
+    assert info.is_stale is False
+
+
+def test_detect_forge_version_missing_build_txt(tmp_path):
+    """Jar exists but no build.txt → version parsed, build_date=None,
+    is_stale=False (can't determine, don't alarm)."""
+    _write_fake_forge(
+        tmp_path,
+        "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        build_text=None,
+    )
+    info = detect_forge_version(tmp_path)
+    assert info.version == "2.0.12"
+    assert info.build_date is None
+    assert info.age_days is None
+    assert info.is_stale is False
+
+
+def test_detect_forge_version_malformed_build_txt(tmp_path):
+    """Garbage build.txt content → no crash, build_date=None."""
+    _write_fake_forge(
+        tmp_path,
+        "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        build_text="not a date",
+    )
+    info = detect_forge_version(tmp_path)
+    assert info.version == "2.0.12"
+    assert info.build_date is None
+    assert info.is_stale is False
+
+
+def test_detect_forge_version_returns_dataclass(tmp_path):
+    """ForgeVersionInfo is a dataclass so tests / endpoints can asdict() it."""
+    from dataclasses import is_dataclass
+    info = detect_forge_version(tmp_path)
+    assert isinstance(info, ForgeVersionInfo)
+    assert is_dataclass(info)
