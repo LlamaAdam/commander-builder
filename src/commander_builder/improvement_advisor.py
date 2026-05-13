@@ -578,8 +578,36 @@ def _advise_steps(
     except OSError:
         pass
 
-    # Prepend manabase so curated essentials surface at the top.
-    recs = list(manabase_recs) + list(recs)
+    # Prepend manabase so curated essentials surface at the top,
+    # then deduplicate so the same card never appears in both the
+    # manabase + primary slices.
+    #
+    # Real failure mode caught in the 2026-05-13 live-browser audit:
+    # manabase prepends shock lands (Steam Vents, Blood Crypt, etc.)
+    # for a 5-color deck missing them, AND bracket_peers ALSO
+    # recommends those shock lands because they appear in 4/5 peer
+    # references and aren't in the user's deck. Without dedup, the
+    # combined ``recs`` list contains "Steam Vents" twice; the audit
+    # response renders it twice; the proposed .dck has ``1 Steam
+    # Vents`` listed twice (illegal in singleton Commander) and Forge
+    # rejects the deck.
+    #
+    # Manabase wins on collision because (a) it's prepended (first
+    # to appear), and (b) its source tag (``manabase_essentials``)
+    # is more specific than a generic peer reference for the UI's
+    # source-badge rendering.
+    seen_lc: set[str] = set()
+    deduped: list[SwapRecommendation] = []
+    for rec in list(manabase_recs) + list(recs):
+        # Only de-dup add candidates — cuts are user-deck cards
+        # already present and naturally singleton.
+        if rec.action == "add":
+            key = rec.card.lower()
+            if key in seen_lc:
+                continue
+            seen_lc.add(key)
+        deduped.append(rec)
+    recs = deduped
 
     role_counts = count_deck_roles(main_cards)
     recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)

@@ -2022,6 +2022,87 @@ def test_advise_appends_manabase_essentials_to_heuristic_path(
     ])
 
 
+def test_advise_dedupes_overlap_between_manabase_and_primary_source(
+    tmp_path, monkeypatch,
+):
+    """Live-browser audit 2026-05-13 caught a real bug: the manabase
+    safety net prepends shock lands (Steam Vents, Blood Crypt, etc.)
+    for a 5-color deck, AND the bracket_peers source ALSO
+    recommends those shock lands because they appear in 4/5 peer
+    decks and aren't in the user's deck. Without dedup, the combined
+    list contains "Steam Vents" twice, the audit response renders it
+    twice, and the proposed .dck has ``1 Steam Vents`` listed twice
+    — illegal under singleton Commander rules; Forge rejects it.
+
+    This test pins that ``advise()`` filters duplicates from the
+    merged ``manabase + primary`` adds list, keeping the manabase
+    entry (which has the more specific source tag).
+    """
+    from commander_builder.improvement_advisor import (
+        SwapRecommendation, _advise_steps, advise, AdvicePhase,
+    )
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring", "Filler"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            # Bracket-peers source path doesn't use EDHREC, but the
+            # default fallback does. Keep this minimal.
+            top=[], synergy=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "",
+            "type_line": "Creature — Dragon Avatar",
+            "color_identity": ["W", "U", "B", "R", "G"],
+        },
+    )
+
+    # Inject a bracket-peers result that includes Steam Vents (a
+    # shock land manabase essentials will also recommend) — simulates
+    # the real overlap that surfaced in the live audit.
+    def fake_peers(commander_name, bracket, deck_cards, **kw):
+        return [
+            SwapRecommendation(
+                card="Steam Vents", action="add",
+                reason="in 5/5 reference decks",
+                evidence={
+                    "in_n_references": 5, "total_references": 5,
+                    "source": "bracket_peers", "role": "land",
+                },
+            ),
+        ], 5
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._bracket_peers_recommendations",
+        fake_peers,
+    )
+
+    report = advise(
+        deck, bracket=3, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    add_cards = [r.card for r in report.recommendations if r.action == "add"]
+    # Steam Vents must appear at most once.
+    assert add_cards.count("Steam Vents") <= 1, (
+        f"Steam Vents duplicated in adds: {add_cards}"
+    )
+    # When dedup keeps the manabase entry (prepended first), the
+    # surviving Steam Vents rec carries the manabase source tag.
+    sv_recs = [
+        r for r in report.recommendations
+        if r.action == "add" and r.card == "Steam Vents"
+    ]
+    if sv_recs:
+        # Should be the manabase one, not the bracket_peers one.
+        assert (sv_recs[0].evidence or {}).get("source") == "manabase_essentials"
+
+
 def test_advise_saturation_filter_preserves_when_threshold_not_hit(
     tmp_path, monkeypatch,
 ):
