@@ -408,6 +408,147 @@ def test_aggregate_match_history_skips_corrupt_json(tmp_path):
 
 # --- advise() — full pipeline (EDHREC mocked) ------------------------------
 
+def test_advise_steps_yields_expected_phase_sequence(tmp_path, monkeypatch):
+    """The streaming generator should yield phases in this order:
+    diagnosis → manabase → primary → complete. Stage A of the
+    streaming-audit work (2026-05-13) refactored the synchronous
+    ``advise()`` to consume this generator; the contract pinned
+    here is what the SSE endpoint will rely on for progressive
+    rendering.
+    """
+    from commander_builder.improvement_advisor import (
+        _advise_steps, AdvicePhase,
+    )
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Test [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring", "Old Card"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    # No Scryfall lookups — commander card details aren't needed
+    # for the phase-order check; manabase phase fires with empty
+    # recs in that case (graceful degradation).
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda n: None,
+    )
+
+    phases = list(_advise_steps(
+        deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    phase_names = [p.phase for p in phases]
+    assert phase_names == ["diagnosis", "manabase", "primary", "complete"]
+    # Each phase yields an AdvicePhase instance — not a bare dict —
+    # so the SSE endpoint can dispatch on phase.phase cleanly.
+    assert all(isinstance(p, AdvicePhase) for p in phases)
+
+
+def test_advise_steps_diagnosis_phase_carries_commanders_and_diagnosis(
+    tmp_path, monkeypatch,
+):
+    """The first phase must carry enough context for the UI to render
+    the diagnosis panel immediately — commander names + the parsed
+    DeckDiagnosis. This is what lets the streaming UI show "weak vs
+    early aggression" pills while Claude is still running."""
+    from commander_builder.improvement_advisor import _advise_steps
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Test [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", lambda n: None,
+    )
+
+    phases = list(_advise_steps(
+        deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    diag = next(p for p in phases if p.phase == "diagnosis")
+    assert diag.data["deck_filename"] == "[USER] Test [B3].dck"
+    assert diag.data["bracket"] == 3
+    assert "Hakbal of the Surging Soul" in diag.data["commander_names"]
+    assert "diagnosis" in diag.data
+    # diagnosis is asdict'd so it's a plain dict the SSE layer can
+    # json.dumps without further conversion.
+    assert isinstance(diag.data["diagnosis"], dict)
+
+
+def test_advise_steps_emits_error_phase_on_missing_deck(tmp_path):
+    """Missing deck files surface as an ``error`` phase rather than
+    raising mid-stream. The synchronous ``advise()`` wrapper still
+    re-raises FileNotFoundError to preserve the legacy contract,
+    but the streaming endpoint needs to emit an SSE error event
+    instead of breaking the response stream."""
+    from commander_builder.improvement_advisor import _advise_steps
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    phases = list(_advise_steps(
+        Path("nonexistent.dck"), bracket=3,
+        deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    assert len(phases) == 1
+    assert phases[0].phase == "error"
+    assert phases[0].data["type"] == "FileNotFoundError"
+    assert "nonexistent.dck" in phases[0].data["reason"]
+
+
+def test_advise_steps_primary_phase_carries_effective_source(
+    tmp_path, monkeypatch,
+):
+    """When a requested source falls back (e.g. claude → heuristic
+    because no API key), the ``primary`` phase must surface BOTH
+    the requested source and the effective source, plus the
+    fallback_reason. The UI uses this to show "Claude analyst fell
+    back to EDHREC" without waiting for the final assembly."""
+    from commander_builder.improvement_advisor import _advise_steps
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", lambda n: None,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    phases = list(_advise_steps(
+        deck, bracket=3, source="claude",
+        deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    primary = next(p for p in phases if p.phase == "primary")
+    assert primary.data["requested_source"] == "claude"
+    assert primary.data["effective_source"] == "heuristic"
+    assert "unavailable" in (primary.data["fallback_reason"] or "")
+
+
 def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     deck_dir = tmp_path / "decks"
     match_dir = tmp_path / "matches"

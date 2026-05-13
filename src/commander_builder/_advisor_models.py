@@ -110,3 +110,38 @@ class AdviceReport:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class AdvicePhase:
+    """One step of the streaming audit pipeline.
+
+    The streaming endpoint (``/api/audit/stream``) drives
+    ``_advise_steps()`` which yields these in order:
+
+    - ``"diagnosis"``: emitted as soon as match-history aggregation
+      completes (~10ms). Carries the parsed ``DeckDiagnosis`` so the
+      UI can show "weak vs early aggression" / "no closer" pills
+      while the source-specific recommender is still working.
+    - ``"manabase"``: emitted after the curated manabase essentials
+      filter runs (~50ms). Carries the prepended manabase
+      recommendations so shock/fetch/bond/tribal lands surface
+      first, before the slow Claude path returns.
+    - ``"primary"``: emitted after the source-specific recommender
+      finishes — heuristic (~100ms), bracket_peers (~2-3s), or
+      claude (~6-8s). Carries the primary recommendations,
+      effective ``source`` (may differ from requested if a fallback
+      happened), and the rationale-override string from Claude when
+      present.
+    - ``"complete"``: emitted last, after the saturation filter +
+      Scryfall hallucination validator. Carries the full
+      ``AdviceReport`` so the client can finalize state.
+    - ``"error"``: emitted instead of ``complete`` on a hard
+      failure. Carries ``{"reason": str, "where": str}``.
+
+    Non-streaming callers can collect the whole iterator and
+    assemble a final ``AdviceReport`` — that's how the existing
+    ``advise()`` synchronous entry point works today.
+    """
+    phase: str
+    data: dict

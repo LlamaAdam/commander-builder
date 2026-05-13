@@ -92,7 +92,12 @@ MIN_SYNERGY_PCT = 25.0
 # orchestrator. Re-exported here so external imports
 # (`from commander_builder.improvement_advisor import AdviceReport`)
 # stay valid.
-from ._advisor_models import AdviceReport, DeckDiagnosis, SwapRecommendation
+from ._advisor_models import (
+    AdviceReport,
+    AdvicePhase,
+    DeckDiagnosis,
+    SwapRecommendation,
+)
 
 
 # --- Diagnosis (read past performance from local data) --------------------
@@ -318,47 +323,172 @@ def advise(
 
     ``use_claude=True`` is preserved as a legacy alias for
     ``source="claude"`` so existing callers don't break.
+
+    Implementation note: this synchronous entry point collects all
+    phases from ``_advise_steps()`` and assembles the final report.
+    Callers that want to render partial progress (e.g. the streaming
+    ``/api/audit/stream`` endpoint) should drive ``_advise_steps()``
+    directly and consume each ``AdvicePhase`` as it arrives.
     """
-    # Resolve the effective backend. Explicit ``source`` wins; otherwise
-    # ``use_claude=True`` maps to claude; otherwise heuristic.
+    final_report: Optional[AdviceReport] = None
+    for phase in _advise_steps(
+        deck_path, bracket,
+        use_claude=use_claude, source=source,
+        deck_dir=deck_dir, match_dir=match_dir,
+        claude_model=claude_model, budget=budget,
+    ):
+        if phase.phase == "complete":
+            final_report = phase.data.get("report")
+        elif phase.phase == "error":
+            # Re-raise to preserve the legacy exception contract — the
+            # synchronous entry point has always thrown for missing
+            # deck files / no commanders. The streaming endpoint
+            # catches this same condition at the generator level and
+            # emits an ``error`` phase instead.
+            err_type = phase.data.get("type", "RuntimeError")
+            err_msg = phase.data.get("reason", "unknown error")
+            if err_type == "FileNotFoundError":
+                raise FileNotFoundError(err_msg)
+            if err_type == "ValueError":
+                raise ValueError(err_msg)
+            raise RuntimeError(err_msg)
+    if final_report is None:
+        raise RuntimeError(
+            "advise() pipeline ended without emitting a 'complete' phase",
+        )
+    return final_report
+
+
+def _advise_steps(
+    deck_path: Path,
+    bracket: int,
+    use_claude: bool = False,
+    source: Optional[str] = None,
+    deck_dir: Path = DECK_DIR,
+    match_dir: Path = MATCH_DIR,
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
+    budget: bool = False,
+):
+    """Generator version of :func:`advise` — yields ``AdvicePhase``
+    events as each stage of the pipeline completes.
+
+    Event sequence (happy path):
+
+    1. ``diagnosis`` — deck context resolved (~10ms): commanders,
+       parsed deck cards, prior-match diagnosis.
+    2. ``manabase`` — curated manabase essentials computed (~50ms):
+       ABU duals / fetches / shocks / bond / tribal lands the deck
+       is missing for its color identity.
+    3. ``primary`` — source-specific recommendations (~100ms to 8s
+       depending on source): the heuristic / bracket_peers / claude
+       output. Includes ``effective_source`` which may differ from
+       the requested source on fallback.
+    4. ``complete`` — saturation filter + Scryfall hallucination
+       validator have run; the final ``AdviceReport`` is assembled
+       and ready to send.
+
+    Failure modes:
+
+    - File-not-found / no-commanders / bad-source-value: yields a
+      single ``error`` phase with ``type`` set to the original
+      exception class name. The synchronous ``advise()`` re-raises
+      to preserve the legacy exception contract.
+    - Mid-pipeline source failures (Claude API down, network blip
+      on Moxfield, EDHREC slug mismatch) are NOT errors — they fall
+      back to the heuristic and emit a normal ``primary`` event
+      with a populated ``fallback_reason``.
+
+    Test guidance: tests that need to inspect a single phase can
+    iterate this directly and break early. The synchronous wrapper
+    is the legacy contract; this generator is the source of truth.
+    """
+    # --- Validate inputs early so the error phase fires before any
+    # work runs (saves a Scryfall round-trip on bad input).
     if source is None:
         source = "claude" if use_claude else "heuristic"
     if source not in ("heuristic", "claude", "bracket_peers"):
-        raise ValueError(
-            f"source must be one of heuristic/claude/bracket_peers, "
-            f"got {source!r}",
-        )
+        yield AdvicePhase("error", {
+            "type": "ValueError",
+            "reason": (
+                f"source must be one of heuristic/claude/bracket_peers, "
+                f"got {source!r}"
+            ),
+            "where": "input_validation",
+        })
+        return
 
     if not deck_path.is_absolute():
         deck_path = deck_dir / deck_path
     if not deck_path.exists():
-        raise FileNotFoundError(f"deck not found: {deck_path}")
+        yield AdvicePhase("error", {
+            "type": "FileNotFoundError",
+            "reason": f"deck not found: {deck_path}",
+            "where": "input_validation",
+        })
+        return
 
-    # Resolve commander names + EDHREC page. We always fetch the page
-    # because heuristic and claude both consume it, AND because
-    # bracket_peers may need it as a fallback when no Moxfield
-    # references are returned.
     commanders = _parse_commander_names_from_dck(deck_path)
     if not commanders:
-        raise ValueError(f"no commanders found in {deck_path.name}")
+        yield AdvicePhase("error", {
+            "type": "ValueError",
+            "reason": f"no commanders found in {deck_path.name}",
+            "where": "commander_parse",
+        })
+        return
     primary_commander = commanders[0]
 
-    # Build diagnosis from prior matches.
     diagnosis = _aggregate_match_history(deck_path.name, match_dir=match_dir)
-
-    # Pull current cards.
     main_cards = set(_read_main_cards(deck_path))
 
-    # Pick backend.
+    # --- Phase 1: diagnosis. Streamed immediately so the UI can
+    # render weakness pills + "scanning for X" placeholders while
+    # the slow source-specific call is still in flight.
+    yield AdvicePhase("diagnosis", {
+        "deck_filename": deck_path.name,
+        "bracket": bracket,
+        "commander_names": commanders,
+        "diagnosis": asdict(diagnosis),
+    })
+
+    # --- Phase 2: manabase essentials. Cheap (one Scryfall lookup
+    # for commander + a catalog walk), so we run this before the
+    # slow source-specific recommender even though it's prepended
+    # later. Streaming it now means manabase shock/fetch suggestions
+    # appear in the UI in well under a second.
+    manabase_recs: list[SwapRecommendation] = []
+    tribe: Optional[str] = None
+    try:
+        commander_card = lookup_card(primary_commander)
+        if commander_card:
+            ci = commander_card.get("color_identity") or []
+            ci_set = {c.upper() for c in ci if isinstance(c, str)}
+            tribe = detect_tribal_type(
+                commander_card.get("oracle_text", "") or "",
+                commander_card.get("type_line", "") or "",
+            )
+            manabase_recs = list(_missing_manabase_recommendations(
+                main_cards, ci_set, tribe=tribe, budget=budget,
+            ))
+    except Exception:  # noqa: BLE001
+        # Commander lookup failure shouldn't break the audit — emit
+        # an empty manabase event so the UI doesn't hang waiting.
+        pass
+    yield AdvicePhase("manabase", {
+        "recommendations": [asdict(r) for r in manabase_recs],
+        "tribe": tribe,
+    })
+
+    # --- Phase 3: source-specific recommendations. The slow phase
+    # — claude can take 6-8s for the LLM round trip. We yield as
+    # soon as the call returns.
     rationale_override: Optional[str] = None
     fallback_reason: Optional[str] = None
     edhrec_page: Optional[CommanderPage] = None
-    bracket_peer_ref_count: int = 0  # set by claude path when refs shipped
+    bracket_peer_ref_count: int = 0
     recs: list[SwapRecommendation]
+    effective_source = source  # mutate on fallback
 
     def _fetch_edhrec_lazy() -> Optional[CommanderPage]:
-        """Lazy-fetch EDHREC only when a backend that needs it actually
-        runs. bracket_peers avoids the round-trip on the happy path."""
         nonlocal edhrec_page
         if edhrec_page is None:
             edhrec_page = fetch_commander_page(primary_commander)
@@ -373,11 +503,7 @@ def advise(
         )
         if peer_recs:
             recs = peer_recs
-            # source stays "bracket_peers"
         else:
-            # No references — fall back to heuristic so we still emit
-            # something useful. Surface the cause so the UI can show
-            # the user why the better backend wasn't used.
             fallback_reason = (
                 f"no bracket-peer references found for "
                 f"{primary_commander!r} at B{bracket} — "
@@ -388,17 +514,9 @@ def advise(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
             )
-            source = "heuristic"
+            effective_source = "heuristic"
     elif source == "claude":
         page = _fetch_edhrec_lazy()
-        # Enrich Claude's context with top-N bracket-peer references.
-        # Best-effort — when Moxfield can't return references (obscure
-        # commander, network blip), Claude falls back to EDHREC-only
-        # context. The peer data is what lets the LLM reason about
-        # "what does this deck have vs. tuned same-bracket peers?"
-        # rather than just "what does EDHREC's all-bracket average
-        # say?" — the same fix that drove the standalone bracket_peers
-        # source.
         try:
             peer_summary = _collect_bracket_peer_summary_for_prompt(
                 primary_commander, bracket=bracket,
@@ -412,15 +530,10 @@ def advise(
                 model=claude_model,
                 bracket_peers_summary=peer_summary,
             )
-            # Record how many peer refs actually shipped to Claude so
-            # the UI can disclose 'Claude analyst (N peer refs)' on
-            # the source pill. Only set when the LLM call succeeded —
-            # a fallback to heuristic shouldn't claim peer enrichment.
             if peer_summary:
                 bracket_peer_ref_count = int(
                     peer_summary.get("ref_count", 0) or 0,
                 )
-            # source stays "claude"
         except NotImplementedError as exc:
             fallback_reason = f"claude advisor unavailable: {exc}"
             print(f"  WARN: {fallback_reason}; falling back to heuristic.",
@@ -428,11 +541,8 @@ def advise(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
             )
-            source = "heuristic"
+            effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
-            # Concrete cause helps diagnose: AuthenticationError (bad
-            # key), APIConnectionError (network), JSONDecodeError
-            # (model returned non-JSON), etc.
             fallback_reason = (
                 f"claude advisor failed ({type(exc).__name__}: {exc})"
             )
@@ -441,12 +551,23 @@ def advise(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
             )
-            source = "heuristic"
+            effective_source = "heuristic"
     else:
         page = _fetch_edhrec_lazy()
         recs = _heuristic_swap_recommendations(main_cards, page)
 
-    # Resolve deck_id from the .dck Moxfield= line if present.
+    yield AdvicePhase("primary", {
+        "recommendations": [asdict(r) for r in recs],
+        "requested_source": source,
+        "effective_source": effective_source,
+        "fallback_reason": fallback_reason,
+        "rationale_override": rationale_override,
+        "bracket_peer_ref_count": bracket_peer_ref_count,
+    })
+
+    # --- Phase 4: finalize. Prepend manabase, apply saturation
+    # filter, validate names. The UI can show "finalizing..." here
+    # since this is the post-processing step.
     deck_id: Optional[str] = None
     try:
         text = deck_path.read_text(encoding="utf-8")
@@ -457,51 +578,12 @@ def advise(
     except OSError:
         pass
 
-    # Curated manabase safety net — prepend any color-identity-
-    # appropriate ABU dual / fetch / shock / bond land the user is
-    # missing. User feedback (2026-05-13): "all decks should have
-    # dual lands and bond lands and fetch lands." The source-specific
-    # paths (heuristic / bracket_peers / claude) recommend lands only
-    # when they happen to appear in references; this fills the gap
-    # deterministically. Best-effort: a failed commander lookup falls
-    # through silently — the existing recs are unaffected.
-    #
-    # Tribal lands (Cavern of Souls, Path of Ancestry, etc.) layer
-    # on top when detect_tribal_type identifies a primary creature
-    # type in the commander's oracle (e.g. The Ur-Dragon → "Dragon").
-    try:
-        commander_card = lookup_card(primary_commander)
-        if commander_card:
-            ci = commander_card.get("color_identity") or []
-            ci_set = {c.upper() for c in ci if isinstance(c, str)}
-            tribe = detect_tribal_type(
-                commander_card.get("oracle_text", "") or "",
-                commander_card.get("type_line", "") or "",
-            )
-            manabase_recs = _missing_manabase_recommendations(
-                main_cards, ci_set, tribe=tribe, budget=budget,
-            )
-            # Prepend rather than append so manabase upgrades surface
-            # at the top of the rec list — they're foundational, not
-            # speculative.
-            recs = list(manabase_recs) + list(recs)
-    except Exception:  # noqa: BLE001
-        # Commander lookup failure shouldn't break the audit.
-        pass
+    # Prepend manabase so curated essentials surface at the top.
+    recs = list(manabase_recs) + list(recs)
 
-    # Drop add recommendations whose role bucket is already saturated
-    # in the user's deck. The Ur-Dragon B4 audit (2026-05-13) lost an
-    # A/B sim partly because the advisor recommended 5 more ramp
-    # pieces to a deck already running 13. ``count_deck_roles`` is
-    # disk-cached behind ``lookup_card`` so this round-trip is
-    # near-free on repeat audits of the same deck.
     role_counts = count_deck_roles(main_cards)
     recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
 
-    # Validate every recommended card name against Scryfall. Catches
-    # Claude hallucinations before Forge silently rejects the deck.
-    # Heuristic recs come from EDHREC and should all resolve; cache hits
-    # make this near-free.
     _validate_card_names(recs)
 
     report = AdviceReport(
@@ -511,7 +593,7 @@ def advise(
         commander_names=commanders,
         diagnosis=diagnosis,
         recommendations=recs,
-        source=source,
+        source=effective_source,
         timestamp=datetime.now(timezone.utc).isoformat(),
         fallback_reason=fallback_reason,
         skipped_for_saturation=skipped_for_saturation,
@@ -519,7 +601,8 @@ def advise(
     )
     if rationale_override:
         report.diagnosis.pattern_summary = rationale_override
-    return report
+
+    yield AdvicePhase("complete", {"report": report})
 
 
 # --- CLI -------------------------------------------------------------------
