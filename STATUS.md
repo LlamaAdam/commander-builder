@@ -1,289 +1,288 @@
 # Status — current state of the project
 
-> Living tracker, updated as work progresses. Read this first to find out
-> "what's the project up to right now?" without scrolling chat history.
+> Living tracker. Read this first to find out *"what's the project up to
+> right now?"* without scrolling chat history.
 >
-> **Three sections** — *Now* (active work), *Recent* (last few days), *Blocked*
-> (paused on something external). Backlog items live in `BACKLOG.md`; design
-> decisions live in `docs/decisions/`. This file is for *operational state*.
+> **Three sections** — *State of the tree* (right now), *Open backlog*
+> (next work, ranked), *Parked plans* (deliberately deferred). History
+> of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
+> conventions live in [docs/architecture.md](docs/architecture.md).
 
-**Last updated**: 2026-04-28 (project-manager session)
-**Current phase**: FP-006 backend live; Flask scaffold + iteration history feed shipped; UI rendering still TBD
-
----
-
-## Now
-
-### Working on
-Nothing actively in flight. The 2026-04-28 project-manager session landed:
-
-- **FP-006 Flask scaffold** — `src/commander_builder/web/`. Routes:
-  `/api/health`, `/api/decks`, `/api/dashboard?deck=<id>`,
-  `/api/iterations[?deck=<id>]`. Path-traversal guard validates deck
-  inputs against `deck_dir`. `pyproject.toml` adds `[web]` extra
-  (`flask>=3.0`). 21 tests cover route shapes + traversal guard +
-  iteration listing. Run dev server: `python -m commander_builder.web`.
-- **Knowledge-log demo seeder** — `scripts/seed_demo_knowledge_log.py`
-  writes a 4-iteration arc (pending → kept → reverted → neutral) for
-  a fictional Omnath deck. Lets the UI's version-history strip
-  develop end-to-end before real Forge data exists. 6 tests.
-- **Test counts**: 482 tests total (was 453), all green.
-
-The 2026-04-27 session before that landed:
-
-- **Shared `mtg_cards` folder** at `C:\dev\mtg_cards\` (out-of-repo, ~180MB
-  Scryfall bulk data + per-card snapshots + Magic Comp Rules text). Both
-  `commander_builder` and `forge_py` resolve their card cache to this
-  shared location via `MTG_CARDS_DIR` env var with a sensible default.
-  Also lays the substrate for the eventual unified MTG application
-  (rules + images + deck testing).
-- **`scryfall_client.refresh_card()`** — force-fetch a card bypassing the
-  cache, mirrored by `forge_py.cards.refresh()`. Use when you need
-  guaranteed-current oracle text (live-text directive).
-- **`staples.py`** — canonical `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`,
-  `classify_role(oracle_text, type_line)`, `render_frequency_label`,
-  `confidence_tier`. `improvement_advisor` and `meta_test` now share the
-  staples list; the advisor tags every add recommendation with a role.
-- **Suggestion-quality improvements** in `improvement_advisor`:
-  - Universal staples (Sol Ring, Arcane Signet, etc.) excluded from
-    must-add lists (noise removal — every deck already has them).
-  - Each add carries `evidence.role` so the advice surface can group by
-    ramp/draw/removal/finisher.
-- **forge_py improvements**:
-  - New `forge_py.cards` module — full live-card-data API with freshness
-    contracts (`is_fresh`, `get`, `refresh`, `get_oracle_text`).
-  - New CLI subcommands: `forge-py refresh`, `forge-py show`,
-    `forge-py prime`.
-  - `ROADMAP.md` written: P1 live-text refresh ✅, P2 bulk index, P3
-    turn-by-turn skeleton, P4 color-aware mana, P5 combat, P6 regress.
-
-Earlier session (2026-04-26 PM) closed **20 backlog items + 2 new modules + 1 design decision**:
-
-| ID | Item | Status |
-|----|------|--------|
-| GAP-001 | Real archetype classifier (heuristic) | ✅ done |
-| GAP-002 | `--max-candidates` flag in pool_curator CLI | ✅ done |
-| GAP-003 | publicId as deck_id (lineage durability) | ✅ done |
-| GAP-004 | `_filename_for_match` collision-suffix gap | ✅ done |
-| GAP-005 | `proposer.py` skeleton + router | ✅ done |
-| GAP-006 | `_split_into_slices` persistent-violation case | ✅ done |
-| GAP-008 | Streaming `forge_runner` output | ✅ done |
-| GAP-009 | `edhrec_client.py` programmatic discovery | ✅ done |
-| GAP-011 | Audit prompt manifest writeback JS | ✅ done |
-| GAP-012 | Integration test for `iteration_loop.run_one_iteration` | ✅ done |
-| GAP-013 | Unit tests for `compare_versions.compare` | ✅ done |
-| GAP-014 | Top-level `commander-status` command | ✅ done |
-| GAP-016 | README reflects Phase 2 workflow | ✅ done |
-| GAP-017 | `revert_to.py` rollback automation | ✅ done |
-| GAP-018 | Game Changers dynamic fetch + cache | ✅ done |
-| GAP-024 | Legacy `deck_id` migration helper | ✅ done |
-| GAP-007 | Claude/Ollama verdict + propose body-fills | ✅ done |
-| GAP-015 | CI / GitHub Actions workflow | ✅ done |
-| GAP-025 | Tribal aggro keyword expansion | ✅ done |
-| GAP-010 | `report.py` deck history Markdown renderer | ✅ done |
-| GAP-026 | Knowledge log export/import for backup | ✅ done |
-| GAP-022 | Moxfield API push | ❌ won't-do (personal-project scope) |
-| GAP-023 | LICENSE choice | ⏸ low-priority (personal use) |
-
-Plus new modules not on original backlog:
-- `commander-doctor` environment health check (10 checks, 13 tests)
-- `commander-history` deck iteration Markdown report (20 tests)
-- `commander-export` knowledge log JSON dump (11 tests)
-
-Plus design decisions:
-- CI simplified to single-OS, single-Python (Windows 3.12 only — matches
-  actual dev environment)
-- `CONTRIBUTING.md` reframed as "session notes" rather than
-  open-source contribution guide
-- FUTURE_PLANS.md FP-005 (Moxfield API push) closed as WON'T-DO
-
-### Up next
-Active engineering backlog is **empty for commander_builder**. **All four
-FP-006 (web-app GUI) suggestion-quality gates are now satisfied** —
-staples-exclusion ✅, frequency labels ✅, role categorization ✅,
-**diagnosis-driven re-ranking ✅** (closed this session). FP-006 is now
-unblocked from the suggestion-quality side; the remaining gate is "the
-user has run a few real iterations to validate the system shape" —
-that needs real iteration data, not engineering work.
-
-Highest-leverage next work, ranked:
-
-1. **Real iteration data accumulation** — knowledge_log has 0 real rows
-   (1 integration-test row). Phase 3 ML training and FP-006 final
-   readiness both wait on this. Action required is from the user, not
-   the codebase.
-2. **forge_py P3 turn-by-turn** — 15–25h. Largest unrealized
-   improvement on either project. Adds tempo + cards-played-curve
-   metrics that correlate with real Forge sims.
-3. **FP-006 path B prototype** (Flask) — ~2 weeks. Now that all
-   suggestion gates are satisfied, this is technically unblocked.
-   Hold until iteration data exists.
-4. **forge_py P4 color-aware mana** — 8–12h. Multicolor decks (Atraxa,
-   Ur-Dragon) currently goldfish as if they're mono-color; color
-   modeling fixes that.
-
-### Sister project: forge_py
-
-A separate spike at `C:\dev\forge_py\` started 2026-04-26 — Python deck-testing
-sandbox for goldfish-level consistency stats (mulligan rate, mana curve,
-commander cast turn) without the Forge JVM. **Not** a Forge replacement;
-complements it for fast statistical sanity checks. See
-`C:\dev\forge_py\README.md` for the phased plan and FUTURE_PLANS.md FP-001
-for the broader "should we replace Forge entirely" decision context.
-
-forge_py status (2026-04-27):
-- **Phase 0 declared complete** — goldfish corpus run on all 13 [USER]
-  decks; goldfish stats correlate with real Forge sims for non-storm
-  decks; storm decks honestly flagged UNCERTAIN rather than producing
-  misleading numbers.
-- **P1 (live card-text reference) ✅** — new `forge_py.cards` module
-  with `refresh()` / `get()` / `is_fresh()` / `get_oracle_text()`
-  honors the user's "reference what the card currently says" directive.
-- **P2 (bulk-data in-memory index) ✅** — `forge_py.bulk_index` loads
-  ~32,000 cards into RAM lazily, integrated into `card_tagger._scryfall_lookup`.
-  Cold-cache deck tagging now goes: per-card snapshot → bulk index → HTTP.
-  Standard-format cards never hit HTTP after bulk download.
-- **P4 (color-aware mana) ✅** — new `forge_py.mana` module + new
-  `color_screw_rate` metric in goldfish reports. Multicolor decks now
-  produce honest mana-pain signal that the integer mana model missed.
-- 10 production modules (dck_parser, card_tagger, goldfish, compare_decks,
-  corpus_summary, scryfall_bulk, cards, bulk_index, mana, cli)
-- **170/170 tests passing** (was 74)
-- **6 CLI subcommands**: `forge-py test`, `compare`, `corpus`, `refresh`,
-  `show`, `prime`
-- ROADMAP.md remaining: P3 turn-by-turn skeleton (~20h), P5 combat,
-  P6 regression suite.
-- Cache shared with this project at `C:\dev\mtg_cards\`.
-
-### Project-management work
-Landed this session:
-- ✅ `BACKLOG.md` — 25 numbered items across 4 tiers (3 closed, 22 open)
-- ✅ `STATUS.md` (this file)
-- ✅ `CHANGELOG.md`
-- ✅ `docs/architecture.md` — layered diagram + module responsibility table
-- ✅ `pyproject.toml` — `pip install -e .` works, no more `PYTHONPATH=src`
-- ✅ `CONTRIBUTING.md` — dev setup walkthrough
-- ✅ `.gitignore` updated (logs, sqlite, .cache)
-- ✅ `README.md` rewritten to reflect Phase 2 (closes GAP-016)
+**Last updated:** 2026-05-13 (doc consolidation session)
+**Phase status:** Phase 2 complete + FP-006 web GUI shipped + 11 commits
+on `feature/2026-04-28-session` ahead of `master`. Phase 3 (ML
+predictor) still data-gated.
 
 ---
 
-## Recent (last 7 days)
+## State of the tree
 
-### 2026-04-27 (autonomous-improvement session)
-- **Shared `C:\dev\mtg_cards\` data folder** established. Both projects
-  resolve their card cache here via `MTG_CARDS_DIR` env var. Holds the
-  Scryfall bulk dump (180MB), 795 per-card snapshots, Magic Comp Rules
-  text, and a slot for future card images. Out-of-repo by design — this
-  is the substrate for the user's eventual unified MTG application.
-- **Live card-text API** in both projects (`forge_py.cards.refresh` /
-  `commander_builder.scryfall_client.refresh_card`). Force-fetches
-  Scryfall, bypasses cache. Default cache-with-freshness window = 7 days.
-- **`staples.py`** (canonical universal-staples + role classifier +
-  frequency labels). Deduplicated `meta_test.UNIVERSAL_STAPLES`.
-- **Suggestion-quality pass** in `improvement_advisor`: staple
-  exclusion, role-tagged adds. `meta_test` now renders frequency labels
-  ("unanimous (5/5 refs)", "majority (3/5 refs)") in the report view.
-- **Diagnosis-driven re-ranking** ✅ FP-006 fourth gate now closed.
-  Weakness signals map to priority roles via `_signals_to_priority_roles`.
-  When diagnosis says "high draw rate / no closer", finisher-tagged adds
-  surface first. Render output groups adds by role with a ★ marker on
-  diagnosis-prioritized roles.
-- **forge_py improvements**:
-  - `cards.py` live-text API + 3 CLI subcommands (`refresh`, `show`, `prime`)
-  - `ROADMAP.md` six-priority queue (P1, P2, P4 ✅ done this session)
-  - `bulk_index.py` in-memory bulk-data index (P2 from roadmap).
-    Integrated into `card_tagger._scryfall_lookup` so cold-cache deck
-    tagging hits ~32,000 cards from RAM instead of HTTP. Persists a
-    snapshot on first hit so subsequent runs skip the bulk path entirely.
-  - `mana.py` (P4) — `parse_mana_cost`, `produced_colors`, `can_cast`,
-    `spend`. Models WUBRG, hybrid, Phyrexian, colorless-{C}, generic-{N}.
-    `TaggedCard.produced_colors` now populated at tag time.
-  - **`color_screw_rate` metric** — fraction of opening hands that have
-    enough lands but wrong colors for any cheap spell. Real-deck signal:
-    Hakbal (3-color) 11.5%, Mothy (Atraxa 4-color) 22.5%, First Sliver
-    (5-color) 39.5%. Health-verdict signals fire above 15% / 25%.
-  - Test-isolation gate: bulk index only consults the real shared file
-    when `CACHE_DIR.parent.name == "mtg_cards"` (production layout).
-    Tests with monkeypatched CACHE_DIR are unaffected.
-- **forge_py `.gitignore`** added (was missing).
-- Tests: 370 → **428** (commander_builder); 91 → **170** (forge_py).
-  Integration test still passes end-to-end.
-- No git commits made — handoff in `HANDOFF_2026-04-27_afk.md`.
+- **Tests:** 674 passing, ~25s offline.
+- **Branch:** `feature/2026-04-28-session`
+- **Recent commits** (oldest first, on this feature branch):
 
-### 2026-04-26 (afternoon)
-- **Phase 2 scaffolding landed**: `scryfall_client`, `knowledge_log`, `analyst`,
-  `iteration_loop`, `moxfield_push`, `ml_dataset`. All 7 new modules wired,
-  144/144 tests passing in 0.6s.
-- **Real bug found and fixed**: `log_parser._normalize` regex order was wrong,
-  causing `_filename_for_match` silent attribution failures. Pinned by test.
-- **Smoke test PASSED**: 20-game Hakbal-vs-Hash head-to-head ran end-to-end,
-  ComparisonReport JSON written, no crashes. 18 of 20 games drew (real
-  signal: B3 multiplayer stalls when neither deck has a finisher).
-- **Integration test PASSED**: `scripts/integration_test_b3.py` exercises every
-  Phase 2 module on the 6 real B3 user decks. Resolved color identities for
-  all 6 commanders via Scryfall, generated push-ready textarea blobs, ran
-  the analyst on real data, persisted to knowledge_log, extracted ML
-  features.
-- **Audit prompt v3 versioned in repo**: `prompts/moxfield_audit_v3.md` with
-  hand-off note pointing at `compare_versions.py`.
+  ```
+  95e3197 feat(speedup): Track 1 — parallel pods, early-stop, intra-pod abort
+  db89514 feat(track2): forge_py correlation harness (opt-in)
+  8564195 fix(moxfield): convert pipe-delimited lines to parens format
+  728be3f feat(ux): bracket auto-inference + modal scroll fix
+  49f0e5c feat(web): LLM analyst, knowledge log, padding, error collector, UI surface
+  e3e5a88 feat(audit): card-name validator flags Claude hallucinations
+  8d2b694 feat(edhrec): retry transient HTTP failures with exponential backoff
+  4ebb8a9 feat(forge): detect bundled jar version + warn when stale
+  6d92fd1 feat(klog): capture deck pricing snapshot in iteration manifest
+  5fa772c feat(edhrec): honor Retry-After header + log each retry
+  <doc consolidation commit>
+  ```
 
-### 2026-04-26 (morning)
-- B3 batch preflight: 6/6 pass.
-- B4 batch preflight: 6/6 pass (3 of 6 hit slow-match cutoff).
-- QA review surfaced 5 fixes; all applied.
-- New modules: `game_analyzer`, `run_match`, `compare_versions`, `snapshot_deck`.
-- `compare_versions.py` validates v1-vs-v2 head-to-head per Phase 2 design.
+- **Modules:** ~30 production. Recent additions: `forge_py_correlation`,
+  `improvement_advisor` (Claude analyst path), web app expansion.
+- **CLI entry points:** 14. See [README.md](README.md#cli-commands).
+- **Knowledge log:** few rows (mix of integration tests + real saves).
+  Phase 3 ML still gated on volume.
+
+### How to resume from cold
+
+1. `cd C:\dev\commander_builder && python -m pytest tests/ -q` — confirm
+   green.
+2. `git log --oneline master..HEAD` — see what's on the feature branch.
+3. Skim *Open backlog* below, pick an item, or jump into the web app
+   (`python -m commander_builder.web`) and run a propose-swap.
 
 ---
 
-## Blocked
+## Open backlog (ranked)
 
-Nothing currently. (Items in Tier 4 of BACKLOG are deferred-by-design — not
-blocked on external action.)
+### Tier 1 — Worth doing soon
+
+1. **Wire `/api/forge_version` into the topbar badge.** Endpoint
+   exists ([web/app.py](src/commander_builder/web/app.py)) but
+   `loadHealth()` in [app.js](src/commander_builder/web/static/app.js)
+   only chains `/api/correlation_summary`. User has to curl to see the
+   version. ~15 min. *Source: self-audit of forge-version commit.*
+
+2. **Fix multi-jar selection bug in `detect_forge_version`.**
+   [forge_runner.py](src/commander_builder/forge_runner.py) does
+   `sorted(glob(...))[0]` — lexicographic sort picks the older jar
+   when both `2.0.10` and `2.0.12` are present (`"0" < "2"` at the
+   relevant position). Sort by parsed version or mtime instead. ~15
+   min. *Source: self-audit.*
+
+3. **Pricing chart / query endpoint.** Pricing snapshots now land in
+   `audit_manifest.pricing` per iteration save, but there's no UI to
+   chart cost evolution. Add `/api/pricing_series?deck=<id>` returning
+   `[{iteration_id, captured_at, total_price_usd}, ...]` + a small
+   inline sparkline on the deck dashboard. ~1 h. *Source: handoff #5
+   self-audit — stated goal not yet met.*
+
+4. **Reject negative `total_price_usd`.** One-line fix in
+   `/api/save_iteration`. ~5 min. *Source: handoff #5 self-audit.*
+
+5. **Auto-refresh dashboard when knowledge_log gains rows.** After a
+   successful save_iteration, the iterations panel should update
+   without a full reload. Soft-refresh infra exists; just wire the
+   call. ~30 min. *Source: 2026-05-06 handoff item #6.*
+
+6. **Per-archetype win-rate breakdown.** When the user has ≥5
+   iterations for a deck, show "kept verdict in 4/5 v3 swaps, kept in
+   2/3 v4 swaps." Reads from `knowledge_log`. ~1–2 h. *Source:
+   2026-05-06 handoff item #7.*
+
+### Tier 2 — Bigger but tractable
+
+7. **Proposed-deck price in audit response.** `/api/audit` returns
+   `proposed_text` but doesn't aggregate its price. Compute post-swap
+   total so the cost-evolution chart can show per-swap delta. Needs
+   threading through the audit pipeline. ~2–3 h.
+
+8. **Card-image lazy fetcher (FP-008).** Render card images alongside
+   oracle text in the suggestions panel. Scryfall image CDN, lazy-fetch
+   to `mtg_cards/images/normal/<scryfall_id>.jpg`. ~3 h.
+
+9. **Oracle-text-first card-reference store (FP-009).** Already-built
+   substrate (`oracle_snapshots/`, `forge_py.cards.get()`, parity API
+   in `scryfall_client`). Missing: presentation helper, errata diff
+   tooling, bulk-refresh CLI. ~4 h.
+
+### Tier 3 — Deferred until prerequisites exist
+
+10. **`commander-iterate --auto-propose` programmatic.** Replace the
+    manual audit-prompt paste with a Claude API call.
+    [proposer.py](src/commander_builder/proposer.py) has the wiring
+    sketch; `claude_propose` body needs filling in. ~30 lines + a few
+    integration tests with mocked `anthropic.Anthropic`. Promote when
+    a routine LLM workflow becomes useful.
+
+11. **Phase 3 ML training (FP-002).** Predict swap outcomes from deck +
+    swap features. `ml_dataset.py` ready (25 features, deck-level
+    split). Needs 200+ logged iterations before training is honest.
+    Today: a few rows.
+
+12. **Concurrent Forge sims (FP-003).** Two JVMs in parallel could
+    halve pool-curation wall time. Needs a 30-min feasibility spike
+    (do separate `cwd`-isolated profiles avoid file-locking races?).
+    Cheap to attempt; not yet a bottleneck.
+
+13. **Forge sim seed (FP-004).** No `--seed` flag in Forge 2.0.12.
+    Variance-via-game-count works fine today. Watch upstream releases.
+
+14. **Settings UI + BYO LLM token (FP-011).** Per-user config at
+    `%LOCALAPPDATA%\commander-builder\config.json` with redacted GET +
+    permissions-restricted PUT. Promote when sharing with anyone
+    beyond the original developer.
+
+---
+
+## Parked plans (big bets, blocked, or strategic forks)
+
+> Items here are **deliberately out of the active queue**. Each is too
+> big to start without a clear go-decision, blocked on data we don't
+> have, or a strategic fork we want to keep visible. Move into the
+> backlog above when its unblock condition fires.
+
+### FP-001 — Replace Forge with a Python-native engine
+
+Full rules-engine port: 6–12+ months of focused engineering. Rules-lite
+"goldfish" sim: 1–2 weeks but useful only as consistency-metrics
+supplement. **Forge AI replacement** (Claude/Ollama at decision points,
+keep Forge's rule engine): 2–4 weeks; this is Phase 4 in the original
+spec. Token cost: ~$0.10–$1.00 per game.
+
+**Status: PARKED.** The wrapper we've built IS the streamlined Python
+interface. Highest-leverage move toward "fewer draws / better signal"
+is Claude/Ollama-piloted Forge AI, not a new engine.
+
+### FP-002 — Phase 3 ML predictor
+
+`ml_dataset.py` ready (25 features, deck-level train/eval split, no
+leakage). Needs 200+ rows across 5+ unique decks. **Status: PARKED.**
+Triggered automatically when row count crosses threshold —
+`commander-status` reports it.
+
+### FP-003 — Concurrent Forge sims
+
+Two `cwd`-isolated Forge profiles in parallel. **Status: PARKED.**
+Cheap to attempt; ~30-min feasibility spike. Currently nobody runs
+curation enough to feel the pain.
+
+### FP-004 — Forge sim seed
+
+Forge 2.0.12 has no `--seed`. JVM bytecode-instrumentation would be
+brittle. **Status: PARKED.** Watch upstream.
+
+### FP-006 — Web GUI
+
+✅ Shipped. All four suggestion-quality gates closed in 2026-04-27:
+universal-staples exclusion, frequency labels, role categorization,
+diagnosis-driven re-ranking. Backend + minimal UI live; ongoing polish
+in the active backlog.
+
+### FP-007 — Unified MTG application
+
+Single web/desktop program consolidating deck testing + card reference
++ rules + library + replays. ~6–10 weeks. **Status: PARKED.** Substrate
+ready (`mtg_cards/`); product-readiness gates not yet met. Ship FP-006
+fully first.
+
+### FP-008 / FP-009 — Card images + oracle-text store
+
+Already-built substrate (`oracle_snapshots/`, `forge_py.cards`,
+`scryfall_client.refresh_card`). Promoted to active backlog (Tier 2).
+**Oracle text is authoritative; images are decorative** — a system
+that *interprets* cards uses oracle, not OCR'd images.
+
+### FP-010 — Package web app as desktop EXE
+
+PyInstaller + pywebview, ~16 h. Bundle Forge + JRE, first-run downloader
+for the 180 MB `mtg_cards/` folder. **Status: PARKED.** Don't start
+until the web app demonstrably works for a full iteration cycle on real
+decks (≥5 audits via the browser without touching a CLI).
+
+### FP-011 — BYO LLM token
+
+Per-user config file with redacted GET / permissions-restricted PUT.
+Pre-commit hook scans staged diffs for `sk-ant-`, `Bearer `, JWT
+prefixes. **Status: PARKED.** Architecture documented; promote when
+shared with anyone beyond the original developer.
+
+### FP-012 — Autonomous deck improvement agent
+
+The everything-bagel: takes a Moxfield URL, learns the deck's intent,
+converges on a better version unattended. Multi-arm bandit / Bayesian
+opt for swap selection. ~120 h total across 8 components. **Status:
+PARKED.** Promote when knowledge_log has ≥150 rows AND
+iteration_loop's proposer is programmatic AND forge_runner supports
+concurrent JVMs. North star, not next step.
+
+### FP-013 — Project-tuned LLM (moonshot)
+
+LoRA fine-tune Llama 3.1 8B / Qwen 2.5 7B on accumulated audit
+manifests + sim outcomes + Magic rules + oracle snapshots. ~$80–$200
+LoRA cost on A100. **Status: PARKED, do not promote.** Needs 2000+
+iteration rows; realistic timeline 18–30 months out.
+
+### Sister projects
+
+- **`forge_py`** at `C:\dev\forge_py\` — Python-native goldfish + combat
+  simulator. Stays independent until its turn-by-turn (P3) and combat
+  (P5) produce signal that correlates with Forge. Then fold the engine
+  in as a fast pre-filter. User stated intent (2026-04-27): *"when
+  forge_py works well I do want it in commander_builder."*
+- **`mtga_draft_helper`** — separate project family; shares
+  `mtg_cards/` but no code-level dependency. No merge planned.
+
+---
+
+## Decisions recently made (recent context)
+
+For older decisions see [docs/architecture.md](docs/architecture.md#key-decisions).
+
+- **2026-05-13 — Doc consolidation.** Reduced 15 markdown files to 4
+  (README, STATUS, CHANGELOG, docs/architecture). Audit retrospectives,
+  session-state snapshots, individual handoffs deleted as superseded.
+  This file is now the single source for *operational state*.
+- **2026-05-13 — Card-name validator scope.** Validate every card in
+  `report.recommendations`, not just Claude-sourced ones. Heuristic
+  EDHREC recs validate via cache (near-free); uniform pass means
+  callers don't have to special-case.
+- **2026-05-13 — `Retry-After` cap at 30s.** EDHREC's CDN occasionally
+  sends `Retry-After: 300+` during incidents. Cap prevents a
+  misbehaving server from pinning the audit; user prefers degraded
+  result over indefinite block.
+- **2026-04-29 — Sprint 1C reframed.** "JVM persistence" → "per-pod
+  intra-pod abort." Original required Forge source mods and only saved
+  ~10s/pod; reframed needs zero Forge changes and saves 20-50% on
+  lopsided matches. See CHANGELOG.
+- **2026-04-28 — Track 2 (forge_py multi-deck sim) runs
+  opportunistically, not as a fast path.** forge_py's combat is shallow
+  (single-attacker, no flying/reach/first-strike); systematic misjudge
+  of control vs aggro is worse than waiting 3 min for Forge truth.
+  Flip default only when r ≥ 0.90 per archetype across ≥30 paired rows.
 
 ---
 
 ## Stats
 
-- **Modules**: 26 production — added `staples.py` (universal-staples + role classification)
-- **Tests**: 428/428 passing across 27 test files (test_staples.py 43, +9 new advisor incl. re-ranking, +3 refresh_card, +3 frequency-label)
-- **Test wall time**: ~19s
-- **CLI entry points**: 14 (import / push / snapshot / curate / match / compare / iterate / status / revert / doctor / history / export / advise / meta-test)
-- **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache (`MTG_CARDS_DIR` env var override available); 795 per-card snapshots + 180MB bulk dump live there.
-- **Imported decks on disk**: B3=99, B4=115, B5=56 (approx; counts include
-  6 [USER]-tagged B3 + 6 [USER]-tagged B4 user decks added this session)
-- **Knowledge log iterations**: 0 real (1 from integration test, in
-  `integration_test_knowledge_log.sqlite`)
-- **Git**: untracked changes accumulating; user has not requested a commit yet
-
----
-
-## Pickup notes for next session
-
-If you're returning to this project cold:
-
-1. Read `PROJECT.md` for the source-of-truth spec.
-2. Read this file (`STATUS.md`) for current operational state.
-3. Read `BACKLOG.md` for the prioritized work queue.
-4. Read `HANDOFF_2026-04-26.md` for the most recent session's narrative.
-5. Run `python -m pytest tests/` (after pyproject.toml lands; until then
-   `cd C:\dev\commander_builder && python -m pytest tests/`).
-6. Run `python scripts/integration_test_b3.py` to confirm the Phase 2 stack
-   still hangs together end-to-end.
+- **Modules**: ~30 production
+- **Tests**: 674 / 674 across ~30 test files
+- **Test wall time**: ~25s offline
+- **CLI entry points**: 14
+- **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache
+  (`MTG_CARDS_DIR` env var override available); ~32k per-card snapshots
+  + 180 MB bulk dump.
+- **Imported decks on disk**: B3=99, B4=115, B5=56 (approx, includes
+  [USER]-tagged decks).
+- **Knowledge log iterations**: few rows; mix of integration tests +
+  recent real saves.
 
 ---
 
 ## How to update this file
 
-- Move items between *Now* / *Recent* / *Blocked* as state changes.
-- *Now* should always have ≤ 3 active items. If more, prune to the truly active
-  ones.
-- *Recent* is rolling — keep ~7 days, prune older into a date-stamped archive
-  (`docs/status_archive/2026-04.md`) when the section gets unwieldy.
-- *Blocked* is for things waiting on external events: API access, decisions
-  from the user, sample-size accumulation. If nothing is blocked, the section
-  should literally say so.
-
-Don't make this file a duplicate of `BACKLOG.md`. Backlog is the queue;
-status is the snapshot.
+- Tree state at the top stays current — bump the test count and the
+  commit list whenever new work lands.
+- Open backlog is the queue. Items move out when shipped (entry added
+  to CHANGELOG) or when reclassified as parked.
+- Parked plans are the long-tail. Items move out only when an unblock
+  condition fires.
+- Don't duplicate CHANGELOG content here — link out, don't restate.
