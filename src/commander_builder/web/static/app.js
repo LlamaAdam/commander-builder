@@ -69,8 +69,26 @@ async function loadHealth() {
   try {
     const h = await fetchJSON("/api/health");
     let txt = `${h.status} · ${h.deck_count} decks`;
+    // Append Forge jar version + age. Best-effort — never block the
+    // health badge if the version probe fails.
+    let forgeIsStale = false;
+    try {
+      const fv = await fetchJSON("/api/forge_version");
+      if (fv && fv.version) {
+        const age = (fv.age_days != null)
+          ? `${fv.age_days}d`
+          : "age unknown";
+        txt += ` · Forge ${fv.version} (${age})`;
+        if (fv.is_stale) {
+          txt += " ⚠";
+          forgeIsStale = true;
+        }
+      } else if (fv) {
+        txt += ` · no Forge jar found ⚠`;
+        forgeIsStale = true;
+      }
+    } catch (_e) { /* ignore */ }
     // Append correlation summary if the harness has produced rows.
-    // Best-effort — never block the health badge on this.
     try {
       const c = await fetchJSON("/api/correlation_summary");
       if (c && c.rows > 0) {
@@ -79,7 +97,12 @@ async function loadHealth() {
         txt += ` · correlation: collecting`;
       }
     } catch (_e) { /* ignore */ }
-    $("health-badge").textContent = txt;
+    const badge = $("health-badge");
+    badge.textContent = txt;
+    badge.title = forgeIsStale
+      ? "Forge install is stale — consider updating from "
+        + "github.com/Card-Forge/forge/releases"
+      : "";
   } catch (e) {
     $("health-badge").textContent = "API unreachable";
   }
