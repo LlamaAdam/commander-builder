@@ -601,6 +601,43 @@ def test_essential_manabase_includes_utility_fixers_for_three_color():
     assert "Mana Confluence" in out
 
 
+def test_essential_manabase_budget_mode_excludes_abu_duals():
+    """Budget mode strips the $200+ ABU duals (Bayou, etc.) — for users
+    who explicitly opted out of the most expensive cards. Shock lands,
+    bond lands, and utility fixers (all $30-and-under) stay."""
+    from commander_builder.staples import essential_manabase_for_colors
+    out = essential_manabase_for_colors({"W", "U", "B", "R", "G"}, budget=True)
+    # ABU duals stripped.
+    assert "Bayou" not in out
+    assert "Savannah" not in out
+    assert "Volcanic Island" not in out
+    # Shocks stay (Ravnica duals are affordable).
+    assert "Stomping Ground" in out
+    # Bond lands stay.
+    assert "Bountiful Promenade" in out
+
+
+def test_essential_manabase_budget_mode_excludes_fetches():
+    """Onslaught + Zendikar fetches are also $25-60 each; budget mode
+    drops them too. Shock-only manabase is the realistic budget path."""
+    from commander_builder.staples import essential_manabase_for_colors
+    out = essential_manabase_for_colors({"W", "G"}, budget=True)
+    assert "Windswept Heath" not in out
+
+
+def test_essential_manabase_default_mode_unchanged():
+    """budget=False (default) keeps all four tiers as before — the
+    new flag is strictly additive."""
+    from commander_builder.staples import essential_manabase_for_colors
+    out_default = essential_manabase_for_colors({"W", "U", "B", "R", "G"})
+    out_explicit_false = essential_manabase_for_colors(
+        {"W", "U", "B", "R", "G"}, budget=False,
+    )
+    assert out_default == out_explicit_false
+    assert "Bayou" in out_default
+    assert "Windswept Heath" in out_default
+
+
 def test_essential_manabase_excludes_utility_fixers_for_two_color():
     """2-color WG (Selesnya) wants dual + fetch + shock + bond, but
     NOT City of Brass (pain-fixer earns less than a Temple Garden)."""

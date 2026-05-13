@@ -384,6 +384,7 @@ def _missing_manabase_recommendations(
     deck_cards,
     color_identity,
     tribe: Optional[str] = None,
+    budget: bool = False,
 ) -> list[SwapRecommendation]:
     """Curated manabase-essentials safety net.
 
@@ -411,7 +412,7 @@ def _missing_manabase_recommendations(
     ``manabase_essentials`` for color-gated, ``tribal_essentials``
     for the tribe-utility set.
     """
-    essentials = essential_manabase_for_colors(color_identity)
+    essentials = essential_manabase_for_colors(color_identity, budget=budget)
     tribal = tribal_essential_lands(tribe)
     if not essentials and not tribal:
         return []
@@ -1053,6 +1054,7 @@ def advise(
     deck_dir: Path = DECK_DIR,
     match_dir: Path = MATCH_DIR,
     claude_model: str = DEFAULT_CLAUDE_MODEL,
+    budget: bool = False,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck.
 
@@ -1238,7 +1240,7 @@ def advise(
                 commander_card.get("type_line", "") or "",
             )
             manabase_recs = _missing_manabase_recommendations(
-                main_cards, ci_set, tribe=tribe,
+                main_cards, ci_set, tribe=tribe, budget=budget,
             )
             # Prepend rather than append so manabase upgrades surface
             # at the top of the rec list — they're foundational, not

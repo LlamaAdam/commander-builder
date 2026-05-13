@@ -186,7 +186,9 @@ def utility_fixing_lands(color_identity) -> list[str]:
     return list(UTILITY_FIXING_LANDS)
 
 
-def essential_manabase_for_colors(color_identity) -> list[str]:
+def essential_manabase_for_colors(
+    color_identity, budget: bool = False,
+) -> list[str]:
     """Return canonical card names for the manabase essentials whose
     color identity is fully contained in ``color_identity``.
 
@@ -197,20 +199,34 @@ def essential_manabase_for_colors(color_identity) -> list[str]:
     inside the deck's identity — a mono-red deck won't see Stomping
     Ground (RG) because the G slot is wasted.
 
+    ``budget=True`` strips the $200+ ABU duals AND the $25-60 fetch
+    lands — leaving shock lands ($10-30), bond lands ($5-20), and
+    utility fixers ($5-30) as the realistic budget manabase. Use
+    when the user opted out of the most expensive cards via the
+    audit panel's budget toggle.
+
     Empty identity (colorless commander) → empty list. The caller
     can still surface colorless utility lands (Cavern of Souls,
     Strip Mine, etc.) separately via tribal / utility helpers.
 
     Order: duals → fetches → shocks → bond lands → universal fixers
-    (when 3+ colors). Within each tier, alphabetical. Keeps the
-    recommendation surface predictable.
+    (when 3+ colors). Within each tier, alphabetical. Budget mode
+    skips the first two tiers but preserves order within the rest.
     """
     if not color_identity:
         return []
     identity = {c.upper() for c in color_identity if isinstance(c, str)}
 
+    tiers: tuple[dict[str, frozenset[str]], ...]
+    if budget:
+        # Drop ABU duals + fetches — the two expensive tiers. Shocks,
+        # bonds, and utility fixers stay.
+        tiers = (SHOCK_LANDS, BOND_LANDS)
+    else:
+        tiers = (ABU_DUAL_LANDS, FETCH_LANDS, SHOCK_LANDS, BOND_LANDS)
+
     out: list[str] = []
-    for source in (ABU_DUAL_LANDS, FETCH_LANDS, SHOCK_LANDS, BOND_LANDS):
+    for source in tiers:
         tier = sorted(
             (name for name, colors in source.items() if colors <= identity),
             key=str.lower,
@@ -220,7 +236,9 @@ def essential_manabase_for_colors(color_identity) -> list[str]:
         # Cards in the static map use simple word casing.
         out.extend(_titlecase_card_name(name) for name in tier)
     # Universal fixers — only for 3+ color decks (see
-    # utility_fixing_lands docstring for the rationale).
+    # utility_fixing_lands docstring for the rationale). City of
+    # Brass / Mana Confluence are $10-30, well under the budget
+    # threshold, so we include them in both modes.
     out.extend(utility_fixing_lands(identity))
     return out
 

@@ -435,6 +435,10 @@ def create_app(
             requested = llm
         use_claude = requested == "claude"
         byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
+        # Budget mode skips ABU duals + fetches from the manabase
+        # essentials safety net. Truthy query values: 1, true, yes.
+        budget_raw = (request.args.get("budget") or "").strip().lower()
+        budget = budget_raw in ("1", "true", "yes")
         # Optional model override. Accepts any string the SDK accepts;
         # defaults to whatever DEFAULT_CLAUDE_MODEL is set to in
         # improvement_advisor (Sonnet today). Most-cost-effective
@@ -452,6 +456,7 @@ def create_app(
                     source=requested,
                     use_claude=use_claude,
                     claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
+                    budget=budget,
                 )
             finally:
                 # Always restore env, even on raise — the BYO key must

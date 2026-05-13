@@ -2439,6 +2439,40 @@ def test_audit_payload_bracket_peer_ref_count_defaults_zero(client, monkeypatch)
     assert resp.get_json()["bracket_peer_ref_count"] == 0
 
 
+def test_audit_endpoint_threads_budget_param_to_advise(client, monkeypatch):
+    """?budget=1 should reach advise() as budget=True so the manabase
+    safety net switches to the cheaper land set."""
+    from types import SimpleNamespace
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["budget"] = kwargs.get("budget")
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="A", action="add", reason="",
+                                evidence={}, name_known=True),
+                SimpleNamespace(card="B", action="cut", reason="",
+                                evidence={}, name_known=True),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # Default: budget not set → False.
+    client.get("/api/audit?deck=Alpha&bracket=3")
+    assert seen["budget"] is False
+    # Explicit truthy values.
+    for v in ("1", "true", "yes"):
+        client.get(f"/api/audit?deck=Alpha&bracket=3&budget={v}")
+        assert seen["budget"] is True, f"budget={v} should set True"
+    # Explicit falsy / unrecognized → False.
+    for v in ("0", "false", "no", "maybe"):
+        client.get(f"/api/audit?deck=Alpha&bracket=3&budget={v}")
+        assert seen["budget"] is False, f"budget={v} should set False"
+
+
 def test_audit_payload_match_pct_zero_for_signal_less_evidence(client, monkeypatch):
     """Regression: Claude recs only carry evidence={"source": "claude"}
     — no EDHREC inclusion/synergy AND no peer references frequency.

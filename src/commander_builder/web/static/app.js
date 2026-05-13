@@ -572,6 +572,16 @@ let _lastDashboardPriceUsd = null;
 const _LLM_PREF_KEY = "cb.audit.llm";
 const _ANTHROPIC_KEY = "cb.audit.anthropic_key";
 const _CLAUDE_MODEL_KEY = "cb.audit.claude_model";
+const _BUDGET_KEY = "cb.audit.budget";
+
+function getBudgetPref() {
+  try { return localStorage.getItem(_BUDGET_KEY) === "1"; }
+  catch (_e) { return false; }
+}
+function setBudgetPref(v) {
+  try { localStorage.setItem(_BUDGET_KEY, v ? "1" : "0"); }
+  catch (_e) { /* ignore */ }
+}
 
 const _AUDIT_SOURCE_OPTIONS = [
   {
@@ -696,6 +706,9 @@ async function loadAdvise() {
     if (sourceFinal === "claude") {
       url += `&model=${encodeURIComponent(getClaudeModel())}`;
     }
+    if (getBudgetPref()) {
+      url += `&budget=1`;
+    }
     const headers = {};
     if (keyFinal) headers["X-Anthropic-API-Key"] = keyFinal;
     const resp = await fetch(url, { headers });
@@ -799,6 +812,23 @@ function renderAuditBackendRow(body) {
     setClaudeModel(modelSelect.value);
   });
   row.appendChild(modelSelect);
+
+  // Budget toggle — skips ABU duals + fetches from the manabase
+  // safety net for users who explicitly opted out of $200+ cards.
+  // Shocks + bond lands + utility fixers still surface.
+  const budgetLabel = el("label",
+    { style: "font-size: 12px; display: flex; gap: 4px; "
+           + "align-items: center;",
+      title: "Skip $200+ ABU duals + $25-60 fetch lands. "
+           + "Shocks, bond lands, and utility fixers still recommended." });
+  const budgetBox = el("input", { type: "checkbox" });
+  budgetBox.checked = getBudgetPref();
+  budgetBox.addEventListener("change", () => {
+    setBudgetPref(budgetBox.checked);
+  });
+  budgetLabel.appendChild(budgetBox);
+  budgetLabel.appendChild(document.createTextNode(" Budget mode"));
+  row.appendChild(budgetLabel);
 
   // Manage-key button — clears stored key or prompts for a new one.
   const keyBtn = el("button",
