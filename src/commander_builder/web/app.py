@@ -423,15 +423,29 @@ def create_app(
                 "rationale": rec.reason or "",
                 "match_pct": _match_pct_from_evidence(rec.evidence),
                 "price_usd": (rec.evidence or {}).get("price_usd"),
+                # name_known: True/False/None. Default True for legacy
+                # stubs/recs that predate the validator.
+                "name_known": getattr(rec, "name_known", True),
             }
             for rec in report.recommendations
             if rec.action == "add" and rec.card.lower() in applied_add_set
         ]
         removed_payload = [
-            {"card": rec.card, "rationale": rec.reason or ""}
+            {
+                "card": rec.card,
+                "rationale": rec.reason or "",
+                "name_known": getattr(rec, "name_known", True),
+            }
             for rec in report.recommendations
             if rec.action == "cut" and rec.card.lower() in applied_cut_set
         ]
+        # Hallucination flag: only count cards Scryfall *confirmed* are
+        # fake (False). Skip None (validator couldn't reach Scryfall)
+        # so a network blip never spuriously raises the count.
+        unknown_card_count = sum(
+            1 for entry in added_payload + removed_payload
+            if entry["name_known"] is False
+        )
         actual_source = getattr(report, "source", "heuristic")
         fallback_reason = getattr(report, "fallback_reason", None)
         warning = None
@@ -473,6 +487,9 @@ def create_app(
             # basic lands to bring a sub-100 source deck up to legal size.
             "basics_padded": padded_count,
             "basics_padded_breakdown": padded_breakdown,
+            # Hallucination defense — non-zero on Claude analyst path
+            # when the LLM invented a card name Scryfall doesn't recognize.
+            "unknown_card_count": unknown_card_count,
         })
 
     @app.route("/api/advise")

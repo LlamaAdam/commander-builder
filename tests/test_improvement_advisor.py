@@ -11,6 +11,7 @@ from commander_builder.improvement_advisor import (
     SwapRecommendation,
     _aggregate_match_history,
     _heuristic_swap_recommendations,
+    _validate_card_names,
     advise,
 )
 
@@ -514,3 +515,150 @@ def test_advise_uses_claude_when_wired(tmp_path, monkeypatch):
     assert "Old" in cards
     # Rationale propagates to the diagnosis pattern_summary.
     assert "test rationale" in report.diagnosis.pattern_summary
+
+
+# --- _validate_card_names — hallucination defense for Claude analyst -------
+
+def test_validate_marks_known_cards_true(monkeypatch):
+    """Scryfall returns a card dict → name_known is True."""
+    recs = [
+        SwapRecommendation(card="Sol Ring", action="add", reason=""),
+        SwapRecommendation(card="Cultivate", action="cut", reason=""),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name, "type_line": "Artifact"},
+    )
+    _validate_card_names(recs)
+    assert all(r.name_known is True for r in recs)
+
+
+def test_validate_marks_unknown_cards_false(monkeypatch):
+    """Scryfall returns None (404) → name_known is False — hallucinated."""
+    recs = [
+        SwapRecommendation(card="Accursed Marauder", action="add", reason=""),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: None,
+    )
+    _validate_card_names(recs)
+    assert recs[0].name_known is False
+
+
+def test_validate_leaves_name_known_none_on_lookup_exception(monkeypatch):
+    """Network failure / cache corruption → leave name_known as None.
+
+    None means 'we couldn't check'; we never want to flag a legitimate
+    card as hallucinated because Scryfall happened to be down.
+    """
+    recs = [SwapRecommendation(card="Sol Ring", action="add", reason="")]
+    def boom(name):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", boom,
+    )
+    _validate_card_names(recs)
+    assert recs[0].name_known is None
+
+
+def test_validate_handles_empty_list(monkeypatch):
+    """No-op on empty list; should not call lookup_card."""
+    calls = []
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: calls.append(name) or {"name": name},
+    )
+    _validate_card_names([])
+    assert calls == []
+
+
+def test_validate_mixed_known_and_unknown(monkeypatch):
+    """Each rec gets independently flagged."""
+    recs = [
+        SwapRecommendation(card="Sol Ring", action="add", reason=""),
+        SwapRecommendation(card="Fake Card", action="add", reason=""),
+        SwapRecommendation(card="Cultivate", action="cut", reason=""),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name} if name != "Fake Card" else None,
+    )
+    _validate_card_names(recs)
+    assert recs[0].name_known is True
+    assert recs[1].name_known is False
+    assert recs[2].name_known is True
+
+
+def test_advise_populates_name_known_on_recommendations(tmp_path, monkeypatch):
+    """End-to-end: advise() runs the validator so every rec carries a flag."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring", "Old"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            top=[("Coat of Arms", 60.0)], synergy=[],
+        ),
+    )
+    # Pretend Scryfall knows "Coat of Arms" and "Old" but not anything else.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name} if name in {"Coat of Arms", "Old"} else None,
+    )
+
+    report = advise(deck, bracket=3, deck_dir=deck_dir, match_dir=deck_dir)
+    # Every rec has name_known set (not None).
+    assert all(r.name_known is not None for r in report.recommendations), (
+        "validator should have populated name_known on every rec"
+    )
+
+
+def test_advise_flags_hallucinated_claude_card(tmp_path, monkeypatch):
+    """When Claude invents a non-existent card, name_known=False on that rec
+    while real cards remain True."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(deck_dir, "[USER] X [B3].dck",
+                     commanders=["Hakbal"], main=["Sol Ring"])
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+
+    fake_response_json = json.dumps({
+        "rationale": "test",
+        "added": ["Sol Ring", "Accursed Marauder"],  # second one is fake
+        "removed": [],
+    })
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _Msg(fake_response_json)
+            return M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name} if name != "Accursed Marauder" else None,
+    )
+
+    report = advise(deck, bracket=3, use_claude=True,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    by_card = {r.card: r.name_known for r in report.recommendations}
+    assert by_card.get("Sol Ring") is True
+    assert by_card.get("Accursed Marauder") is False

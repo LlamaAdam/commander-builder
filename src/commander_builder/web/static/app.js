@@ -736,6 +736,18 @@ function renderAuditResult(container, body) {
   );
   container.appendChild(headline);
 
+  // Hallucination summary — non-zero when the Claude analyst invented
+  // card names that Scryfall doesn't recognize. Individual rows below
+  // get a ⚠ pill; this gives an at-a-glance count.
+  if (body.unknown_card_count && body.unknown_card_count > 0) {
+    container.appendChild(el(
+      "p", { class: "pill bad", style: "display: inline-block;" },
+      `⚠ ${body.unknown_card_count} card name`
+      + (body.unknown_card_count === 1 ? "" : "s")
+      + ` not in Scryfall — likely Claude hallucination`,
+    ));
+  }
+
   // Sub-100 padding warning. When the source deck was short of legal
   // size, we top up with basic lands mirroring its color distribution
   // so Forge will load it. Tell the user that synthetic basics landed.
@@ -846,7 +858,22 @@ function renderAuditResult(container, body) {
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: "verdict pending" }, `${a.match_pct}%`));
       const wrap = el("div");
-      wrap.appendChild(el("div", { class: "name" }, a.card));
+      const nameDiv = el("div", { class: "name" }, a.card);
+      // Per-card hallucination flag — pill renders only on confirmed
+      // Scryfall miss (name_known === false). null/undefined means
+      // unchecked, do not flag.
+      if (a.name_known === false) {
+        nameDiv.appendChild(el(
+          "span",
+          {
+            class: "pill bad",
+            style: "margin-left: 6px; font-size: 11px;",
+            title: "Not found in Scryfall — likely a hallucinated card name",
+          },
+          "⚠ not in Scryfall",
+        ));
+      }
+      wrap.appendChild(nameDiv);
       if (a.rationale) {
         wrap.appendChild(el("div", { class: "muted" }, a.rationale));
       }
@@ -870,7 +897,19 @@ function renderAuditResult(container, body) {
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: "verdict reverted" }, "cut"));
       const wrap = el("div");
-      wrap.appendChild(el("div", { class: "name" }, r.card));
+      const nameDiv = el("div", { class: "name" }, r.card);
+      if (r.name_known === false) {
+        nameDiv.appendChild(el(
+          "span",
+          {
+            class: "pill bad",
+            style: "margin-left: 6px; font-size: 11px;",
+            title: "Not found in Scryfall — likely a hallucinated card name",
+          },
+          "⚠ not in Scryfall",
+        ));
+      }
+      wrap.appendChild(nameDiv);
       if (r.rationale) {
         wrap.appendChild(el("div", { class: "muted" }, r.rationale));
       }

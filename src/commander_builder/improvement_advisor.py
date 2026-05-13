@@ -102,6 +102,12 @@ class SwapRecommendation:
     action: str                       # "add" | "cut"
     reason: str
     evidence: dict = field(default_factory=dict)  # inclusion%, synergy%, etc.
+    # Hallucination flag for the Claude analyst path: True when the card
+    # name resolves in Scryfall, False when Scryfall returns 404
+    # (Claude invented it), None when validation was skipped or the
+    # lookup raised (network out, cache corruption — don't accuse a
+    # real card of being fake just because Scryfall is down).
+    name_known: Optional[bool] = None
 
 
 @dataclass
@@ -306,6 +312,36 @@ def _signals_to_priority_roles(signals: list[str]) -> list[str]:
                         out.append(r)
                 break
     return out[:4]
+
+
+def _validate_card_names(recs: list[SwapRecommendation]) -> None:
+    """Mutate each rec's ``name_known`` flag based on Scryfall lookup.
+
+    Defense against Claude analyst hallucinations: when the LLM invents a
+    plausible-sounding card name (e.g. "Accursed Marauder"), the audit
+    pipeline would otherwise pass it down to Forge, which then rejects
+    the deck silently. Cross-checking against the Scryfall cache catches
+    it early so the UI can mark the recommendation with a warning pill.
+
+    Three terminal states for each rec:
+
+    - ``True``  — Scryfall returned a card dict; the name is real.
+    - ``False`` — Scryfall returned ``None`` (HTTP 404); the name is fake.
+    - ``None``  — lookup raised (network, cache corruption); we couldn't
+      check. **Never** flag a legitimate card as fake on transient
+      failure.
+
+    Heuristic recs come from EDHREC and should always resolve; running
+    them through the validator is cheap (cache hit) and uniform so
+    callers don't need to special-case the source.
+    """
+    for rec in recs:
+        try:
+            card = lookup_card(rec.card)
+        except Exception:
+            rec.name_known = None
+            continue
+        rec.name_known = card is not None
 
 
 def _role_for_card(card_name: str) -> str:
@@ -624,6 +660,12 @@ def advise(
             deck_id = m.group(1).strip()
     except OSError:
         pass
+
+    # Validate every recommended card name against Scryfall. Catches
+    # Claude hallucinations before Forge silently rejects the deck.
+    # Heuristic recs come from EDHREC and should all resolve; cache hits
+    # make this near-free.
+    _validate_card_names(recs)
 
     report = AdviceReport(
         deck_filename=deck_path.name,
