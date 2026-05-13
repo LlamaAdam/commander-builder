@@ -92,30 +92,13 @@ predictor) still data-gated.
    ≥`SATURATION_THRESHOLD` (8?), skip the add. ~1 h. *Source:
    2026-05-13 Ur-Dragon swap loss analysis.*
 
-8. **Advisor: bracket-peers reference mode.** EDHREC's commander
-   page averages across all brackets (precons + B2 casual + B5
-   cEDH), which is why the Ur-Dragon audit recommended generic ramp
-   over deck-specific tools (Moat in a flying-tribal deck, Last
-   March of the Ents as the deck's card draw). New source mode that
-   pulls the top-5 highest-liked decks for the same commander **at
-   the same bracket** and recommends cards appearing in
-   majority-of-references that are missing from the user's deck.
-   Reuses existing infrastructure:
-   - `moxfield_import.find_top_liked_deck_for_commander(name,
-     bracket=N)` (exists, returns 1 — need top-N variant)
-   - `meta_test` set-arithmetic (`must_add` / `consider` /
-     `off_meta`) + frequency labels (exists)
-   - Skip the head-to-head sim path in `meta_test` for this mode
-     (we want cardlist diff only, not Forge verdict)
-
-   Estimate: ~2 h total — 30 min for the multi-deck Moxfield
-   fetcher, 30 min to bypass the sim in the meta_test path, 1 h to
-   wire as a new `advise(source="bracket_peers")` path + UI toggle.
-   *Source: 2026-05-13 Ur-Dragon swap loss analysis. Likely a
-   bigger quality win than the redundancy guard — the recommended
-   cards will be archetype-appropriate by construction because
-   they're sourced from other tuned builds of the same commander at
-   the same bracket.*
+8. ~~**Advisor: bracket-peers reference mode.**~~ ✅ Shipped in
+   commit `34dcfdb`. New `advise(source="bracket_peers")` path +
+   `/api/audit?source=bracket_peers` + UI 3-way selector. Pulls
+   top-5 highest-liked Moxfield decks for the same commander at
+   the same bracket and frequency-ranks the diff against the
+   user's deck. Falls back to EDHREC heuristic with
+   `fallback_reason` set when no references found. 20 new tests.
 
 ### Tier 2 — Bigger but tractable
 
