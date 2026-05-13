@@ -133,6 +133,12 @@ function highlight(li) {
 }
 
 let _activeDeckId = null;
+// AbortController for the currently in-flight audit stream. Reset on
+// every loadAdvise() call so switching decks / re-running the audit
+// cancels the previous Claude call instead of letting the stream
+// keep running in the background (consuming SSE bandwidth and, more
+// importantly, an Anthropic API charge for the user's BYO key).
+let _auditAbortController = null;
 
 async function selectDeck(deckId, li, opts) {
   // ``opts.soft`` (default false) skips the blanking step: keeps the
@@ -141,6 +147,16 @@ async function selectDeck(deckId, li, opts) {
   // through 5+ seconds of "Loading…" while Scryfall resolves any
   // newly-added cards.
   const soft = opts && opts.soft;
+  // Cancel any in-flight audit stream for the previous deck. We do
+  // this BEFORE updating ``_activeDeckId`` so the audit's own
+  // mid-stream "did the deck change?" check still sees the old id
+  // when the abort fires. Soft refresh (re-select the same deck)
+  // doesn't need to cancel — the stream's deck-id pin keeps it
+  // pointed at the right panel.
+  if (!soft && _activeDeckId !== deckId && _auditAbortController) {
+    try { _auditAbortController.abort(); } catch (_e) { /* ignore */ }
+    _auditAbortController = null;
+  }
   _activeDeckId = deckId;
   highlight(li);
   const dash = $("dashboard");
@@ -742,6 +758,19 @@ async function loadAdvise() {
   // Use the filename's [B?] suffix as the audit bracket.
   const bm = (_activeDeckId || "").match(/\[B(\d)\]/);
   const auditBracket = bm ? parseInt(bm[1], 10) : 3;
+  // Cancel any previous in-flight audit stream. Without this, a
+  // user who re-runs the audit (or switches decks) leaves the
+  // previous Claude call running on the server — wasting tokens
+  // and racing the new request's render.
+  if (_auditAbortController) {
+    try { _auditAbortController.abort(); } catch (_e) { /* ignore */ }
+  }
+  _auditAbortController = new AbortController();
+  const auditSignal = _auditAbortController.signal;
+  // Pin the deck this audit was kicked off for. If the user switches
+  // decks mid-stream, the late ``complete`` event for the previous
+  // deck shouldn't clobber the current panel.
+  const auditDeckId = _activeDeckId;
   try {
     // Stream phases from /api/audit/stream so the user sees
     // intermediate progress (diagnosis → manabase → primary →
@@ -750,7 +779,7 @@ async function loadAdvise() {
     // payload shape as the legacy /api/audit, so renderAuditResult
     // works unchanged once the final event arrives.
     let url =
-      `/api/audit/stream?deck=${encodeURIComponent(_activeDeckId)}`
+      `/api/audit/stream?deck=${encodeURIComponent(auditDeckId)}`
       + `&bracket=${auditBracket}`
       + `&source=${encodeURIComponent(sourceFinal)}`;
     if (sourceFinal === "claude") {
@@ -766,10 +795,16 @@ async function loadAdvise() {
     // manual SSE reader. ``streamAuditEvents`` returns an async
     // iterator of ``{event, data}`` pairs.
     const completeBody = await streamAuditEvents(url, headers, {
+      signal: auditSignal,
       onDiagnosis: (d) => updateAuditProgress(sug, "diagnosis", d, sourceFinal),
       onManabase: (m) => updateAuditProgress(sug, "manabase", m, sourceFinal),
       onPrimary: (p) => updateAuditProgress(sug, "primary", p, sourceFinal),
     });
+    // If the user switched decks while we were streaming, the
+    // current ``_activeDeckId`` differs from what we kicked off
+    // with — drop the result silently rather than clobbering the
+    // now-correct panel.
+    if (_activeDeckId !== auditDeckId) return;
     _lastAuditProposed = completeBody.proposed_text || null;
     _lastAuditManifest = {
       deck_id: _activeDeckId,
@@ -792,6 +827,11 @@ async function loadAdvise() {
     };
     renderAuditResult(sug, completeBody);
   } catch (e) {
+    // AbortError = user switched decks or re-ran the audit; the
+    // previous stream's failure isn't an actual error worth
+    // showing. The replacement audit (or a different panel) has
+    // already taken over the DOM.
+    if (e && e.name === "AbortError") return;
     sug.innerHTML = "";
     sug.appendChild(el("h3", {}, "Audit"));
     sug.appendChild(el("p", { class: "muted" }, `Audit failed: ${e.message}`));
@@ -807,8 +847,28 @@ async function loadAdvise() {
 // needs ``X-Anthropic-API-Key``. So we parse SSE manually from the
 // fetch response body. Buffering note: most browsers expose ReadableStream
 // over the response body; we decode chunks as they arrive.
+//
+// ``callbacks.signal`` (optional) is an ``AbortSignal``; when it
+// fires (because the user switched decks or re-triggered the
+// audit), this function rejects with a sentinel ``"aborted"``
+// error so the caller can silently drop the result instead of
+// rendering a toast. We pass the signal to ``fetch`` so the
+// underlying connection is closed too — important when the
+// Claude path is the slow phase and the user shouldn't be billed
+// for a stream they no longer want.
 async function streamAuditEvents(url, headers, callbacks) {
-  const resp = await fetch(url, { headers });
+  const signal = callbacks.signal;
+  let resp;
+  try {
+    resp = await fetch(url, { headers, signal });
+  } catch (e) {
+    if (e && (e.name === "AbortError" || signal?.aborted)) {
+      const err = new Error("aborted");
+      err.name = "AbortError";
+      throw err;
+    }
+    throw e;
+  }
   if (!resp.ok) {
     // Input-validation errors (404 deck-not-found, 400 bad source)
     // return plain JSON, not SSE. Surface the server's error
@@ -825,7 +885,18 @@ async function streamAuditEvents(url, headers, callbacks) {
   let buffer = "";
   let completeData = null;
   while (true) {
-    const { value, done } = await reader.read();
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (e) {
+      if (e && (e.name === "AbortError" || signal?.aborted)) {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      throw e;
+    }
+    const { value, done } = chunk;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     // SSE frames are separated by a blank line (\n\n). Parse and
@@ -884,6 +955,15 @@ function _parseSseFrame(frame) {
 // a live progress line so the user can tell what's happening
 // during the 6-8s Claude call instead of staring at a static
 // "Generating…" message.
+//
+// In addition to the status line, the manabase phase renders a
+// preview list of the curated essentials (Sacred Foundry, Cavern
+// of Souls, etc.) immediately — these don't depend on the slow
+// primary source and the user benefits from seeing them right
+// away rather than waiting 6-8s for the Claude path to finish.
+// ``renderAuditResult`` rebuilds the panel with innerHTML="" once
+// the complete event arrives, so the preview gets replaced
+// cleanly without leaving stale DOM.
 function updateAuditProgress(sug, phase, data, sourceFinal) {
   // Find or create the dedicated progress paragraph. We replace
   // its text per phase rather than appending so the panel doesn't
@@ -907,6 +987,7 @@ function updateAuditProgress(sug, phase, data, sourceFinal) {
           sourceFinal === "bracket_peers" ? "bracket-peer references"
           : "EDHREC heuristic"
         }…`;
+      renderManabasePreview(sug, data.recommendations);
     } else {
       prog.textContent =
         `Manabase looks complete${tribe}. Now fetching ${
@@ -925,6 +1006,63 @@ function updateAuditProgress(sug, phase, data, sourceFinal) {
       `Source returned ${n} candidate${n === 1 ? "" : "s"} from ${eff}${
         fallback}. Finalizing…`;
   }
+}
+
+// Render an early-preview sublist of the manabase essentials the
+// stream's ``manabase`` event ships. Each rec carries
+// ``evidence.source`` ("manabase_essentials" or "tribal_essentials")
+// — we surface that via ``_perCardSourceBadge`` so the row's
+// verdict cell is the same "Manabase" / "Tribal" badge the final
+// render uses. This visual continuity is intentional: the user
+// shouldn't see the preview pills change shape when the complete
+// event lands.
+//
+// Idempotent: re-rendering replaces any existing preview rather
+// than appending. The streaming layer only fires the manabase
+// event once per audit, but this guards against duplicate
+// emissions in test/mock scenarios.
+function renderManabasePreview(sug, recs) {
+  const existing = sug.querySelector(".audit-manabase-preview");
+  if (existing) existing.remove();
+  if (!recs || !recs.length) return;
+  const wrap = el("div", { class: "audit-manabase-preview" });
+  wrap.appendChild(el(
+    "h4",
+    { style: "margin-top: 12px;" },
+    `Manabase essentials (${recs.length} preview)`,
+  ));
+  // Tooltip explaining why these appear before the rest — keeps
+  // the streaming behavior discoverable to first-time users.
+  const note = el(
+    "p", { class: "muted", style: "font-size: 12px; margin: 0 0 6px;" },
+    "Curated color-fixing essentials — surfaced early; "
+    + "rest of audit loading…",
+  );
+  wrap.appendChild(note);
+  const ul = el("ul", { class: "iteration-list" });
+  // Filter to adds only; the manabase phase never emits cuts but
+  // be defensive in case the contract changes.
+  for (const a of recs.filter((r) => r.action === "add")) {
+    const row = el("li", { class: "iteration" });
+    const source = (a.evidence || {}).source || null;
+    const badge = _perCardSourceBadge(source);
+    if (badge) {
+      const badgeEl = el("span", { class: badge.cls }, badge.text);
+      if (badge.title) badgeEl.title = badge.title;
+      row.appendChild(badgeEl);
+    } else {
+      row.appendChild(el("span", { class: "verdict pending" }, "—"));
+    }
+    const wrap2 = el("div");
+    wrap2.appendChild(el("div", { class: "name" }, a.card));
+    if (a.reason) {
+      wrap2.appendChild(el("div", { class: "muted" }, a.reason));
+    }
+    row.appendChild(wrap2);
+    ul.appendChild(row);
+  }
+  wrap.appendChild(ul);
+  sug.appendChild(wrap);
 }
 
 function renderAuditBackendRow(body) {
