@@ -55,18 +55,11 @@ predictor) still data-gated.
 
 ### Tier 1 — Worth doing soon
 
-1. **Wire `/api/forge_version` into the topbar badge.** Endpoint
-   exists ([web/app.py](src/commander_builder/web/app.py)) but
-   `loadHealth()` in [app.js](src/commander_builder/web/static/app.js)
-   only chains `/api/correlation_summary`. User has to curl to see the
-   version. ~15 min. *Source: self-audit of forge-version commit.*
+1. ~~**Wire `/api/forge_version` into the topbar badge.**~~ ✅ Shipped
+   in commit `1ac9d53`.
 
-2. **Fix multi-jar selection bug in `detect_forge_version`.**
-   [forge_runner.py](src/commander_builder/forge_runner.py) does
-   `sorted(glob(...))[0]` — lexicographic sort picks the older jar
-   when both `2.0.10` and `2.0.12` are present (`"0" < "2"` at the
-   relevant position). Sort by parsed version or mtime instead. ~15
-   min. *Source: self-audit.*
+2. ~~**Fix multi-jar selection bug in `detect_forge_version`.**~~ ✅
+   Shipped in commit `23fc108` (parsed-version sort).
 
 3. **Pricing chart / query endpoint.** Pricing snapshots now land in
    `audit_manifest.pricing` per iteration save, but there's no UI to
@@ -75,8 +68,8 @@ predictor) still data-gated.
    inline sparkline on the deck dashboard. ~1 h. *Source: handoff #5
    self-audit — stated goal not yet met.*
 
-4. **Reject negative `total_price_usd`.** One-line fix in
-   `/api/save_iteration`. ~5 min. *Source: handoff #5 self-audit.*
+4. ~~**Reject negative `total_price_usd`.**~~ ✅ Shipped in commit
+   `43205d4`.
 
 5. **Auto-refresh dashboard when knowledge_log gains rows.** After a
    successful save_iteration, the iterations panel should update
@@ -87,6 +80,42 @@ predictor) still data-gated.
    iterations for a deck, show "kept verdict in 4/5 v3 swaps, kept in
    2/3 v4 swaps." Reads from `knowledge_log`. ~1–2 h. *Source:
    2026-05-06 handoff item #7.*
+
+7. **Advisor: archetype-aware redundancy guard.** Real failure mode
+   discovered on the Ur-Dragon B4 audit (2026-05-13): the heuristic
+   recommended 5 ramp/cost-reducer adds to a deck that already had
+   12+ ramp pieces and a built-in commander discount engine.
+   `improvement_advisor` should down-rank an add when the deck
+   already has ≥N cards in the same role bucket. Specifically: for
+   each `evidence.role`, count how many cards in `deck_cards`
+   resolve to the same role via `staples.classify_role`. If
+   ≥`SATURATION_THRESHOLD` (8?), skip the add. ~1 h. *Source:
+   2026-05-13 Ur-Dragon swap loss analysis.*
+
+8. **Advisor: bracket-peers reference mode.** EDHREC's commander
+   page averages across all brackets (precons + B2 casual + B5
+   cEDH), which is why the Ur-Dragon audit recommended generic ramp
+   over deck-specific tools (Moat in a flying-tribal deck, Last
+   March of the Ents as the deck's card draw). New source mode that
+   pulls the top-5 highest-liked decks for the same commander **at
+   the same bracket** and recommends cards appearing in
+   majority-of-references that are missing from the user's deck.
+   Reuses existing infrastructure:
+   - `moxfield_import.find_top_liked_deck_for_commander(name,
+     bracket=N)` (exists, returns 1 — need top-N variant)
+   - `meta_test` set-arithmetic (`must_add` / `consider` /
+     `off_meta`) + frequency labels (exists)
+   - Skip the head-to-head sim path in `meta_test` for this mode
+     (we want cardlist diff only, not Forge verdict)
+
+   Estimate: ~2 h total — 30 min for the multi-deck Moxfield
+   fetcher, 30 min to bypass the sim in the meta_test path, 1 h to
+   wire as a new `advise(source="bracket_peers")` path + UI toggle.
+   *Source: 2026-05-13 Ur-Dragon swap loss analysis. Likely a
+   bigger quality win than the redundancy guard — the recommended
+   cards will be archetype-appropriate by construction because
+   they're sourced from other tuned builds of the same commander at
+   the same bracket.*
 
 ### Tier 2 — Bigger but tractable
 
