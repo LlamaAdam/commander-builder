@@ -122,6 +122,47 @@ def _http_get_text(url: str) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
+# HTTP status codes that indicate a transient server-side problem and are
+# worth retrying. 429 is rate-limiting (back off harder). 4xx other than
+# 404 / 429 means the request itself is wrong — don't retry.
+_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _http_get_text_with_retry(
+    url: str,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> str:
+    """GET ``url`` with exponential backoff on transient failures.
+
+    Retries on 5xx HTTPError, 429 (rate-limited), and URLError (network /
+    DNS / timeout). 404 is deterministic — caller decides whether the
+    miss is fatal — and propagates without retrying. Other 4xx (400,
+    401, 403) are caller-bug class errors and also don't retry.
+
+    Backoff is ``base_delay * 2 ** attempt`` seconds between attempts,
+    so ``max_retries=3`` with ``base_delay=1.0`` yields sleeps of
+    1s, 2s, 4s between 4 total attempts. Raises the final exception
+    when retries are exhausted; callers downstream of ``fetch_*``
+    functions translate that into a graceful ``None`` return.
+    """
+    last_exc: Exception
+    for attempt in range(max_retries + 1):
+        try:
+            return _http_get_text(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in _RETRYABLE_HTTP_CODES:
+                raise
+            last_exc = exc
+        except urllib.error.URLError as exc:
+            last_exc = exc
+        except TimeoutError as exc:
+            last_exc = exc
+        if attempt < max_retries:
+            time.sleep(base_delay * (2 ** attempt))
+    raise last_exc
+
+
 def _extract_next_data(html: str) -> dict:
     """Pull the `__NEXT_DATA__` JSON out of an EDHREC HTML page. Raises
     ValueError if the blob isn't present (page changed shape, or we hit a
@@ -275,15 +316,16 @@ def fetch_commander_page(
     url = f"{EDHREC_BASE}/commanders/{urllib.parse.quote(slug)}"
     time.sleep(REQUEST_SLEEP_SEC)
     try:
-        html = _http_get_text(url)
+        html = _http_get_text_with_retry(url)
     except urllib.error.HTTPError as exc:
         # 404 happens when the slug doesn't match EDHREC's
         # canonical name (newly released commanders, edge-case
         # spellings). Return None instead of crashing the audit;
-        # the caller falls back to no-EDHREC heuristics.
+        # the caller falls back to no-EDHREC heuristics. Exhausted
+        # retries on 5xx land here too — same graceful fallback.
         if exc.code == 404:
             return None
-        raise
+        return None
     except Exception:
         return None
     page = _parse_commander_page(commander_or_slug, slug, html)
@@ -473,7 +515,7 @@ def fetch_average_deck(
 
     try:
         time.sleep(REQUEST_SLEEP_SEC)
-        html = _http_get_text(url)
+        html = _http_get_text_with_retry(url)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
