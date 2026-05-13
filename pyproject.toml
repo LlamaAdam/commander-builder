@@ -71,5 +71,11 @@ filterwarnings = [
     # when no real tempfile was used. These warnings are noise — the
     # synthetic errors are deliberately ephemeral, not leaked
     # response objects.
-    "ignore::ResourceWarning:tempfile",
+    #
+    # Narrow message regex: only suppress the specific
+    # "Implicitly cleaning up <HTTPError ...>" pattern. A real
+    # SpooledTemporaryFile / _TemporaryFileWrapper leak with a
+    # different repr would still surface. Keeps the safety-net
+    # intact without false-negatives on actual file leaks.
+    "ignore:Implicitly cleaning up <HTTPError:ResourceWarning:tempfile",
 ]
