@@ -63,3 +63,13 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 # pytest auto-discovers tests/conftest.py which puts src/ on sys.path even
 # without a `pip install -e .`, so the suite runs both ways.
+filterwarnings = [
+    # tests/test_edhrec_client.py constructs synthetic HTTPError
+    # instances (via _make_http_error) to exercise the retry-with-
+    # backoff helper. HTTPError inherits from http.client.HTTPResponse
+    # which schedules a tempfile-cleanup ResourceWarning on GC even
+    # when no real tempfile was used. These warnings are noise — the
+    # synthetic errors are deliberately ephemeral, not leaked
+    # response objects.
+    "ignore::ResourceWarning:tempfile",
+]

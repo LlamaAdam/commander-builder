@@ -396,11 +396,19 @@ def test_average_deck_to_moxfield_shape_routes_commander(tmp_path, monkeypatch):
 # --- _http_get_text_with_retry — backoff on transient failures ------------
 
 def _make_http_error(code: int):
-    """Construct a urllib HTTPError with a given status code."""
+    """Construct a urllib HTTPError with a given status code.
+
+    Pass an explicit empty BytesIO for ``fp`` so Python's HTTPError
+    doesn't allocate its own SpooledTemporaryFile under the hood —
+    that tempfile triggers a ResourceWarning at GC time when the
+    exception is raised + caught without being explicitly closed
+    (12 such warnings surfaced under -W default before this fix).
+    """
+    import io
     import urllib.error
     return urllib.error.HTTPError(
         url="https://edhrec.com/x", code=code, msg="boom",
-        hdrs=None, fp=None,
+        hdrs=None, fp=io.BytesIO(b""),
     )
 
 
@@ -593,7 +601,13 @@ def test_fetch_commander_page_returns_none_after_exhausted_retries(
 # --- Retry-After header handling + retry logging ---------------------------
 
 def _make_http_error_with_headers(code: int, headers: dict):
-    """HTTPError with a real headers dict (email.message-like .get())."""
+    """HTTPError with a real headers dict (email.message-like .get()).
+
+    Same BytesIO-as-fp trick as ``_make_http_error`` — avoids
+    HTTPError's auto-allocated tempfile and the resulting
+    ResourceWarning at GC.
+    """
+    import io
     import urllib.error
     from email.message import Message
     msg = Message()
@@ -601,7 +615,7 @@ def _make_http_error_with_headers(code: int, headers: dict):
         msg[k] = v
     return urllib.error.HTTPError(
         url="https://edhrec.com/x", code=code, msg="boom",
-        hdrs=msg, fp=None,
+        hdrs=msg, fp=io.BytesIO(b""),
     )
 
 
