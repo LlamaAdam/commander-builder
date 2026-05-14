@@ -345,6 +345,59 @@ def test_fetch_average_deck_returns_none_when_blob_has_no_cards(tmp_path, monkey
     assert fetch_average_deck("Foo", bracket=3) is None
 
 
+def test_fetch_salt_list_parses_salt_scores(tmp_path, monkeypatch):
+    """``fetch_salt_list`` returns a dict mapping lowercased card
+    name to a 0-5 salt score, parsed from EDHREC's
+    ``label: "Salt Score: X.XX"`` annotation."""
+    from commander_builder.edhrec_client import fetch_salt_list
+
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+
+    salt_html = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        '{"props": {"data": {"cardlist": {"header": "Salty",'
+        ' "cardviews": ['
+        '{"name": "Smothering Tithe", "label": "Salt Score: 2.58"},'
+        '{"name": "Stasis", "label": "Salt Score: 3.06"},'
+        '{"name": "Boring Card", "label": "no salt here"}'
+        ']}}}}</script>'
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", lambda url: salt_html,
+    )
+    salt = fetch_salt_list()
+    assert salt["stasis"] == 3.06
+    assert salt["smothering tithe"] == 2.58
+    # Cards without a "Salt Score:" label are skipped.
+    assert "boring card" not in salt
+
+
+def test_fetch_salt_list_returns_empty_dict_on_fetch_failure(
+    tmp_path, monkeypatch,
+):
+    """Best-effort: HTTP errors must not break the audit."""
+    from commander_builder.edhrec_client import fetch_salt_list
+
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+
+    def boom(url):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", boom,
+    )
+    assert fetch_salt_list() == {}
+
+
 def test_fetch_average_deck_uses_direct_url_when_provided(tmp_path, monkeypatch):
     from commander_builder.edhrec_client import fetch_average_deck
     monkeypatch.setattr("commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache")

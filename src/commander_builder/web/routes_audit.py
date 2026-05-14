@@ -31,6 +31,7 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
+from ..edhrec_client import fetch_salt_list
 from ._helpers import (
     _apply_swaps_to_dck,
     _bracket_from_filename,
@@ -205,6 +206,13 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
         # because min(adds, 0) = 0. Users got "no recommendations"
         # instead of "here are 8 manabase upgrades, choose what to
         # cut yourself."
+        # Pull EDHREC's salt list once per audit (cached 7 days)
+        # so we can flag socially-spicy picks. Best-effort: empty
+        # dict on fetch failure → no salt annotations, no warning.
+        try:
+            salt_map = fetch_salt_list()
+        except Exception:  # noqa: BLE001
+            salt_map = {}
         applied_add_set = {n.lower() for n in added}
         applied_cut_set = {n.lower() for n in removed}
         added_payload = [
@@ -226,6 +234,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 # "needs manual cut" pill so the user knows the deck
                 # text isn't pre-built for them.
                 "applied": rec.card.lower() in applied_add_set,
+                # EDHREC salt score (0..5) — None when the card
+                # isn't in the top-100 salty list. UI shows a "salt"
+                # pill when ≥ 2.0; low-bracket users can audit-wise
+                # avoid table-talk-problematic picks.
+                "salt": salt_map.get(rec.card.lower()),
             }
             for rec in report.recommendations
             if rec.action == "add"
@@ -236,6 +249,9 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 "rationale": rec.reason or "",
                 "name_known": getattr(rec, "name_known", True),
                 "applied": rec.card.lower() in applied_cut_set,
+                # Cutting a salty card is GOOD news at low bracket;
+                # surface the score so the UI can highlight it.
+                "salt": salt_map.get(rec.card.lower()),
             }
             for rec in report.recommendations
             if rec.action == "cut"
@@ -462,6 +478,13 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                             )
                         else:
                             price_delta = None
+                        # Pull EDHREC's salt list once per audit
+                        # (cached 7 days). Best-effort: empty dict on
+                        # fetch failure → no salt annotations.
+                        try:
+                            salt_map = fetch_salt_list()
+                        except Exception:  # noqa: BLE001
+                            salt_map = {}
                         # Surface ALL recommendations (not just those
                         # that landed in proposed_text). See the sync
                         # endpoint's matching block for the rationale —
@@ -484,6 +507,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                                 ),
                                 "source": (rec.evidence or {}).get("source"),
                                 "applied": rec.card.lower() in applied_add_set,
+                                "salt": salt_map.get(rec.card.lower()),
                             }
                             for rec in report.recommendations
                             if rec.action == "add"
@@ -496,6 +520,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                                     rec, "name_known", True,
                                 ),
                                 "applied": rec.card.lower() in applied_cut_set,
+                                "salt": salt_map.get(rec.card.lower()),
                             }
                             for rec in report.recommendations
                             if rec.action == "cut"

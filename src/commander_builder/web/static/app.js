@@ -1617,6 +1617,27 @@ function renderAuditResult(container, body) {
           "⚠ not in Scryfall",
         ));
       }
+      // EDHREC salt-score pill — surfaces when a rec is in the
+      // top-100 saltiest cards (Cyclonic Rift, Smothering Tithe,
+      // Rhystic Study, Stasis, ...). The pill's color escalates
+      // with the score; B1-B3 users see this as a "are you sure?"
+      // signal when the audit recommends a high-salt card.
+      if (typeof a.salt === "number" && a.salt >= 2.0) {
+        // Salt score 2.0-2.4 = warn (yellowish), 2.5+ = bad (red).
+        const cls = a.salt >= 2.5 ? "pill bad" : "pill warn";
+        nameDiv.appendChild(el(
+          "span",
+          {
+            class: cls,
+            style: "margin-left: 6px; font-size: 11px;",
+            title: `EDHREC salt score ${a.salt.toFixed(2)}/5.0. `
+                 + `Top-100 saltiest cards are often unpopular with `
+                 + `opponents at lower brackets — consider whether `
+                 + `your playgroup is okay with this pick.`,
+          },
+          `salt ${a.salt.toFixed(1)}`,
+        ));
+      }
       wrap.appendChild(nameDiv);
       if (a.rationale) {
         wrap.appendChild(el("div", { class: "muted" }, a.rationale));
@@ -1714,6 +1735,21 @@ function renderAuditResult(container, body) {
             title: "Not found in Scryfall — likely a hallucinated card name",
           },
           "⚠ not in Scryfall",
+        ));
+      }
+      // Cutting a salty card is good news — surface the score
+      // as a "good" pill so the user sees the audit reduced
+      // table-talk-problematic picks.
+      if (typeof r.salt === "number" && r.salt >= 2.0) {
+        nameDiv.appendChild(el(
+          "span",
+          {
+            class: "pill good",
+            style: "margin-left: 6px; font-size: 11px;",
+            title: `Cutting a salty card (EDHREC salt ${r.salt.toFixed(2)}/5.0). `
+                 + `Lower-bracket playgroups will appreciate the reduction.`,
+          },
+          `cut salt ${r.salt.toFixed(1)}`,
         ));
       }
       wrap.appendChild(nameDiv);

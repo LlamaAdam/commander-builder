@@ -518,6 +518,84 @@ def tribe_tag_slug(tribe_name: str) -> Optional[str]:
     return _TRIBE_TO_TAG_SLUG.get(tribe_name)
 
 
+def fetch_salt_list(
+    cache: bool = True,
+    ttl_hours: int = 168,  # 7 days — salt scores change slowly
+) -> dict[str, float]:
+    """Fetch EDHREC's ``/top/salt`` page and return a mapping of
+    ``{card_name_lowercase: salt_score}``.
+
+    Salt scores are EDHREC's 0-5 measure of how unpopular a card
+    is with opponents (Smothering Tithe, Rhystic Study, Cyclonic
+    Rift, Stasis, etc.). Higher = more "salt" = more likely to
+    cause table-talk problems. Used by the audit to flag
+    bracket-mismatched picks (a B1/B2 Exhibition/Core deck
+    shouldn't include the top-10 saltiest cards).
+
+    Returns an empty dict on fetch failure. Cached for 168h
+    (a week) since salt scores update slowly and the URL doesn't
+    take any parameters.
+    """
+    cache_path = CACHE_DIR.parent / "edhrec_salt" / "top-salt.json"
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass  # Cache corruption → fresh fetch.
+
+    url = f"{EDHREC_BASE}/top/salt"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        html = _http_get_text_with_retry(url)
+    except Exception:  # noqa: BLE001
+        return {}
+
+    try:
+        next_data = _extract_next_data(html)
+    except ValueError:
+        return {}
+
+    # Walk the blob looking for a section with cards carrying a
+    # ``label: "Salt Score: X.XX"`` annotation. There's exactly
+    # one such section on the /top/salt page; the parser tolerates
+    # any header text.
+    salt_map: dict[str, float] = {}
+    def _walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("cardviews"), list):
+                for cv in node["cardviews"]:
+                    if not isinstance(cv, dict):
+                        continue
+                    name = cv.get("name") or cv.get("sanitized")
+                    label = cv.get("label", "")
+                    if not name or "Salt Score" not in label:
+                        continue
+                    # "Salt Score: 3.06" → 3.06
+                    import re as _re
+                    m = _re.search(r"([\d.]+)", label)
+                    if m:
+                        try:
+                            salt_map[name.lower()] = float(m.group(1))
+                        except ValueError:
+                            pass
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+    _walk(next_data)
+
+    if cache and salt_map:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(salt_map), encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return salt_map
+
+
 def fetch_tag_page(
     tag_slug: str,
     cache: bool = True,
