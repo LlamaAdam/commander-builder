@@ -614,6 +614,21 @@ def _advise_steps(
 
     _validate_card_names(recs)
 
+    # Structured per-recommendation logging (opt-in via the
+    # ``COMMANDER_BUILDER_LOG_DECISIONS`` env var). One line per
+    # rec lands in ``_audit_decisions.log`` next to the existing
+    # ``_js_errors.log`` and ``_forge_py_correlation.csv``. Pattern
+    # drift (e.g. another Cyclonic-Rift-shaped misclassification)
+    # then surfaces via grep instead of via Chrome screenshot.
+    from ._advisor_logging import log_decisions as _log_decisions
+    _log_decisions(
+        deck_path=deck_path,
+        commander_names=commanders,
+        effective_source=effective_source,
+        recommendations=recs,
+        fallback_reason=fallback_reason,
+    )
+
     report = AdviceReport(
         deck_filename=deck_path.name,
         deck_id=deck_id,
