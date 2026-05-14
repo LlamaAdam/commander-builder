@@ -603,3 +603,65 @@ def test_build_dashboard_no_tribal_tag_for_random_creature_mix(
     assert tribal_tags == [], (
         f"expected no tribal tag, got {tribal_tags!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Salt-list cross-reference
+# ---------------------------------------------------------------------------
+
+def test_build_dashboard_surfaces_salt_cards(tmp_path, monkeypatch):
+    """Dashboard payload should count + list this deck's salt-list cards.
+
+    The /top/salt page is the EDHREC-canonical "cards opponents hate
+    seeing" ranking. A B1-B3 user reviewing their deck should be able
+    to glance at the pill below the Categories grid and see whether
+    they're packing many high-salt picks.
+    """
+    deck = _write_simple_deck(tmp_path)
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda n: {"type_line": "Sorcery", "oracle_text": "", "cmc": 1.0,
+                   "color_identity": [], "prices": {"usd": "1.00"}},
+    )
+    # Three of the deck's cards are salty per the stubbed list;
+    # Forest is not. The dashboard should count exactly 3 and sort by
+    # score descending.
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.fetch_salt_list",
+        lambda *a, **kw: {
+            "lotus cobra": 2.10,
+            "cultivate": 1.30,
+            "wrath of god": 3.45,
+            "rhystic study": 4.20,  # not in deck — must not be counted
+        },
+    )
+
+    result = build_dashboard(deck, bracket=3)
+
+    assert result.legality["salt_cards_count"] == 3
+    cards = result.legality["salt_cards"]
+    assert len(cards) == 3
+    # Sorted by score descending — Wrath (3.45) first.
+    assert cards[0]["name"] == "Wrath of God"
+    assert cards[0]["score"] == pytest.approx(3.45)
+    # All entries carry name + score.
+    for entry in cards:
+        assert "name" in entry and "score" in entry
+
+
+def test_build_dashboard_handles_salt_list_fetch_failure(tmp_path, monkeypatch):
+    """fetch_salt_list failing must not break the dashboard."""
+    deck = _write_simple_deck(tmp_path)
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda n: {"type_line": "Land", "oracle_text": "", "cmc": 0.0},
+    )
+    def boom(*a, **kw):
+        raise RuntimeError("salt CDN down")
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.fetch_salt_list", boom,
+    )
+    result = build_dashboard(deck, bracket=3)
+    # Graceful degradation: count is 0, list is empty.
+    assert result.legality["salt_cards_count"] == 0
+    assert result.legality["salt_cards"] == []

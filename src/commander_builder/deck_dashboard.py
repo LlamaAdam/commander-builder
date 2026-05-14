@@ -503,6 +503,27 @@ def build_dashboard(
             f"({type(exc).__name__}: {exc}); skipping",
             flush=True,
         )
+    # Salt-list cross-reference. EDHREC's /top/salt page ranks the
+    # cards opponents most dislike seeing across the table (Smothering
+    # Tithe, Rhystic Study, Stasis, …). A B1-B3 deck running many
+    # top-salt picks is the kind of mismatch a quick glance should
+    # catch — UI shows it as a pill below the categories grid.
+    salt_in_deck: list[dict] = []
+    try:
+        from .edhrec_client import fetch_salt_list
+        salt_map = fetch_salt_list()
+        if salt_map:
+            for n in deck_card_names:
+                score = salt_map.get(n.lower())
+                if score is not None:
+                    salt_in_deck.append({"name": n, "score": score})
+            salt_in_deck.sort(key=lambda r: r["score"], reverse=True)
+    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on salt probe
+        print(
+            f"[dashboard] salt-list probe failed "
+            f"({type(exc).__name__}: {exc}); skipping",
+            flush=True,
+        )
     # Total cards = main + commander section. Commander legality
     # requires exactly 100. Surface deficits in the banner so the
     # user sees "deck is short by N" before running an audit /
@@ -517,6 +538,8 @@ def build_dashboard(
         "deck_total": deck_total,
         "deck_target": 100,
         "deck_size_ok": deck_total == 100,
+        "salt_cards_count": len(salt_in_deck),
+        "salt_cards": salt_in_deck[:10],
     }
 
     return DashboardData(

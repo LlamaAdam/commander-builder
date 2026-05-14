@@ -526,7 +526,16 @@ function renderSaveIterationBlock(body) {
       sim_report: body,
       verdict,
       verdict_notes: notesText || null,
-      total_price_usd: _lastDashboardPriceUsd,
+      // Prefer the audit response's post-swap price (captured into
+      // _lastAuditManifest above) since it reflects the deck the user
+      // is about to persist. Fall back to the dashboard snapshot
+      // when no audit ran or it omitted pricing.
+      total_price_usd:
+        (_lastAuditManifest
+          && _lastAuditManifest.deck_id === _activeDeckId
+          && _lastAuditManifest.total_price_usd != null)
+          ? _lastAuditManifest.total_price_usd
+          : _lastDashboardPriceUsd,
     };
     try {
       const resp = await fetch("/api/save_iteration", {
@@ -933,6 +942,16 @@ async function loadAdvise(sourceOverride) {
       })),
       diagnosis: completeBody.diagnosis || "",
       weakness_signals: completeBody.weakness_signals || [],
+      // Post-swap deck price snapshot from the audit response.
+      // Prefer proposed_price_usd (the price the user is about to
+      // commit if they Save iteration); fall back to
+      // original_price_usd when the audit produced no swap (heuristic
+      // mode often leaves proposed null). Either flows through to
+      // save_iteration as total_price_usd so the cost-over-time
+      // series tracks what was actually persisted.
+      total_price_usd: completeBody.proposed_price_usd != null
+        ? completeBody.proposed_price_usd
+        : completeBody.original_price_usd,
     };
     renderAuditResult(sug, completeBody);
   } catch (e) {
@@ -1524,7 +1543,14 @@ function renderAuditResult(container, body) {
       sim_report: null,
       verdict: "pending",
       verdict_notes: "Audit-only save (no A/B sim run).",
-      total_price_usd: _lastDashboardPriceUsd,
+      // Audit just ran (early-return above guarantees the manifest
+      // matches the active deck), so its post-swap price is the
+      // freshest signal. Fall back to the dashboard snapshot only
+      // when the audit response omitted pricing fields.
+      total_price_usd:
+        _lastAuditManifest.total_price_usd != null
+          ? _lastAuditManifest.total_price_usd
+          : _lastDashboardPriceUsd,
     };
     try {
       const resp = await fetch("/api/save_iteration", {
@@ -1864,6 +1890,22 @@ function renderDashboard(data, iterations) {
     cat.appendChild(el("span", {}, name.replace(/_/g, " ")));
     cat.appendChild(el("span", { class: "count" }, String(count)));
     catGrid.appendChild(cat);
+  }
+  // Salt-cards pill: surfaces EDHREC-ranked "high salt" picks the
+  // deck is running. Complements the Game Changers count — GCs are
+  // power signals; salt is table-talk signal. Click to inspect.
+  const saltCount = data.legality?.salt_cards_count ?? 0;
+  if (saltCount > 0) {
+    const saltRow = el("div", { class: "salt-pill-row" });
+    const pill = el("button", {
+      class: "pill warn",
+      style: "cursor: pointer; border: none;",
+    }, `Salt cards: ${saltCount}`);
+    pill.title = (data.legality.salt_cards || [])
+      .map((c) => `${c.name} (${c.score.toFixed(2)})`).join("\n");
+    pill.addEventListener("click", () => showSaltCardsAlert(data.legality.salt_cards || []));
+    saltRow.appendChild(pill);
+    catGrid.appendChild(saltRow);
   }
   dash.appendChild(panel("Categories", catGrid));
 
@@ -2519,6 +2561,40 @@ async function showIllegalAlert() {
   } catch (e) {
     body.innerHTML = `<p class="muted">Audit failed: ${e.message}</p>`;
   }
+}
+
+function showSaltCardsAlert(saltCards) {
+  const modal = $("alert-modal");
+  $("alert-title").textContent = "Salt cards";
+  const body = $("alert-body");
+  body.className = "alert-body";
+  body.innerHTML = "";
+  body.appendChild(el(
+    "p", { class: "muted" },
+    "EDHREC ranks these as the most-disliked cards across Commander " +
+    "tables. Higher scores = more table-talk friction. B1-B3 decks " +
+    "should keep these to a minimum.",
+  ));
+  if (!saltCards || !saltCards.length) {
+    body.appendChild(el(
+      "p", {}, el("span", { class: "pill good" }, "None in this deck"),
+    ));
+  } else {
+    body.appendChild(el(
+      "p", {}, el("span", { class: "pill warn" },
+                  `${saltCards.length} in this deck`),
+    ));
+    const ul = el("ul");
+    for (const c of saltCards) {
+      ul.appendChild(el(
+        "li", {},
+        `${c.name} `,
+        el("span", { class: "muted" }, `(score ${c.score.toFixed(2)})`),
+      ));
+    }
+    body.appendChild(ul);
+  }
+  modal.hidden = false;
 }
 
 function openNewDeckModal() {
