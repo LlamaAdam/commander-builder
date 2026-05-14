@@ -209,12 +209,6 @@ def _power_bracket(
     return max(1, min(5, guess))
 
 
-# Backwards-compatible alias kept so any external caller importing
-# ``_power_level`` doesn't break. Returns a bracket integer (1..5),
-# not the legacy 1..10 score.
-_power_level = _power_bracket
-
-
 # --- Match% scoring for suggestions ------------------------------------
 
 def match_score(

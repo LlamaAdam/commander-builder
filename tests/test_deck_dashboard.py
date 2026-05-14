@@ -19,7 +19,7 @@ from commander_builder.deck_dashboard import (
     DISPLAY_CATEGORIES,
     DashboardData,
     _extract_price_usd,
-    _power_level,
+    _power_bracket,
     _read_main_with_quantities,
     build_dashboard,
     classify_role_extended,
@@ -125,29 +125,29 @@ def test_extract_price_handles_zero():
 
 def test_power_bracket_low_for_high_cmc_no_game_changers():
     """Slow deck (avg cmc 4, 0 changers) is bracket 1 (Exhibition)."""
-    p = _power_level(avg_cmc=4.5, n_game_changers=0, bracket=None)
+    p = _power_bracket(avg_cmc=4.5, n_game_changers=0, bracket=None)
     assert p == 1
 
 
 def test_power_bracket_high_for_fast_deck_with_changers():
     """Fast deck with 3+ game changers is bracket 4 (Optimized)."""
-    p = _power_level(avg_cmc=2.2, n_game_changers=4, bracket=None)
+    p = _power_bracket(avg_cmc=2.2, n_game_changers=4, bracket=None)
     assert p == 4
 
 
 def test_power_bracket_user_supplied_bracket_wins():
     """An explicit bracket trumps the heuristic — it's what the user
     declares the deck is built for."""
-    p_no_bracket = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None)
-    p_bracket_4 = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=4)
+    p_no_bracket = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=None)
+    p_bracket_4 = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=4)
     assert p_bracket_4 == 4
     assert p_no_bracket != 4  # heuristic landed elsewhere
 
 
 def test_power_bracket_clamped_to_1_to_5():
     """Output is always a valid bracket integer."""
-    very_high = _power_level(avg_cmc=1.0, n_game_changers=20, bracket=5)
-    very_low = _power_level(avg_cmc=8.0, n_game_changers=0, bracket=1)
+    very_high = _power_bracket(avg_cmc=1.0, n_game_changers=20, bracket=5)
+    very_low = _power_bracket(avg_cmc=8.0, n_game_changers=0, bracket=1)
     assert 1 <= very_high <= 5
     assert 1 <= very_low <= 5
 
@@ -155,9 +155,9 @@ def test_power_bracket_clamped_to_1_to_5():
 def test_power_bracket_combo_archetype_nudges_up():
     """Combo decks are at least bracket 3 (Upgraded) even with 0 GCs
     in our list (combo lines always pack interaction & tutors)."""
-    p_combo = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None,
+    p_combo = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=None,
                            archetype="combo")
-    p_other = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None,
+    p_other = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=None,
                            archetype="midrange")
     assert p_combo >= p_other
 
@@ -167,8 +167,8 @@ def test_power_bracket_user_override_can_underdeclare():
     B4, the explicit bracket wins. Bracket auto-inference UI uses
     `inferred_bracket` to surface the divergence; the *displayed*
     bracket still respects the user's choice."""
-    declared = _power_level(avg_cmc=2.0, n_game_changers=4, bracket=2)
-    inferred = _power_level(avg_cmc=2.0, n_game_changers=4, bracket=None)
+    declared = _power_bracket(avg_cmc=2.0, n_game_changers=4, bracket=2)
+    inferred = _power_bracket(avg_cmc=2.0, n_game_changers=4, bracket=None)
     assert declared == 2
     assert inferred == 4
 
