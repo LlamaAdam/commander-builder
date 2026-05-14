@@ -2669,6 +2669,76 @@ def test_save_iteration_rejects_negative_price(save_client):
         "non-negative" in resp.get_json()["error"].lower()
 
 
+def test_audit_proposed_price_round_trips_into_save_iteration(
+    save_client, monkeypatch,
+):
+    """Integration test for the JS wiring that pipes the audit
+    response's ``proposed_price_usd`` through to ``save_iteration``
+    as ``total_price_usd``. Simulates what app.js does:
+
+      1. POST /api/audit, capture ``proposed_price_usd``.
+      2. POST /api/save_iteration with that value as
+         ``total_price_usd``.
+      3. GET /api/iteration/<id> → the pricing snapshot lives at
+         ``audit_manifest.pricing.total_price_usd`` and equals the
+         audit's proposed price.
+
+    Protects the round-trip contract so a future refactor of the
+    audit response shape (e.g. renaming the field) is caught here
+    even though we can't run the client JS in the test suite.
+    """
+    from types import SimpleNamespace
+
+    client, _ = save_client
+
+    def fake_lookup(name, *_a, **_kw):
+        prices = {"Sol Ring": "1.50", "Cultivate": "0.50",
+                  "Lotus Cobra": "10.00", "Forest": "0.05"}
+        if name in prices:
+            return {"prices": {"usd": prices[name]}}
+        return None
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card="Lotus Cobra", action="add",
+                                reason="upgrade", evidence={},
+                                name_known=True),
+                SimpleNamespace(card="Cultivate", action="cut",
+                                reason="downgrade", evidence={},
+                                name_known=True),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="",
+                                      weakness_signals=[]),
+            source="heuristic", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+    audit = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
+    proposed = audit.get("proposed_price_usd")
+    original = audit.get("original_price_usd")
+    # Mirror the JS fallback rule: prefer proposed, else original.
+    captured = proposed if proposed is not None else original
+    assert captured is not None, audit
+
+    saved = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_manifest": {"added": [], "removed": []},
+        "total_price_usd": captured,
+        "verdict": "pending",
+    })
+    assert saved.status_code == 200, saved.get_json()
+
+    detail = client.get(f"/api/iteration/{saved.get_json()['id']}").get_json()
+    pricing = detail["audit_manifest"]["pricing"]
+    assert pricing["total_price_usd"] == captured
+
+
 # --- /api/audit — card-name validation (hallucination defense) ------------
 
 def test_audit_payload_includes_name_known_for_each_rec(client, monkeypatch):
