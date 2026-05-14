@@ -17,14 +17,19 @@ from typing import Optional
 
 from ._advisor_models import DeckDiagnosis, SwapRecommendation
 from ._advisor_role_helpers import _role_for_card
-from .edhrec_client import CardEntry, CommanderPage
+from .edhrec_client import AverageDeck, CardEntry, CommanderPage
 from .staples import is_land, is_universal_staple
 
 
-# How many candidate adds + cuts to recommend. Roughly matches the audit
-# prompt's expected swap-list size for a single-iteration pass. Kept in
-# sync with the orchestrator's DEFAULT_ADD_LIMIT / DEFAULT_CUT_LIMIT.
-_DEFAULT_ADD_LIMIT = 8
+# How many candidate adds + cuts to recommend. Bumped from 8 → 12
+# on 2026-05-14 when the heuristic gained two additional add
+# buckets (new_cards from EDHREC's "New Cards" section + average-
+# deck cards from EDHREC's bracket-specific sample build). With
+# 4 buckets feeding candidates_for_add the old 8-card cap was
+# trimming most of the average-deck pool — and average_deck is
+# the highest-confidence signal we have for "cards a tuned deck
+# of this commander runs."
+_DEFAULT_ADD_LIMIT = 12
 _DEFAULT_CUT_LIMIT = 8
 
 # Inclusion% threshold below which a card is unlikely to be a top add.
@@ -109,6 +114,7 @@ def _heuristic_swap_recommendations(
     add_limit: int = _DEFAULT_ADD_LIMIT,
     cut_limit: int = _DEFAULT_CUT_LIMIT,
     diagnosis: Optional[DeckDiagnosis] = None,
+    average_deck: Optional[AverageDeck] = None,
 ) -> list[SwapRecommendation]:
     """Pure-data swap proposals from EDHREC inclusion-% deltas.
 
@@ -122,6 +128,15 @@ def _heuristic_swap_recommendations(
     crashing the audit. The caller still produces a valid
     AdviceReport with zero swaps, which the UI surfaces as "no
     audit suggestions available."
+
+    ``average_deck`` (optional) is EDHREC's bracket-specific sample
+    build for this commander — a coherent 73-98 card reference
+    deck. When provided:
+      - Cards in the average deck join ``edhrec_known`` for the
+        cut decision (high-confidence "this DOES belong here"
+        signal — EDHREC built a deck containing it).
+      - Cards in the average deck but NOT in the user's deck
+        surface as a new add bucket (``source: edhrec.average_deck``).
     """
     if edhrec_page is None:
         return []
@@ -151,6 +166,17 @@ def _heuristic_swap_recommendations(
             candidates_for_add.append(c)
             candidate_bucket[c.name.lower()] = "top_cards"
             seen.add(c.name.lower())
+    # Average-deck candidates BEFORE new_cards: average_deck is a
+    # coherent sample build for this commander at this bracket —
+    # every card was deliberately included, the strongest possible
+    # "tuned decks run this" signal. New cards are interesting
+    # but lower-confidence (early-adopter inclusion data).
+    if average_deck:
+        for c in average_deck.cards:
+            if c.name.lower() not in seen:
+                candidates_for_add.append(c)
+                candidate_bucket[c.name.lower()] = "average_deck"
+                seen.add(c.name.lower())
     # New-card candidates: EDHREC's "New Cards" section ships the
     # 5 most-recently-printed cards that have already accumulated
     # inclusion data for this commander. They're often interesting
@@ -206,6 +232,18 @@ def _heuristic_swap_recommendations(
                 + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
                 + " — recently added to the meta for this commander"
             )
+        elif bucket == "average_deck":
+            # Average-deck cards don't carry inclusion%/synergy
+            # numbers (the endpoint returns just names), so the
+            # rationale leans on the bracket context instead.
+            bracket_label = (
+                (average_deck.bracket_slug or "average").replace("-", " ")
+                if average_deck else "average"
+            )
+            reason_text = (
+                f"in EDHREC's {bracket_label} sample deck for this "
+                f"commander"
+            )
         else:
             reason_text = (
                 f"EDHREC {bucket}: in {inclusion_phrase}"
@@ -247,13 +285,16 @@ def _heuristic_swap_recommendations(
     # absence is a real signal rather than the 20-card spotlight
     # the original parser produced.
     #
-    # The 2026-05-14 audit caught the old behavior: Muxus from
-    # Krenko + Path to Exile from First Sliver were being
-    # recommended for cutting because they weren't in the 20-card
-    # top+synergy intersection. They DO appear in the broader
-    # Creatures / Instants sections; the expanded parser folds
-    # those in.
+    # Average-deck cards (when available) join the known set as
+    # the strongest possible signal: EDHREC built a coherent
+    # sample build containing them. A card in the average deck
+    # is by construction archetype-appropriate; never recommend
+    # cutting one even if it doesn't appear in the page's flat
+    # category lists.
     edhrec_known = edhrec_page.all_known_cards()
+    if average_deck:
+        for c in average_deck.cards:
+            edhrec_known.add(c.name.lower())
 
     # Safety net: if EDHREC's page is genuinely degraded (very
     # obscure commander, schema regression), still refuse to emit

@@ -53,7 +53,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .edhrec_client import CardEntry, CommanderPage, fetch_commander_page
+from .edhrec_client import (
+    AverageDeck,
+    CardEntry,
+    CommanderPage,
+    fetch_average_deck,
+    fetch_commander_page,
+)
 from .forge_runner import VENDOR_FORGE
 from .moxfield_import import find_top_liked_decks_for_commander
 from .scryfall_client import _parse_commander_names_from_dck, lookup_card
@@ -484,6 +490,7 @@ def _advise_steps(
     rationale_override: Optional[str] = None
     fallback_reason: Optional[str] = None
     edhrec_page: Optional[CommanderPage] = None
+    average_deck: Optional[AverageDeck] = None
     bracket_peer_ref_count: int = 0
     recs: list[SwapRecommendation]
     effective_source = source  # mutate on fallback
@@ -493,6 +500,33 @@ def _advise_steps(
         if edhrec_page is None:
             edhrec_page = fetch_commander_page(primary_commander)
         return edhrec_page
+
+    def _fetch_avg_deck_lazy() -> Optional[AverageDeck]:
+        """Pull EDHREC's bracket-specific "average deck" — a curated
+        ~73-98 card reference deck (vs. the 200+ uncategorized
+        cards on the commander page itself).
+
+        Adds ~1-2s per audit but the signal is uniquely strong:
+        the average deck is a coherent SAMPLE BUILD, not a flat
+        ranking. For cuts it acts as a high-confidence "yes this
+        card belongs in this archetype" signal; for adds it
+        surfaces cards that the typical tuned deck runs but the
+        user's deck doesn't.
+
+        Best-effort: returns None when EDHREC doesn't publish an
+        average deck for this commander/bracket combo (newly-
+        released or very obscure commanders). The heuristic
+        gracefully degrades to the commander-page data only.
+        """
+        nonlocal average_deck
+        if average_deck is None:
+            try:
+                average_deck = fetch_average_deck(
+                    primary_commander, bracket=bracket,
+                )
+            except Exception:  # noqa: BLE001
+                average_deck = None
+        return average_deck
 
     if source == "bracket_peers":
         peer_recs, ref_count = _bracket_peers_recommendations(
@@ -513,6 +547,7 @@ def _advise_steps(
             page = _fetch_edhrec_lazy()
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
+                average_deck=_fetch_avg_deck_lazy(),
             )
             effective_source = "heuristic"
     elif source == "claude":
@@ -540,6 +575,7 @@ def _advise_steps(
                   flush=True)
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
+                average_deck=_fetch_avg_deck_lazy(),
             )
             effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
@@ -550,11 +586,14 @@ def _advise_steps(
                   flush=True)
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
+                average_deck=_fetch_avg_deck_lazy(),
             )
             effective_source = "heuristic"
     else:
         page = _fetch_edhrec_lazy()
-        recs = _heuristic_swap_recommendations(main_cards, page)
+        recs = _heuristic_swap_recommendations(
+            main_cards, page, average_deck=_fetch_avg_deck_lazy(),
+        )
 
     yield AdvicePhase("primary", {
         "recommendations": [asdict(r) for r in recs],

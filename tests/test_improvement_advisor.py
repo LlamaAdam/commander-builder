@@ -140,6 +140,96 @@ def test_heuristic_surfaces_new_cards_as_add_recommendations():
     assert "recently" in rec.reason.lower()
 
 
+def test_heuristic_surfaces_average_deck_cards_as_adds():
+    """EDHREC publishes a per-commander, per-bracket "average deck"
+    — a curated 73-98 card sample build (vs. the 200+ uncategorized
+    cards on the commander page). It's the strongest possible
+    "what does a tuned deck of this commander run" signal.
+
+    The heuristic now surfaces cards in the average deck but NOT
+    in the user's deck as a separate add bucket, tagged
+    ``source: edhrec.average_deck``. Rationale references the
+    bracket so the user understands the recommendation came from
+    a bracket-appropriate sample.
+    """
+    from commander_builder.edhrec_client import (
+        AverageDeck, CardEntry, CommanderPage,
+    )
+
+    deck = {"Sol Ring"}  # Single user card; everything else is new.
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        top_cards=[], high_synergy_cards=[], new_cards=[],
+    )
+    avg = AverageDeck(
+        commander_name="Test", slug="test",
+        url="https://edhrec.com/average-decks/test/optimized",
+        bracket_slug="optimized", budget_slug=None,
+        cards=[
+            CardEntry(name="Tuned Pick One"),
+            CardEntry(name="Tuned Pick Two"),
+            CardEntry(name="Sol Ring"),  # in user deck — should dedupe
+        ],
+    )
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=10, average_deck=avg,
+    )
+    adds = [r for r in recs if r.action == "add"]
+    by_name = {r.card: r for r in adds}
+    # Both unique cards from the average deck surface; Sol Ring
+    # (already in user deck) does NOT.
+    assert "Tuned Pick One" in by_name
+    assert "Tuned Pick Two" in by_name
+    assert "Sol Ring" not in by_name
+    # Source label distinguishes this bucket from top/synergy/new.
+    assert by_name["Tuned Pick One"].evidence["source"] == "edhrec.average_deck"
+    # Rationale mentions the bracket so the recommendation is
+    # transparent: "from the OPTIMIZED sample deck", not just
+    # "EDHREC said so."
+    assert "optimized" in by_name["Tuned Pick One"].reason.lower()
+
+
+def test_heuristic_uses_average_deck_to_protect_archetype_cards_from_cuts():
+    """An average-deck card that's currently in the user's deck
+    must NEVER be recommended for cutting — EDHREC's sample build
+    explicitly included it, which is the highest-confidence
+    "this belongs here" signal we have.
+
+    Pinned because the commander page's flat category lists can
+    miss archetype-essential picks (e.g. niche tribal lords); the
+    average deck is the safety net.
+    """
+    from commander_builder.edhrec_client import (
+        AverageDeck, CardEntry, CommanderPage,
+    )
+
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so the cut path
+        # engages.
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(55)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    avg = AverageDeck(
+        commander_name="Test", slug="test",
+        url="https://edhrec.com/average-decks/test",
+        bracket_slug=None, budget_slug=None,
+        cards=[CardEntry(name="Niche Archetype Card")],
+    )
+    deck = {"Niche Archetype Card", "Random Off-Archetype"}
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=0, average_deck=avg,
+    )
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Niche Archetype Card" not in cut_cards, (
+        f"Average-deck cards should be protected from cuts. "
+        f"Cuts: {cut_cards}"
+    )
+    # Sanity: the genuinely-off-archetype card still gets flagged.
+    assert "Random Off-Archetype" in cut_cards
+
+
 def test_heuristic_uses_all_category_lists_for_cut_decisions():
     """The 2026-05-14 parser expansion captures all 14 EDHREC
     sections (Creatures, Instants, Sorceries, Lands, Mana
