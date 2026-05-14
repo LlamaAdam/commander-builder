@@ -639,8 +639,13 @@ def test_heuristic_no_diagnosis_keeps_original_order(monkeypatch):
 
 
 def test_heuristic_respects_add_and_cut_limits():
-    # 35 top_cards padding so the page clears
-    # MIN_EDHREC_SIGNAL_FOR_CUTS (30) and the cut path engages.
+    # 55 top_cards padding so the page clears
+    # MIN_EDHREC_SIGNAL_FOR_CUTS (50) and the cut path engages.
+    # ``add_limit`` only caps the CORE buckets (high_synergy +
+    # top_cards + new_cards) post the 2026-05-15 split-pool
+    # refactor; supplemental sources (average_deck + tag_pages)
+    # are unlimited. This deck has only top_cards (core), so the
+    # limit applies as before.
     deck = {f"Off-{i}" for i in range(20)}
     page = _fake_edhrec_page(
         top=[(f"Top-{i}", 80.0) for i in range(55)],
@@ -651,6 +656,52 @@ def test_heuristic_respects_add_and_cut_limits():
     cuts = [r for r in recs if r.action == "cut"]
     assert len(adds) == 3
     assert len(cuts) == 4
+
+
+def test_heuristic_add_limit_does_not_trim_supplemental_buckets():
+    """The 2026-05-15 split-pool refactor: ``add_limit`` only caps
+    core EDHREC-page buckets (high_synergy / top_cards /
+    new_cards). Supplemental sources (average_deck + tag_pages)
+    bypass the cap because they're coherent reference builds the
+    user wants to browse fully in the "Also suggested" panel.
+
+    Pinned because the previous 12-card global cap was silently
+    dropping 60+ average-deck recs on 5-color decks.
+    """
+    from commander_builder.edhrec_client import (
+        AverageDeck, CardEntry, CommanderPage,
+    )
+    deck = {"Sol Ring"}
+    # Core EDHREC page with 5 top_cards (would all survive the
+    # cap by themselves).
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-15",
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(5)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    # Average deck with 20 cards — way over the default
+    # ``add_limit`` of 12.
+    avg = AverageDeck(
+        commander_name="Test", slug="test",
+        url="https://edhrec.com/average-decks/test",
+        bracket_slug=None, budget_slug=None,
+        cards=[CardEntry(name=f"AvgCard {i}") for i in range(20)],
+    )
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=3, average_deck=avg,
+    )
+    adds = [r for r in recs if r.action == "add"]
+    by_source: dict[str, int] = {}
+    for r in adds:
+        s = r.evidence.get("source", "?")
+        by_source[s] = by_source.get(s, 0) + 1
+    # Core (top_cards) is capped to 3 by add_limit.
+    assert by_source.get("edhrec.top_cards", 0) == 3
+    # Supplemental (average_deck) is NOT capped — all 20 surface.
+    assert by_source.get("edhrec.average_deck", 0) == 20
+    # Total adds: 3 + 20 = 23 (no limit on supplemental).
+    assert len(adds) == 23
 
 
 # --- _aggregate_match_history ----------------------------------------------

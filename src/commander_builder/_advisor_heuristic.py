@@ -324,9 +324,34 @@ def _heuristic_swap_recommendations(
             return priority_index.get(role, len(priority_index) + 1)
         add_recs.sort(key=_rank)
 
-    # Apply the add_limit after re-ranking so the surfaced top-N
-    # reflects the re-ordered list, not the pre-ranked one.
-    recs.extend(add_recs[:add_limit])
+    # Split adds into two pools:
+    #
+    #   - **Core** (high_synergy, top_cards, new_cards): the
+    #     commander-page sourced picks. Cap with ``add_limit``
+    #     because these are flat-ranked and we don't want to
+    #     flood the UI with every EDHREC top-100 card.
+    #
+    #   - **Supplemental** (average_deck + tag_* buckets):
+    #     coherent reference-build sources. These produce 50-100
+    #     cards each — capping at 12 silently dropped most of them
+    #     pre-2026-05-15. The UI now splits results into "applied"
+    #     vs "Also suggested" lists (commit b5ab5ea), so the
+    #     suggested panel can absorb a large rec count without
+    #     cluttering the main view.
+    #
+    # This split lets users browse the full archetype pool while
+    # keeping the "Cards to add" header sensibly short.
+    _CORE_BUCKETS = {"high_synergy", "top_cards", "new_cards"}
+    core_recs = [
+        r for r in add_recs
+        if candidate_bucket.get(r.card.lower(), "") in _CORE_BUCKETS
+    ]
+    supplemental_recs = [
+        r for r in add_recs
+        if candidate_bucket.get(r.card.lower(), "") not in _CORE_BUCKETS
+    ]
+    recs.extend(core_recs[:add_limit])
+    recs.extend(supplemental_recs)
 
     # Cuts — cards in deck not present anywhere on EDHREC's page
     # for this commander. Uses ``all_known_cards()`` which folds
