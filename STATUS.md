@@ -8,8 +8,8 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](docs/architecture.md).
 
-**Last updated:** 2026-05-14 (chrome-audit follow-up session)
-**Phase status:** Phase 2 complete + FP-006 web GUI shipped + 73+ commits
+**Last updated:** 2026-05-15 (overnight 7-phase enrichment session)
+**Phase status:** Phase 2 complete + FP-006 web GUI shipped + 80+ commits
 on `feature/2026-04-28-session` ahead of `master`. Phase 3 (ML
 predictor) still data-gated.
 
@@ -17,10 +17,35 @@ predictor) still data-gated.
 
 ## State of the tree
 
-- **Tests:** 820 passing (+28 from the prior recap), ~37s offline. Zero
+- **Tests:** 875 passing (+9 from the prior recap), ~111s offline. Zero
   warnings under `python -W default`.
-- **Branch:** `feature/2026-04-28-session` (73 commits ahead of
+- **Branch:** `feature/2026-04-28-session` (80+ commits ahead of
   `origin/feature/2026-04-28-session`).
+
+### 2026-05-14/15 overnight session (7 phases)
+
+Each phase was a self-contained commit with live-server verification:
+
+1. **UI split for applied vs suggested adds** (`b5ab5ea`) — the
+   audit panel now visually separates "drop-in" recs (in
+   proposed_text) from "needs manual cut" recs.
+2. **Proposed-deck pricing** (`ef33f58`) — `$X → $Y (Δ)`
+   headline in the audit panel. Tier-2 backlog item.
+3. **EDHREC `/tags/<tribe>` integration** (`5446e7d`) — tribal
+   decks pull the broader-archetype tag page (~250-400 cards
+   beyond the commander page).
+4. **Theme detection + multi-tag pages** (`756a6c2`) — Tokens
+   / Spellslinger / Aristocrats / Lifegain / Reanimator /
+   Equipment / Artifacts / Enchantress detection. Up to 3
+   tag pages per audit.
+5. **Card thumbnails + click-to-zoom** (`f57151b`) — FP-008
+   substrate. Lazy-loaded 60×84 inline images, full-size
+   overlay on click.
+6. **EDHREC salt-list integration** (`553187e`) — bracket-fit
+   warnings. Cyclonic Rift / Smothering Tithe / Stasis get
+   yellow pills when audit recommends them.
+
+### Prior 2026-05-13/14 chrome-audit session (preserved for context)
 - **2026-05-13/14 session deltas** (chrome-audit-driven; most-recent
   first):
 
