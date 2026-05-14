@@ -1444,22 +1444,40 @@ function renderAuditResult(container, body) {
   container.appendChild(saveAuditBtn);
   container.appendChild(saveAuditStatus);
 
-  // Adds list (with rationale + price).
+  // Adds list. Split into two visual buckets so the user sees at
+  // a glance which recs are drop-in (in the proposed deck — safe
+  // to ship to Forge) vs which are suggestions that need a manual
+  // cut to absorb. The split is driven by the ``applied`` flag the
+  // server now ships on every add entry; entries without the flag
+  // (older payloads) default to applied=true so behavior is
+  // unchanged for them.
+  //
+  // Why split rather than inline-tag? The two buckets ARE
+  // semantically different — one set is part of an audit-applied
+  // diff, the other is recommendation-only. Grouping makes that
+  // distinction visually obvious without forcing the user to read
+  // pills row-by-row.
   if (body.added.length) {
-    container.appendChild(el(
-      "h4", { style: "margin-top: 14px;" }, "Cards to add",
-    ));
-    const ul = el("ul", { class: "iteration-list" });
-    for (const a of body.added) {
-      const row = el("li", { class: "iteration" });
+    const applied = body.added.filter(
+      (a) => a.applied !== false,
+    );
+    const suggested = body.added.filter(
+      (a) => a.applied === false,
+    );
+
+    // Helper to render one card row — shared between both buckets
+    // so styling stays consistent.
+    function renderAddRow(a, opts) {
+      const dim = opts && opts.dim;
+      const row = el(
+        "li",
+        {
+          class: "iteration",
+          style: dim ? "opacity: 0.78;" : "",
+        },
+      );
       // Verdict cell: percentage pill when the rec has a numeric
-      // signal (EDHREC inclusion% / bracket_peers reference frequency),
-      // otherwise a source-specific badge ("Manabase" / "Tribal" /
-      // "Claude") so manabase essentials and signal-less Claude recs
-      // don't render as a confusing "0%". The server emits
-      // match_pct === null for those cases (2026-05-13 fix); 0 is
-      // reserved for "0/5 references" or "0% inclusion" — rare but
-      // legitimate signal that should still display.
+      // signal, otherwise a source-specific badge.
       if (typeof a.match_pct === "number") {
         row.appendChild(el(
           "span", { class: "verdict pending" }, `${a.match_pct}%`,
@@ -1471,17 +1489,11 @@ function renderAuditResult(container, body) {
           if (badge.title) badgeEl.title = badge.title;
           row.appendChild(badgeEl);
         } else {
-          // Last-ditch fallback for legacy recs with no source field —
-          // render an empty placeholder so the row's flex layout
-          // stays aligned with sibling rows that do have a verdict.
           row.appendChild(el("span", { class: "verdict pending" }, "—"));
         }
       }
       const wrap = el("div");
       const nameDiv = el("div", { class: "name" }, a.card);
-      // Per-card hallucination flag — pill renders only on confirmed
-      // Scryfall miss (name_known === false). null/undefined means
-      // unchecked, do not flag.
       if (a.name_known === false) {
         nameDiv.appendChild(el(
           "span",
@@ -1502,9 +1514,43 @@ function renderAuditResult(container, body) {
         "span", { class: "delta" },
         a.price_usd != null ? `$${Number(a.price_usd).toFixed(2)}` : "",
       ));
-      ul.appendChild(row);
+      return row;
     }
-    container.appendChild(ul);
+
+    if (applied.length) {
+      container.appendChild(el(
+        "h4", { style: "margin-top: 14px;" },
+        `Cards to add (${applied.length} in proposed deck)`,
+      ));
+      const ul = el("ul", { class: "iteration-list" });
+      for (const a of applied) ul.appendChild(renderAddRow(a, { dim: false }));
+      container.appendChild(ul);
+    }
+
+    if (suggested.length) {
+      container.appendChild(el(
+        "h4",
+        {
+          style: "margin-top: 14px; color: var(--muted, #888);",
+          title: "These recs aren't in the proposed deck text because "
+               + "the auditor couldn't find a high-confidence cut to "
+               + "balance them. Use 'Run with Claude' for a fuller swap "
+               + "list, or cherry-pick what you want and choose cuts "
+               + "manually.",
+        },
+        `Also suggested (${suggested.length} — needs manual cut)`,
+      ));
+      const note = el(
+        "p",
+        { class: "muted", style: "font-size: 12px; margin: 0 0 6px;" },
+        "Strong recommendations the auto-balancer couldn't fit. "
+        + "Add to your deck manually + pick a cut yourself.",
+      );
+      container.appendChild(note);
+      const ul = el("ul", { class: "iteration-list" });
+      for (const a of suggested) ul.appendChild(renderAddRow(a, { dim: true }));
+      container.appendChild(ul);
+    }
   }
 
   // Removed list.
