@@ -65,35 +65,20 @@ def test_classify_role_extended_each_opponent_loses_life():
 
 
 def test_classify_role_extended_you_win_the_game():
-    # Live-browser audit 2026-05-13: Coalition Victory was returning
-    # ``"other"`` instead of ``"win_condition"`` because the original
-    # patterns only matched "target opponent loses" / "each opponent
-    # loses" idioms. The "you win the game" templating (Coalition
-    # Victory, Approach of the Second Sun second cast, Test of
-    # Endurance, Felidar Sovereign) is now caught explicitly.
-    role = classify_role_extended(
-        "You win the game if you control a land of each basic land "
-        "type and a creature of each color.",
-        "Sorcery",
-    )
-    assert role == "win_condition"
+    # Coalition Victory was returning ``"other"`` instead of
+    # ``"win_condition"`` because the original patterns only matched
+    # "target opponent loses" / "each opponent loses" idioms.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Coalition Victory")
+    assert classify_role_extended(o["oracle_text"], o["type_line"]) == "win_condition"
 
 
 def test_classify_role_extended_craterhoof_trample_then_pump():
     # Craterhoof Behemoth's real Scryfall oracle reads "gain trample
-    # and get +X/+X", which is the OPPOSITE word order from the
-    # original pattern's "get +N/+N and gain trample". Both orderings
-    # now match. Live audit 2026-05-13 caught the miss — Craterhoof
-    # was tagged ``threat`` despite being one of the most iconic
-    # green wincons.
-    role = classify_role_extended(
-        "Haste\n"
-        "When this creature enters, creatures you control gain "
-        "trample and get +X/+X until end of turn, where X is the "
-        "number of creatures you control.",
-        "Creature — Beast",
-    )
-    assert role == "win_condition"
+    # and get +X/+X" — opposite word order from the original pattern.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Craterhoof Behemoth")
+    assert classify_role_extended(o["oracle_text"], o["type_line"]) == "win_condition"
 
 
 def test_classify_role_extended_falls_back_to_base_taxonomy():

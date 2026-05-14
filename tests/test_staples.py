@@ -172,87 +172,47 @@ def test_classify_role_wipe_evacuation_style_bounce():
 
 
 def test_classify_role_wipe_cyclonic_rift_real_scryfall_text():
-    # Live-browser audit 2026-05-13 caught a misclassification the
-    # original synthetic-text test missed: Scryfall returns
-    # Cyclonic Rift's oracle as TWO paragraphs separated by ``\n``,
-    # not a single line. ``re.search`` is not DOTALL by default, so
-    # ``.*`` doesn't cross newlines — the old pattern silently
-    # failed against real card data.
-    #
-    # This is the byte-exact text Scryfall returns. Keep it so any
-    # future pattern rewrite that breaks multi-paragraph oracle
-    # parsing fails loud in CI.
-    real_oracle = (
-        "Return target nonland permanent you don't control to its "
-        "owner's hand.\n"
-        "Overload {6}{U} (You may cast this spell for its overload "
-        "cost. If you do, change \"target\" in its text to \"each.\")"
-    )
-    assert classify_role(real_oracle, "Instant") == "wipe"
+    # See ``tests/fixtures/real_oracles.py`` for the byte-exact
+    # Scryfall text and the bug history.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Cyclonic Rift")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "wipe"
 
 
 def test_classify_role_wipe_crux_of_fate_real_scryfall_text():
-    # Same multi-paragraph issue. Crux of Fate's real Scryfall
-    # oracle reads "Destroy all Dragon creatures" (typed all-sweep,
-    # not the "each <subtype>" idiom the original test assumed).
-    real_oracle = (
-        "Choose one —\n"
-        "• Destroy all Dragon creatures.\n"
-        "• Destroy all non-Dragon creatures."
-    )
-    assert classify_role(real_oracle, "Sorcery") == "wipe"
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Crux of Fate")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "wipe"
 
 
 def test_classify_role_ramp_basic_land_type_search():
     # Three Visits / Nature's Lore / Land Tax style — search for a
     # named basic land type rather than the generic word "land".
-    # The original pattern required ``\bland\b`` and so missed
-    # this entire shape of ramp spell. Pinned with real Scryfall
-    # oracle text to prevent regression.
-    real_oracle = (
-        "Search your library for a Forest card, put it onto the "
-        "battlefield, then shuffle."
-    )
-    assert classify_role(real_oracle, "Sorcery") == "ramp"
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Three Visits")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "ramp"
 
 
 def test_classify_role_draw_additional_cards_idiom():
     # Sylvan Library / Howling Mine style — "draw two additional
-    # cards" / "draw an additional card" templating. The
-    # "additional" qualifier between number and "cards" broke the
-    # literal-word-order pattern that only matched "draw two cards"
-    # exactly.
-    real_oracle = (
-        "At the beginning of your draw step, you may draw two "
-        "additional cards. If you do, choose two cards in your "
-        "hand drawn this turn..."
-    )
-    assert classify_role(real_oracle, "Enchantment") == "draw"
+    # cards" / "draw an additional card" templating.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Sylvan Library")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "draw"
 
 
 def test_classify_role_wipe_minus_x_minus_x_mass_shrink():
-    # Toxic Deluge / Crippling Fear style. "All creatures get -X/-X"
-    # is a mass-shrink board wipe that's mechanically distinct from
-    # "destroy all creatures" but functionally equivalent. Original
-    # patterns missed this entirely.
-    real_oracle = (
-        "As an additional cost to cast this spell, pay X life.\n"
-        "All creatures get -X/-X until end of turn."
-    )
-    assert classify_role(real_oracle, "Sorcery") == "wipe"
+    # Toxic Deluge / Crippling Fear style.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Toxic Deluge")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "wipe"
 
 
 def test_classify_role_tutor_or_combined_types():
-    # Mystical Tutor / Worldly Tutor / Eladamri's Call style —
-    # type list with "or" joins ("instant or sorcery card").
-    # Original pattern was a flat alternation that didn't tolerate
-    # the OR templating.
-    real_oracle = (
-        "Search your library for an instant or sorcery card, "
-        "reveal it, then shuffle and put that card on top of "
-        "your library."
-    )
-    assert classify_role(real_oracle, "Instant") == "tutor"
+    # Mystical Tutor / Worldly Tutor / Eladamri's Call style.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Mystical Tutor")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "tutor"
 
 
 def test_classify_role_finisher():
