@@ -59,6 +59,8 @@ from .edhrec_client import (
     CommanderPage,
     fetch_average_deck,
     fetch_commander_page,
+    fetch_tag_page,
+    tribe_tag_slug,
 )
 from .forge_runner import VENDOR_FORGE
 from .moxfield_import import find_top_liked_decks_for_commander
@@ -491,6 +493,7 @@ def _advise_steps(
     fallback_reason: Optional[str] = None
     edhrec_page: Optional[CommanderPage] = None
     average_deck: Optional[AverageDeck] = None
+    tag_page: Optional[CommanderPage] = None
     bracket_peer_ref_count: int = 0
     recs: list[SwapRecommendation]
     effective_source = source  # mutate on fallback
@@ -500,6 +503,27 @@ def _advise_steps(
         if edhrec_page is None:
             edhrec_page = fetch_commander_page(primary_commander)
         return edhrec_page
+
+    def _fetch_tag_page_lazy() -> Optional[CommanderPage]:
+        """Pull the EDHREC ``/tags/<tribe>`` page when the deck has
+        a detected tribal type. Tag pages share the commander
+        page's 14-section structure and surface the BROADER
+        archetype pool — top Dragon staples, Dragon-tribal-
+        specific synergies, Game Changer Dragons, etc. — that
+        complement the commander-specific recs.
+
+        Best-effort: returns None for non-tribal decks or tribes
+        not in the curated ``_TRIBE_TO_TAG_SLUG`` map.
+        """
+        nonlocal tag_page
+        if tag_page is None and tribe:
+            slug = tribe_tag_slug(tribe)
+            if slug:
+                try:
+                    tag_page = fetch_tag_page(slug)
+                except Exception:  # noqa: BLE001
+                    tag_page = None
+        return tag_page
 
     def _fetch_avg_deck_lazy() -> Optional[AverageDeck]:
         """Pull EDHREC's bracket-specific "average deck" — a curated
@@ -548,6 +572,7 @@ def _advise_steps(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
+                tag_page=_fetch_tag_page_lazy(),
             )
             effective_source = "heuristic"
     elif source == "claude":
@@ -576,6 +601,7 @@ def _advise_steps(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
+                tag_page=_fetch_tag_page_lazy(),
             )
             effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
@@ -587,12 +613,15 @@ def _advise_steps(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
+                tag_page=_fetch_tag_page_lazy(),
             )
             effective_source = "heuristic"
     else:
         page = _fetch_edhrec_lazy()
         recs = _heuristic_swap_recommendations(
-            main_cards, page, average_deck=_fetch_avg_deck_lazy(),
+            main_cards, page,
+            average_deck=_fetch_avg_deck_lazy(),
+            tag_page=_fetch_tag_page_lazy(),
         )
 
     yield AdvicePhase("primary", {

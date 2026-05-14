@@ -115,6 +115,7 @@ def _heuristic_swap_recommendations(
     cut_limit: int = _DEFAULT_CUT_LIMIT,
     diagnosis: Optional[DeckDiagnosis] = None,
     average_deck: Optional[AverageDeck] = None,
+    tag_page: Optional[CommanderPage] = None,
 ) -> list[SwapRecommendation]:
     """Pure-data swap proposals from EDHREC inclusion-% deltas.
 
@@ -176,6 +177,25 @@ def _heuristic_swap_recommendations(
             if c.name.lower() not in seen:
                 candidates_for_add.append(c)
                 candidate_bucket[c.name.lower()] = "average_deck"
+                seen.add(c.name.lower())
+    # Tag-page candidates: the EDHREC ``/tags/<tribe>`` or
+    # ``/tags/<theme>`` page surfaces the BROADER archetype pool
+    # (Dragon staples across all Dragon commanders, Token staples
+    # across all Token commanders, etc.). High-synergy + top cards
+    # from the tag page complement the commander-specific signal.
+    # We only pull top + high_synergy (not the per-category lists)
+    # to avoid flooding the candidate list — those are reserved
+    # for the cut-decision known-set fold-in below.
+    if tag_page:
+        for c in tag_page.high_synergy_cards:
+            if c.synergy_pct >= MIN_SYNERGY_PCT and c.name.lower() not in seen:
+                candidates_for_add.append(c)
+                candidate_bucket[c.name.lower()] = "tag_high_synergy"
+                seen.add(c.name.lower())
+        for c in tag_page.top_cards:
+            if c.inclusion_pct >= MIN_INCLUSION_PCT_FOR_ADD and c.name.lower() not in seen:
+                candidates_for_add.append(c)
+                candidate_bucket[c.name.lower()] = "tag_top_cards"
                 seen.add(c.name.lower())
     # New-card candidates: EDHREC's "New Cards" section ships the
     # 5 most-recently-printed cards that have already accumulated
@@ -244,6 +264,22 @@ def _heuristic_swap_recommendations(
                 f"in EDHREC's {bracket_label} sample deck for this "
                 f"commander"
             )
+        elif bucket.startswith("tag_"):
+            # Tag-page sourced. The slug carries the tribe/theme
+            # name (e.g. "dragons", "tokens") — surface it so the
+            # user understands the rec came from the broader
+            # archetype pool, not the commander page directly.
+            tribe_label = (
+                tag_page.slug.replace("-", " ") if tag_page else "tribe"
+            )
+            sub_bucket = bucket[len("tag_"):]
+            reason_text = (
+                f"EDHREC {tribe_label} archetype "
+                f"{sub_bucket.replace('_', ' ')}: in "
+                f"{inclusion_phrase}"
+                + (f", synergy {c.synergy_pct:.0f}%"
+                   if c.synergy_pct else "")
+            )
         else:
             reason_text = (
                 f"EDHREC {bucket}: in {inclusion_phrase}"
@@ -295,6 +331,15 @@ def _heuristic_swap_recommendations(
     if average_deck:
         for c in average_deck.cards:
             edhrec_known.add(c.name.lower())
+    # Tag-page cards join the known set too — Dragon tribal lords,
+    # Token spawners, Spellslinger payoffs, etc. that the
+    # commander page might not list as commander-specific picks
+    # but ARE archetype-appropriate for the deck. Without this,
+    # the cut path would flag niche tribal/theme cards as
+    # off-archetype.
+    if tag_page:
+        for c in tag_page.all_known_cards():
+            edhrec_known.add(c)
 
     # Safety net: if EDHREC's page is genuinely degraded (very
     # obscure commander, schema regression), still refuse to emit

@@ -470,6 +470,120 @@ def fetch_commander_page(
     return page
 
 
+# Common tribal-tag slug mappings. EDHREC's tag URLs use lowercase
+# plural forms with hyphens. Most tribes pluralize with `-s`
+# ("dragon" → "dragons"), but a handful are irregular (elf →
+# elves, merfolk stays "merfolk"). Curated here so callers don't
+# need to special-case.
+_TRIBE_TO_TAG_SLUG: dict[str, str] = {
+    "Dragon": "dragons",
+    "Goblin": "goblins",
+    "Sliver": "slivers",
+    "Elf": "elves",
+    "Vampire": "vampires",
+    "Zombie": "zombies",
+    "Spirit": "spirits",
+    "Angel": "angels",
+    "Demon": "demons",
+    "Beast": "beasts",
+    "Wizard": "wizards",
+    "Knight": "knights",
+    "Merfolk": "merfolk",
+    "Ninja": "ninjas",
+    "Pirate": "pirates",
+    "Dinosaur": "dinosaurs",
+    "Faerie": "faeries",
+    "Eldrazi": "eldrazi",
+    "Werewolf": "werewolves",
+    "Cat": "cats",
+    "Bird": "birds",
+    "Hydra": "hydras",
+    "Treefolk": "treefolk",
+    "Giant": "giants",
+    "Minotaur": "minotaurs",
+    "Druid": "druids",
+    "Warrior": "warriors",
+    "Soldier": "soldiers",
+    "Human": "humans",
+}
+
+
+def tribe_tag_slug(tribe_name: str) -> Optional[str]:
+    """Map a tribe display name (``"Dragon"``) to the EDHREC tag
+    URL slug (``"dragons"``). Returns None when the tribe isn't in
+    the curated map — caller skips the tag-page fetch.
+
+    Matches ``detect_tribal_type``'s canonical tribal-type list.
+    """
+    return _TRIBE_TO_TAG_SLUG.get(tribe_name)
+
+
+def fetch_tag_page(
+    tag_slug: str,
+    cache: bool = True,
+    ttl_hours: int = CACHE_TTL_HOURS,
+) -> Optional[CommanderPage]:
+    """Fetch + parse an EDHREC ``/tags/<slug>`` page.
+
+    Tag pages have IDENTICAL structure to commander pages: same
+    14ish sections (Top Cards / High Synergy / New Cards / Game
+    Changers / Creatures / Instants / Sorceries / Lands / Mana
+    Artifacts / ...) and the same ``__NEXT_DATA__`` shape. So we
+    reuse ``_parse_commander_page`` verbatim — the returned
+    ``CommanderPage`` is structurally identical, just sourced from
+    a tag instead of a commander.
+
+    Returns None on 404 (unknown tag slug) or any other fetch
+    failure. Cached separately from commander pages under
+    ``.cache/edhrec_tag/<slug>.json``.
+
+    Use case: tribal/themed decks (Dragon, Goblin, Sliver, Tokens,
+    Spellslinger, …). The commander-specific page covers what THIS
+    commander runs; the tag page covers the broader archetype
+    pool. Folding both into the heuristic's known-card set gives
+    fuller coverage for cut decisions, and the tag page's high-
+    synergy/top sections surface archetype staples the commander
+    page might miss.
+    """
+    if not tag_slug:
+        return None
+    safe_slug = tag_slug.strip().lower()
+    if not safe_slug:
+        return None
+    cache_path = CACHE_DIR.parent / "edhrec_tag" / f"{safe_slug}.json"
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return _page_from_dict(data)
+        except (OSError, ValueError):
+            pass  # Cache corruption → fresh fetch.
+
+    url = f"{EDHREC_BASE}/tags/{urllib.parse.quote(safe_slug)}"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        html = _http_get_text_with_retry(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        return None
+    except Exception:
+        return None
+    # Reuse the commander-page parser — tag pages have the same
+    # __NEXT_DATA__ shape. The ``commander_name`` field on the
+    # returned CommanderPage carries the tag slug (no real
+    # commander name for tag pages); downstream code that cares
+    # about display can grep for ``"slug": tag``.
+    page = _parse_commander_page(
+        commander_name=f"tag:{safe_slug}",
+        slug=safe_slug,
+        html=html,
+    )
+    if cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(page.to_json(), encoding="utf-8")
+    return page
+
+
 def _page_from_dict(d: dict) -> CommanderPage:
     """Rehydrate a CommanderPage from a cached JSON dict."""
     def card_list(rows):

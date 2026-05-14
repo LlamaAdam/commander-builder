@@ -189,6 +189,91 @@ def test_heuristic_surfaces_average_deck_cards_as_adds():
     assert "optimized" in by_name["Tuned Pick One"].reason.lower()
 
 
+def test_heuristic_surfaces_tag_page_cards_as_adds():
+    """Tag-page integration (Tier-2 work): EDHREC's
+    ``/tags/<tribe-or-theme>`` pages have the same 14-section
+    structure as commander pages and surface the BROADER
+    archetype pool (Dragon staples across all Dragon commanders,
+    Token spawners across all Token commanders, etc.).
+
+    When a deck has a detected tribe and the tag-page fetch
+    succeeds, the heuristic uses the tag page's high_synergy +
+    top_cards as additional add candidates, tagged
+    ``source: edhrec.tag_high_synergy`` or
+    ``edhrec.tag_top_cards``. Tag-page cards are also folded into
+    the cut-decision known set so niche tribal staples don't get
+    wrongly recommended for cutting.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    deck = {"Sol Ring"}
+    page = CommanderPage(
+        commander_name="Test Commander", slug="test", fetched_at="2026-05-14",
+        top_cards=[CardEntry(name=f"CmdTop {i}", inclusion_pct=70.0)
+                   for i in range(5)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    # Tag page = the broader archetype pool. Different cards
+    # from the commander page to make the test unambiguous.
+    tag_page = CommanderPage(
+        commander_name="tag:dragons", slug="dragons",
+        fetched_at="2026-05-14",
+        top_cards=[CardEntry(name="Tribal Staple", inclusion_pct=60.0)],
+        high_synergy_cards=[
+            CardEntry(name="Tribal Lord", inclusion_pct=40.0,
+                      synergy_pct=70.0),
+        ],
+        new_cards=[],
+    )
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=20, tag_page=tag_page,
+    )
+    adds_by_name = {r.card: r for r in recs if r.action == "add"}
+    assert "Tribal Lord" in adds_by_name
+    assert "Tribal Staple" in adds_by_name
+    # Source labels include the tag-page provenance so the audit
+    # log + per-rec debug output can disambiguate.
+    assert adds_by_name["Tribal Lord"].evidence["source"] == "edhrec.tag_high_synergy"
+    assert adds_by_name["Tribal Staple"].evidence["source"] == "edhrec.tag_top_cards"
+    # Rationale mentions the archetype name so the user sees why
+    # the card surfaced.
+    assert "dragons" in adds_by_name["Tribal Lord"].reason.lower()
+
+
+def test_heuristic_uses_tag_page_to_protect_archetype_cards_from_cuts():
+    """Tag-page cards must join the cut-known set so niche tribal/
+    theme picks (e.g. a Sliver lord that isn't on First Sliver's
+    commander page but IS on /tags/slivers) don't get flagged as
+    off-archetype.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so cut path engages.
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(55)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    tag_page = CommanderPage(
+        commander_name="tag:slivers", slug="slivers",
+        fetched_at="2026-05-14",
+        top_cards=[],
+        high_synergy_cards=[],
+        new_cards=[],
+        category_lists={
+            "Creatures": [CardEntry(name="Niche Sliver", inclusion_pct=200.0)],
+        },
+    )
+    deck = {"Niche Sliver", "Random Off-Archetype"}
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=0, tag_page=tag_page,
+    )
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Niche Sliver" not in cut_cards
+    assert "Random Off-Archetype" in cut_cards
+
+
 def test_heuristic_uses_average_deck_to_protect_archetype_cards_from_cuts():
     """An average-deck card that's currently in the user's deck
     must NEVER be recommended for cutting — EDHREC's sample build
