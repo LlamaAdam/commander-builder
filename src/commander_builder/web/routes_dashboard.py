@@ -37,6 +37,7 @@ from ._helpers import (
     _bracket_from_filename,
     _build_suggested_adds,
     _iteration_to_dict,
+    _resolve_deck_path,
 )
 
 
@@ -44,14 +45,14 @@ def make_dashboard_blueprint(
     deck_dir: Path,
     knowledge_db: Optional[Path],
     list_decks,
-    resolve_deck_path,
 ) -> Blueprint:
     """Build a Flask Blueprint for the dashboard + history route group.
 
-    ``list_decks`` and ``resolve_deck_path`` are the corresponding
-    helpers still living in ``web/app.py``. Passing them as
-    arguments keeps the blueprint stateless and dodges circular
-    imports as more route groups get extracted.
+    ``list_decks`` is still passed in because it lives in
+    ``web/app.py`` (depends on the same deck-dir + user-only flag
+    contract). ``_resolve_deck_path`` is imported directly from
+    ``_helpers.py`` (was a constructor parameter before the
+    2026-05-14 cleanup).
     """
     bp = Blueprint("dashboard", __name__)
 
@@ -81,7 +82,7 @@ def make_dashboard_blueprint(
             "1", "true", "yes",
         )
 
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({
                 "error": "deck not found",

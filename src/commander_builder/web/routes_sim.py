@@ -39,21 +39,23 @@ from ..knowledge_log import (
     record_iteration,
     stats_summary,
 )
-from ._helpers import _iteration_to_dict, _to_constructed_format
+from ._helpers import (
+    _iteration_to_dict,
+    _resolve_deck_path,
+    _to_constructed_format,
+)
 
 
 def make_sim_blueprint(
     deck_dir: Path,
     knowledge_db: Optional[Path],
-    resolve_deck_path,
 ) -> Blueprint:
     """Build a Flask Blueprint for the A/B sim + iteration-log route
     group.
 
-    ``resolve_deck_path`` is the ``_resolve_deck_path(deck_dir,
-    deck_id, explicit)`` helper from ``web/app.py``. Passing it as
-    an argument (rather than importing) avoids circular imports as
-    more route groups get extracted.
+    Closes over ``deck_dir`` + ``knowledge_db``. ``_resolve_deck_path``
+    is imported from ``_helpers.py`` directly (was a constructor
+    parameter before the 2026-05-14 cleanup).
     """
     bp = Blueprint("sim", __name__)
 
@@ -103,7 +105,7 @@ def make_sim_blueprint(
                 "error": "mode must be '1v1' or 'pod'",
             }), 400
 
-        old_path = resolve_deck_path(deck_dir, deck_id, None)
+        old_path = _resolve_deck_path(deck_dir, deck_id, None)
         if old_path is None:
             return jsonify({"error": "old deck not found",
                             "deck": deck_id}), 404
@@ -482,7 +484,7 @@ def make_sim_blueprint(
         # browser.
         deck_snapshot = payload.get("deck_snapshot")
         if deck_snapshot is None:
-            path = resolve_deck_path(deck_dir, deck_id, None)
+            path = _resolve_deck_path(deck_dir, deck_id, None)
             if path is not None:
                 try:
                     deck_snapshot = path.read_text(encoding="utf-8")

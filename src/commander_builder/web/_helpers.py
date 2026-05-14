@@ -29,6 +29,35 @@ from pathlib import Path
 from typing import Optional
 
 
+def _resolve_deck_path(
+    deck_dir: Path, deck_id: Optional[str], explicit_path: Optional[str],
+) -> Optional[Path]:
+    """Resolve a deck identifier or explicit path to a real file.
+
+    Both forms are validated against ``deck_dir`` — explicit paths must
+    be inside ``deck_dir`` after resolution, otherwise None is returned.
+
+    Moved here from ``web/app.py`` in the 2026-05-14 Tier-1 #0a
+    cleanup so the 5 blueprint factories can import it directly
+    instead of receiving it as a constructor parameter.
+    """
+    if deck_id:
+        candidate = (deck_dir / f"{deck_id}.dck").resolve()
+        try:
+            candidate.relative_to(deck_dir.resolve())
+        except ValueError:
+            return None
+        return candidate if candidate.exists() else None
+    if explicit_path:
+        candidate = Path(explicit_path).resolve()
+        try:
+            candidate.relative_to(deck_dir.resolve())
+        except ValueError:
+            return None
+        return candidate if candidate.exists() else None
+    return None
+
+
 def _bracket_from_filename(deck_id: str | None) -> int | None:
     """Parse the ``[B<n>]`` suffix the user encodes in deck filenames.
 

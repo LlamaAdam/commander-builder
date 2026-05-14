@@ -23,7 +23,11 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
-from ._helpers import _bracket_from_filename, _normalize_pasted_deck
+from ._helpers import (
+    _bracket_from_filename,
+    _normalize_pasted_deck,
+    _resolve_deck_path,
+)
 
 
 _BRACKET_NAMES = {
@@ -31,13 +35,13 @@ _BRACKET_NAMES = {
 }
 
 
-def make_decks_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
+def make_decks_blueprint(deck_dir: Path) -> Blueprint:
     """Build a Flask Blueprint for the deck-edit / deck-info route
     group.
 
-    ``resolve_deck_path`` is the ``_resolve_deck_path(deck_dir,
-    deck_id, explicit)`` helper from ``web/app.py``. Passing it as
-    an argument (rather than importing) avoids circular imports.
+    Closes over ``deck_dir``. ``_resolve_deck_path`` is imported
+    from ``_helpers.py`` directly (was a constructor parameter
+    before the 2026-05-14 cleanup).
     """
     bp = Blueprint("decks", __name__)
 
@@ -51,7 +55,7 @@ def make_decks_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({
                 "error": "deck not found",
@@ -191,7 +195,7 @@ def make_decks_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
         text = path.read_text(encoding="utf-8")
@@ -274,7 +278,7 @@ def make_decks_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
         text = path.read_text(encoding="utf-8")
@@ -312,7 +316,7 @@ def make_decks_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         (newline-joined card lines). Excludes the [metadata] block."""
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
         from ..moxfield_push import dck_to_textarea
@@ -348,7 +352,7 @@ def make_decks_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
         try:

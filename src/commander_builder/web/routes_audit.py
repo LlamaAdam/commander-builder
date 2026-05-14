@@ -34,9 +34,10 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 from ._helpers import (
     _apply_swaps_to_dck,
     _bracket_from_filename,
+    _build_suggested_adds,
     _match_pct_from_evidence,
     _pad_main_to_99,
-    _build_suggested_adds,
+    _resolve_deck_path,
 )
 
 
@@ -50,16 +51,13 @@ _SOURCE_LABEL = {
 }
 
 
-def make_audit_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
+def make_audit_blueprint(deck_dir: Path) -> Blueprint:
     """Build a Flask Blueprint for the audit/advise route group.
 
-    ``resolve_deck_path`` is the ``_resolve_deck_path(deck_dir,
-    deck_id, explicit)`` helper from ``web/app.py``. It's still
-    defined there (it's a thin wrapper around path manipulation
-    + the deck-dir parameter) so we pass it in to keep the
-    blueprint stateless. Passing it as an argument (rather than
-    importing) avoids a circular import once we move more route
-    groups out.
+    Closes over ``deck_dir`` so route handlers don't need to query
+    Flask's app context for it. ``_resolve_deck_path`` is imported
+    from ``_helpers.py`` directly (no longer threaded through the
+    constructor — moved there in the 2026-05-14 cleanup).
     """
     bp = Blueprint("audit", __name__)
 
@@ -97,7 +95,7 @@ def make_audit_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3
 
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
 
@@ -327,7 +325,7 @@ def make_audit_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3
 
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
 
@@ -539,7 +537,7 @@ def make_audit_blueprint(deck_dir: Path, resolve_deck_path) -> Blueprint:
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3
 
-        path = resolve_deck_path(deck_dir, deck_id, explicit)
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({
                 "error": "deck not found",

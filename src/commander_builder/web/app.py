@@ -45,6 +45,7 @@ from ._helpers import (  # noqa: F401
     _match_pct_from_evidence,
     _normalize_pasted_deck,
     _pad_main_to_99,
+    _resolve_deck_path,
     _to_constructed_format,
 )
 
@@ -119,31 +120,6 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
             "path": str(p),
         })
     return out
-
-
-def _resolve_deck_path(
-    deck_dir: Path, deck_id: Optional[str], explicit_path: Optional[str],
-) -> Optional[Path]:
-    """Resolve a deck identifier or explicit path to a real file.
-
-    Both forms are validated against ``deck_dir`` — explicit paths must
-    be inside ``deck_dir`` after resolution, otherwise None is returned.
-    """
-    if deck_id:
-        candidate = (deck_dir / f"{deck_id}.dck").resolve()
-        try:
-            candidate.relative_to(deck_dir.resolve())
-        except ValueError:
-            return None
-        return candidate if candidate.exists() else None
-    if explicit_path:
-        candidate = Path(explicit_path).resolve()
-        try:
-            candidate.relative_to(deck_dir.resolve())
-        except ValueError:
-            return None
-        return candidate if candidate.exists() else None
-    return None
 
 
 def create_app(
@@ -246,21 +222,15 @@ def create_app(
     from .routes_decks import make_decks_blueprint
     from .routes_meta import make_meta_blueprint
     from .routes_sim import make_sim_blueprint
-    app.register_blueprint(
-        make_audit_blueprint(deck_dir, _resolve_deck_path),
-    )
+    app.register_blueprint(make_audit_blueprint(deck_dir))
     app.register_blueprint(make_dashboard_blueprint(
-        deck_dir, knowledge_db, _list_decks, _resolve_deck_path,
+        deck_dir, knowledge_db, _list_decks,
     ))
-    app.register_blueprint(
-        make_decks_blueprint(deck_dir, _resolve_deck_path),
-    )
+    app.register_blueprint(make_decks_blueprint(deck_dir))
     app.register_blueprint(
         make_meta_blueprint(deck_dir, _list_decks, _ASSET_VERSION),
     )
-    app.register_blueprint(
-        make_sim_blueprint(deck_dir, knowledge_db, _resolve_deck_path),
-    )
+    app.register_blueprint(make_sim_blueprint(deck_dir, knowledge_db))
 
 
     return app
