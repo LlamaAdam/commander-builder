@@ -34,21 +34,22 @@ MIN_INCLUSION_PCT_FOR_ADD = 30.0
 # prioritized even if their inclusion is moderate.
 MIN_SYNERGY_PCT = 25.0
 
-# Minimum combined size of EDHREC top_cards + high_synergy_cards
-# below which we don't emit cut recommendations. Live two-deck
-# comparison (2026-05-14) revealed EDHREC's page-scrape returns
-# only 10+10=20 cards per commander, which means ~80% of a 99-card
-# deck would be flagged as "not in EDHREC top lists" → wrong cuts
-# of obvious staples (Muxus from Krenko, Path to Exile from
-# any deck, etc.).
+# Minimum combined size of EDHREC's recognized cards below which
+# we don't emit cut recommendations. Originally introduced
+# 2026-05-14 when the parser only captured 25 cards/commander
+# (top + high_synergy + new); follow-up investigation revealed
+# EDHREC actually ships 200+ cards per commander across 14
+# sections, and the parser was discarding 90%. The expanded
+# parser (commit f8e9b7f) now feeds the full ~200-card pool
+# into ``edhrec_page.all_known_cards()``, so this threshold
+# returns to its original safety-net role: catch genuinely-
+# broken pages (commander too obscure for EDHREC to have data),
+# not papering over a parser bug.
 #
-# 30 is a deliberate floor: if EDHREC's next-data blob ever
-# expands to a reasonable list size (50+), cuts re-engage. If it
-# stays at 20 we emit zero cuts from the heuristic source —
-# better than wrong cuts. Users who want richer cuts should use
-# ``source=bracket_peers`` which sources from 5 tuned same-bracket
-# decks and reliably returns much more signal.
-MIN_EDHREC_SIGNAL_FOR_CUTS = 30
+# 50 is a conservative floor — the typical commander has 200+
+# cards, so anything below 50 indicates a fundamentally degraded
+# page response and we shouldn't emit cuts.
+MIN_EDHREC_SIGNAL_FOR_CUTS = 50
 
 
 # Map diagnosis weakness keywords to the role buckets that address them.
@@ -128,16 +129,39 @@ def _heuristic_swap_recommendations(
     deck_cards_lc = {c.lower() for c in deck_cards}
 
     # Adds — pull from high-synergy first (commander-specific signal),
-    # then top cards (color staples).
+    # then top cards (color staples), then new cards (recent
+    # printings that EDHREC's "New Cards" section surfaces for this
+    # commander). The 2026-05-14 audit revealed ``new_cards`` was
+    # parsed but never used in recommendations — surfacing it
+    # closes the gap for recently-printed archetype additions.
+    #
+    # Track which candidate came from which bucket so we can label
+    # the rationale string honestly ("new printing" vs "high
+    # synergy") and so the audit log can disambiguate sources.
     candidates_for_add: list[CardEntry] = []
+    candidate_bucket: dict[str, str] = {}  # card_name_lc → bucket label
     seen: set[str] = set()
     for c in edhrec_page.high_synergy_cards:
         if c.synergy_pct >= MIN_SYNERGY_PCT and c.name.lower() not in seen:
             candidates_for_add.append(c)
+            candidate_bucket[c.name.lower()] = "high_synergy"
             seen.add(c.name.lower())
     for c in edhrec_page.top_cards:
         if c.inclusion_pct >= MIN_INCLUSION_PCT_FOR_ADD and c.name.lower() not in seen:
             candidates_for_add.append(c)
+            candidate_bucket[c.name.lower()] = "top_cards"
+            seen.add(c.name.lower())
+    # New-card candidates: EDHREC's "New Cards" section ships the
+    # 5 most-recently-printed cards that have already accumulated
+    # inclusion data for this commander. They're often interesting
+    # adds because the meta hasn't fully absorbed them — early-
+    # adopter signal. No inclusion floor (these are new, the
+    # numbers haven't matured); just dedupe against earlier
+    # buckets.
+    for c in edhrec_page.new_cards:
+        if c.name.lower() not in seen:
+            candidates_for_add.append(c)
+            candidate_bucket[c.name.lower()] = "new_cards"
             seen.add(c.name.lower())
 
     # Build the full add-recommendation list first, then re-rank.
@@ -150,7 +174,12 @@ def _heuristic_swap_recommendations(
         # that's an intentional choice.
         if is_universal_staple(c.name):
             continue
-        bucket = "high_synergy" if c.synergy_pct >= MIN_SYNERGY_PCT else "top_cards"
+        # Pull the bucket we recorded when this candidate was
+        # added — preserves the new_cards distinction (which the
+        # heuristic-after-the-fact ``high_synergy if synergy_pct``
+        # check would have mislabeled as top_cards for any
+        # zero-synergy new card).
+        bucket = candidate_bucket.get(c.name.lower(), "top_cards")
         # Categorize the recommendation by role so the advice
         # surface can group adds by ramp/draw/removal/finisher
         # rather than show a flat list.
@@ -166,13 +195,26 @@ def _heuristic_swap_recommendations(
             if 0 < c.inclusion_pct <= 100
             else f"{int(c.inclusion_pct):,} decks"
         )
+        # New-card rationale gives the user a reason to consider
+        # an unfamiliar pick: "recently printed for this commander."
+        # EDHREC ranks new_cards by early-inclusion signal, so the
+        # cards here aren't random — they're cards the meta is
+        # actively trying.
+        if bucket == "new_cards":
+            reason_text = (
+                f"EDHREC new printing: in {inclusion_phrase}"
+                + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
+                + " — recently added to the meta for this commander"
+            )
+        else:
+            reason_text = (
+                f"EDHREC {bucket}: in {inclusion_phrase}"
+                + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
+            )
         add_recs.append(SwapRecommendation(
             card=c.name,
             action="add",
-            reason=(
-                f"EDHREC {bucket}: in {inclusion_phrase}"
-                + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
-            ),
+            reason=reason_text,
             evidence={
                 "inclusion_pct": c.inclusion_pct,
                 "synergy_pct": c.synergy_pct,
@@ -196,21 +238,26 @@ def _heuristic_swap_recommendations(
     # reflects the re-ordered list, not the pre-ranked one.
     recs.extend(add_recs[:add_limit])
 
-    # Cuts — cards in deck not in EDHREC's top-cards or high-synergy
-    # lists. Inverse of the adds path: if the rest of the meta isn't
-    # running this, it's probably off-archetype. Conservative — top
-    # cards by EDHREC are color staples that not all decks need.
-    edhrec_known = {c.name.lower() for c in edhrec_page.top_cards} \
-                 | {c.name.lower() for c in edhrec_page.high_synergy_cards}
+    # Cuts — cards in deck not present anywhere on EDHREC's page
+    # for this commander. Uses ``all_known_cards()`` which folds
+    # together every section (top_cards + high_synergy + new_cards
+    # + per-category lists Creatures/Instants/Sorceries/Lands/Mana
+    # Artifacts/Game Changers/...). Typical commander has 200+
+    # cards in this pool — comparable to the deck size, so
+    # absence is a real signal rather than the 20-card spotlight
+    # the original parser produced.
+    #
+    # The 2026-05-14 audit caught the old behavior: Muxus from
+    # Krenko + Path to Exile from First Sliver were being
+    # recommended for cutting because they weren't in the 20-card
+    # top+synergy intersection. They DO appear in the broader
+    # Creatures / Instants sections; the expanded parser folds
+    # those in.
+    edhrec_known = edhrec_page.all_known_cards()
 
-    # Sparse-data guard. When EDHREC's next-data blob returns only
-    # 10+10=20 cards (the current 2026-05-14 baseline), the
-    # "not in edhrec_known" predicate flags ~80% of a 99-card deck
-    # — including obvious staples like Muxus, Path to Exile, etc.
-    # Live two-deck comparison surfaced this: both Krenko's Muxus
-    # and the Sliver deck's Path to Exile were recommended for
-    # cutting. Better to emit ZERO cuts than wrong cuts; the user
-    # can switch to source=bracket_peers for high-signal cuts.
+    # Safety net: if EDHREC's page is genuinely degraded (very
+    # obscure commander, schema regression), still refuse to emit
+    # cuts rather than recommend cutting on weak signal.
     if len(edhrec_known) < MIN_EDHREC_SIGNAL_FOR_CUTS:
         return recs
 

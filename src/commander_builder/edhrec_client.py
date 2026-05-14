@@ -75,10 +75,42 @@ class CommanderPage:
     top_cards: list[CardEntry] = field(default_factory=list)
     high_synergy_cards: list[CardEntry] = field(default_factory=list)
     new_cards: list[CardEntry] = field(default_factory=list)
+    # Per-category card lists keyed by EDHREC's section header
+    # (``"Creatures"``, ``"Instants"``, ``"Sorceries"``, ``"Lands"``,
+    # ``"Mana Artifacts"``, ``"Game Changers"``, etc.). The
+    # 2026-05-14 live-audit investigation revealed EDHREC ships
+    # 200+ cards per commander split across ~14 sections, but the
+    # original parser only kept the 25 cards in top_cards +
+    # high_synergy + new_cards. Capturing all sections gives the
+    # heuristic 5-10× more signal for both adds and cuts.
+    category_lists: dict[str, list[CardEntry]] = field(default_factory=dict)
     related_commanders: list[str] = field(default_factory=list)
     average_deck_url: Optional[str] = None
     deck_count: Optional[int] = None
     raw_size_bytes: int = 0
+
+    def all_known_cards(self) -> set[str]:
+        """Return the lowercase union of every card across every section.
+
+        Used by the heuristic cut path to answer "is this deck card
+        in EDHREC's data for this commander?" — before the
+        2026-05-14 parser expansion the answer relied only on
+        top_cards + high_synergy (25 cards), so ~80% of any 99-card
+        deck looked off-archetype. With all 14 sections captured
+        the typical set is 200+ cards, comparable to the real
+        EDHREC page.
+        """
+        out: set[str] = set()
+        for c in self.top_cards:
+            out.add(c.name.lower())
+        for c in self.high_synergy_cards:
+            out.add(c.name.lower())
+        for c in self.new_cards:
+            out.add(c.name.lower())
+        for cards in self.category_lists.values():
+            for c in cards:
+                out.add(c.name.lower())
+        return out
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -248,11 +280,28 @@ def _walk_for_cardlists(node, out: dict[str, list[CardEntry]]) -> None:
     """Recursively walk the next-data blob looking for objects that look like
     EDHREC cardlist entries (`{name, inclusion, synergy, num_decks, ...}`).
     EDHREC's schema isn't strictly typed across page versions, so we hunt by
-    shape rather than by path."""
+    shape rather than by path.
+
+    Sections we recognize explicitly (kept under stable keys):
+      - "high_synergy"  ← "High Synergy Cards"
+      - "new_cards"     ← "New Cards"
+      - "top_cards"     ← "Top Cards" / unheadered top section
+
+    Every OTHER section ("Creatures", "Instants", "Sorceries",
+    "Lands", "Mana Artifacts", "Game Changers", etc.) is bucketed
+    under ``category:<original-header>`` so callers can reach all
+    14ish sections EDHREC ships (~200+ cards total per page) via
+    ``CommanderPage.category_lists``. Live audit 2026-05-14
+    revealed the original parser was discarding 90% of EDHREC's
+    data by ignoring every header that wasn't one of the three
+    above — Muxus, Path to Exile, and most other staples lived in
+    the broader category sections.
+    """
     if isinstance(node, dict):
         # An EDHREC cardlist section typically has `header` and `cardviews`.
         if "header" in node and isinstance(node.get("cardviews"), list):
-            header = str(node.get("header", "")).lower()
+            raw_header = str(node.get("header", ""))
+            header = raw_header.lower()
             bucket: list[CardEntry] = []
             for cv in node["cardviews"]:
                 if not isinstance(cv, dict):
@@ -271,6 +320,15 @@ def _walk_for_cardlists(node, out: dict[str, list[CardEntry]]) -> None:
                 out.setdefault("new_cards", []).extend(bucket)
             elif "top card" in header or header.strip() == "":
                 out.setdefault("top_cards", []).extend(bucket)
+            else:
+                # Per-category sections: Creatures, Instants, Sorceries,
+                # Lands, Mana Artifacts, Game Changers, Utility Lands,
+                # Utility Artifacts, Enchantments, Planeswalkers,
+                # Battles, etc. Keyed by the original header so the
+                # CommanderPage.category_lists dict mirrors EDHREC's
+                # own organization.
+                key = f"category:{raw_header}"
+                out.setdefault(key, []).extend(bucket)
         for v in node.values():
             _walk_for_cardlists(v, out)
     elif isinstance(node, list):
@@ -342,6 +400,15 @@ def _parse_commander_page(commander_name: str, slug: str, html: str) -> Commande
     page.top_cards = buckets.get("top_cards", [])
     page.high_synergy_cards = buckets.get("high_synergy", [])
     page.new_cards = buckets.get("new_cards", [])
+    # Per-category sections (Creatures, Instants, Sorceries, Lands,
+    # Mana Artifacts, Game Changers, etc.) — strip the
+    # ``"category:"`` prefix and keep the original EDHREC header
+    # as the dict key.
+    page.category_lists = {
+        k[len("category:"):]: v
+        for k, v in buckets.items()
+        if k.startswith("category:")
+    }
 
     # Recursively hunt for the "Average Deck" Moxfield URL — schema varies.
     page.average_deck_url = _walk_for_moxfield_url(next_data)
@@ -414,6 +481,10 @@ def _page_from_dict(d: dict) -> CommanderPage:
         top_cards=card_list(d.get("top_cards", [])),
         high_synergy_cards=card_list(d.get("high_synergy_cards", [])),
         new_cards=card_list(d.get("new_cards", [])),
+        category_lists={
+            k: card_list(v)
+            for k, v in (d.get("category_lists") or {}).items()
+        },
         related_commanders=list(d.get("related_commanders", [])),
         average_deck_url=d.get("average_deck_url"),
         deck_count=d.get("deck_count"),

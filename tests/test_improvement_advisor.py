@@ -89,7 +89,7 @@ def test_heuristic_recommends_cuts_for_off_archetype_cards():
     # when EDHREC data is rich enough.
     deck = {"Random Off-Archetype", "Sol Ring", "Forest"}
     page = _fake_edhrec_page(
-        top=[("Sol Ring", 95.0)] + [(f"Top Card {i}", 70.0) for i in range(35)],
+        top=[("Sol Ring", 95.0)] + [(f"Top Card {i}", 70.0) for i in range(55)],
         synergy=[],
     )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
@@ -98,6 +98,95 @@ def test_heuristic_recommends_cuts_for_off_archetype_cards():
     # Sol Ring + basics protected.
     assert "Sol Ring" not in cuts
     assert "Forest" not in cuts
+
+
+def test_heuristic_surfaces_new_cards_as_add_recommendations():
+    """EDHREC ships a ``New Cards`` section (5 recently-printed
+    cards with early inclusion data for this commander). The
+    original parser captured them but the heuristic never used
+    them. 2026-05-14 audit caught this — we were throwing away a
+    valid signal. Recently-printed cards are interesting adds
+    because the meta hasn't fully absorbed them; surfacing them
+    gives users early-adopter recommendations.
+
+    Pinned because the bucket label matters: new_cards should
+    carry ``source: edhrec.new_cards`` (distinct from
+    ``edhrec.top_cards`` and ``edhrec.high_synergy``) so the
+    rationale + per-recommendation logging can disambiguate.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    deck = {"Existing Card"}
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(5)],
+        high_synergy_cards=[],
+        new_cards=[
+            CardEntry(name="Newly Printed Card", inclusion_pct=15.0,
+                      synergy_pct=8.0),
+        ],
+    )
+    recs = _heuristic_swap_recommendations(deck, page, add_limit=10)
+    adds = [r for r in recs if r.action == "add"]
+    by_name = {r.card: r for r in adds}
+    assert "Newly Printed Card" in by_name, (
+        f"new_cards should surface as adds; got {list(by_name)}"
+    )
+    rec = by_name["Newly Printed Card"]
+    assert rec.evidence["source"] == "edhrec.new_cards"
+    # Rationale mentions "recently" so users understand why it's
+    # surfacing despite a low inclusion%.
+    assert "recently" in rec.reason.lower()
+
+
+def test_heuristic_uses_all_category_lists_for_cut_decisions():
+    """The 2026-05-14 parser expansion captures all 14 EDHREC
+    sections (Creatures, Instants, Sorceries, Lands, Mana
+    Artifacts, Game Changers, etc.) totaling ~200+ cards per
+    commander. The heuristic's cut path must consult
+    ``all_known_cards()`` (the union across every section), not
+    just top + high_synergy.
+
+    Without this, Muxus from Krenko (in the Creatures section,
+    NOT the 10-card top_cards list) gets wrongly recommended for
+    cutting — exactly the bug the live two-deck audit caught.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    page = CommanderPage(
+        commander_name="Krenko, Mob Boss", slug="krenko-mob-boss",
+        fetched_at="2026-05-14",
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(10)],
+        high_synergy_cards=[CardEntry(name=f"Synergy {i}",
+                                       inclusion_pct=30.0,
+                                       synergy_pct=50.0)
+                            for i in range(10)],
+        new_cards=[],
+        category_lists={
+            "Creatures": [
+                CardEntry(name="Muxus, Goblin Grandee",
+                          inclusion_pct=8000.0),
+            ] + [CardEntry(name=f"Creature {i}", inclusion_pct=5000.0)
+                 for i in range(49)],
+            "Instants": [CardEntry(name=f"Instant {i}",
+                                    inclusion_pct=4000.0)
+                         for i in range(25)],
+        },
+    )
+    # all_known_cards should now contain ~95 entries — well above
+    # the 50-card MIN_EDHREC_SIGNAL_FOR_CUTS gate.
+    assert len(page.all_known_cards()) >= 50
+    deck = {"Muxus, Goblin Grandee", "Random Off-Archetype"}
+    recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Muxus, Goblin Grandee" not in cut_cards, (
+        f"Muxus is in EDHREC's Creatures section — should not be "
+        f"recommended for cutting. Cuts: {cut_cards}"
+    )
+    # Sanity: actually-off-archetype cards still get cut.
+    assert "Random Off-Archetype" in cut_cards
 
 
 def test_heuristic_skips_cuts_when_edhrec_signal_too_sparse():
@@ -136,7 +225,7 @@ def test_heuristic_protects_universal_staples_from_cuts():
     # "Off Card" assertion vacuous.
     deck = {"Sol Ring", "Arcane Signet", "Command Tower", "Forest", "Off Card"}
     page = _fake_edhrec_page(
-        top=[(f"Top Card {i}", 70.0) for i in range(35)],
+        top=[(f"Top Card {i}", 70.0) for i in range(55)],
         synergy=[],
     )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
@@ -379,7 +468,7 @@ def test_heuristic_respects_add_and_cut_limits():
     # MIN_EDHREC_SIGNAL_FOR_CUTS (30) and the cut path engages.
     deck = {f"Off-{i}" for i in range(20)}
     page = _fake_edhrec_page(
-        top=[(f"Top-{i}", 80.0) for i in range(35)],
+        top=[(f"Top-{i}", 80.0) for i in range(55)],
         synergy=[],
     )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=3, cut_limit=4)
@@ -610,7 +699,7 @@ def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     # engages — see test_heuristic_skips_cuts_when_edhrec_signal_too_sparse.
     fake_page = _fake_edhrec_page(
         top=[("Sol Ring", 95.0), ("Coat of Arms", 60.0)]
-            + [(f"Filler-{i}", 70.0) for i in range(35)],
+            + [(f"Filler-{i}", 70.0) for i in range(55)],
         synergy=[("Kindred Discovery", 40.0, 50.0)],
     )
     monkeypatch.setattr(
@@ -649,7 +738,7 @@ def test_advise_to_manifest_matches_audit_schema(tmp_path, monkeypatch):
             # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so the cut
             # path engages and "Old" surfaces in removed.
             top=[("Coat of Arms", 60.0)]
-                + [(f"Filler-{i}", 70.0) for i in range(35)],
+                + [(f"Filler-{i}", 70.0) for i in range(55)],
             synergy=[],
         ),
     )
@@ -1129,7 +1218,7 @@ def test_heuristic_never_cuts_nonbasic_lands(monkeypatch):
     """
     deck_cards = {"Savannah", "Some Other Card"}
     page = _fake_edhrec_page(
-        top=[("Sol Ring", 90.0)] + [(f"Filler-{i}", 70.0) for i in range(35)],
+        top=[("Sol Ring", 90.0)] + [(f"Filler-{i}", 70.0) for i in range(55)],
         synergy=[],
     )
     def fake_lookup(name):
