@@ -1291,6 +1291,60 @@ function renderAuditResult(container, body) {
   );
   container.appendChild(headline);
 
+  // Price-delta headline. Shows "$420 → $537 (+$117)" when the
+  // audit produced any applied swaps. Null prices (Scryfall down /
+  // all-digital deck) render as "—" with a tooltip explaining why.
+  // Tier-2 backlog item: feeds the cost-evolution chart's per-swap
+  // delta and lets budget-mode users see audit cost impact at a
+  // glance.
+  if (body.original_price_usd != null || body.proposed_price_usd != null) {
+    const orig = body.original_price_usd;
+    const prop = body.proposed_price_usd;
+    const delta = body.price_delta_usd;
+    const fmt = (v) => v == null ? "—" : `$${Number(v).toFixed(2)}`;
+    const deltaText = delta == null
+      ? ""
+      : (delta >= 0 ? `(+${fmt(delta).slice(1)})` : `(-${fmt(-delta).slice(1)})`);
+    const deltaCls = delta == null
+      ? "muted"
+      : (delta > 5 ? "pill bad" : (delta < -5 ? "pill good" : "muted"));
+    const priceP = el(
+      "p", { style: "margin: 4px 0 6px; font-size: 13px;" },
+      el("span", { class: "muted" }, "Cost: "),
+      `${fmt(orig)} → ${fmt(prop)} `,
+    );
+    if (delta != null) {
+      priceP.appendChild(el(
+        "span",
+        {
+          class: deltaCls,
+          style: "display: inline-block; padding: 1px 6px;",
+          title:
+            delta > 0 ? "Audit raises deck cost"
+            : delta < 0 ? "Audit lowers deck cost"
+            : "Audit is cost-neutral",
+        },
+        deltaText,
+      ));
+    }
+    // Footnote when not all cards have prices — keeps the user
+    // from misreading a partial total as authoritative.
+    const origN = body.n_priced_cards_original ?? 0;
+    const propN = body.n_priced_cards_proposed ?? 0;
+    if (origN < 99 || propN < 99) {
+      priceP.appendChild(el(
+        "span",
+        { class: "muted",
+          style: "margin-left: 8px; font-size: 11px;",
+          title: `${origN}/${propN} cards have Scryfall prices in `
+               + `the original/proposed deck respectively.`,
+        },
+        `(${Math.min(origN, propN)} cards priced)`,
+      ));
+    }
+    container.appendChild(priceP);
+  }
+
   // Hallucination summary — non-zero when the Claude analyst invented
   // card names that Scryfall doesn't recognize. Individual rows below
   // get a ⚠ pill; this gives an at-a-glance count.

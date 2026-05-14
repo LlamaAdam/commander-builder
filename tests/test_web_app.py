@@ -2999,6 +2999,75 @@ def test_audit_payload_match_pct_null_for_signal_less_evidence(client, monkeypat
     assert by_card["Cool Claude Pick"]["source"] == "claude"
 
 
+def test_audit_payload_includes_price_delta(client, monkeypatch):
+    """Audit response surfaces original + proposed deck prices plus
+    a computed delta. Tier-2 backlog item shipped in this commit.
+    Feeds the cost-evolution chart and the UI's "$X → $Y (Δ)"
+    headline alongside the diff.
+
+    Test stubs Scryfall's lookup to return controlled prices so the
+    expected delta is predictable.
+    """
+    from types import SimpleNamespace
+
+    def fake_lookup(name, *_a, **_kw):
+        prices = {
+            "Sol Ring": "1.50",
+            "Cultivate": "0.50",
+            "Lotus Cobra": "10.00",
+            "Forest": "0.05",
+        }
+        if name in prices:
+            return {"prices": {"usd": prices[name]}}
+        return None
+    # Patch both deck_dashboard's lookup (which client fixture also
+    # patches) and scryfall_client directly so the audit endpoint's
+    # _total_price_for_deck_text helper sees the mocked prices.
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add",
+                    reason="upgrade", evidence={},
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Cultivate", action="cut",
+                    reason="downgrade", evidence={},
+                    name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    body = resp.get_json()
+    # Net delta is dominated by adding Lotus Cobra ($10) minus all
+    # 5 Cultivates ($2.50) plus the basic-padding (_pad_main_to_99
+    # tops the deck up to 99 with Forests after the cut, so the
+    # exact delta depends on padding count). Sanity-check the sign
+    # + ballpark rather than pin an exact value — the padding
+    # contribution is a real (intended) behavior we don't want to
+    # over-constrain.
+    assert body.get("original_price_usd") is not None
+    assert body.get("proposed_price_usd") is not None
+    assert body.get("price_delta_usd") is not None
+    # Sign: positive (audit added $10 Lotus Cobra, removed cheap
+    # Cultivates + cheap Forest padding).
+    assert body["price_delta_usd"] > 5
+    # Upper bound: less than the Lotus Cobra price + a generous
+    # padding allowance. If this fails, the audit is leaking a
+    # huge price somewhere.
+    assert body["price_delta_usd"] < 20
+
+
 def test_audit_payload_surfaces_unapplied_adds_when_no_cuts(client, monkeypatch):
     """Live two-deck comparison (2026-05-14) caught a regression
     introduced by the MIN_EDHREC_SIGNAL_FOR_CUTS gate: when the

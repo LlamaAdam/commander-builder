@@ -38,6 +38,7 @@ from ._helpers import (
     _match_pct_from_evidence,
     _pad_main_to_99,
     _resolve_deck_path,
+    _total_price_for_deck_text,
 )
 
 
@@ -176,6 +177,20 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
         proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
             proposed_text, post_swap_main,
         )
+        # Compute the original + proposed deck total prices so the UI
+        # can show "$420 → $537 (+$117)" alongside the diff. Tier-2
+        # backlog item — feeds the cost-evolution chart's per-swap
+        # delta and lets budget-mode users see the cost impact of
+        # their audit at a glance. Best-effort: ``_total_price_for_
+        # deck_text`` returns ``(None, 0)`` when no priced cards are
+        # available (Scryfall down, all-digital-only deck), which
+        # the UI translates to "—" instead of "$0.00."
+        original_total, original_priced = _total_price_for_deck_text(original)
+        proposed_total, proposed_priced = _total_price_for_deck_text(proposed_text)
+        if original_total is not None and proposed_total is not None:
+            price_delta = round(proposed_total - original_total, 2)
+        else:
+            price_delta = None
         # Surface ALL adds/cuts the advisor produced, not just those
         # that landed in proposed_text after _apply_swaps_to_dck's
         # adds==cuts balancing. The ``applied`` flag tells the UI
@@ -301,6 +316,15 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             "bracket_peer_ref_count": int(
                 getattr(report, "bracket_peer_ref_count", 0) or 0,
             ),
+            # Proposed-deck pricing — feeds the cost-evolution view
+            # + lets the UI surface "$X → $Y (Δ)" alongside the diff.
+            # All three fields are nullable: None when no priced
+            # cards were found in the corresponding deck text.
+            "original_price_usd": original_total,
+            "proposed_price_usd": proposed_total,
+            "price_delta_usd": price_delta,
+            "n_priced_cards_original": original_priced,
+            "n_priced_cards_proposed": proposed_priced,
         })
 
     @bp.route("/api/audit/stream")
@@ -421,6 +445,23 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                         proposed_text, padded_count, padded_breakdown = (
                             _pad_main_to_99(proposed_text, post_swap_main)
                         )
+                        # Compute original + proposed deck prices for
+                        # the cost-delta UI. Same logic as the sync
+                        # endpoint — see its matching block for the
+                        # rationale.
+                        (
+                            original_total, original_priced,
+                        ) = _total_price_for_deck_text(original)
+                        (
+                            proposed_total, proposed_priced,
+                        ) = _total_price_for_deck_text(proposed_text)
+                        if (original_total is not None
+                                and proposed_total is not None):
+                            price_delta = round(
+                                proposed_total - original_total, 2,
+                            )
+                        else:
+                            price_delta = None
                         # Surface ALL recommendations (not just those
                         # that landed in proposed_text). See the sync
                         # endpoint's matching block for the rationale —
@@ -506,6 +547,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                                     report, "bracket_peer_ref_count", 0,
                                 ) or 0,
                             ),
+                            "original_price_usd": original_total,
+                            "proposed_price_usd": proposed_total,
+                            "price_delta_usd": price_delta,
+                            "n_priced_cards_original": original_priced,
+                            "n_priced_cards_proposed": proposed_priced,
                         })
                         continue
                     # Intermediate phases (diagnosis / manabase / primary)
