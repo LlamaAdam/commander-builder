@@ -65,10 +65,11 @@ from .edhrec_client import (
 from .forge_runner import VENDOR_FORGE
 from .moxfield_import import find_top_liked_decks_for_commander
 from .scryfall_client import _parse_commander_names_from_dck, lookup_card
-from .staples import (
+from .staples import (  # noqa: F401
     ROLE_SATURATION_THRESHOLDS,
     classify_role,
     count_deck_roles,
+    detect_themes,
     detect_tribal_type,
     essential_manabase_for_colors,
     is_basic_land,
@@ -493,7 +494,7 @@ def _advise_steps(
     fallback_reason: Optional[str] = None
     edhrec_page: Optional[CommanderPage] = None
     average_deck: Optional[AverageDeck] = None
-    tag_page: Optional[CommanderPage] = None
+    tag_pages: Optional[list[CommanderPage]] = None
     bracket_peer_ref_count: int = 0
     recs: list[SwapRecommendation]
     effective_source = source  # mutate on fallback
@@ -504,26 +505,71 @@ def _advise_steps(
             edhrec_page = fetch_commander_page(primary_commander)
         return edhrec_page
 
-    def _fetch_tag_page_lazy() -> Optional[CommanderPage]:
-        """Pull the EDHREC ``/tags/<tribe>`` page when the deck has
-        a detected tribal type. Tag pages share the commander
-        page's 14-section structure and surface the BROADER
-        archetype pool — top Dragon staples, Dragon-tribal-
-        specific synergies, Game Changer Dragons, etc. — that
-        complement the commander-specific recs.
+    def _fetch_tag_pages_lazy() -> list[CommanderPage]:
+        """Pull EDHREC ``/tags/<slug>`` pages for both the detected
+        tribe AND any themes detected from the deck's oracle text.
 
-        Best-effort: returns None for non-tribal decks or tribes
-        not in the curated ``_TRIBE_TO_TAG_SLUG`` map.
+        Tribal slug comes from ``tribe_tag_slug(tribe)``; theme
+        slugs come from ``detect_themes(deck_oracles)`` which scans
+        for Tokens / Spellslinger / Aristocrats / +1+1 counters /
+        Landfall / Lifegain / Reanimator / Equipment / Artifacts /
+        Enchantress signals (each gated by a per-theme min-count
+        threshold so goodstuff decks don't trip every theme).
+
+        Returns the list of successfully-fetched tag pages (may be
+        empty for non-tribal, non-themed decks). Capped at 4 pages
+        total to bound the cumulative HTTP cost.
+
+        All pages have the same shape as a commander page so the
+        heuristic can iterate them uniformly.
         """
-        nonlocal tag_page
-        if tag_page is None and tribe:
-            slug = tribe_tag_slug(tribe)
-            if slug:
+        nonlocal tag_pages
+        if tag_pages is not None:
+            return tag_pages
+        slugs: list[str] = []
+        seen_slugs: set[str] = set()
+        # Tribe first (highest signal — tribal decks have the
+        # tightest archetype identity).
+        if tribe:
+            s = tribe_tag_slug(tribe)
+            if s and s not in seen_slugs:
+                slugs.append(s)
+                seen_slugs.add(s)
+        # Detected themes second. Scan the deck's oracle texts via
+        # the cached scryfall lookups (no extra network — just
+        # ``lookup_card`` per card, all already warm from the
+        # role-classifier pass earlier in this audit).
+        try:
+            deck_oracles: list[tuple[str, str]] = []
+            for name in main_cards:
                 try:
-                    tag_page = fetch_tag_page(slug)
+                    card = lookup_card(name)
                 except Exception:  # noqa: BLE001
-                    tag_page = None
-        return tag_page
+                    continue
+                if card:
+                    deck_oracles.append(
+                        (name, card.get("oracle_text", "") or ""),
+                    )
+            for s in detect_themes(deck_oracles):
+                if s and s not in seen_slugs:
+                    slugs.append(s)
+                    seen_slugs.add(s)
+        except Exception:  # noqa: BLE001
+            pass
+        # Cap at 4 pages — each is a ~1-2s HTTP round-trip on a
+        # cold cache, and beyond ~3 the signal diminishes quickly
+        # (themes overlap heavily on staples).
+        slugs = slugs[:4]
+        out: list[CommanderPage] = []
+        for s in slugs:
+            try:
+                p = fetch_tag_page(s)
+            except Exception:  # noqa: BLE001
+                p = None
+            if p is not None:
+                out.append(p)
+        tag_pages = out
+        return tag_pages
 
     def _fetch_avg_deck_lazy() -> Optional[AverageDeck]:
         """Pull EDHREC's bracket-specific "average deck" — a curated
@@ -572,7 +618,7 @@ def _advise_steps(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
-                tag_page=_fetch_tag_page_lazy(),
+                tag_pages=_fetch_tag_pages_lazy(),
             )
             effective_source = "heuristic"
     elif source == "claude":
@@ -601,7 +647,7 @@ def _advise_steps(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
-                tag_page=_fetch_tag_page_lazy(),
+                tag_pages=_fetch_tag_pages_lazy(),
             )
             effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
@@ -613,7 +659,7 @@ def _advise_steps(
             recs = _heuristic_swap_recommendations(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
-                tag_page=_fetch_tag_page_lazy(),
+                tag_pages=_fetch_tag_pages_lazy(),
             )
             effective_source = "heuristic"
     else:
@@ -621,7 +667,7 @@ def _advise_steps(
         recs = _heuristic_swap_recommendations(
             main_cards, page,
             average_deck=_fetch_avg_deck_lazy(),
-            tag_page=_fetch_tag_page_lazy(),
+            tag_pages=_fetch_tag_pages_lazy(),
         )
 
     yield AdvicePhase("primary", {

@@ -179,6 +179,82 @@ def test_classify_role_wipe_cyclonic_rift_real_scryfall_text():
     assert classify_role(o["oracle_text"], o["type_line"]) == "wipe"
 
 
+def test_detect_themes_returns_token_theme_when_threshold_hit():
+    """``detect_themes`` scans card oracles for archetype-indicator
+    patterns and returns the EDHREC tag slugs of themes that
+    clear their per-theme min-count threshold. Pinned for the
+    Tokens theme (threshold = 8 cards with "create ... token" or
+    similar phrasing).
+    """
+    from commander_builder.staples import detect_themes
+
+    # 8 cards with token-creation text → Tokens slug should fire.
+    deck = [
+        (f"Token Maker {i}", "Create a 1/1 white Soldier creature token.")
+        for i in range(8)
+    ]
+    deck += [("Filler", "Vanilla creature.")]
+    themes = detect_themes(deck)
+    assert "tokens" in themes
+
+
+def test_detect_themes_skips_below_threshold():
+    """Goodstuff decks with a few incidental theme cards should NOT
+    trip a theme. The per-theme min-count threshold is the gate.
+    """
+    from commander_builder.staples import detect_themes
+
+    # Only 3 token-making cards → below the 8-card threshold.
+    deck = [
+        ("T1", "Create a token."),
+        ("T2", "Create a token."),
+        ("T3", "Create a token."),
+        ("Filler", "Vanilla creature."),
+    ]
+    themes = detect_themes(deck)
+    assert "tokens" not in themes
+
+
+def test_detect_themes_returns_multiple_themes_when_multiple_hit():
+    """A deck that clears multiple theme thresholds gets all of
+    them back (capped at 3, sorted by signal strength)."""
+    from commander_builder.staples import detect_themes
+
+    deck = (
+        # 10 token-makers (clears Tokens threshold of 8)
+        [(f"T{i}", "Create a 1/1 token.") for i in range(10)]
+        # 8 sacrifice triggers (clears Aristocrats threshold of 8)
+        + [(f"S{i}", "Whenever a creature you control dies, draw a card.")
+           for i in range(8)]
+    )
+    themes = detect_themes(deck)
+    # Both themes should fire; Tokens has more matches so it sorts first.
+    assert "tokens" in themes
+    assert "sacrifice" in themes
+    assert themes[0] == "tokens"  # higher count wins ordering
+
+
+def test_detect_themes_caps_at_3():
+    """The result is capped at 3 slugs to bound the audit's
+    cumulative HTTP cost (each tag-page fetch is 1-2s on cold
+    cache).
+    """
+    from commander_builder.staples import detect_themes
+
+    # 20 cards that each hit 4 different themes (token + sacrifice
+    # + life-gain + counters).
+    deck = [
+        (
+            f"C{i}",
+            "Create a 1/1 token. Whenever a creature dies, "
+            "you gain 1 life and put a +1/+1 counter on a creature.",
+        )
+        for i in range(20)
+    ]
+    themes = detect_themes(deck)
+    assert len(themes) <= 3
+
+
 def test_classify_role_wipe_crux_of_fate_real_scryfall_text():
     from tests.fixtures.real_oracles import oracle
     o = oracle("Crux of Fate")

@@ -329,6 +329,160 @@ _TRIBAL_LANDS = (
 )
 
 
+# Theme-detection patterns. Each theme has a list of regex
+# patterns (matched against card oracle text, case-insensitive)
+# and a minimum count required to flag the deck. Mapped to EDHREC
+# tag slugs so the advisor can pull /tags/<slug> for additional
+# add candidates + cut-protection.
+#
+# Tuning rationale: thresholds reflect "the deck obviously cares
+# about this" — at least 8 cards minimum for most themes,
+# stricter (10-12) for broad themes that incidentally appear in
+# many decks (Lifegain, Counters). Below threshold the deck is
+# probably a goodstuff toolbox, not a themed build.
+_THEME_PATTERNS: list[tuple[str, str, list[str], int]] = [
+    # (theme_name_for_logging, edhrec_tag_slug, [oracle_regex...], min_count)
+    (
+        "Tokens", "tokens",
+        [
+            # Match anything between "create" and "token(s)" — token
+            # blurbs include power/toughness ("1/1"), slashes,
+            # numbers, colors, creature types. ``.+?`` with the
+            # non-greedy modifier is broad-but-bounded; the
+            # closing "token" anchors the match.
+            r"creates? .+? tokens?",
+            r"create [\w\s]+ tokens?",  # fallback for simple "Create N tokens"
+        ],
+        8,
+    ),
+    (
+        "Spellslinger", "spellslinger",
+        [
+            r"whenever you cast (?:a|an|your)",
+            r"prowess",
+            r"copy target instant or sorcery",
+            r"instant and sorcery spells you cast cost",
+        ],
+        8,
+    ),
+    (
+        "Aristocrats", "sacrifice",
+        [
+            r"sacrifice (?:a|another) creature",
+            r"whenever (?:a creature|another creature|this creature) (?:you control )?dies",
+            r"creatures? you control dies?",
+        ],
+        8,
+    ),
+    (
+        "+1/+1 Counters", "plus-1-plus-1-counters",
+        [
+            r"\+1/\+1 counter",
+            r"enters? with a \+1/\+1",
+            r"put a \+1/\+1 counter",
+        ],
+        10,
+    ),
+    (
+        "Landfall", "landfall",
+        [
+            r"landfall",
+            r"whenever a land enters",
+            r"whenever you play a land",
+            r"for each land you control",
+        ],
+        7,
+    ),
+    (
+        "Lifegain", "lifegain",
+        [
+            r"you gain \w+ life",
+            r"whenever you gain life",
+            r"if you gained life this turn",
+            r"lifelink",
+        ],
+        10,
+    ),
+    (
+        "Reanimator", "reanimator",
+        [
+            r"return target creature card from (?:your |a )?graveyard",
+            r"return [\w\s]+ from your graveyard to the battlefield",
+            r"put target creature card from a graveyard onto the battlefield",
+        ],
+        6,
+    ),
+    (
+        "Equipment", "equipment",
+        [
+            r"\bequip\s*\{",
+            r"equipped creature",
+            r"attach to target creature",
+        ],
+        8,
+    ),
+    (
+        "Artifacts", "artifacts",
+        [
+            r"whenever (?:an? |another )?artifact (?:enters|you control)",
+            r"artifacts? (?:you control )?(?:enters?|cost)",
+            r"metalcraft",
+            r"affinity for artifacts",
+        ],
+        10,
+    ),
+    (
+        "Enchantress", "enchantress",
+        [
+            r"whenever you cast an enchantment",
+            r"whenever an enchantment enters",
+            r"constellation",
+        ],
+        6,
+    ),
+]
+
+
+def detect_themes(deck_oracles: list[tuple[str, str]]) -> list[str]:
+    """Scan the deck's card oracle texts and return EDHREC tag
+    slugs for any themes that meet their threshold count.
+
+    ``deck_oracles`` is a list of ``(card_name, oracle_text)``
+    tuples. Each pattern matches against the lowercased oracle;
+    a card counts toward a theme if ANY of the theme's patterns
+    match anywhere in its text. Cards can count for multiple
+    themes (a token-producer with a +1/+1 effect counts toward
+    both).
+
+    Returns up to 3 theme slugs sorted by signal strength (most
+    matches first). 3-slug cap keeps the audit's
+    ``/tags/<slug>`` fetch count bounded — each tag page is a
+    ~1-2s HTTP round-trip even with caching.
+
+    Used by the advisor to pull theme-specific tag pages for
+    non-tribal themed decks (Spellslinger, Tokens, Aristocrats,
+    etc.). Tribal detection is separate (``detect_tribal_type``).
+    """
+    import re as _re
+    counts: dict[str, tuple[str, int]] = {}  # slug → (name, count)
+    for name, oracle in deck_oracles:
+        if not oracle:
+            continue
+        text = oracle.lower()
+        for theme_name, slug, patterns, _threshold in _THEME_PATTERNS:
+            if any(_re.search(p, text, _re.IGNORECASE) for p in patterns):
+                _name, prev = counts.get(slug, (theme_name, 0))
+                counts[slug] = (theme_name, prev + 1)
+    # Filter to themes that cleared their min-count threshold.
+    qualifying: list[tuple[str, int]] = []
+    for theme_name, slug, _patterns, min_count in _THEME_PATTERNS:
+        _n, count = counts.get(slug, (theme_name, 0))
+        if count >= min_count:
+            qualifying.append((slug, count))
+    qualifying.sort(key=lambda kv: -kv[1])
+    return [slug for slug, _ in qualifying[:3]]
+
+
 def tribal_essential_lands(tribe: Optional[str]) -> list[str]:
     """Return the canonical tribal-utility lands for ``tribe``.
 
