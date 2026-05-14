@@ -8,8 +8,8 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](docs/architecture.md).
 
-**Last updated:** 2026-05-13 (doc consolidation session)
-**Phase status:** Phase 2 complete + FP-006 web GUI shipped + 11 commits
+**Last updated:** 2026-05-14 (chrome-audit follow-up session)
+**Phase status:** Phase 2 complete + FP-006 web GUI shipped + 73+ commits
 on `feature/2026-04-28-session` ahead of `master`. Phase 3 (ML
 predictor) still data-gated.
 
@@ -17,34 +17,44 @@ predictor) still data-gated.
 
 ## State of the tree
 
-- **Tests:** 792 passing, ~33s offline. Zero warnings under
-  `python -W default`.
-- **Branch:** `feature/2026-04-28-session` (~50 commits ahead of
-  `master`).
-- **Notable feature branches landed this run** (most-recent first):
+- **Tests:** 820 passing (+28 from the prior recap), ~37s offline. Zero
+  warnings under `python -W default`.
+- **Branch:** `feature/2026-04-28-session` (73 commits ahead of
+  `origin/feature/2026-04-28-session`).
+- **2026-05-13/14 session deltas** (chrome-audit-driven; most-recent
+  first):
 
   ```
-  47de382 feat(cli): commander-advise gains --budget flag
-  066a346 feat(advisor): budget mode skips ABU duals + fetches
-  84d3ca7 fix(tests): narrow ResourceWarning filter, fix surfaced leaks
-  46299a0 fix(staples): tribal-type detection picks most-frequent mention
-  e625055 feat(staples): utility fixing lands for 3+ color decks
-  7407867 refactor(advisor): extract _peer_card_frequency helper
-  c107666 feat(advisor): tribal-essential lands (Cavern of Souls etc.)
-  14bd1a9 feat(advisor): recommend missing manabase essentials
-  78b2ba5 feat(staples): curated manabase essentials by color identity
-  dccd1dd fix(advisor): never recommend cutting any land
-  5899e65 feat(advisor): enrich Claude prompt with bracket-peer refs
-  fd8920a feat(advisor): role-saturation guard drops redundant adds
-  34dcfdb feat(advisor): bracket-peers source — top-N tuned decks
-  e3e5a88 feat(audit): card-name validator flags hallucinations
+  085c256 fix(staples): five more pattern misses caught by bulk audit
+  afc57ac fix(advisor): dedupe adds across manabase + primary source
+  b2ff2b9 fix(staples): real-Scryfall text for Cyclonic Rift / Crux / Coalition
+  f190646 docs(architecture): document advisor + web blueprint refactors
+  f548d28 refactor(web): final stage of blueprint split (closes #3.1)
+  e4cd164 refactor(web): extract deck-edit → routes_decks (stage 4)
+  2622ca5 refactor(web): extract sim → routes_sim (stage 3)
+  c7788fc refactor(web): extract audit/advise → routes_audit (stage 2)
+  9a7c12b refactor(web): extract pure helpers → _helpers.py (stage 1)
+  c9ec4d2 fix(advisor): recalibrate saturation thresholds
+  0410680 fix(dashboard): wire detect_tribal_type into theme_tags
+  52f0b78 feat(ui): manabase-preview + abort-in-flight stream cancel
+  e9514cd feat(ui): progressive audit render via SSE
+  021dd3a feat(web): /api/audit/stream SSE endpoint
+  f69ccca refactor(advisor): split advise() into _advise_steps generator
+  54dd71b fix(ui): suppress 0% pill, render source badges
+  c98d3a2 fix(advisor): consolidate role classifier + wipe patterns
   ```
 
-- **Modules:** ~30 production. Recent additions: `forge_py_correlation`,
-  manabase + tribal helpers in `staples`, multi-source advisor in
-  `improvement_advisor`.
-- **CLI entry points:** 14. `commander-advise` gained `--source`,
-  `--claude-model`, `--budget`.
+  Net: closed the entire 2026-05-13 ranked bug list (1.1/1.2/1.3/1.4,
+  2.1, 3.1) plus caught and fixed 9 production-only bugs during live
+  re-verification.
+
+- **Modules:** ~30 production, plus the `web/` subpackage now split
+  into 6 modules: `app.py` (302-line orchestrator), `_helpers.py`,
+  and 5 blueprint factories (`routes_audit`, `routes_sim`,
+  `routes_decks`, `routes_dashboard`, `routes_meta`). The advisor is
+  similarly split: orchestrator + 7 `_advisor_*.py` sub-modules.
+- **CLI entry points:** 14. `commander-advise` retains
+  `--source`, `--claude-model`, `--budget`.
 - **Knowledge log:** few rows (mix of integration tests + real saves).
   Phase 3 ML still gated on volume.
 
@@ -61,6 +71,24 @@ predictor) still data-gated.
 ## Open backlog (ranked)
 
 ### Tier 1 — Worth doing soon
+
+0. **Curated real-oracle test fixture.** The 2026-05-14 session caught
+   9 production-only bugs that hid behind synthetic-text unit tests.
+   Codify the "use byte-exact Scryfall oracle text" lesson into a
+   shared fixture (`tests/fixtures/real_oracles.py`) and migrate
+   existing classifier tests to source from it. ~1 h.
+
+0a. **Move `_resolve_deck_path` into `web/_helpers.py`.** The blueprint
+    refactor left this helper in `web/app.py` and each of the 5
+    blueprint factories takes it as a parameter. Moving it to
+    `_helpers.py` lets blueprints import directly and shrinks
+    `app.py`'s argument-threading. ~30 min.
+
+0b. **Structured per-recommendation debug logging.** Tier-3 #3.4 from
+    the original audit. Single line per rec
+    (`card=Cyclonic Rift role=wipe source=heuristic`) feeds a
+    `_audit_decisions.log` file so the next misclassification surfaces
+    in seconds, not via Chrome screenshot. ~45 min.
 
 1. ~~**Wire `/api/forge_version` into the topbar badge.**~~ ✅ Shipped
    in commit `1ac9d53`.
@@ -255,6 +283,32 @@ iteration rows; realistic timeline 18–30 months out.
 
 For older decisions see [docs/architecture.md](docs/architecture.md#key-decisions).
 
+- **2026-05-14 — Synthetic test text is insufficient.** The chrome-
+  audit follow-up caught 9 classifier bugs that all passed
+  hand-written unit tests because the synthetic oracle text happened
+  to match overly-permissive regexes. Real Scryfall data (with
+  `\n` paragraph breaks, basic-land-type substitutions like "Forest
+  card", typed alternation, etc.) exposed them. New tests pin
+  byte-exact real card text; a shared real-oracle fixture is in the
+  Tier 1 queue.
+- **2026-05-14 — Manabase × bracket_peers dedup.** The two sources
+  legitimately overlap on shock lands for 5-color decks. Without
+  explicit dedup the proposed `.dck` had duplicate card lines
+  (illegal in singleton Commander; Forge silently rejected).
+  Dedup-by-card-name lives in `_advise_steps`, manabase wins on
+  collision (prepended first + more-specific source tag).
+- **2026-05-13 — Web blueprint split.** `web/app.py` 2,368 → 302
+  lines via 5 Flask Blueprint factories
+  (`routes_audit`/`_sim`/`_decks`/`_dashboard`/`_meta`) plus
+  `_helpers.py` for Flask-independent utilities. Each blueprint is
+  built by `make_<group>_blueprint(...)` closing over the deck dir +
+  shared helpers; the orchestrator just creates the Flask app and
+  registers the 5 factories.
+- **2026-05-13 — Streaming audit pipeline.** `advise()` now wraps an
+  `_advise_steps()` generator that yields `AdvicePhase` events
+  (diagnosis → manabase → primary → complete). The new
+  `/api/audit/stream` SSE endpoint drives the generator; the client
+  renders manabase recs ~50ms in while Claude is still working.
 - **2026-05-13 — Doc consolidation.** Reduced 15 markdown files to 4
   (README, STATUS, CHANGELOG, docs/architecture). Audit retrospectives,
   session-state snapshots, individual handoffs deleted as superseded.
@@ -281,9 +335,10 @@ For older decisions see [docs/architecture.md](docs/architecture.md#key-decision
 
 ## Stats
 
-- **Modules**: ~30 production
-- **Tests**: 792 / 792 across ~30 test files
-- **Test wall time**: ~33s offline
+- **Modules**: ~30 production (advisor split into orchestrator + 7
+  sub-modules; web split into orchestrator + 5 blueprints + helpers)
+- **Tests**: 820 / 820 across ~30 test files
+- **Test wall time**: ~37s offline
 - **CLI entry points**: 14
 - **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache
   (`MTG_CARDS_DIR` env var override available); ~32k per-card snapshots

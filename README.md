@@ -131,8 +131,19 @@ The web app collapses steps 3–5 into a single propose-swap flow.
 ## Project layout
 
 ```
-src/commander_builder/   ~30 production modules (incl. web/ subpackage)
-tests/                   ~670 unit tests, all offline (~25s)
+src/commander_builder/   ~30 production modules; key subsystems split:
+  improvement_advisor.py  orchestrator (advise + _advise_steps generator)
+  _advisor_*.py          7 sub-modules: models, heuristic, bracket_peers,
+                         claude, manabase, filters, role_helpers
+  web/
+    app.py               Flask orchestrator (registers 5 blueprints)
+    _helpers.py          pure functions (deck format, evidence scoring)
+    routes_audit.py      /api/audit + /api/audit/stream (SSE) + /api/advise
+    routes_sim.py        /api/propose_swap + iteration CRUD
+    routes_decks.py      deck text/source/import + game_changers + deck_audit
+    routes_dashboard.py  /api/dashboard + pricing + verdict breakdown
+    routes_meta.py       root + health + forge_version + log_error
+tests/                   820 unit tests, all offline (~37s)
 scripts/                 integration tests + batch runners (hit Forge)
 prompts/                 versioned LLM workflow prompts
 docs/                    architecture, current handoff, sprint specs
