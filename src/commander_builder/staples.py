@@ -383,12 +383,26 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         # "your library" + a "land" mention appear in the same clause,
         # it's a ramp/fetch effect.
         (r"search your library[^.]{0,80}\bland\b", None, 80),
+        # "Search your library for a Forest card" / "Plains card" etc.
+        # — Three Visits / Nature's Lore / Land Tax style. The basic
+        # land type names act as "land" synonyms in the templating.
+        # Live audit 2026-05-13 caught Three Visits returning "other"
+        # because the original pattern required the literal word
+        # "land", which Three Visits replaces with "Forest".
+        (r"search your library[^.]{0,80}\b(?:forest|island|plains|swamp|mountain)\b card", None, 80),
         (r"add\s+\{[wubrgc]\}", None, 50),  # mana producers, colored or colorless
         (r"(?:put|return)[^.]+land card[^.]+(?:onto the battlefield|to the battlefield)", None, 80),
         (r"create a treasure token", None, 40),
     ]),
     ("draw", [
         (r"draw (?:a card|two cards|three cards|\d cards|x cards|cards equal)", None, 70),
+        # "Draw two additional cards" / "draw an additional card" —
+        # Sylvan Library / Howling Mine style. The "additional"
+        # qualifier between the number and "cards" broke the literal
+        # word-order pattern above; this looser one catches the
+        # idiom. Live audit 2026-05-13 caught Sylvan Library
+        # returning "other".
+        (r"draw \w+ additional cards?", None, 70),
         (r"investigate", None, 40),
         (r"scry \d+", None, 30),
         (r"\bcantrip", None, 60),
@@ -445,6 +459,14 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         # Symmetric: when the overload appears earlier (unlikely
         # but possible in re-formatted oracle text), still catch it.
         (r"return each[\s\S]*?(?:you don't control|nonland permanent)[\s\S]*?to (?:its|their) owner(?:'s|s')? hands?", None, 85),
+        # -X/-X mass-shrink wipes — Toxic Deluge, Crippling Fear,
+        # Languish (which uses literal -2/-2 and is already covered
+        # by the digit form). The "all creatures get -X/-X" template
+        # is the modern catch-all. Pattern allows digits OR variables
+        # so it matches both "all creatures get -2/-2" (Languish) and
+        # "all creatures get -X/-X" (Toxic Deluge).
+        # Live audit 2026-05-13 caught Toxic Deluge returning "other".
+        (r"all creatures get -[\dxn]+/-[\dxn]+", None, 80),
     ]),
     ("protection", [
         (r"hexproof", None, 50),
@@ -455,6 +477,11 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
     ]),
     ("tutor", [
         (r"search your library for a (?:card|creature|artifact|enchantment|instant|sorcery|planeswalker|legendary)", None, 80),
+        # "Search your library for an instant or sorcery card" —
+        # Mystical Tutor style, where the type list is OR'd. Generic
+        # version: "an? <type-word>(?: or <type-word>)* card". Live
+        # audit 2026-05-13 caught Mystical Tutor returning "other".
+        (r"search your library for an? (?:creature|artifact|enchantment|instant|sorcery|planeswalker|legendary|\w+)(?: or (?:creature|artifact|enchantment|instant|sorcery|planeswalker|legendary|\w+))+\s+card", None, 80),
     ]),
     ("finisher", [
         (r"each opponent loses \d+ life", None, 60),
@@ -499,9 +526,20 @@ _WIN_CONDITION_PATTERNS = [
     re.compile(r"each opponent's life total becomes", re.IGNORECASE),
     re.compile(r"infect", re.IGNORECASE),
     re.compile(r"poison counter", re.IGNORECASE),
-    # Big-trample finishers
-    re.compile(r"creatures you control get \+\d+/\+\d+ and gain trample",
-               re.IGNORECASE),
+    # Big-trample finishers — Craterhoof Behemoth, Pathbreaker
+    # Ibex, Overwhelming Stampede, End-Raze Forerunners. Two
+    # orderings: "get +N/+N and gain trample" OR "gain trample
+    # and get +N/+N". Live audit 2026-05-13 caught Craterhoof
+    # returning "threat" because its actual oracle says "gain
+    # trample and get +X/+X" — opposite order from the original
+    # pattern. The ``[\dxn]`` character class accepts both
+    # literal-digit pumps and X-based pumps.
+    re.compile(
+        r"creatures you control "
+        r"(?:get \+[\dxn]+/\+[\dxn]+ and gain trample"
+        r"|gain trample and get \+[\dxn]+/\+[\dxn]+)",
+        re.IGNORECASE,
+    ),
     re.compile(r"craterhoof", re.IGNORECASE),
 ]
 

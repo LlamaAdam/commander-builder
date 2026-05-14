@@ -203,6 +203,58 @@ def test_classify_role_wipe_crux_of_fate_real_scryfall_text():
     assert classify_role(real_oracle, "Sorcery") == "wipe"
 
 
+def test_classify_role_ramp_basic_land_type_search():
+    # Three Visits / Nature's Lore / Land Tax style — search for a
+    # named basic land type rather than the generic word "land".
+    # The original pattern required ``\bland\b`` and so missed
+    # this entire shape of ramp spell. Pinned with real Scryfall
+    # oracle text to prevent regression.
+    real_oracle = (
+        "Search your library for a Forest card, put it onto the "
+        "battlefield, then shuffle."
+    )
+    assert classify_role(real_oracle, "Sorcery") == "ramp"
+
+
+def test_classify_role_draw_additional_cards_idiom():
+    # Sylvan Library / Howling Mine style — "draw two additional
+    # cards" / "draw an additional card" templating. The
+    # "additional" qualifier between number and "cards" broke the
+    # literal-word-order pattern that only matched "draw two cards"
+    # exactly.
+    real_oracle = (
+        "At the beginning of your draw step, you may draw two "
+        "additional cards. If you do, choose two cards in your "
+        "hand drawn this turn..."
+    )
+    assert classify_role(real_oracle, "Enchantment") == "draw"
+
+
+def test_classify_role_wipe_minus_x_minus_x_mass_shrink():
+    # Toxic Deluge / Crippling Fear style. "All creatures get -X/-X"
+    # is a mass-shrink board wipe that's mechanically distinct from
+    # "destroy all creatures" but functionally equivalent. Original
+    # patterns missed this entirely.
+    real_oracle = (
+        "As an additional cost to cast this spell, pay X life.\n"
+        "All creatures get -X/-X until end of turn."
+    )
+    assert classify_role(real_oracle, "Sorcery") == "wipe"
+
+
+def test_classify_role_tutor_or_combined_types():
+    # Mystical Tutor / Worldly Tutor / Eladamri's Call style —
+    # type list with "or" joins ("instant or sorcery card").
+    # Original pattern was a flat alternation that didn't tolerate
+    # the OR templating.
+    real_oracle = (
+        "Search your library for an instant or sorcery card, "
+        "reveal it, then shuffle and put that card on top of "
+        "your library."
+    )
+    assert classify_role(real_oracle, "Instant") == "tutor"
+
+
 def test_classify_role_finisher():
     role = classify_role("Target opponent loses the game.", "Sorcery")
     assert role == "finisher"

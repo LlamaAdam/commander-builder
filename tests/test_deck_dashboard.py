@@ -79,6 +79,23 @@ def test_classify_role_extended_you_win_the_game():
     assert role == "win_condition"
 
 
+def test_classify_role_extended_craterhoof_trample_then_pump():
+    # Craterhoof Behemoth's real Scryfall oracle reads "gain trample
+    # and get +X/+X", which is the OPPOSITE word order from the
+    # original pattern's "get +N/+N and gain trample". Both orderings
+    # now match. Live audit 2026-05-13 caught the miss — Craterhoof
+    # was tagged ``threat`` despite being one of the most iconic
+    # green wincons.
+    role = classify_role_extended(
+        "Haste\n"
+        "When this creature enters, creatures you control gain "
+        "trample and get +X/+X until end of turn, where X is the "
+        "number of creatures you control.",
+        "Creature — Beast",
+    )
+    assert role == "win_condition"
+
+
 def test_classify_role_extended_falls_back_to_base_taxonomy():
     """When no land/win patterns match, fall through to staples.classify_role."""
     role = classify_role_extended(
