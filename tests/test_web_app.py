@@ -2048,6 +2048,286 @@ def test_propose_swap_503_when_forge_unavailable(client, monkeypatch):
     assert body["error"] == "Forge not available"
 
 
+# ---------------------------------------------------------------------------
+# /api/propose_swap — Forge-mode-conversion path coverage
+# ---------------------------------------------------------------------------
+#
+# The 1v1 path stages decks under ``userdata/decks/constructed/``
+# (NOT the commander folder), strips the ``[Commander]`` section,
+# and injects ``Deck Type=constructed`` so Forge's ``-f constructed``
+# mode actually starts games. Without these transformations Forge
+# silently loads the deck but plays 0 games — the bug the
+# ``_to_constructed_format`` helper exists to prevent.
+#
+# These tests pin the conversion + staging behavior so a future
+# refactor that breaks the 1v1 path fails loud in CI rather than
+# silently producing zero-games sim results in production.
+#
+# Helper: ``_capture_compare(monkeypatch)`` wraps ``_stub_compare``
+# but ALSO reads the staged file contents during the fake compare
+# call (before cleanup runs). Returns a dict the test can inspect.
+
+def _capture_compare(monkeypatch, **stub_kwargs):
+    """Stub ``compare()`` but capture the staged deck contents +
+    paths for inspection. Returns a captured dict the test asserts
+    against. Inspecting from inside fake_compare runs BEFORE the
+    endpoint's cleanup loop deletes the staged files.
+    """
+    from types import SimpleNamespace
+    captured: dict = {}
+
+    def fake_compare(old_deck, new_deck, bracket, games_per_pod,
+                     filler_pairs=2, mode="1v1", runner=None,
+                     out_dir=None, deck_dir=None,
+                     parallel=True, max_workers=None,
+                     early_stop=True):
+        # Capture call arguments first.
+        captured["old_deck"] = old_deck
+        captured["new_deck"] = new_deck
+        captured["mode"] = mode
+        captured["deck_dir"] = deck_dir
+        # Read the staged file contents WHILE they still exist.
+        if deck_dir:
+            old_path = Path(deck_dir) / old_deck
+            new_path = Path(deck_dir) / new_deck
+            if old_path.exists():
+                captured["old_text"] = old_path.read_text(encoding="utf-8")
+            if new_path.exists():
+                captured["new_text"] = new_path.read_text(encoding="utf-8")
+        # Return a minimal valid report.
+        old_wins = stub_kwargs.get("old_wins", 4)
+        new_wins = stub_kwargs.get("new_wins", 11)
+        draws = stub_kwargs.get("draws", 0)
+        return SimpleNamespace(
+            old_deck=old_deck, new_deck=new_deck,
+            bracket=bracket, mode=mode, games_per_pod=games_per_pod,
+            old_stats=SimpleNamespace(
+                deck_filename=old_deck,
+                wins=old_wins, games=old_wins + new_wins + draws,
+            ),
+            new_stats=SimpleNamespace(
+                deck_filename=new_deck,
+                wins=new_wins, games=old_wins + new_wins + draws,
+            ),
+            draws=draws, total_games=games_per_pod,
+            timestamp="2026-05-14T12:00:00",
+            winner="new", margin=abs(new_wins - old_wins),
+            pods=[{}], pods_planned=1, stopped_early=False,
+        )
+
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.ForgeRunner.locate",
+        classmethod(lambda cls: SimpleNamespace(name="stubbed")),
+    )
+    return captured
+
+
+def test_propose_swap_pod_mode_stages_in_commander_folder(
+    client, monkeypatch,
+):
+    """Pod mode (the default) should stage the proposed .dck file as
+    a sibling of the original — under ``userdata/decks/commander/``,
+    NOT the ``constructed/`` subfolder. Forge's ``-f commander``
+    looks here.
+    """
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "pod",
+    })
+    assert resp.status_code == 200
+    # stage_dir for pod mode is the commander folder (the parent of
+    # the original deck path). The test's deck_dir fixture IS the
+    # commander folder.
+    from pathlib import Path as _P
+    assert _P(captured["deck_dir"]).name != "constructed"
+    # Pod mode does NOT convert — the staged file should retain
+    # its [Commander] section.
+    assert "[Commander]" in captured["new_text"]
+
+
+def test_propose_swap_1v1_mode_stages_in_constructed_subfolder(
+    client, monkeypatch,
+):
+    """1v1 mode must stage files under
+    ``<deck_dir>.parent / 'constructed'`` — Forge's
+    ``-f constructed`` mode ONLY looks there. Staging 1v1 decks in
+    the commander folder produces 'No deck found' errors and zero
+    games (the original 'Done. 0 games played' mystery).
+    """
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+    })
+    assert resp.status_code == 200
+    from pathlib import Path as _P
+    assert _P(captured["deck_dir"]).name == "constructed"
+
+
+def test_propose_swap_1v1_converts_both_old_and_new_decks(
+    client, monkeypatch,
+):
+    """The 1v1 conversion path applies ``_to_constructed_format`` to
+    BOTH the new (proposed) deck AND the old (baseline) deck —
+    not just the new one. Forge can't sim a deck with a
+    ``[Commander]`` section under ``-f constructed``, so both
+    decks must have their commander folded into ``[Main]`` and the
+    ``Deck Type=constructed`` metadata stamped.
+
+    Pinned because the original implementation only converted the
+    new deck for a stretch in early development, producing
+    asymmetric sims where Forge would play one deck (the converted
+    new one) but fail to find the old one.
+    """
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+    })
+    assert resp.status_code == 200
+    # Both staged files must have the [Commander] section stripped
+    # and Deck Type=constructed stamped.
+    for label in ("old_text", "new_text"):
+        text = captured[label]
+        assert "[Commander]" not in text, (
+            f"{label} still has [Commander] section: {text[:200]!r}"
+        )
+        assert "Deck Type=constructed" in text, (
+            f"{label} missing Deck Type=constructed: {text[:200]!r}"
+        )
+
+
+def test_propose_swap_1v1_uniquifies_metadata_name(client, monkeypatch):
+    """The 1v1 path renames both staged decks so Forge's match-result
+    parser can attribute wins to the right side. Without this, both
+    decks shipped with the same ``Name=`` field and log_parser
+    counted every game as a tie regardless of who won.
+
+    Pin that the new + old staged decks have DIFFERENT ``Name=``
+    metadata values after staging.
+    """
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+    })
+    assert resp.status_code == 200
+    import re as _re
+    old_name = _re.search(r"^Name=(.+)$", captured["old_text"],
+                          _re.MULTILINE)
+    new_name = _re.search(r"^Name=(.+)$", captured["new_text"],
+                          _re.MULTILINE)
+    assert old_name and new_name, "both decks should have Name= metadata"
+    assert old_name.group(1) != new_name.group(1), (
+        f"old + new have same Name= ({old_name.group(1)!r}); "
+        f"log_parser will tag every game as a tie."
+    )
+    # Both names should include a timestamp suffix so they're unique
+    # across iterations (matching the _proposed_<ts> / _converted_<ts>
+    # filename pattern).
+    assert "_proposed_" in new_name.group(1) or "_converted_" in new_name.group(1)
+    assert "_converted_" in old_name.group(1)
+
+
+def test_propose_swap_1v1_cleans_up_staged_files_after_compare(
+    client, monkeypatch, tmp_path,
+):
+    """Both ``_proposed_<ts>.dck`` and ``_converted_<ts>.dck`` files
+    must be deleted after ``compare()`` returns. They're working
+    copies for the A/B sim, not deck assets — leaving them on disk
+    pollutes the sidebar and confuses future sessions.
+
+    This test runs the full path (no captured-during-compare
+    inspection) and then checks the constructed/ subfolder is
+    empty (modulo any files the fixture itself created).
+    """
+    _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+    })
+    assert resp.status_code == 200
+    # The deck_dir fixture path is tmp_path / "decks"; the
+    # constructed staging dir is its sibling.
+    from commander_builder.web.app import create_app  # noqa: F401
+    # Look at the constructed dir if it exists.
+    deck_dir = client.application.config.get("DECK_DIR")
+    if deck_dir is None:
+        return  # nothing to assert
+    constructed_dir = Path(deck_dir).parent / "constructed"
+    if constructed_dir.exists():
+        leftover = [
+            f.name for f in constructed_dir.iterdir()
+            if "_proposed_" in f.name or "_converted_" in f.name
+        ]
+        assert leftover == [], (
+            f"staged files left behind: {leftover}"
+        )
+
+
+def test_propose_swap_400_on_bad_mode_value(client, monkeypatch):
+    """``mode`` must be 'pod' or '1v1' — any other value is a 400."""
+    _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n[Commander]\n1 Cmdr\n\n"
+        "[Main]\n1 Forest\n1 Lotus Cobra\n"
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "mode": "skirmish",   # nonsense
+    })
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "mode" in body["error"]
+
+
+def test_propose_swap_pod_mode_does_not_convert_format(client, monkeypatch):
+    """Pod (commander) mode must NOT apply ``_to_constructed_format``.
+    Forge's ``-f commander`` REQUIRES the ``[Commander]`` section;
+    stripping it would silently produce zero-games sims (the same
+    failure mode that motivated the 1v1 conversion in the first
+    place, just in reverse).
+    """
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "pod",
+    })
+    assert resp.status_code == 200
+    # Pod mode preserves [Commander] in the staged file.
+    assert "[Commander]" in captured["new_text"]
+    # And does NOT inject Deck Type=constructed.
+    assert "Deck Type=constructed" not in captured["new_text"]
+
+
 def test_compare_iterations_handles_added_cards(seeded_client):
     """Demo seeder writes the same minimal snapshot for each version
     plus one extra card slug per iteration; check the diff isn't empty
