@@ -187,6 +187,25 @@ async function selectDeck(deckId, li, opts) {
       fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
     ]);
     renderDashboard(data, iters.iterations || []);
+    // Auto-kick a fast heuristic audit so the user sees recs
+    // immediately instead of hunting for the "Run audit" button.
+    // Forced to "heuristic" regardless of the user's source pref:
+    // the auto-kick fires without user input, so it must never
+    // consume an Anthropic API quota. The "Run with Claude" button
+    // inside the audit panel lets the user upgrade on demand.
+    //
+    // Gated by the auto-audit-on-load preference so power users on
+    // slow networks can disable. Also gated on the deck staying
+    // selected (the auto-kick races a possible deck switch).
+    if (getAutoAuditPref() && _activeDeckId === deckId) {
+      // ``loadAdvise("heuristic")`` is intentionally not awaited —
+      // it runs in the background while the user reads the
+      // dashboard. The Suggested-adds panel updates when it
+      // resolves; if the user switches decks first, the existing
+      // AbortController-based cancellation halts the in-flight
+      // call.
+      loadAdvise("heuristic");
+    }
   } catch (e) {
     dash.innerHTML = `<p class="empty-state">Error loading: ${e.message}</p>`;
   } finally {
@@ -700,6 +719,29 @@ function getAuditLLMPref() {
   const valid = _AUDIT_SOURCE_OPTIONS.map((o) => o.value);
   return valid.includes(stored) ? stored : "heuristic";
 }
+
+// Auto-audit-on-dashboard-load preference. Default true: most users
+// want to see a fast heuristic audit immediately rather than hunt
+// for the "Run audit" button. Power users on slow networks can
+// disable via the topbar checkbox (or by setting the localStorage
+// key directly to "0"). Tier-2 issue #2.2 from the 2026-05-13
+// ranked list — the streaming-audit infrastructure makes this
+// cheap enough to enable by default since heuristic returns in
+// ~100ms-1s.
+const _AUTO_AUDIT_KEY = "auto_audit_on_dashboard_load";
+function getAutoAuditPref() {
+  try {
+    const v = localStorage.getItem(_AUTO_AUDIT_KEY);
+    // null = first-time user → default on. Explicit "0" → off.
+    return v === null ? true : v !== "0";
+  } catch (_e) { return true; }
+}
+function setAutoAuditPref(enabled) {
+  try {
+    localStorage.setItem(_AUTO_AUDIT_KEY, enabled ? "1" : "0");
+  } catch (_e) { /* ignore */ }
+}
+
 function setAuditLLMPref(v) {
   try { localStorage.setItem(_LLM_PREF_KEY, v); } catch (_e) { /* ignore */ }
 }
@@ -714,11 +756,17 @@ function setAnthropicKey(k) {
   } catch (_e) { /* ignore */ }
 }
 
-async function loadAdvise() {
+async function loadAdvise(sourceOverride) {
+  // ``sourceOverride`` (optional) bypasses the user's stored
+  // preference for THIS call only — used by the dashboard's
+  // auto-kick (always forces "heuristic" since it runs without
+  // a user click and shouldn't consume a Claude API quota), and
+  // by the "Run with Claude" upgrade button (forces "claude").
+  // When omitted, the user's stored preference applies as before.
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
   if (!sug) return;
-  const sourcePref = getAuditLLMPref();   // heuristic | bracket_peers | claude
+  const sourcePref = sourceOverride || getAuditLLMPref();
   // Only the Claude path needs a BYO key. Bracket-peers + heuristic
   // are key-free, so don't prompt the user for one.
   const byoKey = sourcePref === "claude" ? getAnthropicKey() : "";
@@ -730,11 +778,14 @@ async function loadAdvise() {
     );
     if (k && k.trim().startsWith("sk-")) {
       setAnthropicKey(k.trim());
-    } else {
+    } else if (!sourceOverride) {
+      // Only mutate the user's stored preference when this isn't an
+      // explicit override — the auto-kick / upgrade button mustn't
+      // silently change the persisted setting.
       setAuditLLMPref("heuristic");
     }
   }
-  const sourceFinal = getAuditLLMPref();
+  const sourceFinal = sourceOverride || getAuditLLMPref();
   const keyFinal = sourceFinal === "claude" ? getAnthropicKey() : "";
 
   // Restore the panel header (renderSuggestions strips children
@@ -1099,6 +1150,26 @@ function renderAuditBackendRow(body) {
       { class: "muted", style: "font-size: 11px;" },
       `(requested ${requested})`,
     ));
+  }
+
+  // "Run with Claude" upgrade button — only when the current result
+  // is a non-Claude source. The auto-kick on dashboard load runs
+  // heuristic (since it can't consume a Claude API quota
+  // unilaterally), so this is the path the user takes to upgrade
+  // the result with the better backend. Tier-2 issue #2.2.
+  if (source !== "claude") {
+    const upgradeBtn = el(
+      "button",
+      {
+        class: "advise-btn",
+        style: "padding: 4px 10px; font-size: 12px;",
+        title: "Re-run this audit with the Claude analyst "
+             + "(slower, ~6-8s; needs an Anthropic API key).",
+      },
+      "↗ Run with Claude",
+    );
+    upgradeBtn.addEventListener("click", () => loadAdvise("claude"));
+    row.appendChild(upgradeBtn);
   }
 
   // Selector — switch backend for the *next* audit. This run already
@@ -2391,6 +2462,17 @@ document.addEventListener("DOMContentLoaded", () => {
   const newDeckBtn = $("btn-new-deck");
   if (newDeckBtn) newDeckBtn.addEventListener("click", openNewDeckModal);
 
+  // Auto-audit-on-load toggle (Tier-2 #2.2). Persists to
+  // localStorage; default on. When off, selecting a deck loads the
+  // dashboard without firing the background heuristic audit.
+  const autoAuditToggle = $("auto-audit-toggle");
+  if (autoAuditToggle) {
+    autoAuditToggle.checked = getAutoAuditPref();
+    autoAuditToggle.addEventListener("change", () => {
+      setAutoAuditPref(autoAuditToggle.checked);
+    });
+  }
+
   // New-deck modal: tab switching + import buttons.
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => switchTab(t.dataset.tab));
@@ -2403,3 +2485,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
 loadHealth();
 loadDecks();
+
+// Refresh the topbar health badge every 60s so the Forge-version
+// staleness indicator updates when the user installs a new Forge
+// jar without reloading the page. Also picks up forge_py
+// correlation-log growth + deck-count changes for free since
+// loadHealth re-fetches all three endpoints. Tier-2 issue #2.4
+// from the 2026-05-13 ranked list.
+//
+// 60s is a deliberate trade-off: short enough that an operator who
+// drops a new Forge jar sees the badge update within a minute,
+// long enough that the polling cost is negligible (3 cheap JSON
+// endpoints, all served from cache after warm-up).
+const _HEALTH_REFRESH_MS = 60_000;
+setInterval(() => { loadHealth(); }, _HEALTH_REFRESH_MS);
