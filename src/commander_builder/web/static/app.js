@@ -649,6 +649,64 @@ function _sourcePill(source) {
   return { cls: "pill", text: "EDHREC heuristic" };
 }
 
+// Click a card thumbnail in the audit panel → full-size overlay.
+// Pure JS overlay, no library — single img on top of a translucent
+// scrim. Esc or click-outside closes. The full-size Scryfall variant
+// is ~700×980 (200-400KB) so this fetch only fires on explicit click,
+// not during scroll.
+function openCardImageOverlay(cardName) {
+  // Remove any prior overlay (defensive — click-spam can race).
+  const prior = document.getElementById("_card-overlay");
+  if (prior) prior.remove();
+  const scrim = el(
+    "div",
+    {
+      id: "_card-overlay",
+      style: "position: fixed; inset: 0; background: rgba(0,0,0,0.7); "
+           + "z-index: 1000; display: flex; align-items: center; "
+           + "justify-content: center; cursor: pointer;",
+    },
+  );
+  const img = el(
+    "img",
+    {
+      src: cardImageUrl(cardName, "normal"),
+      alt: cardName,
+      style: "max-width: 90vw; max-height: 90vh; "
+           + "border-radius: 8px; box-shadow: 0 4px 32px rgba(0,0,0,0.5);",
+    },
+  );
+  scrim.appendChild(img);
+  function close() {
+    scrim.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(e) { if (e.key === "Escape") close(); }
+  scrim.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(scrim);
+}
+
+// Build a Scryfall image URL for a card name. The
+// ``/cards/named?exact=<name>&format=image&version=<size>`` endpoint
+// is a server-side redirect to the actual image asset — no API key
+// or pre-fetch needed; the browser follows the redirect when the
+// <img> tag loads. ``version=small`` is 146×204px (~15KB); use it
+// for inline thumbnails. The ``loading="lazy"`` attr on the <img>
+// element defers fetching until the row scrolls into view, so a
+// 30-card audit panel doesn't fire 30 simultaneous redirects.
+//
+// FP-008 substrate from STATUS.md — card images alongside oracle
+// text in the suggestions panel.
+function cardImageUrl(name, size) {
+  size = size || "small";
+  return (
+    "https://api.scryfall.com/cards/named"
+    + `?exact=${encodeURIComponent(name)}`
+    + `&format=image&version=${size}`
+  );
+}
+
 // Per-card source badge for the "Cards to add" rows. The audit
 // payload now carries a ``source`` string per rec; when match_pct
 // is null (manabase essentials, vanilla Claude recs with no peer
@@ -1564,6 +1622,35 @@ function renderAuditResult(container, body) {
         wrap.appendChild(el("div", { class: "muted" }, a.rationale));
       }
       row.appendChild(wrap);
+      // Card thumbnail (FP-008). Only render for recs we expect
+      // Scryfall to know about; ``name_known === false`` means the
+      // validator already confirmed Scryfall doesn't have the
+      // card. ``loading="lazy"`` defers the fetch until the row
+      // scrolls into view — a 30-card audit panel doesn't fire
+      // 30 simultaneous HTTPS round-trips. ``decoding="async"``
+      // keeps image decoding off the main thread so the panel
+      // scrolls smoothly even on slow hardware.
+      if (a.name_known !== false) {
+        const thumb = el(
+          "img",
+          {
+            src: cardImageUrl(a.card, "small"),
+            loading: "lazy",
+            decoding: "async",
+            alt: a.card,
+            title: `${a.card} — click to view full size`,
+            style: "width: 60px; height: 84px; "
+                 + "border-radius: 3px; "
+                 + "object-fit: cover; cursor: pointer; "
+                 + "margin-left: 8px;",
+          },
+        );
+        // Click to expand to a modal-ish overlay with the full
+        // image. Keeps the row compact while still letting users
+        // read the card text without leaving the audit panel.
+        thumb.addEventListener("click", () => openCardImageOverlay(a.card));
+        row.appendChild(thumb);
+      }
       row.appendChild(el(
         "span", { class: "delta" },
         a.price_usd != null ? `$${Number(a.price_usd).toFixed(2)}` : "",
