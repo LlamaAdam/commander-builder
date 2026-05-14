@@ -34,6 +34,22 @@ MIN_INCLUSION_PCT_FOR_ADD = 30.0
 # prioritized even if their inclusion is moderate.
 MIN_SYNERGY_PCT = 25.0
 
+# Minimum combined size of EDHREC top_cards + high_synergy_cards
+# below which we don't emit cut recommendations. Live two-deck
+# comparison (2026-05-14) revealed EDHREC's page-scrape returns
+# only 10+10=20 cards per commander, which means ~80% of a 99-card
+# deck would be flagged as "not in EDHREC top lists" → wrong cuts
+# of obvious staples (Muxus from Krenko, Path to Exile from
+# any deck, etc.).
+#
+# 30 is a deliberate floor: if EDHREC's next-data blob ever
+# expands to a reasonable list size (50+), cuts re-engage. If it
+# stays at 20 we emit zero cuts from the heuristic source —
+# better than wrong cuts. Users who want richer cuts should use
+# ``source=bracket_peers`` which sources from 5 tuned same-bracket
+# decks and reliably returns much more signal.
+MIN_EDHREC_SIGNAL_FOR_CUTS = 30
+
 
 # Map diagnosis weakness keywords to the role buckets that address them.
 # Order in each tuple matters — leftmost role is the strongest match
@@ -186,6 +202,17 @@ def _heuristic_swap_recommendations(
     # cards by EDHREC are color staples that not all decks need.
     edhrec_known = {c.name.lower() for c in edhrec_page.top_cards} \
                  | {c.name.lower() for c in edhrec_page.high_synergy_cards}
+
+    # Sparse-data guard. When EDHREC's next-data blob returns only
+    # 10+10=20 cards (the current 2026-05-14 baseline), the
+    # "not in edhrec_known" predicate flags ~80% of a 99-card deck
+    # — including obvious staples like Muxus, Path to Exile, etc.
+    # Live two-deck comparison surfaced this: both Krenko's Muxus
+    # and the Sliver deck's Path to Exile were recommended for
+    # cutting. Better to emit ZERO cuts than wrong cuts; the user
+    # can switch to source=bracket_peers for high-signal cuts.
+    if len(edhrec_known) < MIN_EDHREC_SIGNAL_FOR_CUTS:
+        return recs
 
     for card in deck_cards:
         # Don't recommend cutting any land (basic, dual, fetch,

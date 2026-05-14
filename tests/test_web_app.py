@@ -2999,6 +2999,68 @@ def test_audit_payload_match_pct_null_for_signal_less_evidence(client, monkeypat
     assert by_card["Cool Claude Pick"]["source"] == "claude"
 
 
+def test_audit_payload_surfaces_unapplied_adds_when_no_cuts(client, monkeypatch):
+    """Live two-deck comparison (2026-05-14) caught a regression
+    introduced by the MIN_EDHREC_SIGNAL_FOR_CUTS gate: when the
+    heuristic refused to emit cuts (sparse EDHREC data), the
+    adds==cuts balancing in ``_apply_swaps_to_dck`` silently
+    dropped all adds (min(adds, 0) = 0). Users got "no
+    recommendations" instead of "here are 8 manabase upgrades."
+
+    Fix: the ``added`` payload now includes ALL recommendations
+    from the report, with an ``applied`` flag indicating whether
+    each one landed in ``proposed_text``. The UI can render
+    unapplied entries as "needs manual cut" suggestions instead
+    of dropping them silently.
+    """
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        # 3 adds but ZERO cuts — mirrors the live failure where
+        # the cut-gate fired and balancing dropped all adds.
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Sacred Foundry", action="add",
+                    reason="essential dual",
+                    evidence={"source": "manabase_essentials"},
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Blood Crypt", action="add",
+                    reason="essential dual",
+                    evidence={"source": "manabase_essentials"},
+                    name_known=True,
+                ),
+                SimpleNamespace(
+                    card="Steam Vents", action="add",
+                    reason="essential dual",
+                    evidence={"source": "manabase_essentials"},
+                    name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    body = resp.get_json()
+    # All 3 recommendations must surface in the added payload, NOT
+    # be dropped due to add/cut imbalance.
+    assert len(body["added"]) == 3, (
+        f"expected 3 adds visible, got {len(body['added'])}: "
+        f"{[a['card'] for a in body['added']]}"
+    )
+    # None landed in proposed_text since there were no cuts.
+    for a in body["added"]:
+        assert a["applied"] is False, (
+            f"{a['card']!r} should be marked applied=False "
+            f"(no cut to balance), got True"
+        )
+
+
 def test_audit_payload_match_pct_null_for_manabase_essentials(client, monkeypatch):
     """Manabase essentials (Sacred Foundry, Cavern of Souls, etc.)
     have no inclusion% or reference-frequency signal — they're added

@@ -81,9 +81,15 @@ def test_heuristic_filters_by_inclusion_threshold():
 
 
 def test_heuristic_recommends_cuts_for_off_archetype_cards():
+    # Note: MIN_EDHREC_SIGNAL_FOR_CUTS gates cut emission behind a
+    # 30-card EDHREC-page threshold (live 2026-05-14 audit revealed
+    # EDHREC ships only ~20 cards per commander, which makes the
+    # cut signal unreliable). Padding the fake page above the
+    # threshold so this test exercises the cut path that fires
+    # when EDHREC data is rich enough.
     deck = {"Random Off-Archetype", "Sol Ring", "Forest"}
     page = _fake_edhrec_page(
-        top=[("Sol Ring", 95.0)],
+        top=[("Sol Ring", 95.0)] + [(f"Top Card {i}", 70.0) for i in range(35)],
         synergy=[],
     )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
@@ -94,9 +100,45 @@ def test_heuristic_recommends_cuts_for_off_archetype_cards():
     assert "Forest" not in cuts
 
 
+def test_heuristic_skips_cuts_when_edhrec_signal_too_sparse():
+    """Live two-deck comparison (2026-05-14) caught a production
+    bug: EDHREC's commander page returns only ~20 cards per
+    commander, so the cut heuristic flagged ~80% of every deck as
+    off-archetype — including obvious staples like Muxus from
+    Krenko Goblin and Path to Exile from a Sliver deck.
+
+    Fix: when the combined top_cards + high_synergy_cards size is
+    below ``MIN_EDHREC_SIGNAL_FOR_CUTS`` (30), don't emit ANY cuts.
+    Better to emit zero cuts than wrong cuts; users who want
+    high-signal cuts can switch to source=bracket_peers which
+    sources from 5 tuned same-bracket decks.
+    """
+    deck = {"Muxus", "Path to Exile", "Krenko's Will", "Random Card"}
+    # Realistic sparse page — 10 top + 10 high-synergy = 20, below
+    # the 30-card threshold. Mirrors the actual 2026-05-14 EDHREC
+    # page shape for Krenko, Mob Boss.
+    page = _fake_edhrec_page(
+        top=[(f"Top Card {i}", 70.0) for i in range(10)],
+        synergy=[(f"Synergy Card {i}", 30.0, 50.0) for i in range(10)],
+    )
+    recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
+    cuts = [r for r in recs if r.action == "cut"]
+    assert cuts == [], (
+        f"Expected zero cuts when EDHREC signal is sparse (20 cards "
+        f"< 30 threshold), got: {[r.card for r in cuts]}"
+    )
+
+
 def test_heuristic_protects_universal_staples_from_cuts():
+    # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS (30) so the cut path
+    # engages — the sparse-signal gate (added 2026-05-14) would
+    # otherwise short-circuit and emit zero cuts, making the
+    # "Off Card" assertion vacuous.
     deck = {"Sol Ring", "Arcane Signet", "Command Tower", "Forest", "Off Card"}
-    page = _fake_edhrec_page(top=[], synergy=[])
+    page = _fake_edhrec_page(
+        top=[(f"Top Card {i}", 70.0) for i in range(35)],
+        synergy=[],
+    )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
     cuts = {r.card for r in recs if r.action == "cut"}
     for protected in ("Sol Ring", "Arcane Signet", "Command Tower", "Forest"):
@@ -333,9 +375,11 @@ def test_heuristic_no_diagnosis_keeps_original_order(monkeypatch):
 
 
 def test_heuristic_respects_add_and_cut_limits():
+    # 35 top_cards padding so the page clears
+    # MIN_EDHREC_SIGNAL_FOR_CUTS (30) and the cut path engages.
     deck = {f"Off-{i}" for i in range(20)}
     page = _fake_edhrec_page(
-        top=[(f"Top-{i}", 80.0) for i in range(20)],
+        top=[(f"Top-{i}", 80.0) for i in range(35)],
         synergy=[],
     )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=3, cut_limit=4)
@@ -562,8 +606,11 @@ def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     )
 
     # Fake EDHREC page recommends a synergy card and flags Old Card as off.
+    # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS (30) so the cut path
+    # engages — see test_heuristic_skips_cuts_when_edhrec_signal_too_sparse.
     fake_page = _fake_edhrec_page(
-        top=[("Sol Ring", 95.0), ("Coat of Arms", 60.0)],
+        top=[("Sol Ring", 95.0), ("Coat of Arms", 60.0)]
+            + [(f"Filler-{i}", 70.0) for i in range(35)],
         synergy=[("Kindred Discovery", 40.0, 50.0)],
     )
     monkeypatch.setattr(
@@ -599,7 +646,11 @@ def test_advise_to_manifest_matches_audit_schema(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "commander_builder.improvement_advisor.fetch_commander_page",
         lambda name, **kw: _fake_edhrec_page(
-            top=[("Coat of Arms", 60.0)], synergy=[],
+            # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so the cut
+            # path engages and "Old" surfaces in removed.
+            top=[("Coat of Arms", 60.0)]
+                + [(f"Filler-{i}", 70.0) for i in range(35)],
+            synergy=[],
         ),
     )
 
@@ -1071,9 +1122,16 @@ def test_bracket_peers_never_cuts_nonbasic_lands(monkeypatch):
 
 
 def test_heuristic_never_cuts_nonbasic_lands(monkeypatch):
-    """Same guard as above, applied to the EDHREC heuristic cut path."""
+    """Same guard as above, applied to the EDHREC heuristic cut path.
+
+    Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so the cut path
+    engages.
+    """
     deck_cards = {"Savannah", "Some Other Card"}
-    page = _fake_edhrec_page(top=[("Sol Ring", 90.0)], synergy=[])
+    page = _fake_edhrec_page(
+        top=[("Sol Ring", 90.0)] + [(f"Filler-{i}", 70.0) for i in range(35)],
+        synergy=[],
+    )
     def fake_lookup(name):
         if name == "Savannah":
             return {"type_line": "Land — Plains Forest", "oracle_text": ""}

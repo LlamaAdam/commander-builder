@@ -176,11 +176,20 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
         proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
             proposed_text, post_swap_main,
         )
-        # Trim the rendered payloads to exactly the swaps that were
-        # actually applied to the deck text. _apply_swaps_to_dck
-        # balances adds==cuts to keep deck size legal; without this
-        # filter, the UI would say "5 added 8 removed" while only 5+5
-        # of those changes actually landed.
+        # Surface ALL adds/cuts the advisor produced, not just those
+        # that landed in proposed_text after _apply_swaps_to_dck's
+        # adds==cuts balancing. The ``applied`` flag tells the UI
+        # which entries are in proposed_text (safe to drop into
+        # Forge) vs which are loose recommendations (the user
+        # needs to choose what to swap them in for).
+        #
+        # Live-audit 2026-05-14 surfaced the need: the new heuristic
+        # cut-gate (MIN_EDHREC_SIGNAL_FOR_CUTS) correctly emits zero
+        # cuts when EDHREC's data is sparse, but the previous
+        # ``applied_add_set`` filter dropped EVERY add silently
+        # because min(adds, 0) = 0. Users got "no recommendations"
+        # instead of "here are 8 manabase upgrades, choose what to
+        # cut yourself."
         applied_add_set = {n.lower() for n in added}
         applied_cut_set = {n.lower() for n in removed}
         added_payload = [
@@ -196,18 +205,25 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 # badge when match_pct is null (manabase essentials,
                 # vanilla Claude recs). Values mirror evidence.source.
                 "source": (rec.evidence or {}).get("source"),
+                # True when this rec landed in proposed_text;
+                # False = "recommended but no cut to balance against."
+                # UI styles unapplied entries with a muted look + a
+                # "needs manual cut" pill so the user knows the deck
+                # text isn't pre-built for them.
+                "applied": rec.card.lower() in applied_add_set,
             }
             for rec in report.recommendations
-            if rec.action == "add" and rec.card.lower() in applied_add_set
+            if rec.action == "add"
         ]
         removed_payload = [
             {
                 "card": rec.card,
                 "rationale": rec.reason or "",
                 "name_known": getattr(rec, "name_known", True),
+                "applied": rec.card.lower() in applied_cut_set,
             }
             for rec in report.recommendations
-            if rec.action == "cut" and rec.card.lower() in applied_cut_set
+            if rec.action == "cut"
         ]
         # Hallucination flag: only count cards Scryfall *confirmed* are
         # fake (False). Skip None (validator couldn't reach Scryfall)
@@ -405,6 +421,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                         proposed_text, padded_count, padded_breakdown = (
                             _pad_main_to_99(proposed_text, post_swap_main)
                         )
+                        # Surface ALL recommendations (not just those
+                        # that landed in proposed_text). See the sync
+                        # endpoint's matching block for the rationale —
+                        # the live-audit 2026-05-14 cut-gate fix would
+                        # otherwise silently drop every add when cuts=0.
                         applied_add_set = {n.lower() for n in added}
                         applied_cut_set = {n.lower() for n in removed}
                         added_payload = [
@@ -421,10 +442,10 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                                     rec, "name_known", True,
                                 ),
                                 "source": (rec.evidence or {}).get("source"),
+                                "applied": rec.card.lower() in applied_add_set,
                             }
                             for rec in report.recommendations
                             if rec.action == "add"
-                            and rec.card.lower() in applied_add_set
                         ]
                         removed_payload = [
                             {
@@ -433,10 +454,10 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                                 "name_known": getattr(
                                     rec, "name_known", True,
                                 ),
+                                "applied": rec.card.lower() in applied_cut_set,
                             }
                             for rec in report.recommendations
                             if rec.action == "cut"
-                            and rec.card.lower() in applied_cut_set
                         ]
                         unknown_card_count = sum(
                             1 for entry in added_payload + removed_payload
