@@ -524,7 +524,14 @@ def test_auto_curate_main_writes_versioned_file_without_dry_run(
     tmp_path, monkeypatch, capsys,
 ):
     """Without --dry-run, the new versioned .dck lands on disk with the
-    expected name and content. Smoke-tests the full happy path."""
+    expected name and content. Smoke-tests the full happy path.
+
+    Passes ``--no-log`` so the test focuses on the file-write contract
+    without depending on knowledge_log state. The autouse
+    ``_isolate_knowledge_log_default_path`` fixture in conftest.py
+    would catch a leak even without this flag, but being explicit
+    here documents intent.
+    """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
     monkeypatch.setattr(
         "commander_builder.proposer._load_game_changers",
@@ -544,7 +551,7 @@ def test_auto_curate_main_writes_versioned_file_without_dry_run(
     )
 
     from commander_builder.proposer import auto_curate_main
-    rc = auto_curate_main([str(deck), "--bracket", "3"])
+    rc = auto_curate_main([str(deck), "--bracket", "3", "--no-log"])
     assert rc == 0
 
     out_path = tmp_path / "[USER] Foo v2 [B3].dck"
