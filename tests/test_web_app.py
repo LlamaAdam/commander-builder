@@ -1730,6 +1730,104 @@ def test_audit_endpoint_surfaces_salt_warning_at_low_bracket(
     assert cultivate["salt"] == 3.7
 
 
+def test_audit_endpoint_surfaces_deck_health_signals(
+    client, monkeypatch, deck_dir,
+):
+    """The audit response carries ``deck_health`` with all 5 signals
+    populated. Tests that the route's _compute_deck_health_safe
+    wrapper correctly threads the deck text through and returns the
+    full shape."""
+    from types import SimpleNamespace
+
+    # Deck with one of each named signal: an MDFC, a wincon-protection
+    # card, and a self-mill enabler.
+    p = deck_dir / "Healthy.dck"
+    p.write_text(
+        "[metadata]\nName=Healthy\nMoxfield=abc\n"
+        "[Commander]\n1 Test Commander\n"
+        "[Main]\n"
+        "1 Boseiju, Who Endures\n"      # MDFC
+        "1 Silence\n"                    # wincon protection
+        "1 Stitcher's Supplier\n"        # self-mill enabler
+        + "1 Forest\n" * 32,
+        encoding="utf-8",
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # Stub Scryfall so spell-density / mana-sink computation doesn't
+    # hit the network.
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: {
+            "name": name,
+            "type_line": "Land" if "Forest" in name else "Creature",
+            "mana_cost": "",
+        },
+    )
+
+    resp = client.get("/api/audit?deck=Healthy&bracket=3")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    health = body.get("deck_health")
+    assert health is not None
+    # All 5 top-level keys present (UI tile renderer needs each).
+    assert set(health.keys()) == {
+        "mdfc", "spell_density", "mana_sinks",
+        "wincon_protection", "self_mill",
+    }
+    # Named-card signals picked up correctly.
+    assert health["mdfc"]["count"] == 1
+    assert "Boseiju, Who Endures" in health["mdfc"]["cards"]
+    assert health["wincon_protection"]["count"] == 1
+    assert "Silence" in health["wincon_protection"]["cards"]
+    assert health["self_mill"]["count"] == 1
+    assert "Stitcher's Supplier" in health["self_mill"]["cards"]
+
+
+def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
+    client, monkeypatch,
+):
+    """If Scryfall is unreachable, deck_health degrades gracefully:
+    the spell_density and mana_sinks signals report zeros (can't
+    classify types) but the named-card signals (MDFC, protection,
+    self-mill) still work since they don't need Scryfall."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("scryfall down")),
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    health = resp.get_json()["deck_health"]
+    # Still has all keys (UI needs them).
+    assert set(health.keys()) == {
+        "mdfc", "spell_density", "mana_sinks",
+        "wincon_protection", "self_mill",
+    }
+    # Scryfall-dependent signals return zero/null gracefully.
+    assert health["mana_sinks"]["count"] == 0
+    assert health["spell_density"]["non_permanent_count"] == 0
+
+
 def test_audit_endpoint_surfaces_protected_cards_from_metadata(
     client, monkeypatch, deck_dir,
 ):

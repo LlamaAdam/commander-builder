@@ -56,6 +56,33 @@ _SOURCE_LABEL = {
 }
 
 
+# Empty shape for deck_health when computation fails entirely. The UI
+# renders tiles based on key presence; missing keys would crash the
+# renderer, so we always ship the full structure even on failure.
+_EMPTY_DECK_HEALTH = {
+    "mdfc": {"count": 0, "cards": []},
+    "spell_density": {
+        "non_permanent_count": 0,
+        "total_main_count": 0,
+        "ratio": None,
+    },
+    "mana_sinks": {"count": 0, "cards": []},
+    "wincon_protection": {"count": 0, "cards": []},
+    "self_mill": {"count": 0, "cards": []},
+}
+
+
+def _compute_deck_health_safe(deck_text: str) -> dict:
+    """Wrap ``deck_health.compute_deck_health`` so a Scryfall outage
+    or unexpected parse failure doesn't take down the whole audit
+    response. Returns the empty-shape dict on any exception."""
+    try:
+        from ..deck_health import compute_deck_health
+        return compute_deck_health(deck_text)
+    except Exception:  # noqa: BLE001 -- defensive at the route layer
+        return dict(_EMPTY_DECK_HEALTH)
+
+
 def make_audit_blueprint(deck_dir: Path) -> Blueprint:
     """Build a Flask Blueprint for the audit/advise route group.
 
@@ -370,6 +397,15 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             # advisory suggestions and the user might still want to
             # see what the advisor flagged.
             "protected_cards": read_protected_cards(original),
+            # Deck-health tile row signals: MDFC count, spell density,
+            # mana sinks, wincon-specific protection, self-mill
+            # enablement. These surface deck-construction quality
+            # signals the advisor's recommendation engine doesn't
+            # directly act on but the user benefits from seeing
+            # (e.g. "this combo deck has 0 Silence-class protection").
+            # Best-effort: any individual signal that fails returns
+            # its empty shape so the rest of the panel renders.
+            "deck_health": _compute_deck_health_safe(original),
         })
 
     @bp.route("/api/audit/stream")
@@ -625,6 +661,12 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                             # [metadata] Protect= entries — same
                             # surface as the sync endpoint.
                             "protected_cards": read_protected_cards(
+                                original,
+                            ),
+                            # Deck-health tile signals — mirrors the
+                            # sync endpoint shape so the UI renderer
+                            # is shared.
+                            "deck_health": _compute_deck_health_safe(
                                 original,
                             ),
                         })
