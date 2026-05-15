@@ -7,6 +7,11 @@ the one-stop guide to keeping your API keys out of the repo.
 ## TL;DR
 
 ```sh
+# 0. (One-time, if you haven't already.) Install the package so the
+#    commander-* shell commands are available. Editable install means
+#    you don't need to reinstall after git pulls.
+pip install -e .[claude]
+
 # 1. Scaffold the credentials file (outside the repo).
 commander-config init
 
@@ -23,6 +28,26 @@ commander-auto-curate "vendor/forge/userdata/decks/commander/[USER] Goblin [B4].
 That's the whole flow. The credentials file lives **outside the repo
 directory tree** so git can't see it even with the most paranoid `git
 add -A`. Read on for the why and the edge cases.
+
+### Haven't run `pip install -e .` yet?
+
+Every `commander-*` command in this doc has a `python -m` equivalent
+that works without installing the package. Useful for quick smoke
+runs or when you don't want a global entry-point shim:
+
+| Entry point              | Module-form equivalent                              |
+|--------------------------|------------------------------------------------------|
+| `commander-config init`  | `python -m commander_builder._secrets init`          |
+| `commander-config show`  | `python -m commander_builder._secrets show`          |
+| `commander-config path`  | `python -m commander_builder._secrets path`          |
+| `commander-auto-curate`  | `python -m commander_builder.proposer ...`           |
+| `commander-doctor`       | `python -m commander_builder.doctor ...`             |
+| `commander-bulk-import`  | `python -m commander_builder.moxfield_import ...`    |
+
+The credentials file path and behavior are identical either way --
+both forms invoke the same `config_main()` function under the hood.
+For day-to-day use, `pip install -e .` once and the shorter shell
+form just works.
 
 ## Where the file lives
 
