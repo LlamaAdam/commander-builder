@@ -435,6 +435,13 @@ adds + cuts already filtered by the EDHREC heuristic advisor.
 Your job: pick a small, applicable subset of those candidates that will
 genuinely improve the deck at the target bracket. Respect these rules:
 
+- THE CAPS ARE CEILINGS, NOT TARGETS. The user will tell you the maximum
+  number of adds and cuts you may propose. DO NOT fill the cap just
+  because you can. If the deck only needs 3 changes, propose 3. If it
+  needs zero, propose zero. Padding a proposal to "use up the slots"
+  produces worse decks — every unnecessary swap dilutes the signal of
+  your real recommendations and increases the user's verification cost.
+  Quality beats quantity, always.
 - Stay within color identity (do NOT add off-color cards).
 - Honor the bracket: at B1/B2, avoid game-changers (the user's pipeline
   will strip them anyway, but don't waste a slot recommending them).
@@ -450,6 +457,10 @@ Return ONLY a JSON object with this exact shape:
   {"adds": ["Card 1", "Card 2", ...],
    "cuts": ["Cut 1", "Cut 2", ...],
    "rationale": "one or two sentences explaining the swap intent"}
+
+If your honest assessment is that the deck needs no changes, return
+empty lists: ``{"adds": [], "cuts": [], "rationale": "..."}``. That's
+a valid response. The system records "zero changes proposed" cleanly.
 
 No prose around the JSON. No code fences. Just the object.
 """
@@ -522,26 +533,34 @@ def auto_propose(
     protected_lower = {p.lower() for p in protected_list}
 
     # Curation-intensity hint to Claude. The hard caps (max_adds /
-    # max_cuts) still clip the output; this block just nudges the
-    # curator to pair more or fewer changes within that budget.
+    # max_cuts) clip the output; this block tells the curator how
+    # WILLING to spend the cap budget it should be. None of these
+    # hints REQUIRE filling the cap — see the system prompt's
+    # "CAPS ARE CEILINGS NOT TARGETS" rule, which always wins.
     _MODE_HINTS = {
         "polish": (
             "MODE: POLISH. Make conservative targeted swaps. Only pair "
             "your highest-confidence picks — leave the deck's identity "
             "intact. Prefer fewer changes if the deck is already close "
-            "to ideal at this bracket."
+            "to ideal at this bracket. Zero changes is a valid answer "
+            "when the deck doesn't need anything."
         ),
         "overhaul": (
-            "MODE: OVERHAUL. The user explicitly wants a substantial "
-            "revision. Pair as many high-quality swaps as the cap "
-            "allows; treat this as a major retune. Still respect color "
-            "identity, bracket caps, and the protected list."
+            "MODE: OVERHAUL. The user has explicitly signaled they're "
+            "open to substantial revision, so don't be timid about "
+            "pairing more than a handful of swaps WHEN THE DECK "
+            "WARRANTS IT. But the cap is still a ceiling, not a target "
+            "— propose only changes you'd genuinely make. A focused "
+            "5-swap overhaul beats a padded 15-swap one. Use the larger "
+            "budget when the deck has many misalignments; don't use it "
+            "when the deck is already tight."
         ),
         "free": (
             "MODE: FREE. No specific intensity hint — pick the number "
             "of changes that genuinely improve the deck. If the deck "
-            "is well-tuned already, ship a small proposal; if it has "
-            "many misalignments, propose more."
+            "is well-tuned already, ship a small proposal (or zero). "
+            "If it has many misalignments, propose more. Match the "
+            "proposal size to the deck's actual needs."
         ),
     }
     mode_hint = _MODE_HINTS.get(mode, _MODE_HINTS["polish"])
@@ -568,7 +587,10 @@ def auto_propose(
         + "\n\nCANDIDATE CUTS (from EDHREC heuristic advisor):\n"
         + "\n".join(f"- {c}" for c in candidates_removed)
         + f"\n\nADVISOR RATIONALE: {advisor_rationale}\n\n"
-        f"Pick up to {max_adds} adds and {max_cuts} cuts. "
+        f"You may propose up to {max_adds} adds and {max_cuts} cuts. "
+        f"These are CEILINGS, not targets — if the deck only needs 3 "
+        f"changes, propose 3. If it needs zero, propose zero "
+        f"(empty lists, valid response). Quality beats quantity. "
         f"Return ONLY the JSON object."
     )
 

@@ -364,6 +364,64 @@ def test_auto_propose_injects_protected_block_into_prompt(
     assert "Goblin Lackey" in user_msg
 
 
+def test_auto_propose_prompt_says_caps_are_ceilings_not_targets(
+    tmp_path, monkeypatch,
+):
+    """The system prompt MUST tell Claude that max_adds / max_cuts are
+    ceilings, not targets. Without this rule, Claude tends to fill the
+    cap (5 of 5, 15 of 15) regardless of the deck's actual needs,
+    producing bloated proposals that dilute the high-confidence picks.
+
+    Also pinned: the user message reiterates the rule at the bottom
+    (closest to where Claude generates its response — repetition
+    reinforces) and the system prompt explicitly permits empty lists
+    as a valid response when the deck needs no changes."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+
+    captured: dict = {}
+    import sys, types as _types
+    block = type("_Block", (), {"text": json.dumps({
+        "adds": [], "cuts": [], "rationale": "ok",
+    })})
+    msg = type("_Msg", (), {"content": [block()]})
+
+    class CapturingClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    captured.update(kw)
+                    return msg()
+            return M()
+    fake = _types.ModuleType("anthropic")
+    fake.Anthropic = CapturingClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Foo\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    auto_propose(
+        deck_path=deck, bracket=3,
+        advice_report=_stub_advice_report(),
+    )
+
+    # System prompt rule.
+    system = captured["system"]
+    assert "CEILINGS, NOT TARGETS" in system or "ceilings, not targets" in system.lower()
+    assert "empty lists" in system.lower() or "zero" in system.lower()
+
+    # User message reiterates at the bottom.
+    user_msg = captured["messages"][0]["content"]
+    assert "CEILING" in user_msg or "ceiling" in user_msg.lower()
+
+
 def test_auto_propose_no_protected_block_when_empty(
     tmp_path, monkeypatch,
 ):
