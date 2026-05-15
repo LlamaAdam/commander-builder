@@ -41,6 +41,7 @@ from ._helpers import (
     _resolve_deck_path,
     _total_price_for_deck_text,
     project_average_deck_preview,
+    project_salt_warning,
 )
 
 
@@ -352,6 +353,15 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 getattr(report, "edhrec_categories", {}) or {},
                 original,
             ),
+            # Aggregate salt-score banner — fires above the audit
+            # recommendations when the user's current deck carries
+            # salty picks at a low bracket. Null at B4/B5 (high-
+            # power tables expect salt) or when EDHREC's salt-list
+            # was unreachable. The per-rec ``salt`` annotations on
+            # added/removed entries are unaffected.
+            "salt_warning": project_salt_warning(
+                original, salt_map, bracket,
+            ),
         })
 
     @bp.route("/api/audit/stream")
@@ -596,6 +606,12 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                                 getattr(report, "average_deck", None),
                                 getattr(report, "edhrec_categories", {}) or {},
                                 original,
+                            ),
+                            # Salt-warning banner — mirrors the sync
+                            # endpoint. None at B4/B5 or when no salt
+                            # data is available.
+                            "salt_warning": project_salt_warning(
+                                original, salt_map, bracket,
                             ),
                         })
                         continue

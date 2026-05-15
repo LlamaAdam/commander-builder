@@ -1346,6 +1346,17 @@ function renderAuditResult(container, body) {
     ));
   }
 
+  // Salt-warning banner — fires at B1/B2/B3 when the user's CURRENT
+  // deck carries cards on EDHREC's salt list. The advisor's per-rec
+  // salt annotations elsewhere in the panel handle the recommended
+  // cards; this banner is the aggregate view: "your deck has N
+  // salty picks at bracket B — consider cutting these." Hidden at
+  // B4/B5 where salt is expected, or when the server didn't ship
+  // the field (legacy clients / no salt data).
+  if (body.salt_warning) {
+    container.appendChild(renderSaltWarningBanner(body.salt_warning));
+  }
+
   if (body.diagnosis) {
     container.appendChild(el(
       "p", {}, el("span", { class: "muted" }, "Diagnosis: "),
@@ -1811,6 +1822,59 @@ function renderAuditResult(container, body) {
   pre.textContent = body.proposed_text || "(empty)";
   details.appendChild(pre);
   container.appendChild(details);
+}
+
+// Render the salt-warning banner that fires above the recommendations
+// when the user's current deck carries salty picks at a low bracket.
+// Yellow/orange treatment (warn, not bad) — the user CAN keep the
+// cards; the banner is advisory, not blocking. Cards listed inline so
+// the user doesn't have to scroll to see what's being flagged.
+function renderSaltWarningBanner(warning) {
+  const wrap = el("div", {
+    class: "salt-warning-banner",
+    style: "margin: 10px 0; padding: 10px 14px; "
+         + "background: rgba(245, 158, 11, 0.12); "
+         + "border-left: 4px solid #f59e0b; "
+         + "border-radius: 6px; "
+         + "color: var(--text);",
+  });
+  const headline = el(
+    "div",
+    { style: "font-weight: 600; margin-bottom: 4px;" },
+    `Salt warning: ${warning.count} `
+    + (warning.count === 1 ? "card scores" : "cards score")
+    + ` ≥ ${warning.threshold} on EDHREC's salt list — `
+    + `consider cutting at B${warning.bracket}.`,
+  );
+  wrap.appendChild(headline);
+  const list = el("ul", {
+    style: "list-style: none; padding: 0; margin: 4px 0 0 0; "
+         + "display: flex; flex-wrap: wrap; gap: 6px 12px; "
+         + "font-size: 13px;",
+  });
+  for (const c of warning.cards) {
+    const li = el("li", {});
+    li.appendChild(el(
+      "span",
+      { style: "font-weight: 500;" },
+      c.name,
+    ));
+    li.appendChild(document.createTextNode(" "));
+    li.appendChild(el(
+      "span",
+      {
+        class: "pill",
+        style: "background: #f59e0b; color: #1a1a1a; "
+             + "padding: 1px 6px; border-radius: 4px; "
+             + "font-size: 11px; font-weight: 600;",
+        title: `EDHREC salt score (0..5). Higher = more socially salty.`,
+      },
+      `${c.salt.toFixed(1)}`,
+    ));
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+  return wrap;
 }
 
 // Render the EDHREC average-deck preview as a collapsible <details>

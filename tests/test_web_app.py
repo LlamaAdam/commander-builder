@@ -1553,6 +1553,67 @@ def test_audit_endpoint_average_deck_preview_is_null_when_advisor_omits_it(
     assert resp.get_json()["average_deck_preview"] is None
 
 
+def test_audit_endpoint_surfaces_salt_warning_at_low_bracket(
+    client, monkeypatch,
+):
+    """When the user's current deck carries salty cards AND the
+    bracket is ≤ 3, the audit response carries a salt_warning payload
+    the UI renders as a banner above the recommendations."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # The test fixture deck (_write_deck) contains Forest + Cultivate.
+    # Mark Cultivate as a high-salt card so the banner fires.
+    monkeypatch.setattr(
+        "commander_builder.web.routes_audit.fetch_salt_list",
+        lambda: {"cultivate": 3.7, "forest": 0.0},
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=2")
+    assert resp.status_code == 200
+    warning = resp.get_json().get("salt_warning")
+    assert warning is not None
+    assert warning["bracket"] == 2
+    assert warning["count"] >= 1
+    cultivate = next(c for c in warning["cards"] if c["name"] == "Cultivate")
+    assert cultivate["salt"] == 3.7
+
+
+def test_audit_endpoint_salt_warning_null_at_high_bracket(
+    client, monkeypatch,
+):
+    """At B4/B5, salt is expected — the banner suppresses to avoid
+    noise. The per-recommendation salt annotations elsewhere in the
+    response continue to populate."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.web.routes_audit.fetch_salt_list",
+        lambda: {"cultivate": 3.7},
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=4")
+    assert resp.status_code == 200
+    assert resp.get_json()["salt_warning"] is None
+
+
 def test_audit_endpoint_404_on_missing_deck(client):
     resp = client.get("/api/audit?deck=Ghost")
     assert resp.status_code == 404

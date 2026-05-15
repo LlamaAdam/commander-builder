@@ -659,3 +659,104 @@ def project_average_deck_preview(
         "card_count": len(projected),
         "cards": projected,
     }
+
+
+# ---------------------------------------------------------------------------
+# Salt-list warning aggregator
+# ---------------------------------------------------------------------------
+#
+# Per-recommendation salt annotations already land on each add/cut
+# entry (see routes_audit.py's salt_map lookups). The banner that the
+# audit panel renders ABOVE the recommendations needs an aggregate
+# view of the user's CURRENT deck — every salty card, sorted by score,
+# regardless of whether the advisor flagged it for cut. That's what
+# this helper produces.
+
+
+# Default threshold for "salty" — EDHREC's salt scores run 0..5.
+# Anything ≥ 1.5 is "noticeable salt" in their UI's color scale; we
+# use the same cut-off so the banner reflects what a casual reader
+# of EDHREC would already consider problematic.
+_SALT_WARN_THRESHOLD = 1.5
+
+# Brackets at which the warning shows. WotC's bracket guidance:
+# B1 (Exhibition) + B2 (Core) are unconditionally casual; B3 (Upgraded)
+# is "focused but still social". Salt is unwelcome at all three. B4+
+# tables expect cEDH-grade picks and the banner just becomes noise.
+_SALT_WARN_BRACKET_MAX = 3
+
+
+def project_salt_warning(
+    user_deck_text: str,
+    salt_map: dict,
+    bracket: int,
+    *,
+    threshold: float = _SALT_WARN_THRESHOLD,
+    bracket_max: int = _SALT_WARN_BRACKET_MAX,
+):
+    """Aggregate salty cards in the user's deck into a banner payload.
+
+    Returns ``None`` when there's no warning to show:
+      - bracket > bracket_max (B4/B5 expect salty picks; banner = noise)
+      - no salt_map (EDHREC unreachable)
+      - no cards in the deck meet the threshold
+
+    Otherwise returns::
+
+        {
+          "bracket": int,
+          "count": int,
+          "threshold": float,
+          "cards": [
+            {"name": str, "salt": float},
+            ...    # sorted by salt desc, then name asc
+          ]
+        }
+
+    The UI uses ``count`` for the headline ("3 salty cards at B2 —
+    consider cutting"), iterates ``cards`` for the inline list, and
+    ``threshold`` shows what cut-off we used (so the banner stays
+    truthful if we ever tune the threshold).
+    """
+    if bracket > bracket_max:
+        return None
+    if not salt_map:
+        return None
+
+    # Preserve the canonical casing from the user's .dck for display
+    # — the salt-list is keyed lowercase but the banner reads better
+    # as "Smothering Tithe" than "smothering tithe".
+    import re as _re
+    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+    canonical_by_lower: dict[str, str] = {}
+    for raw in user_deck_text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("["):
+            continue
+        m = line_pattern.match(stripped)
+        if m:
+            name = m.group(2).strip()
+            canonical_by_lower.setdefault(name.lower(), name)
+
+    hits: list[dict] = []
+    for name_lower, canonical in canonical_by_lower.items():
+        score = salt_map.get(name_lower)
+        if score is None:
+            continue
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            continue
+        if score_f >= threshold:
+            hits.append({"name": canonical, "salt": round(score_f, 2)})
+
+    if not hits:
+        return None
+
+    hits.sort(key=lambda h: (-h["salt"], h["name"]))
+    return {
+        "bracket": bracket,
+        "count": len(hits),
+        "threshold": threshold,
+        "cards": hits,
+    }
