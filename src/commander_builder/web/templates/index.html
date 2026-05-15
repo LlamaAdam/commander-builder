@@ -49,6 +49,7 @@
       <div class="tabs">
         <button class="tab active" data-tab="moxfield">Moxfield URL</button>
         <button class="tab" data-tab="paste">Paste deck list</button>
+        <button class="tab" data-tab="bulk">Bulk URLs</button>
       </div>
       <div class="tab-panel" id="tab-moxfield">
         <label>Display name (optional — defaults to Moxfield deck name)</label>
@@ -79,6 +80,16 @@
         <label>Deck list (.dck format or Moxfield bulk-paste — both work)</label>
         <textarea id="new-paste-text" spellcheck="false" placeholder="1 Sol Ring&#10;1 Arcane Signet&#10;1 Command Tower&#10;..."></textarea>
         <button class="advise-btn" id="new-paste-create">Create deck</button>
+      </div>
+      <div class="tab-panel" id="tab-bulk" hidden>
+        <label>Moxfield URLs — one per line (max 50)</label>
+        <textarea id="new-bulk-urls" spellcheck="false" placeholder="https://moxfield.com/decks/abc123&#10;https://moxfield.com/decks/def456&#10;..."></textarea>
+        <p class="muted" style="font-size: 12px; margin-top: 4px;">
+          Polite rate-limit: 1s between Moxfield fetches. A 20-URL batch
+          takes ~20s. Bracket is read from each deck's Moxfield metadata.
+        </p>
+        <button class="advise-btn" id="new-bulk-import">Import all</button>
+        <div id="new-bulk-result"></div>
       </div>
       <div id="new-deck-status" class="muted"></div>
     </div>

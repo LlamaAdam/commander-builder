@@ -2824,6 +2824,10 @@ function openNewDeckModal() {
   $("new-mox-url").value = "";
   $("new-paste-name").value = "";
   $("new-paste-text").value = "";
+  const bulkUrls = $("new-bulk-urls");
+  if (bulkUrls) bulkUrls.value = "";
+  const bulkResult = $("new-bulk-result");
+  if (bulkResult) bulkResult.innerHTML = "";
   $("new-deck-modal").hidden = false;
 }
 
@@ -2863,6 +2867,111 @@ async function importMoxfield() {
   } catch (e) {
     status.textContent = `Network error: ${e.message}`;
   }
+}
+
+async function bulkImportFromTextarea() {
+  const textarea = $("new-bulk-urls");
+  const result = $("new-bulk-result");
+  const status = $("new-deck-status");
+  const raw = (textarea.value || "").split(/\r?\n/);
+  const urls = raw.map((s) => s.trim()).filter((s) => s.length > 0);
+
+  result.innerHTML = "";
+  if (urls.length === 0) {
+    status.textContent = "Paste at least one Moxfield URL.";
+    return;
+  }
+  if (urls.length > 50) {
+    status.textContent =
+      `Too many URLs (${urls.length}). Max 50 per batch — split it up.`;
+    return;
+  }
+
+  status.textContent =
+    `Importing ${urls.length} deck${urls.length === 1 ? "" : "s"}…`;
+  // Disable the button while the batch runs so the user doesn't fire
+  // a second concurrent batch by accident — the backend would dedupe
+  // but the UX gets confused.
+  const btn = $("new-bulk-import");
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/bulk_import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls, is_user: true }),
+    });
+    const body = await resp.json();
+    status.textContent =
+      `Done: ${body.success_count} imported, `
+      + `${body.duplicate_count} duplicates, `
+      + `${body.failure_count} failed.`;
+    renderBulkResult(result, body);
+    if (body.success_count > 0) {
+      // Refresh the deck list so newly-imported decks appear without a
+      // page reload. The modal stays open so the user can review the
+      // per-URL outcomes.
+      await loadDecks();
+    }
+  } catch (e) {
+    status.textContent = `Network error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderBulkResult(container, body) {
+  container.innerHTML = "";
+  const summary = el(
+    "p",
+    { class: "muted", style: "margin-top: 8px;" },
+    `${body.success_count}/${body.total} succeeded`,
+  );
+  container.appendChild(summary);
+
+  function listBlock(label, entries, cls) {
+    if (!entries.length) return;
+    container.appendChild(el(
+      "h5",
+      { style: "margin: 8px 0 4px 0; font-size: 13px;" },
+      `${label} (${entries.length})`,
+    ));
+    const ul = el("ul", {
+      style: "list-style: none; padding: 0; margin: 0; font-size: 12px;",
+    });
+    for (const e of entries) {
+      const li = el("li", { class: cls, style: "padding: 1px 0;" });
+      if (e.path) {
+        // Success row: deck filename
+        const fname = e.path.split(/[\\/]/).pop();
+        li.appendChild(el("span", {}, `✓ ${fname}`));
+      } else if (e.existing_path || e.reason) {
+        // Duplicate row: deck_id + reason
+        li.appendChild(el(
+          "span",
+          { class: "muted" },
+          `↺ ${e.deck_id || e.url} (${e.reason || "duplicate"})`,
+        ));
+      } else if (e.error) {
+        // Failure row: URL + error
+        li.appendChild(el(
+          "span",
+          { class: "pill bad", style: "display: inline-block;" },
+          `✗ ${e.url}`,
+        ));
+        li.appendChild(el(
+          "div",
+          { class: "muted", style: "margin-left: 14px;" },
+          e.error,
+        ));
+      }
+      ul.appendChild(li);
+    }
+    container.appendChild(ul);
+  }
+
+  listBlock("Imported", body.successes, "");
+  listBlock("Duplicates", body.duplicates, "muted");
+  listBlock("Failed", body.failures, "");
 }
 
 async function createPasteDeck() {
@@ -3001,6 +3110,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (moxImport) moxImport.addEventListener("click", importMoxfield);
   const pasteCreate = $("new-paste-create");
   if (pasteCreate) pasteCreate.addEventListener("click", createPasteDeck);
+  const bulkImport = $("new-bulk-import");
+  if (bulkImport) bulkImport.addEventListener("click", bulkImportFromTextarea);
 });
 
 loadHealth();

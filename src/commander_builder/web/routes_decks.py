@@ -180,6 +180,63 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             "path": str(target),
         })
 
+    @bp.route("/api/bulk_import", methods=["POST"])
+    def bulk_import_route():
+        """Import many Moxfield URLs at once.
+
+        Body: ``{"urls": ["https://moxfield.com/decks/a", ...],
+                 "is_user": true}``
+
+        Wraps the same ``bulk_import`` library function the
+        ``commander-bulk-import`` CLI uses, so the politeness contract
+        (FETCH_SLEEP_SEC between requests) and dedup behavior are
+        shared. Response is the JSON form of ``BulkImportResult``:
+
+            {
+              "successes": [{url, deck_id, path}, ...],
+              "duplicates": [{url, deck_id, existing_path, reason}, ...],
+              "failures":  [{url, error}, ...],
+              "total": int, "success_count": int,
+              "duplicate_count": int, "failure_count": int
+            }
+
+        Status code is 200 even with partial failures — the per-URL
+        outcomes tell the UI what to render. 400 only on bad input.
+        502 when EVERY url failed (likely network down).
+        """
+        try:
+            payload = request.get_json(force=True) or {}
+        except Exception:
+            return jsonify({"error": "expected JSON body"}), 400
+
+        urls = payload.get("urls")
+        if not isinstance(urls, list):
+            return jsonify({
+                "error": "urls must be a list of strings",
+            }), 400
+
+        is_user = bool(payload.get("is_user", True))
+
+        # Hard cap to keep the request bounded — a 1000-URL paste at
+        # 1s/fetch would block the worker for ~17 min. Surface the
+        # cap to the client rather than silently truncating.
+        MAX_BULK_URLS = 50
+        if len(urls) > MAX_BULK_URLS:
+            return jsonify({
+                "error": f"too many urls — max {MAX_BULK_URLS} per request",
+                "received": len(urls),
+            }), 400
+
+        from ..moxfield_import import bulk_import as _bulk_import
+        result = _bulk_import(urls, out_dir=deck_dir, is_user=is_user)
+
+        # If at least one URL was provided AND every one failed, surface
+        # 502 so the UI can warn about network rather than just showing
+        # an empty success table.
+        if result.total > 0 and result.failure_count == result.total:
+            return jsonify(result.to_dict()), 502
+        return jsonify(result.to_dict())
+
     @bp.route("/api/deck_source", methods=["GET", "PUT"])
     def deck_source():
         """Get or set the Moxfield source URL attached to a deck.
