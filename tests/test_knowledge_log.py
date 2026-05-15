@@ -13,6 +13,7 @@ from commander_builder.knowledge_log import (
     recent_iterations,
     record_iteration,
     stats_summary,
+    update_iteration_sim,
     update_verdict,
     verdict_breakdown_for_deck,
 )
@@ -31,6 +32,79 @@ def test_init_db_creates_schema(db):
     init_db(db)
     summary = stats_summary(db_path=db)
     assert summary["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# update_iteration_sim -- folds A/B-sim outcome into a pending row
+# ---------------------------------------------------------------------------
+
+def test_update_iteration_sim_writes_verdict_and_sim_report(db):
+    """One atomic UPDATE writes verdict + sim_report + win rates +
+    margin together. The pending row becomes a finalized row after a
+    successful A/B sim."""
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        audit_manifest={"added": [], "removed": []},
+        verdict="pending",
+    )
+    new_id = record_iteration(it, db_path=db)
+
+    update_iteration_sim(
+        iteration_id=new_id,
+        verdict="kept",
+        sim_report={"wins_a": 1, "wins_b": 3, "games": 4},
+        win_rate_old=0.25, win_rate_new=0.75, margin=2,
+        notes="A/B sim: new won 3-1",
+        db_path=db,
+    )
+
+    refreshed = get_iteration(new_id, db_path=db)
+    assert refreshed.verdict == "kept"
+    assert refreshed.win_rate_old == 0.25
+    assert refreshed.win_rate_new == 0.75
+    assert refreshed.margin == 2
+    assert refreshed.sim_report["wins_b"] == 3
+    assert refreshed.verdict_notes == "A/B sim: new won 3-1"
+
+
+def test_update_iteration_sim_preserves_unset_columns(db):
+    """When the sim only produces a verdict (e.g. status=skipped),
+    ``sim_report`` / win_rate / margin args are None and the update
+    leaves those columns at their pre-existing values rather than
+    nulling them out."""
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        win_rate_old=0.4, win_rate_new=0.6, margin=2,
+        verdict="pending",
+    )
+    new_id = record_iteration(it, db_path=db)
+
+    update_iteration_sim(
+        iteration_id=new_id,
+        verdict="pending",
+        notes="sim skipped: no fillers",
+        db_path=db,
+        # sim_report / win_rate / margin omitted
+    )
+    refreshed = get_iteration(new_id, db_path=db)
+    assert refreshed.verdict == "pending"
+    # Original values preserved -- not overwritten with NULL.
+    assert refreshed.win_rate_old == 0.4
+    assert refreshed.win_rate_new == 0.6
+    assert refreshed.margin == 2
+
+
+def test_update_iteration_sim_rejects_invalid_verdict(db):
+    """Same whitelist as update_verdict -- prevents arbitrary strings
+    from polluting the column."""
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3, verdict="pending",
+    )
+    new_id = record_iteration(it, db_path=db)
+    with pytest.raises(ValueError, match="verdict must be"):
+        update_iteration_sim(
+            iteration_id=new_id, verdict="BANANA", db_path=db,
+        )
 
 
 def test_record_and_get_iteration(db):

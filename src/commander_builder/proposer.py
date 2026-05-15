@@ -982,6 +982,30 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                    help="Path to a file with one card name per line, "
                         "all protected against cuts. Unioned with "
                         "--protect and [metadata] Protect=.")
+    p.add_argument("--run-sim", action="store_true",
+                   help="After applying the proposal, run a Forge A/B "
+                        "head-to-head between the old and new deck and "
+                        "record the verdict (kept/reverted/neutral) in "
+                        "the knowledge_log. Closes the loop -- the "
+                        "iteration row's verdict reflects empirical sim "
+                        "results, not a permanent 'pending'. Skipped "
+                        "automatically under --dry-run or --no-log "
+                        "(no row to update).")
+    p.add_argument("--sim-games", type=int, default=5,
+                   help="Games per A/B sim (default 5). The harness "
+                        "alternates seat order, so total games = 2 * "
+                        "this number isn't quite right -- it's exactly "
+                        "this number, half with old in seat 1.")
+    p.add_argument("--sim-fillers", default=None,
+                   help="Comma-separated filenames (relative to "
+                        "deck_dir) of filler decks for the 4-player "
+                        "Commander pod. Default: auto-pick 2 from the "
+                        "opponent pool (non-[USER] .dck files in "
+                        "deck_dir).")
+    p.add_argument("--sim-margin", type=int, default=_DEFAULT_SIM_MARGIN,
+                   help="Minimum (wins_new - wins_old) margin to call "
+                        "'kept'. Mirrored for 'reverted'. Within "
+                        "margin = neutral. Default 1.")
     args = p.parse_args(argv)
 
     # Load the external credentials file (~/.commander-builder/credentials
@@ -1139,6 +1163,32 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         except Exception as exc:  # noqa: BLE001
             log_error = f"{type(exc).__name__}: {exc}"
 
+    # Step 4: optional Forge A/B sim. Closes the loop -- the iteration
+    # row we just wrote has verdict='pending'; this fills it in with
+    # the actual head-to-head result. Skipped under --dry-run (no
+    # row exists), --no-log (we'd have nowhere to write), and the
+    # bare default (opt-in via --run-sim). When the user opts in,
+    # this can take 5-15 minutes depending on game count.
+    sim_result_payload = None
+    sim_error: Optional[str] = None
+    sim_verdict: Optional[str] = None
+    if (args.run_sim
+            and not args.dry_run
+            and not args.no_log
+            and iteration_id is not None):
+        sim_result_payload, sim_error, sim_verdict = _run_sim_and_record(
+            args=args,
+            out_path=out_path,
+            iteration_id=iteration_id,
+            db_path=Path(args.db_path) if args.db_path else None,
+        )
+    elif args.run_sim and args.dry_run and not args.json:
+        print("[sim] --run-sim ignored under --dry-run (no deck on disk "
+              "to test).", flush=True)
+    elif args.run_sim and args.no_log and not args.json:
+        print("[sim] --run-sim ignored under --no-log (no iteration row "
+              "to update with the result).", flush=True)
+
     if args.json:
         print(json.dumps({
             "input_deck": str(args.deck_path),
@@ -1150,6 +1200,15 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             "proposal": proposal.to_dict(),
             "iteration_id": iteration_id,
             "log_error": log_error,
+            # Sim block. ``sim_run=True`` only when --run-sim AND the
+            # sim actually executed (not dry-run, not no-log, has
+            # fillers). verdict is the kept/reverted/neutral/pending
+            # outcome; sim_report carries the ABResult dict for
+            # downstream analysis.
+            "sim_run": sim_result_payload is not None or sim_error is not None,
+            "sim_verdict": sim_verdict,
+            "sim_report": sim_result_payload,
+            "sim_error": sim_error,
         }, indent=2))
         return 0
 
@@ -1191,13 +1250,243 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     else:
         print(f"Wrote: {out_path}")
         if iteration_id is not None:
-            print(f"Logged iteration #{iteration_id} (pending)")
+            initial_verdict = sim_verdict or "pending"
+            print(f"Logged iteration #{iteration_id} ({initial_verdict})")
         elif args.no_log:
             print("(skipped knowledge_log per --no-log)")
         elif log_error:
             # Non-fatal: deck is on disk, history just lost this row.
             print(f"WARN: knowledge_log write failed: {log_error}")
+
+        # Sim summary block. Only print when the sim actually ran or
+        # was attempted -- silence when --run-sim wasn't passed at all.
+        if sim_result_payload is not None or sim_error is not None:
+            print()
+            if sim_error:
+                print(f"A/B sim: {sim_error}")
+            else:
+                wa = sim_result_payload.get("wins_a", 0)
+                wb = sim_result_payload.get("wins_b", 0)
+                games = sim_result_payload.get("games", 0)
+                status = sim_result_payload.get("status", "?")
+                avg_a = sim_result_payload.get("avg_turns_a", 0)
+                avg_b = sim_result_payload.get("avg_turns_b", 0)
+                print(f"A/B sim ({status}): old={wa} wins, new={wb} wins "
+                      f"({games} games)")
+                if avg_a or avg_b:
+                    print(f"  avg-turns-to-win: old={avg_a}, new={avg_b}")
+                if sim_verdict:
+                    print(f"  verdict: {sim_verdict}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Forge A/B-sim integration -- closes the loop the project's mission
+# statement rests on. The advisor + curator produce a proposed deck;
+# without empirically validating that the new deck wins MORE games than
+# the old one, the recommendations are just untested suggestions. This
+# block wires ``commander-auto-curate --run-sim`` into ``run_ab_sim
+# ulation`` so each iteration row lands with a real verdict + win rates
+# attached, not a permanent ``verdict='pending'``.
+
+
+# Minimum margin (wins_b - wins_a) for an A/B run to be called a kept
+# vs reverted vs neutral outcome. Default 1 means a 3-2 result is
+# 'kept' rather than 'neutral' -- on a 5-game sim that's a meaningful
+# signal even though it's noisy. The CLI can tune via --sim-margin.
+_DEFAULT_SIM_MARGIN = 1
+
+
+def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN) -> str:
+    """Map an ``ABResult`` to a verdict label.
+
+    Returns one of 'kept' / 'reverted' / 'neutral' / 'pending':
+
+      'kept'     -- new deck won at least ``margin`` more games than old
+      'reverted' -- old deck won at least ``margin`` more games than new
+      'neutral'  -- difference within margin (e.g. 3-2 with margin=2)
+      'pending'  -- sim didn't complete (status='skipped' or 'failed')
+
+    The neutral case is genuine: a 5-game sim that splits 3-2 is below
+    the noise floor of Forge's AI. Without --sim-games 20+, treat
+    near-ties as neutral rather than overfitting to single-game flips.
+    """
+    status = getattr(ab_result, "status", None)
+    if status != "done":
+        return "pending"
+    delta = (ab_result.wins_b or 0) - (ab_result.wins_a or 0)
+    if delta >= margin:
+        return "kept"
+    if delta <= -margin:
+        return "reverted"
+    return "neutral"
+
+
+def _ab_to_iteration_fields(ab_result) -> dict:
+    """Extract win_rate_old / win_rate_new / margin / sim_report from
+    an ABResult into the shape ``update_iteration_sim`` expects.
+
+    Win rates are computed as wins/total_games (ignoring draws since
+    Forge's AI rarely produces them). When the sim was skipped or
+    games=0, win rates are None -- caller passes None to
+    ``update_iteration_sim`` which preserves existing column values.
+    """
+    fields: dict = {
+        "sim_report": ab_result.to_dict() if hasattr(ab_result, "to_dict") else None,
+    }
+    total = getattr(ab_result, "games", 0) or 0
+    if total > 0:
+        wins_a = getattr(ab_result, "wins_a", 0) or 0
+        wins_b = getattr(ab_result, "wins_b", 0) or 0
+        fields["win_rate_old"] = round(wins_a / total, 4)
+        fields["win_rate_new"] = round(wins_b / total, 4)
+        fields["margin"] = wins_b - wins_a
+    return fields
+
+
+def _pick_filler_decks(
+    deck_dir: Path,
+    exclude_paths: list[Path],
+    *,
+    count: int = 2,
+    rng=None,
+) -> list[str]:
+    """Pick ``count`` opponent-pool deck filenames from ``deck_dir``.
+
+    Auto-pick rules:
+      - Skip any file under ``exclude_paths`` (the v_n + v_n+1 decks
+        being compared -- pitting the new deck against the old deck's
+        identical copy in the filler slots would be self-defeating).
+      - Skip ``[USER]`` prefixed decks (those are the user's own work;
+        the opponent pool is everything WITHOUT the prefix).
+      - Sort candidates alphabetically and use the provided ``rng``
+        (defaults to ``random.Random()`` -- tests inject a seeded
+        Random for determinism).
+
+    Returns the chosen filenames in ``rng.sample`` order. Returns
+    an empty list if fewer than ``count`` candidates exist -- the
+    caller checks for [] and skips the sim with a clear message.
+    """
+    import random as _random
+    if rng is None:
+        rng = _random.Random()
+    exclude_set = {p.name for p in exclude_paths}
+    candidates = sorted(
+        p.name for p in deck_dir.glob("*.dck")
+        if not p.name.startswith("[USER]") and p.name not in exclude_set
+    )
+    if len(candidates) < count:
+        return []
+    return rng.sample(candidates, count)
+
+
+def _run_sim_and_record(
+    args,
+    out_path: Path,
+    iteration_id: int,
+    db_path: Optional[Path],
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """Execute the Forge A/B sim and persist results to knowledge_log.
+
+    Returns ``(sim_result_dict, error_str, verdict)``:
+      - sim_result_dict: ``ABResult.to_dict()`` on success, or the
+        partial result on a runtime failure
+      - error_str: human-readable error if the sim couldn't complete,
+        else None
+      - verdict: 'kept'/'reverted'/'neutral' on success, 'pending' on
+        a sim that was skipped or failed
+
+    Never raises. All failure modes (Forge missing, fillers
+    unavailable, runner crash) land as printed warnings + a
+    ``verdict='pending'`` outcome so the iteration row stays
+    consistent.
+    """
+    from .forge_runner import run_ab_simulation
+    from .knowledge_log import update_iteration_sim
+
+    # Resolve filler decks. Default: auto-pick 2 from the opponent
+    # pool in the user's deck dir. Override: explicit --sim-fillers
+    # comma-separated list (filenames relative to deck_dir).
+    deck_dir = out_path.parent
+    if args.sim_fillers:
+        filler_names = [f.strip() for f in args.sim_fillers.split(",")
+                        if f.strip()]
+    else:
+        filler_names = _pick_filler_decks(
+            deck_dir,
+            exclude_paths=[args.deck_path, out_path],
+            count=2,
+        )
+    if len(filler_names) < 2:
+        msg = (
+            f"[sim] Need 2+ filler decks in {deck_dir} for a 4-player "
+            f"Commander pod; found {len(filler_names)}. Sim skipped."
+        )
+        if not args.json:
+            print(msg, flush=True)
+        # Still write 'pending' verdict explicitly so the row's state
+        # is unambiguous (vs leaving the auto-curate default).
+        try:
+            update_iteration_sim(
+                iteration_id=iteration_id,
+                verdict="pending",
+                notes=msg,
+                db_path=db_path if db_path else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not args.json:
+                print(f"[sim] WARN: could not persist pending verdict: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+        return None, msg, "pending"
+
+    if not args.json:
+        print(f"[4/4] Running Forge A/B sim ({args.sim_games} games, "
+              f"fillers={filler_names})...", flush=True)
+    ab_result = run_ab_simulation(
+        deck_a_path=args.deck_path,
+        deck_b_path=out_path,
+        games=args.sim_games,
+        fillers=filler_names,
+    )
+
+    sim_payload = ab_result.to_dict()
+    verdict = _verdict_from_ab(ab_result, margin=args.sim_margin)
+    sim_fields = _ab_to_iteration_fields(ab_result)
+
+    # Build a human-readable note that captures the sim status + result
+    # for the iteration row's verdict_notes column. Future analysts /
+    # the dashboard tooltip use this to explain "why kept?"
+    status = ab_result.status
+    if status == "done":
+        note = (
+            f"A/B sim: old won {ab_result.wins_a}, new won "
+            f"{ab_result.wins_b}, neutral={max(0, ab_result.games - ab_result.wins_a - ab_result.wins_b)} "
+            f"({ab_result.games} games, margin={args.sim_margin})"
+        )
+    elif status == "skipped":
+        note = f"A/B sim skipped: {ab_result.error or 'unknown reason'}"
+    elif status == "failed":
+        note = f"A/B sim failed: {ab_result.error or 'unknown error'}"
+    else:
+        note = f"A/B sim ended with unexpected status={status!r}"
+
+    try:
+        update_iteration_sim(
+            iteration_id=iteration_id,
+            verdict=verdict,
+            notes=note,
+            db_path=db_path if db_path else None,
+            **sim_fields,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Don't lose the sim result if the DB update fails -- return
+        # the payload so the CLI summary + JSON still surface it.
+        if not args.json:
+            print(f"[sim] WARN: could not persist sim result: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+        return sim_payload, f"{type(exc).__name__}: {exc}", verdict
+
+    return sim_payload, None, verdict
 
 
 def _log_auto_curate_iteration(

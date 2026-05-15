@@ -1844,6 +1844,310 @@ def test_auto_curate_main_rejects_negative_max(tmp_path, capsys):
     assert "non-negative" in capsys.readouterr().out
 
 
+# ---------------------------------------------------------------------------
+# Forge A/B-sim integration (--run-sim)
+# ---------------------------------------------------------------------------
+
+def test_verdict_from_ab_kept_when_new_deck_wins():
+    """3-1 in 4 games with margin=1 -> kept. The 2-game spread is the
+    'new deck won meaningfully' signal Phase 3's predictor will train on."""
+    from commander_builder.proposer import _verdict_from_ab
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=1, wins_b=3, games=4, status="done")
+    assert _verdict_from_ab(ab, margin=1) == "kept"
+
+
+def test_verdict_from_ab_reverted_when_old_deck_wins():
+    """3-1 the other way (wins_a > wins_b) → reverted."""
+    from commander_builder.proposer import _verdict_from_ab
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=3, wins_b=1, games=4, status="done")
+    assert _verdict_from_ab(ab, margin=1) == "reverted"
+
+
+def test_verdict_from_ab_neutral_within_margin():
+    """2-3 in 5 games with margin=2 → neutral. The 1-game spread is
+    inside the noise floor of Forge AI; calling it 'kept' would
+    overfit Phase 3 to single-game flips."""
+    from commander_builder.proposer import _verdict_from_ab
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=2, wins_b=3, games=5, status="done")
+    assert _verdict_from_ab(ab, margin=2) == "neutral"
+
+
+def test_verdict_from_ab_pending_when_sim_did_not_complete():
+    """Status 'skipped' or 'failed' → pending. Doesn't claim a verdict
+    we can't actually support."""
+    from commander_builder.proposer import _verdict_from_ab
+    from commander_builder.forge_runner import ABResult
+    skipped = ABResult(wins_a=0, wins_b=0, games=0, status="skipped",
+                       error="Forge not installed")
+    assert _verdict_from_ab(skipped) == "pending"
+    failed = ABResult(wins_a=1, wins_b=0, games=1, status="failed",
+                      error="JVM crashed")
+    assert _verdict_from_ab(failed) == "pending"
+
+
+def test_ab_to_iteration_fields_includes_win_rates(tmp_path):
+    """Win rates are wins/total, rounded to 4 decimals (matches the
+    knowledge_log column precision). Margin is wins_b - wins_a."""
+    from commander_builder.proposer import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=2, wins_b=3, games=5, status="done",
+                  avg_turns_a=11.0, avg_turns_b=9.5)
+    fields = _ab_to_iteration_fields(ab)
+    assert fields["win_rate_old"] == 0.4
+    assert fields["win_rate_new"] == 0.6
+    assert fields["margin"] == 1
+    assert fields["sim_report"]["wins_b"] == 3
+
+
+def test_ab_to_iteration_fields_omits_rates_when_zero_games():
+    """A skipped sim (games=0) shouldn't write 0.0 win rates to the
+    DB -- that would overwrite legitimate columns with misleading
+    values. The shape is sim_report only."""
+    from commander_builder.proposer import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=0, wins_b=0, games=0, status="skipped",
+                  error="no fillers")
+    fields = _ab_to_iteration_fields(ab)
+    assert "win_rate_old" not in fields
+    assert "win_rate_new" not in fields
+    assert "margin" not in fields
+    assert fields["sim_report"]["status"] == "skipped"
+
+
+def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):
+    """Auto-pick rules:
+      - Skip [USER] decks (those are the user's own work)
+      - Skip the excluded paths (the v_n + v_n+1 being compared)
+      - Pick `count` from what remains
+      - Deterministic via the seeded rng arg"""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    (tmp_path / "[USER] Mine [B3].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "[USER] Mine v2 [B3].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler C.dck").write_text("a", encoding="utf-8")
+    picks = _pick_filler_decks(
+        tmp_path,
+        exclude_paths=[
+            tmp_path / "[USER] Mine [B3].dck",
+            tmp_path / "[USER] Mine v2 [B3].dck",
+        ],
+        count=2,
+        rng=_rnd.Random(42),
+    )
+    assert len(picks) == 2
+    assert all(not p.startswith("[USER]") for p in picks)
+    assert "[USER] Mine [B3].dck" not in picks
+    assert "[USER] Mine v2 [B3].dck" not in picks
+
+
+def test_pick_filler_decks_returns_empty_when_too_few(tmp_path):
+    """Caller distinguishes 'no opponent pool' from a real pick.
+    Returns [] so the sim path can warn + skip cleanly."""
+    from commander_builder.proposer import _pick_filler_decks
+    (tmp_path / "[USER] Mine [B3].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    # Only 1 filler available, requesting 2 -> empty list.
+    picks = _pick_filler_decks(
+        tmp_path,
+        exclude_paths=[tmp_path / "[USER] Mine [B3].dck"],
+        count=2,
+    )
+    assert picks == []
+
+
+def test_auto_curate_main_run_sim_records_verdict(
+    tmp_path, monkeypatch, capsys,
+):
+    """End-to-end: --run-sim runs the A/B harness (mocked), updates
+    the iteration row with verdict + sim_report + win rates."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["Brainstorm"], "cuts": ["OldCard"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    # Mock the A/B harness so we don't actually run Forge in the test
+    # suite. Returns a "new wins 3-1" outcome.
+    from commander_builder.forge_runner import ABResult
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        return ABResult(
+            deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+            wins_a=1, wins_b=3, games=4,
+            avg_turns_a=12.0, avg_turns_b=10.5,
+            status="done",
+        )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation", fake_ab_sim,
+    )
+
+    deck = tmp_path / "[USER] SimDeck [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=SimDeck\nMoxfield=sim-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 OldCard\n",
+        encoding="utf-8",
+    )
+    # Provide filler decks so auto-pick succeeds.
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B.dck").write_text("a", encoding="utf-8")
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--run-sim", "--sim-games", "4",
+    ])
+    assert rc == 0
+
+    # Iteration row updated with sim results.
+    from commander_builder.knowledge_log import iterations_for_deck
+    its = iterations_for_deck("sim-id", db_path=db)
+    assert len(its) == 1
+    it = its[0]
+    assert it.verdict == "kept"               # new won 3-1
+    assert it.win_rate_old == 0.25            # 1/4
+    assert it.win_rate_new == 0.75            # 3/4
+    assert it.margin == 2                      # 3 - 1
+    assert it.sim_report is not None
+    assert it.sim_report["wins_b"] == 3
+
+    out = capsys.readouterr().out
+    assert "A/B sim" in out
+    assert "verdict: kept" in out
+
+
+def test_auto_curate_main_run_sim_skipped_when_no_fillers(
+    tmp_path, monkeypatch, capsys,
+):
+    """If the deck_dir has fewer than 2 non-[USER] files, the sim is
+    skipped with a clear message + the iteration row gets verdict=
+    'pending' explicitly (not silently left). User isn't surprised
+    by their nightly batch producing 'pending' rows forever."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A"], "cuts": ["C"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    # No filler decks in deck_dir -> auto-pick returns [].
+    deck = tmp_path / "[USER] LoneDeck [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Lone\nMoxfield=lone-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db), "--run-sim",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Need 2+ filler decks" in out or "Sim skipped" in out
+
+    from commander_builder.knowledge_log import iterations_for_deck
+    its = iterations_for_deck("lone-id", db_path=db)
+    assert len(its) == 1
+    assert its[0].verdict == "pending"
+
+
+def test_auto_curate_main_run_sim_ignored_under_dry_run(
+    tmp_path, monkeypatch, capsys,
+):
+    """--run-sim --dry-run is contradictory: dry-run skips the file
+    write so there's no v_n+1 deck to compare. Print a clear nudge
+    and skip the sim, don't crash."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A"], "cuts": ["C"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Dry [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Dry\nMoxfield=dry-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--dry-run", "--run-sim",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--run-sim ignored under --dry-run" in out
+
+
+def test_auto_curate_main_json_mode_surfaces_sim_block(
+    tmp_path, monkeypatch, capsys,
+):
+    """--json output gains sim_run / sim_verdict / sim_report fields
+    so batch drivers can read the verdict programmatically."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A"], "cuts": ["C"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    from commander_builder.forge_runner import ABResult
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        return ABResult(
+            deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+            wins_a=2, wins_b=3, games=5, status="done",
+        )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation", fake_ab_sim,
+    )
+
+    deck = tmp_path / "[USER] JsonSim [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Js\nMoxfield=js-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B.dck").write_text("a", encoding="utf-8")
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--run-sim", "--sim-games", "5", "--sim-margin", "2", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sim_run"] is True
+    # 3-2 with margin=2 -> neutral (within 1 vs requested 2).
+    assert payload["sim_verdict"] == "neutral"
+    assert payload["sim_report"]["wins_b"] == 3
+    assert payload["sim_error"] is None
+
+
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
     """Bracket validation lives in the CLI, not the library — the
     library functions accept any int. Out-of-range → exit 2."""

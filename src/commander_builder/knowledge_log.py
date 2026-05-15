@@ -182,6 +182,64 @@ def update_verdict(
         )
 
 
+def update_iteration_sim(
+    iteration_id: int,
+    verdict: str,
+    sim_report: Optional[dict] = None,
+    win_rate_old: Optional[float] = None,
+    win_rate_new: Optional[float] = None,
+    margin: Optional[int] = None,
+    notes: Optional[str] = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Fold the A/B-sim outcome into a pending iteration row.
+
+    Distinct from ``update_verdict`` because the auto-curate path runs
+    the full sim atomically -- one UPDATE writes verdict + sim_report
+    + win rates + margin together. Splitting them would leave the row
+    in an inconsistent 'verdict=kept but sim_report=NULL' state
+    if the second update failed mid-way.
+
+    Verdict must be one of kept/reverted/neutral/pending so an "I
+    don't know yet" caller can pass 'pending' and still record the
+    sim_report for diagnosis.
+
+    All non-verdict args are optional -- pass only what the sim
+    produced. ``None`` values preserve the existing column value
+    (SQLite COALESCE-style update; we just skip those fields in
+    the SET clause).
+    """
+    if verdict not in {"kept", "reverted", "neutral", "pending"}:
+        raise ValueError(
+            f"verdict must be one of kept/reverted/neutral/pending, "
+            f"got {verdict!r}"
+        )
+    set_clauses = ["verdict = ?"]
+    params: list = [verdict]
+    if notes is not None:
+        set_clauses.append("verdict_notes = ?")
+        params.append(notes)
+    if sim_report is not None:
+        set_clauses.append("sim_report = ?")
+        params.append(json.dumps(sim_report))
+    if win_rate_old is not None:
+        set_clauses.append("win_rate_old = ?")
+        params.append(float(win_rate_old))
+    if win_rate_new is not None:
+        set_clauses.append("win_rate_new = ?")
+        params.append(float(win_rate_new))
+    if margin is not None:
+        set_clauses.append("margin = ?")
+        params.append(int(margin))
+    params.append(iteration_id)
+    sql = (
+        f"UPDATE iterations SET {', '.join(set_clauses)} "
+        f"WHERE id = ?"
+    )
+    with _connect(db_path) as conn:
+        conn.execute(sql, params)
+
+
 def get_iteration(iteration_id: int, db_path: Path = DEFAULT_DB_PATH) -> Optional[Iteration]:
     init_db(db_path)
     with _connect(db_path) as conn:
