@@ -712,6 +712,12 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--json", action="store_true",
                    help="Emit the proposal as JSON on stdout instead "
                         "of human-readable summary.")
+    p.add_argument("--no-log", action="store_true",
+                   help="Skip writing the iteration to knowledge_log "
+                        "(default: persist a pending iteration row).")
+    p.add_argument("--db-path",
+                   help="Override the knowledge_log SQLite path "
+                        "(default: vendor/knowledge_log.sqlite).")
     args = p.parse_args(argv)
 
     if not args.deck_path.exists():
@@ -763,12 +769,33 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         args.deck_path, proposal, dry_run=args.dry_run,
     )
 
+    # Step 3b: persist iteration to knowledge_log. Skipped on dry-run
+    # (no actual deck to point at) and on --no-log (opt-out). Failures
+    # to write the log are NON-fatal — the .dck is already on disk;
+    # the user shouldn't lose that work because of a knowledge_log
+    # quirk. Surface the failure in the summary instead.
+    iteration_id: Optional[int] = None
+    log_error: Optional[str] = None
+    if not args.dry_run and not args.no_log:
+        try:
+            iteration_id = _log_auto_curate_iteration(
+                src_deck_path=args.deck_path,
+                new_deck_path=out_path,
+                bracket=args.bracket,
+                proposal=proposal,
+                db_path=Path(args.db_path) if args.db_path else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log_error = f"{type(exc).__name__}: {exc}"
+
     if args.json:
         print(json.dumps({
             "input_deck": str(args.deck_path),
             "output_deck": str(out_path),
             "dry_run": args.dry_run,
             "proposal": proposal.to_dict(),
+            "iteration_id": iteration_id,
+            "log_error": log_error,
         }, indent=2))
         return 0
 
@@ -791,7 +818,74 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         print(f"DRY RUN — would have written: {out_path}")
     else:
         print(f"Wrote: {out_path}")
+        if iteration_id is not None:
+            print(f"Logged iteration #{iteration_id} (pending)")
+        elif args.no_log:
+            print("(skipped knowledge_log per --no-log)")
+        elif log_error:
+            # Non-fatal: deck is on disk, history just lost this row.
+            print(f"WARN: knowledge_log write failed: {log_error}")
     return 0
+
+
+def _log_auto_curate_iteration(
+    src_deck_path: Path,
+    new_deck_path: Path,
+    bracket: int,
+    proposal: "Proposal",
+    db_path: Optional[Path] = None,
+) -> int:
+    """Persist a 'pending' Iteration row recording this auto-curate run.
+
+    Reads the moxfield publicId out of the new .dck (falls back to the
+    filename stem). Hooks the new row's parent_id to the most recent
+    prior iteration of the same deck so the iteration chain stays
+    threaded — important for the upcoming knowledge_log graph view.
+
+    Verdict is 'pending' — we haven't actually played the new deck yet.
+    Phase 2's analyst path (or a follow-up Forge sim) updates verdict
+    + sim_report once results land.
+    """
+    from .iteration_loop import resolve_deck_id
+    from .knowledge_log import (
+        DEFAULT_DB_PATH,
+        Iteration,
+        iterations_for_deck,
+        record_iteration,
+    )
+
+    effective_db = db_path or DEFAULT_DB_PATH
+
+    deck_id = resolve_deck_id(new_deck_path, fallback=new_deck_path.stem)
+    deck_name = new_deck_path.stem
+
+    # Thread the iteration chain: find the latest existing iteration for
+    # this deck_id and set it as parent. If none exists, parent_id stays
+    # None (this becomes v1 in the log).
+    prior = iterations_for_deck(deck_id, db_path=effective_db)
+    parent_id = prior[-1].id if prior else None
+
+    deck_snapshot = new_deck_path.read_text(encoding="utf-8")
+    audit_manifest = {
+        "added": list(proposal.adds),
+        "removed": list(proposal.cuts),
+        "rationale": proposal.rationale,
+        "source": proposal.source,
+        "dropped_for_bracket": list(proposal.dropped_for_bracket),
+        "src_deck": src_deck_path.name,
+    }
+
+    it = Iteration(
+        deck_id=deck_id,
+        deck_name=deck_name,
+        bracket=bracket,
+        parent_id=parent_id,
+        audit_version="claude-auto",
+        audit_manifest=audit_manifest,
+        verdict="pending",
+        deck_snapshot=deck_snapshot,
+    )
+    return record_iteration(it, db_path=effective_db)
 
 
 if __name__ == "__main__":

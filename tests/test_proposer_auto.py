@@ -586,6 +586,213 @@ def test_auto_curate_main_returns_nonzero_on_runtime_error(
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().out
 
 
+def test_auto_curate_main_logs_iteration_to_knowledge_log(
+    tmp_path, monkeypatch, capsys,
+):
+    """The default (no --no-log) writes a 'pending' iteration row to
+    knowledge_log so the auto-curate output threads into the iteration
+    history alongside manual audits."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["Brainstorm"], "cuts": ["Random Filler"],
+        "rationale": "+draw -filler",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] LogTest [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=LogTest\nMoxfield=test-public-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 Random Filler\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+    ])
+    assert rc == 0
+
+    # Iteration is persisted with the expected shape.
+    from commander_builder.knowledge_log import iterations_for_deck
+    iterations = iterations_for_deck("test-public-id", db_path=db)
+    assert len(iterations) == 1
+    it = iterations[0]
+    assert it.bracket == 3
+    assert it.verdict == "pending"
+    assert it.audit_version == "claude-auto"
+    assert it.audit_manifest["added"] == ["Brainstorm"]
+    assert it.audit_manifest["removed"] == ["Random Filler"]
+    assert it.audit_manifest["source"] == "claude-auto"
+    assert it.audit_manifest["src_deck"] == "[USER] LogTest [B3].dck"
+    # Deck snapshot captured for reproducibility.
+    assert "1 Brainstorm" in it.deck_snapshot
+    assert "Random Filler" not in it.deck_snapshot
+    # First iteration → no parent.
+    assert it.parent_id is None
+
+    out = capsys.readouterr().out
+    assert "Logged iteration" in out
+
+
+def test_auto_curate_main_threads_parent_id_to_prior_iteration(
+    tmp_path, monkeypatch, capsys,
+):
+    """When a deck already has prior iterations in knowledge_log, the
+    new auto-curate row threads parent_id to the latest one — keeps
+    the v1→v2→...→vN chain navigable for the iteration graph view."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["NewCard"], "cuts": ["OldCard"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Chained [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Chained\nMoxfield=chained-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 OldCard\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    # Seed a prior iteration for this deck so the new one threads to it.
+    from commander_builder.knowledge_log import Iteration, record_iteration
+    seed_id = record_iteration(
+        Iteration(
+            deck_id="chained-id", deck_name="Chained", bracket=3,
+            audit_version="manual", verdict="kept",
+        ),
+        db_path=db,
+    )
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+    ])
+    assert rc == 0
+
+    from commander_builder.knowledge_log import iterations_for_deck
+    iterations = iterations_for_deck("chained-id", db_path=db)
+    assert len(iterations) == 2
+    # The new (second) row's parent_id is the seed's id.
+    assert iterations[1].parent_id == seed_id
+
+
+def test_auto_curate_main_no_log_flag_skips_iteration_write(
+    tmp_path, monkeypatch, capsys,
+):
+    """--no-log opts out. Lets users run ad-hoc curate without
+    polluting the persistent history (e.g. exploring a 'what would
+    Claude propose at B5' question without saving)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["X"], "cuts": ["Y"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Quiet [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Quiet\nMoxfield=quiet-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 Y\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--no-log", "--db-path", str(db),
+    ])
+    assert rc == 0
+
+    from commander_builder.knowledge_log import iterations_for_deck
+    assert iterations_for_deck("quiet-id", db_path=db) == []
+    assert "skipped knowledge_log per --no-log" in capsys.readouterr().out
+
+
+def test_auto_curate_main_dry_run_skips_iteration_write(
+    tmp_path, monkeypatch, capsys,
+):
+    """Dry-run mode never writes the .dck → it must also never write
+    the iteration log (there's no real deck to thread to). Pinning
+    so a refactor doesn't slip in a 'dry-run still logs' regression."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["X"], "cuts": ["Y"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] DryQuiet [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=DryQuiet\nMoxfield=dry-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 Y\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--dry-run", "--db-path", str(db),
+    ])
+    assert rc == 0
+
+    from commander_builder.knowledge_log import iterations_for_deck
+    assert iterations_for_deck("dry-id", db_path=db) == []
+
+
+def test_auto_curate_main_logfail_is_nonfatal(
+    tmp_path, monkeypatch, capsys,
+):
+    """If knowledge_log write fails for any reason (disk full, schema
+    drift, permissions), the .dck stays on disk and the CLI exits 0
+    with a WARN line. We never lose the audit work to a logging quirk."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["X"], "cuts": ["Y"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    def boom(it, db_path):
+        raise RuntimeError("simulated knowledge_log failure")
+    monkeypatch.setattr(
+        "commander_builder.knowledge_log.record_iteration", boom,
+    )
+
+    deck = tmp_path / "[USER] LogBoom [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=LogBoom\nMoxfield=boom-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 Y\n",
+        encoding="utf-8",
+    )
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([str(deck), "--bracket", "3"])
+    assert rc == 0
+    # New .dck still exists.
+    assert (tmp_path / "[USER] LogBoom v2 [B3].dck").exists()
+    # Warning surfaced.
+    assert "knowledge_log write failed" in capsys.readouterr().out
+
+
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
     """Bracket validation lives in the CLI, not the library — the
     library functions accept any int. Out-of-range → exit 2."""
