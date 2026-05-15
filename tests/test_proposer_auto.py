@@ -1945,6 +1945,133 @@ def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):
     assert "[USER] Mine v2 [B3].dck" not in picks
 
 
+def test_pick_filler_decks_prefers_same_bracket(tmp_path):
+    """Regression for the 2026-05-15 live-bug: B4 user deck was matched
+    against B5 cEDH + B2 casual fillers, producing a noise-dominated
+    verdict. With target_bracket=4, the auto-pick MUST prefer B4
+    fillers over more distant brackets."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    # 2 B4 fillers + a B5 cEDH + a B2 casual.
+    (tmp_path / "Some B4 Filler [B4].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Another B4 Filler [B4].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "cEDH Filler [B5].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Casual Filler [B2].dck").write_text("a", encoding="utf-8")
+
+    picks = _pick_filler_decks(
+        tmp_path,
+        exclude_paths=[],
+        count=2,
+        target_bracket=4,
+        rng=_rnd.Random(42),
+    )
+    # Both picks MUST be the B4 fillers -- never B5 or B2.
+    assert len(picks) == 2
+    for name in picks:
+        assert "[B4]" in name, (
+            f"expected only B4 fillers when matching a B4 deck, got {name}"
+        )
+
+
+def test_pick_filler_decks_falls_back_to_adjacent_bracket(tmp_path):
+    """When same-bracket pool is too small, fall through to adjacent
+    brackets (|delta| = 1) before reaching far-bracket fillers."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    # Only 1 B4 filler available, but plenty of B3 + B5.
+    (tmp_path / "Lone B4 [B4].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "B3 One [B3].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "B3 Two [B3].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "B5 One [B5].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "B1 Far [B1].dck").write_text("a", encoding="utf-8")
+
+    picks = _pick_filler_decks(
+        tmp_path,
+        exclude_paths=[],
+        count=2,
+        target_bracket=4,
+        rng=_rnd.Random(42),
+    )
+    assert len(picks) == 2
+    # The B4 is first; the second pick is delta=1 (B3 or B5), not
+    # delta=3 (B1). B1 should NEVER appear when adjacent decks exist.
+    assert "Lone B4 [B4].dck" in picks
+    assert "B1 Far [B1].dck" not in picks
+    # The second pick is from delta=1 (B3 or B5).
+    second = [p for p in picks if p != "Lone B4 [B4].dck"][0]
+    assert "[B3]" in second or "[B5]" in second
+
+
+def test_pick_filler_decks_falls_back_to_distant_bracket_when_needed(
+    tmp_path,
+):
+    """When same-bracket AND adjacent are exhausted, the picker
+    accepts further-out brackets rather than returning empty. Better
+    a noisy sim than no sim at all -- the verdict is 'pending'
+    classified, not silently dropped."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    # Only B1 and B5 fillers -- B4 user has no nearby pool.
+    (tmp_path / "B5 cEDH [B5].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "B1 Casual [B1].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "B1 Other [B1].dck").write_text("a", encoding="utf-8")
+
+    picks = _pick_filler_decks(
+        tmp_path,
+        exclude_paths=[],
+        count=2,
+        target_bracket=4,
+        rng=_rnd.Random(42),
+    )
+    assert len(picks) == 2  # took whatever was available
+
+
+def test_pick_filler_decks_handles_unparseable_bracket(tmp_path):
+    """Files without a [B<N>] suffix (legacy imports, weird names)
+    land in a fallback bucket -- used only when bracket-tagged
+    fillers can't fill the count quota."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    (tmp_path / "Tagged B4 [B4].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Untagged Filler.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Another Untagged.dck").write_text("a", encoding="utf-8")
+
+    # With target_bracket=4 + 1 same-bracket filler available, second
+    # pick falls through to the unparseable bucket.
+    picks = _pick_filler_decks(
+        tmp_path,
+        exclude_paths=[],
+        count=2,
+        target_bracket=4,
+        rng=_rnd.Random(42),
+    )
+    assert "Tagged B4 [B4].dck" in picks
+    assert len(picks) == 2
+    second = [p for p in picks if p != "Tagged B4 [B4].dck"][0]
+    # Untagged filler used as fallback.
+    assert "[B" not in second
+
+
+def test_pick_filler_decks_no_target_bracket_falls_back_to_alpha(tmp_path):
+    """When target_bracket=None, behaves like the original picker:
+    sorted candidates, shuffled, first ``count``. Backwards-compat
+    for callers that don't care about bracket matching."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    (tmp_path / "Filler A [B5].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B [B3].dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler C [B1].dck").write_text("a", encoding="utf-8")
+
+    picks = _pick_filler_decks(
+        tmp_path,
+        exclude_paths=[],
+        count=2,
+        target_bracket=None,
+        rng=_rnd.Random(42),
+    )
+    assert len(picks) == 2  # any 2, no bracket preference
+
+
 def test_pick_filler_decks_returns_empty_when_too_few(tmp_path):
     """Caller distinguishes 'no opponent pool' from a real pick.
     Returns [] so the sim path can warn + skip cleanly."""

@@ -1349,35 +1349,93 @@ def _pick_filler_decks(
     exclude_paths: list[Path],
     *,
     count: int = 2,
+    target_bracket: Optional[int] = None,
     rng=None,
 ) -> list[str]:
     """Pick ``count`` opponent-pool deck filenames from ``deck_dir``.
+
+    Bracket-aware ranking: when ``target_bracket`` is given, prefers
+    fillers matching that bracket first, then adjacent brackets
+    (delta=1), then delta=2, etc. A B4 user deck A/B'd against a B5
+    cEDH filler + B2 casual filler produces NOISE-dominated verdicts:
+    the cEDH crushes everything (both v_n and v_n+1 lose to it
+    equally), the casual gets rolled (both v_n and v_n+1 beat it
+    equally), and the v_n vs v_n+1 delta -- the signal we actually
+    want -- drowns in filler asymmetry.
+
+    With same-bracket fillers the games are competitive enough that
+    the choice of v_n vs v_n+1 in seat-1 is the dominant variable.
 
     Auto-pick rules:
       - Skip any file under ``exclude_paths`` (the v_n + v_n+1 decks
         being compared -- pitting the new deck against the old deck's
         identical copy in the filler slots would be self-defeating).
-      - Skip ``[USER]`` prefixed decks (those are the user's own work;
-        the opponent pool is everything WITHOUT the prefix).
-      - Sort candidates alphabetically and use the provided ``rng``
-        (defaults to ``random.Random()`` -- tests inject a seeded
-        Random for determinism).
+      - Skip ``[USER]`` prefixed decks (those are the user's own
+        work; the opponent pool is everything WITHOUT the prefix).
+      - When ``target_bracket`` is given, group candidates by
+        |bracket_of_candidate - target_bracket| and walk the buckets
+        from delta=0 up. Each bucket is shuffled via ``rng`` for
+        variety within a tier.
+      - Fillers with NO ``[B<N>]`` suffix (unparseable bracket) land
+        in a final fallback bucket at delta=infinity -- used only
+        if every parseable filler bucket can't fill ``count``.
 
-    Returns the chosen filenames in ``rng.sample`` order. Returns
-    an empty list if fewer than ``count`` candidates exist -- the
-    caller checks for [] and skips the sim with a clear message.
+    Returns the chosen filenames. Returns an empty list if fewer
+    than ``count`` candidates exist total -- the caller surfaces
+    "no fillers" and skips the sim with verdict='pending'.
     """
     import random as _random
+    from .web._helpers import _bracket_from_filename
     if rng is None:
         rng = _random.Random()
     exclude_set = {p.name for p in exclude_paths}
-    candidates = sorted(
+    candidates = [
         p.name for p in deck_dir.glob("*.dck")
         if not p.name.startswith("[USER]") and p.name not in exclude_set
-    )
-    if len(candidates) < count:
+    ]
+    if not candidates:
         return []
-    return rng.sample(candidates, count)
+
+    # Bucket by bracket-distance to target. Files without a parseable
+    # bracket land in their own bucket at the end of the priority list
+    # so they're only used when nothing better is available.
+    if target_bracket is None:
+        # No target -- single bucket, alpha-sorted then shuffled. This
+        # matches the pre-bracket-aware behavior for callers that don't
+        # care.
+        sorted_pool = sorted(candidates)
+        rng.shuffle(sorted_pool)
+        if len(sorted_pool) < count:
+            return []
+        return sorted_pool[:count]
+
+    buckets: dict[int, list[str]] = {}
+    unparseable: list[str] = []
+    for name in sorted(candidates):
+        b = _bracket_from_filename(name)
+        if b is None:
+            unparseable.append(name)
+        else:
+            buckets.setdefault(abs(b - target_bracket), []).append(name)
+
+    picks: list[str] = []
+    for delta in sorted(buckets.keys()):
+        bucket = list(buckets[delta])
+        rng.shuffle(bucket)
+        for name in bucket:
+            picks.append(name)
+            if len(picks) >= count:
+                return picks[:count]
+    # Fall back to unparseable bracket only when everything else is
+    # exhausted. Shuffled for variety.
+    rng.shuffle(unparseable)
+    for name in unparseable:
+        picks.append(name)
+        if len(picks) >= count:
+            return picks[:count]
+    if len(picks) < count:
+        return []
+    return picks[:count]
 
 
 def _run_sim_and_record(
@@ -1416,6 +1474,10 @@ def _run_sim_and_record(
             deck_dir,
             exclude_paths=[args.deck_path, out_path],
             count=2,
+            # Bracket-match the fillers to the user's deck. A B4 vs B4
+            # filler pod is competitive; B4 vs (B5 cEDH + B2 casual) is
+            # filler-asymmetry-dominated and yields junk verdicts.
+            target_bracket=args.bracket,
         )
     if len(filler_names) < 2:
         msg = (
