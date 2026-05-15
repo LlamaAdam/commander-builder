@@ -1730,6 +1730,75 @@ def test_audit_endpoint_surfaces_salt_warning_at_low_bracket(
     assert cultivate["salt"] == 3.7
 
 
+def test_audit_endpoint_main_count_reflects_proposed_text(
+    client, monkeypatch, deck_dir,
+):
+    """Regression for the 2026-05-15 main_count headline bug.
+
+    Pre-fix: main_count = kept + len(added_payload) + padded_count
+    which counted EVERY recommendation -- including ones that
+    balancing / bracket-cap / protection dropped -- producing
+    headline numbers like 143 on a deck whose proposed_text is
+    actually 99 cards.
+
+    Post-fix: main_count is counted from proposed_text directly so
+    the headline matches what Forge will load. This test ships an
+    advisor with imbalanced adds vs cuts (5 adds, 1 cut) so the
+    OLD math would produce inflated count while the NEW math reads
+    proposed_text and reports truth."""
+    from types import SimpleNamespace
+
+    # The advisor returns 5 adds + 1 cut. After balancing in
+    # _apply_swaps_to_dck, min(5, 1) = 1 of each lands. The
+    # proposed_text should be source_main - 1 cut + 1 add = source_main.
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(card=f"Add{i}", action="add", reason="",
+                                evidence={})
+                for i in range(5)
+            ] + [
+                SimpleNamespace(card="Cultivate", action="cut", reason="",
+                                evidence={}),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    # Count main cards in proposed_text directly to derive the truth.
+    import re
+    in_main = False
+    truth = 0
+    for raw in body["proposed_text"].splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            in_main = s.lower() == "[main]"
+            continue
+        if in_main:
+            m = re.match(r"^(\d+)\s+", s)
+            if m:
+                truth += int(m.group(1))
+
+    # The headline MUST match what's actually in proposed_text. Under
+    # the old buggy math, main_count would be (kept=39 or so) + 5 +
+    # padding ~= 50+, while proposed_text is balanced near the source
+    # size. Under the fix, the two agree.
+    assert body["main_count"] == truth, (
+        f"main_count headline ({body['main_count']}) doesn't match "
+        f"actual proposed_text count ({truth}) -- regression of the "
+        f"2026-05-15 fix."
+    )
+
+
 def test_audit_endpoint_surfaces_deck_health_signals(
     client, monkeypatch, deck_dir,
 ):

@@ -72,6 +72,40 @@ _EMPTY_DECK_HEALTH = {
 }
 
 
+def _count_main_lines(deck_text: str) -> int:
+    """Sum quantity prefixes across the [Main] section.
+
+    Counts what's ACTUALLY in the deck text, not derived from
+    recommendation list lengths. The pre-fix headline math was
+    ``kept + len(added_payload) + padded_count`` which counted
+    every recommendation including the ones that balancing /
+    protection / bracket-cap dropped -- producing a misleading
+    main_count (e.g. 143 on a deck whose proposed_text was 99
+    cards). This helper walks proposed_text once and sums the
+    qty prefixes the way Forge actually parses them.
+    """
+    import re as _re
+    line_pat = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+    total = 0
+    in_main = False
+    for raw in deck_text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            in_main = s.lower() == "[main]"
+            continue
+        if not in_main:
+            continue
+        m = line_pat.match(s)
+        if m:
+            try:
+                total += int(m.group(1))
+            except (TypeError, ValueError):
+                total += 1
+    return total
+
+
 def _compute_deck_health_safe(deck_text: str) -> dict:
     """Wrap ``deck_health.compute_deck_health`` so a Scryfall outage
     or unexpected parse failure doesn't take down the whole audit
@@ -327,7 +361,15 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             "added": added_payload,
             "removed": removed_payload,
             "kept_count": kept,
-            "main_count": kept + len(added_payload) + padded_count,
+            # main_count reflects what's ACTUALLY in proposed_text -- the
+            # cards Forge will load. Previously this was computed as
+            # ``kept + len(added_payload) + padded_count`` which counts
+            # every recommendation including ones balancing/protection
+            # dropped, producing a misleading headline (e.g. First Sliver
+            # B3 reported 143 main on a 99-card proposed deck). Count
+            # quantity-prefixed [Main] lines directly to keep the
+            # headline truthful.
+            "main_count": _count_main_lines(proposed_text),
             "diagnosis": getattr(report.diagnosis, "pattern_summary", ""),
             "weakness_signals": list(getattr(
                 report.diagnosis, "weakness_signals", [],
@@ -612,7 +654,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                             "added": added_payload,
                             "removed": removed_payload,
                             "kept_count": kept,
-                            "main_count": kept + len(added) + padded_count,
+                            # Count from proposed_text directly so the
+                            # headline matches what Forge will load --
+                            # see the sync /api/audit endpoint for the
+                            # rationale and the pre-fix bug context.
+                            "main_count": _count_main_lines(proposed_text),
                             "rationale": (
                                 getattr(report.diagnosis, "pattern_summary", "")
                                 or ""
