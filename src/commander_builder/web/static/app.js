@@ -2513,7 +2513,11 @@ function renderDashboard(data, iterations) {
   const actions = el("div", { class: "hero-actions" });
 
   const proposeBtn = el("button", { class: "primary" }, "Propose changes");
-  proposeBtn.addEventListener("click", openProposeModal);
+  // Wrap so the PointerEvent isn't passed as ``opts`` -- the truthy
+  // check ``(opts && opts.saveOnly)`` makes this work by accident
+  // today (event has no saveOnly), but the binding's INTENT is
+  // "open in A/B mode" so we make that explicit.
+  proposeBtn.addEventListener("click", () => openProposeModal());
   actions.appendChild(proposeBtn);
 
   const auditBtn = el("button", {}, "Run audit");
