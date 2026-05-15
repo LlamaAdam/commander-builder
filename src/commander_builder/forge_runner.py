@@ -31,7 +31,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -454,6 +454,217 @@ class ForgeRunner:
             return data.decode("utf-8", errors="replace")
         except OSError:
             return ""
+
+
+# ---------------------------------------------------------------------------
+# A/B simulation harness — old-deck vs new-deck head-to-head
+# ---------------------------------------------------------------------------
+
+# Sentinel statuses for ABResult.status. Plain strings (rather than an enum)
+# so the dict round-trips cleanly through JSON for the iteration row and the
+# UI's status pill can switch on them without an import.
+_AB_STATUS_PENDING = "pending"
+_AB_STATUS_RUNNING = "running"
+_AB_STATUS_DONE = "done"
+_AB_STATUS_SKIPPED = "skipped"
+_AB_STATUS_FAILED = "failed"
+
+# Default per-game timeout for the A/B sim. Commander games can stall on
+# board states that confuse the AI; cap each game at this many seconds so
+# one bad game can't hang the whole 5-game batch indefinitely.
+_AB_TIMEOUT_PER_GAME_SEC = 180
+
+
+@dataclass
+class ABResult:
+    """Aggregate result of a head-to-head A/B Forge sim.
+
+    Persisted into the iteration row's sim_report so the UI can render
+    "Old: 3 wins / New: 2 wins (5 games)" alongside the audit history.
+    ``status`` is the lifecycle pill:
+
+    - ``pending`` — queued but not yet started
+    - ``running`` — in flight on the background worker
+    - ``done`` — completed; ``wins_a`` / ``wins_b`` are authoritative
+    - ``skipped`` — Forge unreachable, missing fillers, etc.; no wins
+    - ``failed`` — Forge ran but errored; ``error`` carries the reason
+    """
+    deck_a: str = ""
+    deck_b: str = ""
+    wins_a: int = 0
+    wins_b: int = 0
+    games: int = 0
+    avg_turns_a: float = 0.0
+    avg_turns_b: float = 0.0
+    status: str = _AB_STATUS_PENDING
+    error: Optional[str] = None
+    duration_sec: float = 0.0
+    # The per-game deck_filenames lists we sent to Forge — handy for
+    # debugging seat-order alternation and for showing the user which
+    # filler decks the harness picked.
+    seat_orders: list[list[str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _ab_deck_name_for_match(deck_path: Path) -> str:
+    """Normalize a deck path to the name Forge writes into Match Result
+    lines. The runner accepts filename-style decks (e.g.
+    ``[USER] Goblin [B4].dck``) but the parser keys on the deck's
+    internal Name= field, which strips the [USER] prefix and the
+    `.dck`/[B<n>] suffix. log_parser._normalize encodes that mapping —
+    reuse it so the test fakes and the production path stay aligned."""
+    # Imported lazily to avoid a module-level cycle (log_parser depends
+    # on nothing in forge_runner, but downstream callers may have
+    # patched things at import time).
+    from .log_parser import _normalize
+    return _normalize(deck_path.stem)
+
+
+def run_ab_simulation(
+    deck_a_path: Path,
+    deck_b_path: Path,
+    games: int = 5,
+    *,
+    runner: Optional["ForgeRunner"] = None,
+    fillers: Optional[list[str]] = None,
+    game_format: str = "commander",
+) -> ABResult:
+    """Run a 5-game (configurable) head-to-head between two decks.
+
+    Alternates seat order across games — game 1 puts ``deck_a`` in
+    seat 1, game 2 puts ``deck_b`` in seat 1, … — so first-player
+    advantage is balanced over an even number of games.
+
+    Commander format expects a 4-player pod, so the caller must supply
+    two filler deck filenames (already present in the Forge userdata
+    commander/ directory). The harness skips with status='skipped'
+    when fewer than 2 fillers are supplied; same for when ForgeRunner
+    can't be located on the host.
+
+    The function never raises — every failure mode lands in the
+    returned ABResult so the background worker on /api/save_iteration
+    can record it on the iteration row without try/except boilerplate.
+    """
+    # Lazy imports so a missing optional dep in log_parser/game_analyzer
+    # doesn't break ``from forge_runner import ...`` at module import
+    # time. (Both are local imports, so cost is one-time per call.)
+    from .log_parser import parse as _parse_sim
+    from .game_analyzer import analyze as _analyze_match
+
+    result = ABResult(
+        deck_a=deck_a_path.name,
+        deck_b=deck_b_path.name,
+        games=0,
+        status=_AB_STATUS_PENDING,
+    )
+
+    # Locate Forge first — if the host doesn't have it we bail before
+    # touching the runner. The save-iteration HTTP response shouldn't
+    # care whether Forge is reachable; the worker logs the skip and
+    # the UI surfaces 'skipped' in the status pill.
+    if runner is None:
+        try:
+            runner = ForgeRunner.locate()
+        except (FileNotFoundError, OSError) as exc:
+            result.status = _AB_STATUS_SKIPPED
+            result.error = f"Forge not available: {exc}"
+            return result
+
+    if game_format == "commander":
+        if fillers is None or len(fillers) < 2:
+            result.status = _AB_STATUS_SKIPPED
+            result.error = (
+                "commander A/B sim needs at least 2 filler decks "
+                "(got "
+                + (str(len(fillers)) if fillers is not None else "0")
+                + ")"
+            )
+            return result
+        filler_a = fillers[0]
+        filler_b = fillers[1]
+
+    name_a = _ab_deck_name_for_match(deck_a_path)
+    name_b = _ab_deck_name_for_match(deck_b_path)
+
+    a_turns: list[int] = []
+    b_turns: list[int] = []
+    started = datetime.now()
+    result.status = _AB_STATUS_RUNNING
+
+    for i in range(games):
+        # Alternate seat order — even iters: A first; odd iters: B first.
+        # The filler pair stays in seats 3+4 in both cases; only the
+        # head-to-head pair flips.
+        if game_format == "commander":
+            if i % 2 == 0:
+                order = [deck_a_path.name, deck_b_path.name, filler_a, filler_b]
+            else:
+                order = [deck_b_path.name, deck_a_path.name, filler_a, filler_b]
+        else:
+            order = (
+                [deck_a_path.name, deck_b_path.name]
+                if i % 2 == 0
+                else [deck_b_path.name, deck_a_path.name]
+            )
+        result.seat_orders.append(order)
+
+        try:
+            sim = runner.run(
+                deck_filenames=order,
+                num_games=1,
+                game_format=game_format,
+                timeout_sec=_AB_TIMEOUT_PER_GAME_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001 — never raise from background
+            result.status = _AB_STATUS_FAILED
+            result.error = f"{type(exc).__name__}: {exc}"
+            result.duration_sec = (datetime.now() - started).total_seconds()
+            return result
+
+        # Treat any non-zero exit OR captured error as a failure for
+        # the batch — don't try to salvage partial sims; the dashboard
+        # banner is more useful with "failed at game 2/5" than a
+        # noisy 1-of-5 partial.
+        if sim.error or (sim.returncode is not None and sim.returncode != 0):
+            result.status = _AB_STATUS_FAILED
+            result.error = sim.error or f"Forge exited with code {sim.returncode}"
+            result.duration_sec = (datetime.now() - started).total_seconds()
+            return result
+
+        parsed = _parse_sim(sim.stdout)
+        match = _analyze_match(sim.stdout)
+
+        # Attribute wins by normalized deck name (seat-agnostic).
+        for d in parsed.deck_results:
+            if d.normalized_name == name_a:
+                result.wins_a += d.wins
+            elif d.normalized_name == name_b:
+                result.wins_b += d.wins
+
+        # Per-game turn stats. game_analyzer attributes a winner per
+        # game; we tally only the games each deck actually won so
+        # avg_turns_a reflects "how fast does A close out games it
+        # wins" rather than "average length of all games A played".
+        for g in match.games:
+            if g.end_turn is None:
+                continue
+            winner = g.winner_normalized
+            if winner == name_a:
+                a_turns.append(g.end_turn)
+            elif winner == name_b:
+                b_turns.append(g.end_turn)
+
+        result.games = i + 1
+
+    if a_turns:
+        result.avg_turns_a = round(sum(a_turns) / len(a_turns), 2)
+    if b_turns:
+        result.avg_turns_b = round(sum(b_turns) / len(b_turns), 2)
+    result.status = _AB_STATUS_DONE
+    result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+    return result
 
 
 if __name__ == "__main__":

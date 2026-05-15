@@ -301,3 +301,237 @@ def test_detect_forge_version_unparseable_filename_is_skipped(tmp_path):
 
     info = detect_forge_version(tmp_path)
     assert info.version == "2.0.12"
+
+
+# --- run_ab_simulation — head-to-head old-vs-new A/B harness ----------------
+
+
+def _ab_canned_stdout(end_turn: int, winner_seat: int, winner_name: str,
+                      seats: list[str]) -> str:
+    """Synthesize a Forge sim stdout payload for one game.
+
+    Lines emitted MUST match the live Forge regex shapes consumed by
+    ``log_parser`` and ``game_analyzer``:
+
+    - ``Turn: Turn N (Ai(M)-DeckName)`` — seeds per-seat deck identities
+      so the analyzer can attribute wins/turns to the right deck.
+    - ``Game Outcome: Turn N`` — authoritative end-turn marker that
+      overrides any inferred turn count.
+    - ``Game Result: Game N ended in NNNN ms. Ai(M)-Winner has won!``
+      — terminates the buffered game and carries the winner seat+name.
+    - ``Match Result: Ai(1)-A: wins ...`` — cumulative per-deck wins,
+      parsed by log_parser to attribute to ``deck_results``.
+    """
+    # One Turn line per seat seeds deck identities for the analyzer.
+    turn_seeds = "\n".join(
+        f"Turn: Turn 1 (Ai({i + 1})-{n})"
+        for i, n in enumerate(seats)
+    )
+    match_parts = " ".join(
+        f"Ai({i + 1})-{n}: {1 if (i + 1) == winner_seat else 0}"
+        for i, n in enumerate(seats)
+    )
+    return (
+        f"{turn_seeds}\n"
+        f"Game Outcome: Turn {end_turn}\n"
+        f"Game Result: Game 1 ended in 540000 ms. "
+        f"Ai({winner_seat})-{winner_name} has won!\n"
+        f"Match Result: {match_parts}\n"
+    )
+
+
+def test_run_ab_simulation_alternates_seat_order_per_game(tmp_path):
+    """Game 1 puts Deck A in seat 1; game 2 puts Deck B in seat 1;
+    alternating balances first-player advantage. The function must
+    drive the runner with the right ``deck_filenames`` list per
+    iteration."""
+    from commander_builder.forge_runner import run_ab_simulation
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n1 Sol Ring\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n1 Sol Ring\n", encoding="utf-8")
+
+    captured_orders: list[list[str]] = []
+
+    class _FakeRunner:
+        def run(self, deck_filenames, num_games, **kwargs):
+            captured_orders.append(list(deck_filenames))
+            return SimResult(
+                cmd=["fake"], returncode=0, duration_sec=1.0,
+                stdout=_ab_canned_stdout(
+                    10, 3, "filler1",
+                    seats=["DeckA", "DeckB", "filler1", "filler2"],
+                ),
+                stderr="", timed_out=False, error=None,
+            )
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=4,
+        runner=_FakeRunner(),
+        fillers=["filler1.dck", "filler2.dck"],
+    )
+
+    assert result.games == 4
+    assert len(captured_orders) == 4
+    # Games 0, 2: Deck A in seat 1.
+    assert captured_orders[0][0] == deck_a.name
+    assert captured_orders[0][1] == deck_b.name
+    assert captured_orders[2][0] == deck_a.name
+    # Games 1, 3: Deck B in seat 1.
+    assert captured_orders[1][0] == deck_b.name
+    assert captured_orders[1][1] == deck_a.name
+    assert captured_orders[3][0] == deck_b.name
+
+
+def test_run_ab_simulation_records_wins_and_turn_stats(tmp_path):
+    """Wins are attributed by deck identity, not seat. Average
+    turns-when-won is computed only over games each deck won."""
+    from commander_builder.forge_runner import run_ab_simulation
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    # 4 sims; seat order alternates A-first / B-first.
+    canned = [
+        # Game 0: seats = [DeckA, DeckB, f1, f2], A wins turn 12.
+        _ab_canned_stdout(12, 1, "DeckA",
+                          seats=["DeckA", "DeckB", "filler1", "filler2"]),
+        # Game 1: seats = [DeckB, DeckA, f1, f2], B wins turn 8.
+        _ab_canned_stdout(8, 1, "DeckB",
+                          seats=["DeckB", "DeckA", "filler1", "filler2"]),
+        # Game 2: seats = [DeckA, DeckB, ...], A wins turn 14.
+        _ab_canned_stdout(14, 1, "DeckA",
+                          seats=["DeckA", "DeckB", "filler1", "filler2"]),
+        # Game 3: seats = [DeckB, DeckA, ...], A wins from seat 2, turn 10.
+        _ab_canned_stdout(10, 2, "DeckA",
+                          seats=["DeckB", "DeckA", "filler1", "filler2"]),
+    ]
+
+    class _FakeRunner:
+        def __init__(self):
+            self.idx = 0
+
+        def run(self, deck_filenames, num_games, **kwargs):
+            stdout = canned[self.idx]
+            self.idx += 1
+            return SimResult(
+                cmd=["fake"], returncode=0, duration_sec=1.0,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=4,
+        runner=_FakeRunner(),
+        fillers=["filler1.dck", "filler2.dck"],
+    )
+
+    assert result.status == "done"
+    assert result.games == 4
+    # A won games 0, 2, 3 → 3 wins. B won game 1 → 1 win.
+    assert result.wins_a == 3
+    assert result.wins_b == 1
+    # Avg turns when A won: (12+14+10)/3 = 12.0
+    # Avg turns when B won: 8.0
+    assert result.avg_turns_a == pytest.approx(12.0, abs=0.5)
+    assert result.avg_turns_b == pytest.approx(8.0, abs=0.5)
+
+
+def test_run_ab_simulation_skips_when_forge_not_installed(tmp_path, monkeypatch):
+    """When ForgeRunner.locate() raises (no JRE / no vendor/forge), the
+    helper returns status='skipped' with the error captured rather
+    than propagating. Lets the background queue log the skip without
+    taking the save-iteration HTTP response down."""
+    from commander_builder.forge_runner import run_ab_simulation, ForgeRunner
+
+    def _raise(cls):
+        raise FileNotFoundError("Forge jar not found")
+
+    monkeypatch.setattr(ForgeRunner, "locate", classmethod(_raise))
+
+    deck_a = tmp_path / "a.dck"
+    deck_b = tmp_path / "b.dck"
+    deck_a.write_text("", encoding="utf-8")
+    deck_b.write_text("", encoding="utf-8")
+
+    result = run_ab_simulation(deck_a, deck_b, games=5)
+
+    assert result.status == "skipped"
+    assert result.games == 0
+    assert "Forge" in (result.error or "")
+    assert result.wins_a == 0
+    assert result.wins_b == 0
+
+
+def test_run_ab_simulation_captures_failure_from_runner(tmp_path):
+    """Non-zero exit / runner error becomes status='failed' so the UI
+    banner can show 'Sim failed — see logs' instead of silently
+    showing 0-0 'done'."""
+    from commander_builder.forge_runner import run_ab_simulation
+
+    deck_a = tmp_path / "a.dck"
+    deck_b = tmp_path / "b.dck"
+    deck_a.write_text("", encoding="utf-8")
+    deck_b.write_text("", encoding="utf-8")
+
+    class _BrokenRunner:
+        def run(self, deck_filenames, num_games, **kwargs):
+            return SimResult(
+                cmd=["fake"], returncode=1, duration_sec=0.1,
+                stdout="", stderr="java crashed",
+                timed_out=False, error="JVM exited unexpectedly",
+            )
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=3,
+        runner=_BrokenRunner(),
+        fillers=["f1.dck", "f2.dck"],
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+
+
+def test_run_ab_simulation_requires_two_fillers(tmp_path):
+    """Commander format demands a 4-player pod; <2 fillers is a skip,
+    not a crash. The runner must NOT be called."""
+    from commander_builder.forge_runner import run_ab_simulation
+
+    deck_a = tmp_path / "a.dck"
+    deck_b = tmp_path / "b.dck"
+    deck_a.write_text("", encoding="utf-8")
+    deck_b.write_text("", encoding="utf-8")
+
+    class _NeverCalledRunner:
+        def run(self, *args, **kwargs):
+            raise AssertionError("should not be invoked")
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=5,
+        runner=_NeverCalledRunner(),
+        fillers=["only_one.dck"],
+    )
+    assert result.status == "skipped"
+    assert "filler" in (result.error or "").lower()
+
+
+def test_ab_result_to_dict_is_json_safe():
+    """ABResult round-trips through dict→json so the iteration row
+    can persist it without bespoke serialization."""
+    import json
+    from commander_builder.forge_runner import ABResult
+    r = ABResult(
+        deck_a="a.dck", deck_b="b.dck",
+        wins_a=3, wins_b=2, games=5,
+        avg_turns_a=11.0, avg_turns_b=13.5,
+        status="done",
+    )
+    d = r.to_dict()
+    blob = json.dumps(d)
+    parsed = json.loads(blob)
+    assert parsed["wins_a"] == 3
+    assert parsed["wins_b"] == 2
+    assert parsed["games"] == 5
+    assert parsed["status"] == "done"
