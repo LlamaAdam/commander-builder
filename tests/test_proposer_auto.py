@@ -87,6 +87,109 @@ def _stub_advice_report(adds=None, cuts=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# _extract_curator_json — resilient JSON parser for Claude responses
+# ---------------------------------------------------------------------------
+
+def test_extract_curator_json_raw_object():
+    """Happy path: Claude obeyed the prompt and returned only JSON."""
+    from commander_builder.proposer import _extract_curator_json
+    raw = '{"adds": ["A"], "cuts": ["B"], "rationale": "swap"}'
+    assert _extract_curator_json(raw) == {
+        "adds": ["A"], "cuts": ["B"], "rationale": "swap",
+    }
+
+
+def test_extract_curator_json_with_code_fence():
+    """Tolerates markdown code-fence wrapping (``` json ... ```)."""
+    from commander_builder.proposer import _extract_curator_json
+    raw = '```json\n{"adds": [], "cuts": [], "rationale": "x"}\n```'
+    assert _extract_curator_json(raw) == {
+        "adds": [], "cuts": [], "rationale": "x",
+    }
+
+
+def test_extract_curator_json_with_prose_preamble():
+    """Regression for the 2026-05-15 live smoke: Claude led with
+    'Looking at this deck...' prose before emitting JSON. Parser
+    must extract the embedded JSON block."""
+    from commander_builder.proposer import _extract_curator_json
+    raw = (
+        "Looking at this Bracket 4 Krenko deck, I need to assess if it "
+        "genuinely needs changes. Let me analyze:\n\n"
+        "**Deck Assessment:**\n"
+        "- Strong core combo package\n"
+        "- Some mana rocks could be tighter\n\n"
+        '{"adds": ["Mana Crypt"], "cuts": ["Coalition Relic"], '
+        '"rationale": "upgrade slow ramp to fast"}'
+    )
+    parsed = _extract_curator_json(raw)
+    assert parsed is not None
+    assert parsed["adds"] == ["Mana Crypt"]
+    assert parsed["cuts"] == ["Coalition Relic"]
+
+
+def test_extract_curator_json_with_trailing_prose():
+    """Sometimes Claude follows JSON with explanation. Extract the
+    first balanced JSON object and ignore the rest."""
+    from commander_builder.proposer import _extract_curator_json
+    raw = (
+        '{"adds": ["A"], "cuts": ["B"], "rationale": "x"}\n\n'
+        "Hope this helps! Let me know if you want a different angle."
+    )
+    parsed = _extract_curator_json(raw)
+    assert parsed is not None
+    assert parsed["adds"] == ["A"]
+
+
+def test_extract_curator_json_handles_braces_inside_strings():
+    """The rationale string can legally contain ``{`` or ``}`` (e.g.
+    mana cost notation). Brace counter must respect string context
+    so a ``{R}`` inside rationale doesn't confuse the parser."""
+    from commander_builder.proposer import _extract_curator_json
+    raw = (
+        'Here is the JSON:\n'
+        '{"adds": ["Lightning Bolt"], "cuts": [], '
+        '"rationale": "Add cheap removal at the {R} slot"}'
+    )
+    parsed = _extract_curator_json(raw)
+    assert parsed is not None
+    assert "{R}" in parsed["rationale"]
+
+
+def test_extract_curator_json_handles_escaped_quotes_in_strings():
+    """JSON strings can contain escaped double-quotes ``\\"``. The
+    brace counter's string-context detection must respect escapes
+    or it'll prematurely exit string mode."""
+    from commander_builder.proposer import _extract_curator_json
+    raw = '{"adds": [], "cuts": [], "rationale": "Quoted \\"text\\" here"}'
+    parsed = _extract_curator_json(raw)
+    assert parsed is not None
+    assert 'Quoted "text" here' == parsed["rationale"]
+
+
+def test_extract_curator_json_returns_none_when_no_object_found():
+    """Pure prose with no JSON → None so the caller can surface a
+    diagnostic error instead of silently dropping changes."""
+    from commander_builder.proposer import _extract_curator_json
+    assert _extract_curator_json("No JSON anywhere in this response.") is None
+
+
+def test_extract_curator_json_skips_unparseable_block_and_tries_next():
+    """If the first ``{...}`` block in the text isn't valid JSON
+    (e.g. prose like 'use the form {X} to denote...'), the parser
+    skips it and tries the next ``{`` until it finds a valid object."""
+    from commander_builder.proposer import _extract_curator_json
+    raw = (
+        "Note: the syntax {X} means mana cost X.\n"
+        "Here's the actual proposal:\n"
+        '{"adds": ["A"], "cuts": ["B"], "rationale": "swap"}'
+    )
+    parsed = _extract_curator_json(raw)
+    assert parsed is not None
+    assert parsed["adds"] == ["A"]
+
+
+# ---------------------------------------------------------------------------
 # auto_propose — return shape + guardrails
 # ---------------------------------------------------------------------------
 
@@ -1137,8 +1240,8 @@ def test_auto_curate_main_summary_surfaces_dropped_for_balance(
 
     out = capsys.readouterr().out
     # Headline shows requested → applied counts.
-    assert "Adds requested (3) → applied (1)" in out
-    assert "Cuts requested (1) → applied (1)" in out
+    assert "Adds requested (3) -> applied (1)" in out
+    assert "Cuts requested (1) -> applied (1)" in out
     # The "Dropped to keep deck size legal" block surfaces with the
     # specific cards that didn't land.
     assert "Dropped to keep deck size legal" in out
@@ -1185,6 +1288,79 @@ def test_auto_curate_main_json_mode_surfaces_applied_fields(
     assert prop["applied_adds"] == ["A1"]                # min(3,1)=1
     assert prop["applied_cuts"] == ["OldA"]
     assert set(prop["dropped_for_balance"]) == {"A2", "A3"}
+
+
+def test_auto_curate_main_resolves_relative_deck_path_to_absolute(
+    tmp_path, monkeypatch, capsys,
+):
+    """Regression test for the path-doubling bug discovered 2026-05-15.
+
+    The advisor's ``advise()`` function treats relative paths as
+    deck_dir-relative and prepends its internal deck_dir. When the
+    user passes a path that already contains the deck_dir prefix
+    (the natural way to invoke commander-auto-curate from the repo
+    root: ``vendor/forge/userdata/decks/commander/[USER] X [B3].dck``),
+    the advisor double-prefixes and reports the deck as not found.
+
+    Fix: ``auto_curate_main`` resolves args.deck_path to absolute
+    BEFORE calling advise(). This test pins the fix by simulating a
+    relative-path invocation and asserting advise() receives an
+    absolute Path.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["NewCard"], "cuts": ["OldCard"], "rationale": "x",
+    }))
+
+    # Track what path the advisor saw — if it's still relative, the
+    # fix regressed and the advisor would double-prefix.
+    captured_path: list[Path] = []
+
+    class _FakeReport:
+        def to_manifest(self):
+            return _stub_advice_report()
+
+    def _fake_advise(deck_path, bracket, **kw):
+        captured_path.append(deck_path)
+        return _FakeReport()
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", _fake_advise,
+    )
+
+    deck_abs = tmp_path / "[USER] Resolved [B3].dck"
+    deck_abs.write_text(
+        "[metadata]\nName=Resolved\nMoxfield=res-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 OldCard\n",
+        encoding="utf-8",
+    )
+    # Invoke with a RELATIVE path. argparse stores whatever the user
+    # typed; the fix happens inside auto_curate_main.
+    import os as _os
+    orig_cwd = _os.getcwd()
+    try:
+        _os.chdir(tmp_path)
+        from commander_builder.proposer import auto_curate_main
+        rc = auto_curate_main([
+            "[USER] Resolved [B3].dck",  # relative to cwd
+            "--bracket", "3", "--dry-run", "--no-log",
+        ])
+    finally:
+        _os.chdir(orig_cwd)
+
+    assert rc == 0
+    # The path advise() saw MUST be absolute. If relative, the advisor
+    # would prepend deck_dir and the file would not be found.
+    assert len(captured_path) == 1
+    assert captured_path[0].is_absolute(), (
+        f"advise() got a relative path: {captured_path[0]}. "
+        f"auto_curate_main should resolve to absolute first to avoid "
+        f"the deck_dir double-prefix bug."
+    )
 
 
 def test_auto_curate_main_returns_nonzero_on_missing_deck(tmp_path, capsys):

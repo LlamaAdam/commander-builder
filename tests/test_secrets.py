@@ -85,6 +85,33 @@ def test_load_credentials_populates_missing_env_keys(tmp_path, monkeypatch):
     assert os.environ["MOXFIELD_USER"] == "alice"
 
 
+def test_load_credentials_treats_empty_env_var_as_not_set(
+    tmp_path, monkeypatch,
+):
+    """Regression for the 2026-05-15 smoke-test bug.
+
+    An empty env var (``KEY=""`` in shell, or a stale ``set KEY=`` on
+    Windows that left the variable defined with empty value) MUST
+    NOT block the file from contributing a real value. Without this,
+    a single accidental ``set ANTHROPIC_API_KEY=`` in a session would
+    silently break every commander-* command for the rest of that
+    session even though the credentials file has the right key.
+
+    Discovered live: user had ANTHROPIC_API_KEY="" in their env
+    (from an earlier monkeypatched test or shell command), the
+    loader saw ``key in os.environ`` and skipped the file's value,
+    and the Anthropic SDK then failed with 'Could not resolve
+    authentication method' because the env value was empty.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")  # empty but PRESENT
+    f = tmp_path / "creds"
+    f.write_text("ANTHROPIC_API_KEY=sk-real-from-file\n", encoding="utf-8")
+    applied = _secrets.load_credentials(path=f, quiet=True)
+    # The empty env var should NOT have blocked the file's value.
+    assert applied == {"ANTHROPIC_API_KEY": "sk-real-from-file"}
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-real-from-file"
+
+
 def test_load_credentials_respects_existing_env_vars(tmp_path, monkeypatch):
     """Shell env always wins. A pre-existing ANTHROPIC_API_KEY=<real>
     is NOT overwritten by the file's value, even though the file

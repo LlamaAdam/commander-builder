@@ -1,4 +1,4 @@
-"""LLM proposer — produces a swap manifest for an iteration cycle.
+"""LLM proposer -- produces a swap manifest for an iteration cycle.
 
 Phase 2's "what should change?" voice. Inputs are a deck (filename or
 Moxfield URL); output is a structured `audit_manifest.json` that
@@ -6,14 +6,14 @@ Moxfield URL); output is a structured `audit_manifest.json` that
 
 Three implementations sharing one interface:
 
-  ManualProposer  — wraps the existing prompt-paste workflow. Reads a
+  ManualProposer  -- wraps the existing prompt-paste workflow. Reads a
                     pre-generated manifest from disk. The path you're on
                     today; the only proposer that requires no API access.
-  ClaudeProposer  — invokes Claude with `prompts/moxfield_audit_v3.md` as
+  ClaudeProposer  -- invokes Claude with `prompts/moxfield_audit_v3.md` as
                     system, deck content as user input. Currently a stub
                     that raises NotImplementedError until the anthropic SDK
                     is installed and ANTHROPIC_API_KEY is set.
-  OllamaProposer  — local model variant. Stub. Lower-quality but free.
+  OllamaProposer  -- local model variant. Stub. Lower-quality but free.
 
 The router `propose()` picks based on `ProposerConfig`. Default is Manual
 because it's the only path that works without external dependencies; flip
@@ -101,7 +101,7 @@ class ProposerConfig:
 def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> ProposerOutput:
     """Route a proposer call through the configured ladder.
 
-    Order: Claude (if enabled) → Ollama (if enabled) → Manual fallback.
+    Order: Claude (if enabled) -> Ollama (if enabled) -> Manual fallback.
     Manual is the safety net because it's the only path guaranteed to work
     without external deps. If you set `use_claude=True` but the SDK isn't
     installed, the call falls back to manual rather than crashing the loop."""
@@ -196,7 +196,7 @@ def claude_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     user_msg = (
         f"Run the audit workflow on the following deck. Use bracket "
-        f"{input_.bracket} as the target. Skip Step 5.6 (the goldfish sim) — "
+        f"{input_.bracket} as the target. Skip Step 5.6 (the goldfish sim) -- "
         f"compare_versions handles that empirically downstream.\n\n"
         f"Deck (Forge .dck format):\n```\n{deck_text}\n```\n\n"
         f"After completing the audit, return ONLY the audit_manifest JSON "
@@ -264,7 +264,7 @@ def ollama_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     instruction = (
         f"{system_prompt}\n\n"
         f"Run the audit on this deck. Target bracket: {input_.bracket}. Skip "
-        f"Step 5.6 — compare_versions handles that downstream.\n\n"
+        f"Step 5.6 -- compare_versions handles that downstream.\n\n"
         f"Deck (Forge .dck format):\n{deck_text}\n\n"
         f"Output ONLY the audit_manifest JSON. No prose, no code fences."
     )
@@ -302,11 +302,11 @@ def ollama_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
 
 
 # ===========================================================================
-# Auto-propose curator path — used by `commander-iterate --auto-propose`
+# Auto-propose curator path -- used by `commander-iterate --auto-propose`
 # without a pre-built manifest.
 # ===========================================================================
 #
-# The three proposers above generate manifests from scratch: deck → Claude →
+# The three proposers above generate manifests from scratch: deck -> Claude ->
 # audit_manifest. That's the right shape when a human is running an audit
 # session, but for unattended overnight refinement we already have a wide
 # candidate set from the EDHREC heuristic advisor (advise.AdviceReport).
@@ -317,9 +317,9 @@ def ollama_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
 #
 #   Proposal(adds, cuts, rationale, source, dropped_for_bracket).to_dict()
 #   auto_propose(deck_path, bracket, advice_report, max_adds, max_cuts)
-#     → Proposal
-#   apply_proposal_to_deck(src_path, proposal, dry_run=False) → out_path
-#   enforce_bracket_caps(adds, bracket) → (kept, dropped)
+#     -> Proposal
+#   apply_proposal_to_deck(src_path, proposal, dry_run=False) -> out_path
+#   enforce_bracket_caps(adds, bracket) -> (kept, dropped)
 #
 # All Claude calls are exercised through the same Anthropic SDK as
 # claude_propose above; tests mock by injecting a fake ``anthropic`` module.
@@ -341,14 +341,14 @@ class Proposal:
     Fields split into REQUESTED (what Claude asked for) and APPLIED
     (what actually landed in the .dck after balancing/padding):
 
-      adds / cuts                — what Claude proposed.
-      dropped_for_bracket        — game-changers stripped at B1/B2.
-      applied_adds / applied_cuts — what landed after balancing via
+      adds / cuts                -- what Claude proposed.
+      dropped_for_bracket        -- game-changers stripped at B1/B2.
+      applied_adds / applied_cuts -- what landed after balancing via
                                     min(adds, cuts). Populated by
                                     apply_proposal_to_deck.
-      dropped_for_balance        — adds OR cuts sliced off because
+      dropped_for_balance        -- adds OR cuts sliced off because
                                     the lists were unequal length.
-      padded_count + padded_breakdown — basics synthesized to bring
+      padded_count + padded_breakdown -- basics synthesized to bring
                                         the proposed deck to 99 main.
     """
     adds: list[str] = field(default_factory=list)
@@ -358,7 +358,7 @@ class Proposal:
     # Cards Claude wanted to add but enforce_bracket_caps stripped because
     # they're WotC-designated game-changers and the target bracket is below
     # the threshold. Surfaced so the iteration log can record "Claude wanted
-    # Smothering Tithe at B2 — filtered" without losing the signal.
+    # Smothering Tithe at B2 -- filtered" without losing the signal.
     dropped_for_bracket: list[str] = field(default_factory=list)
     # Cards Claude proposed for cut that match the user's protected list
     # ([metadata] Protect= entries + --protect CLI flags). Sliced before
@@ -378,9 +378,9 @@ class Proposal:
 
 
 # Threshold below which game-changers get filtered out. Comes from the WotC
-# bracket guidelines: B1 (Exhibition), B2 (Core) — no game-changers allowed.
+# bracket guidelines: B1 (Exhibition), B2 (Core) -- no game-changers allowed.
 # B3 (Upgraded) and B4 (Optimized) permit up to 3; B5 (cEDH) is unbounded.
-# We currently only enforce the binary 'allowed at all' line — the 3-card
+# We currently only enforce the binary 'allowed at all' line -- the 3-card
 # cap at B3/B4 is a follow-up.
 _BRACKET_NO_GAME_CHANGERS_THRESHOLD = 3
 
@@ -404,7 +404,7 @@ def enforce_bracket_caps(
 
     Below B3 (i.e. B1 + B2), game-changers are stripped from adds and
     returned separately so the caller can log them. At B3+ this is a
-    no-op pass-through — game-changers are allowed and the WotC 3-card
+    no-op pass-through -- game-changers are allowed and the WotC 3-card
     cap is enforced elsewhere (deck-level audit, not the curator).
 
     Card-name comparison is case-insensitive: the game-changers set
@@ -439,13 +439,13 @@ genuinely improve the deck at the target bracket. Respect these rules:
   number of adds and cuts you may propose. DO NOT fill the cap just
   because you can. If the deck only needs 3 changes, propose 3. If it
   needs zero, propose zero. Padding a proposal to "use up the slots"
-  produces worse decks — every unnecessary swap dilutes the signal of
+  produces worse decks -- every unnecessary swap dilutes the signal of
   your real recommendations and increases the user's verification cost.
   Quality beats quantity, always.
 - Stay within color identity (do NOT add off-color cards).
 - Honor the bracket: at B1/B2, avoid game-changers (the user's pipeline
   will strip them anyway, but don't waste a slot recommending them).
-- Pick adds and cuts that pair — if you add a finisher, cut a redundant
+- Pick adds and cuts that pair -- if you add a finisher, cut a redundant
   filler, not a key utility piece.
 - NEVER propose cutting a card in the user's PROTECTED CARDS list. Those
   are locked pet cards; any cut you propose against them gets stripped
@@ -462,8 +462,100 @@ If your honest assessment is that the deck needs no changes, return
 empty lists: ``{"adds": [], "cuts": [], "rationale": "..."}``. That's
 a valid response. The system records "zero changes proposed" cleanly.
 
-No prose around the JSON. No code fences. Just the object.
+OUTPUT FORMAT IS STRICT. Your ENTIRE response must be the JSON object
+and nothing else. Do NOT write any prose, analysis, explanation, or
+reasoning before the JSON. Do NOT write headers like "## Assessment"
+or "**Deck Analysis:**". Do NOT think out loud. The "rationale" field
+INSIDE the JSON is the only place your reasoning belongs. The first
+character of your response must be ``{`` and the last must be ``}``.
+No code fences. No markdown. Just the raw JSON object.
 """
+
+
+def _extract_curator_json(text: str) -> Optional[dict]:
+    """Pull the curator's JSON object out of a Claude response.
+
+    The system prompt asks for a raw JSON object but real responses
+    sometimes have:
+      - Prose preamble ("Looking at this deck, I think...")
+      - Markdown code fences (```json ... ```)
+      - Trailing prose after the object
+      - Multiple ``{...}`` blocks if the curator includes an example
+        in its rationale
+
+    Strategy: try ``json.loads(text)`` first (covers the happy path
+    where the response IS just JSON). If that fails, locate the first
+    ``{`` and find its matching ``}`` by counting braces (handles
+    nested objects inside ``rationale`` strings). If parsing that
+    substring also fails, return None so the caller surfaces a
+    diagnostic.
+
+    Strings inside JSON can legally contain ``{`` and ``}``, so a
+    naive find-last-} approach mis-parses. The brace-counter respects
+    string context (skips braces inside double-quoted runs).
+    """
+    cleaned = text.strip()
+
+    # Path 1: try the whole response as JSON. Common case under the
+    # strict prompt.
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Path 2: strip markdown code fences if present, then retry.
+    if "```" in cleaned:
+        fenced = cleaned.split("```", 2)
+        if len(fenced) >= 2:
+            inner = fenced[1]
+            # Strip optional language tag like ```json
+            inner = inner.split("\n", 1)[1] if "\n" in inner else inner
+            inner = inner.rsplit("```", 1)[0].strip()
+            try:
+                return json.loads(inner)
+            except json.JSONDecodeError:
+                pass
+
+    # Path 3: find the first balanced ``{...}`` block in the text.
+    # Walks character-by-character respecting string context so a
+    # ``{`` inside a JSON string doesn't confuse the counter.
+    start = cleaned.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        end = -1
+        for i in range(start, len(cleaned)):
+            ch = cleaned[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end != -1:
+            candidate = cleaned[start:end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+        # That block didn't parse — search for the next ``{`` and try
+        # again. Handles "prose with { in it } then the real JSON".
+        start = cleaned.find("{", start + 1)
+
+    return None
 
 
 def auto_propose(
@@ -480,23 +572,23 @@ def auto_propose(
     """Curate an advisor's candidate pool into a small applicable Proposal.
 
     Inputs:
-      deck_path        — .dck file; contents are sent to Claude as context.
-      bracket          — target bracket (1-5). Drives game-changer
+      deck_path        -- .dck file; contents are sent to Claude as context.
+      bracket          -- target bracket (1-5). Drives game-changer
                          enforcement.
-      advice_report    — dict shape from ``AdviceReport.to_manifest()``.
+      advice_report    -- dict shape from ``AdviceReport.to_manifest()``.
                          We feed the ``added`` + ``removed`` lists to
                          Claude as the candidate pool plus ``rationale``
                          for hint.
-      max_adds         — hard cap on returned adds (default 5).
-      max_cuts         — hard cap on returned cuts (default 5).
-      model            — Anthropic model id (default sonnet-4-5).
-      protected_cards  — names the user has locked against cuts. Listed
+      max_adds         -- hard cap on returned adds (default 5).
+      max_cuts         -- hard cap on returned cuts (default 5).
+      model            -- Anthropic model id (default sonnet-4-5).
+      protected_cards  -- names the user has locked against cuts. Listed
                          in the Claude prompt so the curator doesn't
                          waste a slot proposing to cut a pet card; any
                          that slip through anyway are post-filtered to
                          ``Proposal.dropped_for_protection``. Case-
                          insensitive match. Same pattern as bracket caps.
-      mode             — curation intensity hint passed to the curator
+      mode             -- curation intensity hint passed to the curator
                          prompt: "polish" (small targeted swaps), "overhaul"
                          (major revision), or "free" (Claude decides
                          based on deck's needs). The hard cap still
@@ -519,7 +611,7 @@ def auto_propose(
         )
     try:
         from anthropic import Anthropic
-    except ImportError as exc:  # pragma: no cover — covered via stub
+    except ImportError as exc:  # pragma: no cover -- covered via stub
         raise RuntimeError(
             "auto_propose requires `pip install anthropic` "
             "(in the [claude] extras)."
@@ -535,12 +627,12 @@ def auto_propose(
     # Curation-intensity hint to Claude. The hard caps (max_adds /
     # max_cuts) clip the output; this block tells the curator how
     # WILLING to spend the cap budget it should be. None of these
-    # hints REQUIRE filling the cap — see the system prompt's
+    # hints REQUIRE filling the cap -- see the system prompt's
     # "CAPS ARE CEILINGS NOT TARGETS" rule, which always wins.
     _MODE_HINTS = {
         "polish": (
             "MODE: POLISH. Make conservative targeted swaps. Only pair "
-            "your highest-confidence picks — leave the deck's identity "
+            "your highest-confidence picks -- leave the deck's identity "
             "intact. Prefer fewer changes if the deck is already close "
             "to ideal at this bracket. Zero changes is a valid answer "
             "when the deck doesn't need anything."
@@ -550,13 +642,13 @@ def auto_propose(
             "open to substantial revision, so don't be timid about "
             "pairing more than a handful of swaps WHEN THE DECK "
             "WARRANTS IT. But the cap is still a ceiling, not a target "
-            "— propose only changes you'd genuinely make. A focused "
+            "-- propose only changes you'd genuinely make. A focused "
             "5-swap overhaul beats a padded 15-swap one. Use the larger "
             "budget when the deck has many misalignments; don't use it "
             "when the deck is already tight."
         ),
         "free": (
-            "MODE: FREE. No specific intensity hint — pick the number "
+            "MODE: FREE. No specific intensity hint -- pick the number "
             "of changes that genuinely improve the deck. If the deck "
             "is well-tuned already, ship a small proposal (or zero). "
             "If it has many misalignments, propose more. Match the "
@@ -567,11 +659,11 @@ def auto_propose(
 
     # Build a PROTECTED CARDS block in the user message so Claude knows
     # not to propose them for cut. Skip the block entirely when the
-    # list is empty — keeps the prompt clean for the common case.
+    # list is empty -- keeps the prompt clean for the common case.
     protected_block = ""
     if protected_list:
         protected_block = (
-            "PROTECTED CARDS (locked — NEVER propose for cut):\n"
+            "PROTECTED CARDS (locked -- NEVER propose for cut):\n"
             + "\n".join(f"- {c}" for c in protected_list)
             + "\n\n"
         )
@@ -588,7 +680,7 @@ def auto_propose(
         + "\n".join(f"- {c}" for c in candidates_removed)
         + f"\n\nADVISOR RATIONALE: {advisor_rationale}\n\n"
         f"You may propose up to {max_adds} adds and {max_cuts} cuts. "
-        f"These are CEILINGS, not targets — if the deck only needs 3 "
+        f"These are CEILINGS, not targets -- if the deck only needs 3 "
         f"changes, propose 3. If it needs zero, propose zero "
         f"(empty lists, valid response). Quality beats quantity. "
         f"Return ONLY the JSON object."
@@ -608,22 +700,12 @@ def auto_propose(
     if not text.strip():
         raise RuntimeError("auto_propose: empty response from Claude")
 
-    cleaned = text.strip()
-    # Tolerate Claude wrapping JSON in code fences despite the prompt.
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```", 2)
-        cleaned = cleaned[1] if len(cleaned) > 1 else text
-        # Strip optional language tag like ```json
-        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
-        cleaned = cleaned.rsplit("```", 1)[0].strip()
-
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
+    payload = _extract_curator_json(text)
+    if payload is None:
         raise RuntimeError(
-            f"auto_propose: Claude returned unparseable JSON: {exc}. "
+            f"auto_propose: Claude returned unparseable JSON. "
             f"Raw payload (first 200 chars): {text[:200]!r}"
-        ) from exc
+        )
 
     raw_adds = list(payload.get("adds", []) or [])
     raw_cuts = list(payload.get("cuts", []) or [])
@@ -634,7 +716,7 @@ def auto_propose(
     kept_adds, dropped_for_bracket = enforce_bracket_caps(raw_adds, bracket)
 
     # Protection filter: strip any cut Claude proposed against the
-    # user's locked list. Same pattern as bracket caps — done BEFORE
+    # user's locked list. Same pattern as bracket caps -- done BEFORE
     # max_cuts slicing so the cap counts only allowed cuts. Claude
     # was told about the list in the prompt; this is the safety net
     # for the rare case it ignored the instruction.
@@ -661,9 +743,9 @@ def auto_propose(
 
 # Filename version-bump regex. Matches optional `v<N>` immediately before
 # an optional `[B<N>]` bracket suffix and the `.dck` extension:
-#   [USER] Foo [B3].dck       → group1='[USER] Foo', v=None,  bracket='3'
-#   [USER] Foo v3 [B3].dck    → group1='[USER] Foo', v='3',   bracket='3'
-#   MyDeck.dck                → no match (handled by fallback path)
+#   [USER] Foo [B3].dck       -> group1='[USER] Foo', v=None,  bracket='3'
+#   [USER] Foo v3 [B3].dck    -> group1='[USER] Foo', v='3',   bracket='3'
+#   MyDeck.dck                -> no match (handled by fallback path)
 _VERSION_BRACKET_RE = _re.compile(
     r"^(?P<base>.+?)(?:\s+v(?P<ver>\d+))?\s+\[B(?P<bracket>\d+)\]\.dck$"
 )
@@ -676,9 +758,9 @@ def _bump_version_filename(name: str) -> str:
     """Compute the next-version filename for a .dck path.
 
     Rules:
-      ``[USER] Foo [B3].dck``      → ``[USER] Foo v2 [B3].dck``
-      ``[USER] Foo v3 [B3].dck``   → ``[USER] Foo v4 [B3].dck``
-      ``MyDeck.dck``               → ``MyDeck v2.dck`` (no bracket suffix)
+      ``[USER] Foo [B3].dck``      -> ``[USER] Foo v2 [B3].dck``
+      ``[USER] Foo v3 [B3].dck``   -> ``[USER] Foo v4 [B3].dck``
+      ``MyDeck.dck``               -> ``MyDeck v2.dck`` (no bracket suffix)
 
     The bracket suffix is preserved as the last token so tooling that
     filters ``*[B3].dck`` keeps finding the file after the bump.
@@ -696,7 +778,7 @@ def _bump_version_filename(name: str) -> str:
         ver = int(m.group("ver") or 1)
         return f"{base} v{ver + 1}.dck"
 
-    # Last-resort fallback for paths that don't end in .dck — just
+    # Last-resort fallback for paths that don't end in .dck -- just
     # append ' v2' before whatever extension is there.
     if "." in name:
         stem, _, ext = name.rpartition(".")
@@ -719,10 +801,10 @@ def apply_proposal_to_deck(
     would have landed.
 
     The new file lives next to the source with a bumped version
-    (``[USER] Foo [B3].dck`` → ``[USER] Foo v2 [B3].dck``). Bracket
+    (``[USER] Foo [B3].dck`` -> ``[USER] Foo v2 [B3].dck``). Bracket
     suffix preserved as the last token.
 
-    Deck-legality invariants — shared with the audit-endpoint path
+    Deck-legality invariants -- shared with the audit-endpoint path
     via ``web/_helpers._apply_swaps_to_dck`` and ``_pad_main_to_99``:
 
       1. Adds and cuts are balanced via ``min(len(adds), len(cuts))``.
@@ -740,7 +822,7 @@ def apply_proposal_to_deck(
          ``proposal.padded_breakdown``.
 
     This mirrors the invariants the web UI's /api/audit endpoint
-    already enforces. The two flows are now in sync — same balancing,
+    already enforces. The two flows are now in sync -- same balancing,
     same padding, same legal output.
 
     Mutation rules within the file:
@@ -750,7 +832,7 @@ def apply_proposal_to_deck(
         kept add.
       - Card-line matching handles edition codes (``|CLB|871``).
     """
-    # Lazy import — proposer.py is library-level, web/_helpers is the
+    # Lazy import -- proposer.py is library-level, web/_helpers is the
     # web layer's internal helpers module. The helpers themselves are
     # pure Python (no Flask coupling) so the import is clean, but
     # importing at module-load time would create a circular risk if
@@ -761,14 +843,14 @@ def apply_proposal_to_deck(
     out_path = src_path.parent / _bump_version_filename(src_path.name)
 
     # Build SwapRecommendation-shape objects so _apply_swaps_to_dck
-    # accepts them. The helper only reads .card and .action — the
+    # accepts them. The helper only reads .card and .action -- the
     # reason field is unused on this path but required by the dataclass.
     #
     # Defense-in-depth: even if auto_propose's protection filter let
     # something through (e.g. proposal was hand-constructed or came
     # from a test path), strip protected cuts here too. The protect
     # list lives in the deck's [metadata] section so we read it
-    # straight from disk — no extra arg-passing needed.
+    # straight from disk -- no extra arg-passing needed.
     from .web._helpers import read_protected_cards
     src_text_for_protect = src_path.read_text(encoding="utf-8")
     protected_lower = {p.lower() for p in read_protected_cards(src_text_for_protect)}
@@ -822,7 +904,7 @@ def apply_proposal_to_deck(
 
 
 # ---------------------------------------------------------------------------
-# commander-auto-curate CLI — unattended advisor → curator → apply pipeline
+# commander-auto-curate CLI -- unattended advisor -> curator -> apply pipeline
 # ---------------------------------------------------------------------------
 
 def auto_curate_main(argv: Optional[list[str]] = None) -> int:
@@ -846,7 +928,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         prog="commander-auto-curate",
         description=(
-            "Run advisor → Claude curator → apply, all in one go. "
+            "Run advisor -> Claude curator -> apply, all in one go. "
             "Designed for unattended overnight batch refinement."
         ),
     )
@@ -911,6 +993,13 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     from ._secrets import load_credentials
     load_credentials(quiet=True)
 
+    # Resolve to absolute path BEFORE handing to the advisor. The
+    # advisor treats relative paths as deck_dir-relative and prepends
+    # its own deck_dir, which double-prefixes when the user passes a
+    # path already inside vendor/forge/userdata/decks/commander/.
+    # Same fix as scripts/compare_curator_modes.py — keeps both paths
+    # consistent.
+    args.deck_path = args.deck_path.resolve()
     if not args.deck_path.exists():
         print(f"ERROR: deck not found: {args.deck_path}", flush=True)
         return 2
@@ -940,13 +1029,13 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     if not args.json:
         if (args.max_adds is None and args.max_cuts is None):
             print(
-                f"      mode={args.mode!r} → up to {effective_max_adds} "
+                f"      mode={args.mode!r} -> up to {effective_max_adds} "
                 f"adds and {effective_max_cuts} cuts",
                 flush=True,
             )
         else:
             print(
-                f"      mode={args.mode!r} + overrides → "
+                f"      mode={args.mode!r} + overrides -> "
                 f"max adds={effective_max_adds}, max cuts={effective_max_cuts}",
                 flush=True,
             )
@@ -1033,7 +1122,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
 
     # Step 3b: persist iteration to knowledge_log. Skipped on dry-run
     # (no actual deck to point at) and on --no-log (opt-out). Failures
-    # to write the log are NON-fatal — the .dck is already on disk;
+    # to write the log are NON-fatal -- the .dck is already on disk;
     # the user shouldn't lose that work because of a knowledge_log
     # quirk. Surface the failure in the summary instead.
     iteration_id: Optional[int] = None
@@ -1066,12 +1155,12 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
 
     print()
     # Surface what Claude REQUESTED vs what actually LANDED. The two
-    # can differ when adds and cuts are unbalanced — apply_proposal_
+    # can differ when adds and cuts are unbalanced -- apply_proposal_
     # to_deck slices both to min() so the deck stays the right size.
-    print(f"Adds requested ({len(proposal.adds)}) → applied ({len(proposal.applied_adds)}):")
+    print(f"Adds requested ({len(proposal.adds)}) -> applied ({len(proposal.applied_adds)}):")
     for c in proposal.applied_adds:
         print(f"  + {c}")
-    print(f"Cuts requested ({len(proposal.cuts)}) → applied ({len(proposal.applied_cuts)}):")
+    print(f"Cuts requested ({len(proposal.cuts)}) -> applied ({len(proposal.applied_cuts)}):")
     for c in proposal.applied_cuts:
         print(f"  - {c}")
     if proposal.dropped_for_bracket:
@@ -1083,7 +1172,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         print(f"Dropped because protected (user-locked): "
               f"{len(proposal.dropped_for_protection)}")
         for c in proposal.dropped_for_protection:
-            print(f"  🔒 {c}")
+            print(f"  [LOCKED] {c}")
     if proposal.dropped_for_balance:
         print(f"Dropped to keep deck size legal "
               f"(adds/cuts unbalanced): {len(proposal.dropped_for_balance)}")
@@ -1091,14 +1180,14 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             print(f"  ~ {c}")
     if proposal.padded_count:
         breakdown_str = ", ".join(
-            f"{n}× {b}" for b, n in proposal.padded_breakdown.items()
+            f"{n}x {b}" for b, n in proposal.padded_breakdown.items()
         )
         print(f"Padded with basics: +{proposal.padded_count} ({breakdown_str})")
     print()
     print(f"Rationale: {proposal.rationale}")
     print()
     if args.dry_run:
-        print(f"DRY RUN — would have written: {out_path}")
+        print(f"DRY RUN -- would have written: {out_path}")
     else:
         print(f"Wrote: {out_path}")
         if iteration_id is not None:
@@ -1123,9 +1212,9 @@ def _log_auto_curate_iteration(
     Reads the moxfield publicId out of the new .dck (falls back to the
     filename stem). Hooks the new row's parent_id to the most recent
     prior iteration of the same deck so the iteration chain stays
-    threaded — important for the upcoming knowledge_log graph view.
+    threaded -- important for the upcoming knowledge_log graph view.
 
-    Verdict is 'pending' — we haven't actually played the new deck yet.
+    Verdict is 'pending' -- we haven't actually played the new deck yet.
     Phase 2's analyst path (or a follow-up Forge sim) updates verdict
     + sim_report once results land.
     """
@@ -1149,7 +1238,7 @@ def _log_auto_curate_iteration(
     parent_id = prior[-1].id if prior else None
 
     deck_snapshot = new_deck_path.read_text(encoding="utf-8")
-    # Record what ACTUALLY LANDED in the .dck — these are the changes
+    # Record what ACTUALLY LANDED in the .dck -- these are the changes
     # that produced the new deck snapshot. ``requested_*`` fields
     # preserve Claude's intent for analysis (which adds did the curator
     # want but balancing dropped?) without conflating the two.

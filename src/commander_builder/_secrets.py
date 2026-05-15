@@ -170,8 +170,14 @@ def load_credentials(
             # a real env var with an empty string just because the file
             # mentioned the key.
             continue
-        # Shell env always wins.
-        if key in os.environ:
+        # Shell env wins — but only if it has a NON-EMPTY value. An
+        # empty env var (KEY="" in shell, or a stale `set KEY=` on
+        # Windows) is treated as "not configured" so the file can
+        # contribute a real value. Without this, a single accidental
+        # `set ANTHROPIC_API_KEY=` in a shell session would silently
+        # break every commander-* command for that session even though
+        # the credentials file has the right key.
+        if os.environ.get(key):
             continue
         os.environ[key] = value
         applied[key] = value
