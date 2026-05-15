@@ -464,6 +464,7 @@ def auto_propose(
     max_cuts: int = 5,
     model: str = "claude-sonnet-4-5",
     protected_cards: "Iterable[str]" = (),
+    mode: str = "polish",
 ) -> Proposal:
     """Curate an advisor's candidate pool into a small applicable Proposal.
 
@@ -484,6 +485,13 @@ def auto_propose(
                          that slip through anyway are post-filtered to
                          ``Proposal.dropped_for_protection``. Case-
                          insensitive match. Same pattern as bracket caps.
+      mode             — curation intensity hint passed to the curator
+                         prompt: "polish" (small targeted swaps), "overhaul"
+                         (major revision), or "free" (Claude decides
+                         based on deck's needs). The hard cap still
+                         applies via max_adds / max_cuts; mode only
+                         tunes Claude's pairing aggressiveness within
+                         the cap. Default 'polish'.
 
     Side effects: none. ``apply_proposal_to_deck`` does the file write.
 
@@ -513,6 +521,31 @@ def auto_propose(
     protected_list = list(protected_cards)
     protected_lower = {p.lower() for p in protected_list}
 
+    # Curation-intensity hint to Claude. The hard caps (max_adds /
+    # max_cuts) still clip the output; this block just nudges the
+    # curator to pair more or fewer changes within that budget.
+    _MODE_HINTS = {
+        "polish": (
+            "MODE: POLISH. Make conservative targeted swaps. Only pair "
+            "your highest-confidence picks — leave the deck's identity "
+            "intact. Prefer fewer changes if the deck is already close "
+            "to ideal at this bracket."
+        ),
+        "overhaul": (
+            "MODE: OVERHAUL. The user explicitly wants a substantial "
+            "revision. Pair as many high-quality swaps as the cap "
+            "allows; treat this as a major retune. Still respect color "
+            "identity, bracket caps, and the protected list."
+        ),
+        "free": (
+            "MODE: FREE. No specific intensity hint — pick the number "
+            "of changes that genuinely improve the deck. If the deck "
+            "is well-tuned already, ship a small proposal; if it has "
+            "many misalignments, propose more."
+        ),
+    }
+    mode_hint = _MODE_HINTS.get(mode, _MODE_HINTS["polish"])
+
     # Build a PROTECTED CARDS block in the user message so Claude knows
     # not to propose them for cut. Skip the block entirely when the
     # list is empty — keeps the prompt clean for the common case.
@@ -526,7 +559,8 @@ def auto_propose(
 
     user_msg = (
         f"Target bracket: {bracket}\n"
-        f"Deck file: {deck_path.name}\n\n"
+        f"Deck file: {deck_path.name}\n"
+        f"{mode_hint}\n\n"
         f"CURRENT DECK (Forge .dck format):\n```\n{deck_text}\n```\n\n"
         + protected_block
         + f"CANDIDATE ADDS (from EDHREC heuristic advisor):\n"
@@ -797,10 +831,28 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("deck_path", type=Path, help="Path to the .dck file to audit.")
     p.add_argument("--bracket", type=int, required=True,
                    help="Target bracket (1-5). Drives game-changer enforcement.")
-    p.add_argument("--max-adds", type=int, default=5,
-                   help="Hard cap on returned adds (default 5).")
-    p.add_argument("--max-cuts", type=int, default=5,
-                   help="Hard cap on returned cuts (default 5).")
+    p.add_argument(
+        "--mode", choices=["polish", "overhaul", "free"], default="polish",
+        help=(
+            "Curation intensity preset (default 'polish'). "
+            "polish=5 adds + 5 cuts (safe for unattended overnight runs). "
+            "overhaul=15 + 15 (deliberate major revision). "
+            "free=unbounded (trust Claude to pick the right count). "
+            "Override individual caps with --max-adds / --max-cuts."
+        ),
+    )
+    # Defaults are None so we can tell whether the user passed an
+    # explicit cap (which overrides the mode preset) or left it at
+    # the mode's recommended value. argparse-of-the-classics: a
+    # sentinel beats reading sys.argv directly.
+    p.add_argument("--max-adds", type=int, default=None,
+                   help="Hard cap on returned adds. Overrides --mode's "
+                        "add cap when set. Default: preset value for "
+                        "the active --mode (polish=5, overhaul=15, "
+                        "free=999).")
+    p.add_argument("--max-cuts", type=int, default=None,
+                   help="Hard cap on returned cuts. Same override "
+                        "semantics as --max-adds.")
     p.add_argument("--source", default="heuristic",
                    choices=["heuristic", "bracket_peers", "claude"],
                    help="Advisor backend (default heuristic).")
@@ -834,6 +886,39 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     if not (1 <= args.bracket <= 5):
         print(f"ERROR: bracket must be 1-5, got {args.bracket}", flush=True)
         return 2
+
+    # Resolve effective caps from the mode preset + any explicit
+    # overrides. The preset is the discoverable default ("I want a
+    # polish run / overhaul / let Claude decide") and the explicit
+    # flags are the fine-tune for users who want a specific number.
+    _MODE_CAPS = {
+        "polish":   (5,   5),    # conservative; safe for unattended
+        "overhaul": (15,  15),   # deliberate major revision
+        "free":     (999, 999),  # effectively unbounded
+    }
+    preset_adds, preset_cuts = _MODE_CAPS[args.mode]
+    effective_max_adds = args.max_adds if args.max_adds is not None else preset_adds
+    effective_max_cuts = args.max_cuts if args.max_cuts is not None else preset_cuts
+    if effective_max_adds < 0 or effective_max_cuts < 0:
+        print(
+            f"ERROR: --max-adds / --max-cuts must be non-negative, "
+            f"got adds={effective_max_adds} cuts={effective_max_cuts}",
+            flush=True,
+        )
+        return 2
+    if not args.json:
+        if (args.max_adds is None and args.max_cuts is None):
+            print(
+                f"      mode={args.mode!r} → up to {effective_max_adds} "
+                f"adds and {effective_max_cuts} cuts",
+                flush=True,
+            )
+        else:
+            print(
+                f"      mode={args.mode!r} + overrides → "
+                f"max adds={effective_max_adds}, max cuts={effective_max_cuts}",
+                flush=True,
+            )
 
     # Step 1: advisor. Imported lazily so the CLI startup stays cheap when
     # the user only wanted --help.
@@ -897,10 +982,11 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             deck_path=args.deck_path,
             bracket=args.bracket,
             advice_report=advice_dict,
-            max_adds=args.max_adds,
-            max_cuts=args.max_cuts,
+            max_adds=effective_max_adds,
+            max_cuts=effective_max_cuts,
             model=args.model,
             protected_cards=protected_combined,
+            mode=args.mode,
         )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", flush=True)
@@ -938,6 +1024,9 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             "input_deck": str(args.deck_path),
             "output_deck": str(out_path),
             "dry_run": args.dry_run,
+            "mode": args.mode,
+            "max_adds": effective_max_adds,
+            "max_cuts": effective_max_cuts,
             "proposal": proposal.to_dict(),
             "iteration_id": iteration_id,
             "log_error": log_error,

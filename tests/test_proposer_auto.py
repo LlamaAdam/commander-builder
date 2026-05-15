@@ -1372,6 +1372,244 @@ def test_auto_curate_main_logfail_is_nonfatal(
     assert "knowledge_log write failed" in capsys.readouterr().out
 
 
+def test_auto_curate_main_polish_mode_is_default_5_5(
+    tmp_path, monkeypatch, capsys,
+):
+    """No --mode flag → polish preset → max-adds 5, max-cuts 5.
+    Backwards-compatibility check for batch drivers that ran without
+    --mode before this commit."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A1", "A2", "A3", "A4", "A5", "A6", "A7"],  # 7 — over 5
+        "cuts": ["C1", "C2", "C3", "C4", "C5", "C6"],         # 6 — over 5
+        "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Polish [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Polish\nMoxfield=p-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C1\n1 C2\n1 C3\n1 C4\n1 C5\n1 C6\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--dry-run", "--json",
+    ])
+    assert rc == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "polish"
+    assert payload["max_adds"] == 5
+    assert payload["max_cuts"] == 5
+    # Proposal caps at 5 each.
+    assert len(payload["proposal"]["adds"]) == 5
+    assert len(payload["proposal"]["cuts"]) == 5
+
+
+def test_auto_curate_main_overhaul_mode_is_15_15(
+    tmp_path, monkeypatch, capsys,
+):
+    """--mode overhaul → max-adds 15, max-cuts 15. Pinned so the
+    'deliberate major revision' preset never silently regresses to
+    the polish defaults."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    # Claude returns 12/10 — both under the 15-cap so all survive.
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [f"A{i}" for i in range(12)],
+        "cuts": [f"C{i}" for i in range(10)],
+        "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Overhaul [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Overhaul\nMoxfield=oh-id\n"
+        "[Commander]\n1 Test\n[Main]\n"
+        + "".join(f"1 C{i}\n" for i in range(10)),
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--mode", "overhaul", "--dry-run", "--json",
+    ])
+    assert rc == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "overhaul"
+    assert payload["max_adds"] == 15
+    assert payload["max_cuts"] == 15
+    # Both lists land within the cap.
+    assert len(payload["proposal"]["adds"]) == 12
+    assert len(payload["proposal"]["cuts"]) == 10
+
+
+def test_auto_curate_main_free_mode_is_unbounded(
+    tmp_path, monkeypatch, capsys,
+):
+    """--mode free → caps at 999/999 (effectively unbounded). Trust
+    Claude to pick the right count for the deck's actual needs."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [f"A{i}" for i in range(30)],
+        "cuts": [f"C{i}" for i in range(20)],
+        "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Free [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Free\nMoxfield=fr-id\n"
+        "[Commander]\n1 Test\n[Main]\n"
+        + "".join(f"1 C{i}\n" for i in range(20)),
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--mode", "free", "--dry-run", "--json",
+    ])
+    assert rc == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "free"
+    assert payload["max_adds"] == 999
+    assert payload["max_cuts"] == 999
+    # Nothing dropped to cap — Claude's full output survives.
+    assert len(payload["proposal"]["adds"]) == 30
+    assert len(payload["proposal"]["cuts"]) == 20
+
+
+def test_auto_curate_main_explicit_cap_overrides_mode_preset(
+    tmp_path, monkeypatch, capsys,
+):
+    """``--mode overhaul --max-adds 3`` → 3, not 15. Explicit cap
+    wins over the mode preset so power users can tune precisely."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [f"A{i}" for i in range(20)],
+        "cuts": [f"C{i}" for i in range(20)],
+        "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Mixed [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Mixed\nMoxfield=mx-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C1\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--mode", "overhaul",
+        "--max-adds", "3",   # overrides overhaul's 15
+        # max-cuts not passed → falls through to overhaul's 15
+        "--dry-run", "--json",
+    ])
+    assert rc == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "overhaul"
+    assert payload["max_adds"] == 3   # explicit override
+    assert payload["max_cuts"] == 15  # preset
+
+
+def test_auto_curate_main_summary_mentions_mode(
+    tmp_path, monkeypatch, capsys,
+):
+    """Human-readable summary surfaces the mode + effective caps so
+    a user looking at output knows whether they got polish or
+    overhaul behavior."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A1"], "cuts": ["C1"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] ModeShow [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=ModeShow\nMoxfield=ms-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C1\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--mode", "overhaul",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "mode='overhaul'" in out
+    assert "15 adds" in out
+    assert "15 cuts" in out
+
+
+def test_auto_curate_main_rejects_invalid_mode(tmp_path, capsys):
+    """argparse choices=[polish, overhaul, free] rejects anything else
+    before the run starts. SystemExit code 2 (argparse-style)."""
+    deck = tmp_path / "[USER] Bad [B3].dck"
+    deck.write_text(
+        "[metadata]\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    from commander_builder.proposer import auto_curate_main
+    with pytest.raises(SystemExit) as exc_info:
+        auto_curate_main([
+            str(deck), "--bracket", "3", "--mode", "BANANA", "--dry-run",
+        ])
+    assert exc_info.value.code == 2
+
+
+def test_auto_curate_main_rejects_negative_max(tmp_path, capsys):
+    """Negative explicit cap → exit 2 with a clear error. Without
+    this guard, a typo (e.g. ``--max-adds -5``) could pass through
+    argparse silently and slice the list to 0 with confusing UX."""
+    deck = tmp_path / "[USER] Neg [B3].dck"
+    deck.write_text(
+        "[metadata]\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--max-adds", "-5", "--dry-run",
+    ])
+    assert rc == 2
+    assert "non-negative" in capsys.readouterr().out
+
+
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
     """Bracket validation lives in the CLI, not the library — the
     library functions accept any int. Out-of-range → exit 2."""
