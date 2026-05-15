@@ -221,6 +221,7 @@ def create_app(
     from .routes_dashboard import make_dashboard_blueprint
     from .routes_decks import make_decks_blueprint
     from .routes_meta import make_meta_blueprint
+    from .routes_oracle import make_oracle_blueprint
     from .routes_sim import make_sim_blueprint
     app.register_blueprint(make_audit_blueprint(deck_dir))
     app.register_blueprint(make_dashboard_blueprint(
@@ -230,6 +231,9 @@ def create_app(
     app.register_blueprint(
         make_meta_blueprint(deck_dir, _list_decks, _ASSET_VERSION),
     )
+    # FP-009: oracle-text presentation endpoint backing the audit
+    # panel's hover tooltip + click-to-expand side panel.
+    app.register_blueprint(make_oracle_blueprint())
     app.register_blueprint(make_sim_blueprint(deck_dir, knowledge_db))
 
 
