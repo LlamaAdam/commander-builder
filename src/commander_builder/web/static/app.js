@@ -1757,12 +1757,42 @@ function renderAuditResult(container, body) {
     container.appendChild(el(
       "h4", { style: "margin-top: 14px;" }, "Cards to cut",
     ));
+    // Build a case-folded set of protected card names so the
+    // cuts-list renderer can badge them with a 🔒 pill. Protected
+    // cards live in the .dck file's [metadata] Protect= entries
+    // (read server-side, shipped in body.protected_cards) and tell
+    // the user "the curator won't act on this even if the advisor
+    // suggested it." Empty set when no protection is configured.
+    const protectedSet = new Set(
+      (body.protected_cards || []).map((n) => (n || "").toLowerCase()),
+    );
     const ul = el("ul", { class: "iteration-list" });
     for (const r of body.removed) {
-      const row = el("li", { class: "iteration" });
+      const isProtected = protectedSet.has((r.card || "").toLowerCase());
+      const row = el("li", {
+        class: "iteration",
+        style: isProtected ? "opacity: 0.55;" : "",
+      });
       row.appendChild(el("span", { class: "verdict reverted" }, "cut"));
       const wrap = el("div");
       const nameDiv = el("div", { class: "name" }, r.card);
+      if (isProtected) {
+        nameDiv.appendChild(el(
+          "span",
+          {
+            class: "pill",
+            style: "margin-left: 6px; font-size: 11px; "
+                 + "background: rgba(96, 165, 250, 0.15); "
+                 + "color: #60a5fa; border: 1px solid #60a5fa; "
+                 + "padding: 1px 6px; border-radius: 4px; "
+                 + "font-weight: 600;",
+            title: "Protected by [metadata] Protect= — "
+                 + "commander-auto-curate will skip this cut. "
+                 + "Remove the Protect= entry from the .dck to unlock.",
+          },
+          "🔒 protected",
+        ));
+      }
       if (r.name_known === false) {
         nameDiv.appendChild(el(
           "span",

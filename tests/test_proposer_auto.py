@@ -236,6 +236,322 @@ def test_auto_propose_raises_on_empty_response(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Protected-cards filter — pet cards locked against cuts
+# ---------------------------------------------------------------------------
+
+def test_auto_propose_strips_protected_cards_from_cuts(tmp_path, monkeypatch):
+    """Cards in the protected_cards list MUST be filtered out of
+    Claude's cut proposals. They land in dropped_for_protection so
+    the iteration log records what Claude tried to cut anyway."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["NewA", "NewB"],
+        "cuts": ["Krenko, Mob Boss", "Goblin Lackey", "RandomFiller"],
+        "rationale": "trim filler",
+    }))
+
+    deck = tmp_path / "[USER] Goblin [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Goblin\n[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n1 Goblin Lackey\n1 RandomFiller\n",
+        encoding="utf-8",
+    )
+
+    # Protected list is passed as a plain list of strings — no parsing
+    # required at this layer. The .dck-metadata parse rule (one card
+    # per line, commas literal) only applies when reading from disk.
+    proposal = auto_propose(
+        deck_path=deck, bracket=3,
+        advice_report=_stub_advice_report(),
+        max_adds=5, max_cuts=5,
+        protected_cards=["Krenko, Mob Boss", "Goblin Lackey"],
+    )
+
+    # Protected cuts stripped from cuts list.
+    assert "Krenko, Mob Boss" not in proposal.cuts
+    assert "Goblin Lackey" not in proposal.cuts
+    # Non-protected cut survives.
+    assert "RandomFiller" in proposal.cuts
+    # Stripped names surface for log/UI.
+    assert "Krenko, Mob Boss" in proposal.dropped_for_protection
+    assert "Goblin Lackey" in proposal.dropped_for_protection
+    # Adds untouched — protection only applies to cuts.
+    assert proposal.adds == ["NewA", "NewB"]
+
+
+def test_auto_propose_protection_is_case_insensitive(tmp_path, monkeypatch):
+    """Casing variations across EDHREC scrape vs .dck format must not
+    let a protected card slip through as a cut. 'sol ring' in the
+    protect list must catch a 'Sol Ring' cut proposal."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [],
+        "cuts": ["Sol Ring", "SOL RING", "sol ring"],
+        "rationale": "redundant ramp",
+    }))
+
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Foo\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    proposal = auto_propose(
+        deck_path=deck, bracket=3,
+        advice_report=_stub_advice_report(),
+        protected_cards=["sol ring"],  # lowercase
+    )
+    assert proposal.cuts == []
+    assert len(proposal.dropped_for_protection) == 3
+
+
+def test_auto_propose_injects_protected_block_into_prompt(
+    tmp_path, monkeypatch,
+):
+    """The curator system prompt tells Claude 'NEVER propose cutting
+    a card in the user's PROTECTED CARDS list.' For that to work, the
+    list MUST appear in the user message — verify by capturing the
+    Anthropic call."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+
+    captured: dict = {}
+
+    # Custom anthropic stub that records the user message.
+    import sys, types as _types
+    block = type("_Block", (), {"text": json.dumps({
+        "adds": [], "cuts": [], "rationale": "ok",
+    })})
+    msg = type("_Msg", (), {"content": [block()]})
+
+    class CapturingClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    captured.update(kw)
+                    return msg()
+            return M()
+    fake = _types.ModuleType("anthropic")
+    fake.Anthropic = CapturingClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Foo\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    auto_propose(
+        deck_path=deck, bracket=3,
+        advice_report=_stub_advice_report(),
+        protected_cards=["Krenko, Mob Boss", "Goblin Lackey"],
+    )
+
+    user_msg = captured["messages"][0]["content"]
+    assert "PROTECTED CARDS" in user_msg
+    assert "Krenko, Mob Boss" in user_msg
+    assert "Goblin Lackey" in user_msg
+
+
+def test_auto_propose_no_protected_block_when_empty(
+    tmp_path, monkeypatch,
+):
+    """When the protected list is empty, the PROTECTED CARDS block is
+    omitted from the prompt entirely — keeps token cost minimal for
+    the common case where the user hasn't locked anything."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+
+    captured: dict = {}
+    import sys, types as _types
+    block = type("_Block", (), {"text": json.dumps({
+        "adds": [], "cuts": [], "rationale": "ok",
+    })})
+    msg = type("_Msg", (), {"content": [block()]})
+
+    class CapturingClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    captured.update(kw)
+                    return msg()
+            return M()
+    fake = _types.ModuleType("anthropic")
+    fake.Anthropic = CapturingClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Foo\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    auto_propose(
+        deck_path=deck, bracket=3,
+        advice_report=_stub_advice_report(),
+    )
+
+    user_msg = captured["messages"][0]["content"]
+    assert "PROTECTED CARDS" not in user_msg
+
+
+def test_apply_proposal_strips_protected_from_metadata_as_defense(tmp_path):
+    """Defense-in-depth: even if a Proposal is constructed by hand
+    with a protected card in cuts (skipping auto_propose's filter),
+    apply_proposal_to_deck reads [metadata] Protect= and refuses to
+    cut the locked card. The card lands in dropped_for_protection
+    so the surface still records what got blocked."""
+    src = _make_dck(tmp_path, "[USER] Foo [B3].dck",
+                    ["Sol Ring", "Cultivate", "Lightning Bolt"])
+    # Inject Protect= entries into the .dck metadata.
+    text = src.read_text(encoding="utf-8")
+    text = text.replace("Moxfield=abc\n",
+                        "Moxfield=abc\nProtect=Sol Ring\n")
+    src.write_text(text, encoding="utf-8")
+
+    proposal = Proposal(
+        adds=["A", "B"],
+        # Sol Ring is locked but the proposal lists it anyway —
+        # simulating a stale proposal or hand construction.
+        cuts=["Sol Ring", "Cultivate"],
+        rationale="x", source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    new_text = out.read_text(encoding="utf-8")
+
+    # Sol Ring NOT cut — protected by [metadata].
+    assert "1 Sol Ring" in new_text
+    # Cultivate cut — not protected.
+    assert "1 Cultivate" not in new_text
+    # The protection action got recorded on the proposal.
+    assert "Sol Ring" in proposal.dropped_for_protection
+
+
+def test_auto_curate_main_unions_three_protection_sources(
+    tmp_path, monkeypatch, capsys,
+):
+    """[metadata] Protect= entries + --protect CLI flags + --protect-
+    from file are unioned. Test all three sources and verify the
+    summary mentions the combined count."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["Brainstorm"],
+        # Claude tries to cut all 3 protected cards.
+        "cuts": ["FromMeta", "FromFlag", "FromFile"],
+        "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Protected [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Protected\nMoxfield=prot-id\n"
+        "Protect=FromMeta\n"
+        "[Commander]\n1 Test\n"
+        "[Main]\n1 FromMeta\n1 FromFlag\n1 FromFile\n1 Filler\n",
+        encoding="utf-8",
+    )
+    protect_file = tmp_path / "protect.txt"
+    protect_file.write_text("FromFile\n", encoding="utf-8")
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--protect", "FromFlag",
+        "--protect-from", str(protect_file),
+    ])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    # CLI reports the combined protected count (3 sources).
+    assert "3 protected cards locked" in out
+    # All 3 cards listed in the dropped-for-protection summary.
+    assert "FromMeta" in out
+    assert "FromFlag" in out
+    assert "FromFile" in out
+
+
+def test_auto_curate_main_protect_from_missing_file(
+    tmp_path, monkeypatch, capsys,
+):
+    """--protect-from with a non-existent file → exit 2 (invocation
+    error) so the user sees the typo before the run starts."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Foo\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3",
+        "--protect-from", str(tmp_path / "does_not_exist.txt"),
+    ])
+    assert rc == 2
+    assert "not found" in capsys.readouterr().out
+
+
+def test_audit_iteration_log_records_protected_lists(
+    tmp_path, monkeypatch, capsys,
+):
+    """The iteration log's audit_manifest captures both the
+    protected_cards list (state at audit time) and
+    dropped_for_protection (what Claude tried to cut anyway) so
+    post-hoc analysis can answer 'did protection ever block a swap?'"""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["Brainstorm"],
+        "cuts": ["PetCard", "FillerCard"],
+        "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Pets [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Pets\nMoxfield=pets-id\nProtect=PetCard\n"
+        "[Commander]\n1 Test\n[Main]\n1 PetCard\n1 FillerCard\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([str(deck), "--bracket", "3", "--db-path", str(db)])
+    assert rc == 0
+
+    from commander_builder.knowledge_log import iterations_for_deck
+    it = iterations_for_deck("pets-id", db_path=db)[0]
+    assert "PetCard" in it.audit_manifest["dropped_for_protection"]
+    # The new iteration's deck snapshot still has PetCard (NOT cut).
+    assert "1 PetCard" in it.deck_snapshot
+
+
+# ---------------------------------------------------------------------------
 # enforce_bracket_caps — game-changer filter at low brackets
 # ---------------------------------------------------------------------------
 

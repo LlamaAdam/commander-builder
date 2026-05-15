@@ -1587,6 +1587,68 @@ def test_audit_endpoint_surfaces_salt_warning_at_low_bracket(
     assert cultivate["salt"] == 3.7
 
 
+def test_audit_endpoint_surfaces_protected_cards_from_metadata(
+    client, monkeypatch, deck_dir,
+):
+    """[metadata] Protect= entries in the .dck appear in the audit
+    response as ``protected_cards: [...]`` so the UI can render a
+    🔒 badge on the corresponding cut suggestions."""
+    from types import SimpleNamespace
+
+    # Write a deck with three Protect= entries — one comma-named (the
+    # commander), one quoted-compact list for two simple names.
+    p = deck_dir / "Protected.dck"
+    p.write_text(
+        "[metadata]\nName=Protected\nMoxfield=abc\n"
+        "Protect=Krenko, Mob Boss\n"
+        'Protect="Goblin Lackey", "Skirk Prospector"\n'
+        "[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n" + "1 Forest\n" * 35,
+        encoding="utf-8",
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+    resp = client.get("/api/audit?deck=Protected&bracket=3")
+    assert resp.status_code == 200, resp.get_json()
+    protected = resp.get_json().get("protected_cards")
+    # The commander surfaces as a single entry, commas intact.
+    assert "Krenko, Mob Boss" in protected
+    # The quoted-compact line surfaces as two distinct cards.
+    assert "Goblin Lackey" in protected
+    assert "Skirk Prospector" in protected
+
+
+def test_audit_endpoint_protected_cards_empty_when_no_metadata(
+    client, monkeypatch,
+):
+    """A deck without Protect= entries surfaces an empty list (not
+    null). The UI's null-guard treats both as 'nothing locked.'"""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    assert resp.get_json()["protected_cards"] == []
+
+
 def test_audit_endpoint_salt_warning_null_at_high_bracket(
     client, monkeypatch,
 ):

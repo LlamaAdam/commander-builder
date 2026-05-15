@@ -42,6 +42,7 @@ from ._helpers import (
     _total_price_for_deck_text,
     project_average_deck_preview,
     project_salt_warning,
+    read_protected_cards,
 )
 
 
@@ -362,6 +363,13 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             "salt_warning": project_salt_warning(
                 original, salt_map, bracket,
             ),
+            # Per-deck protected-cards list from [metadata] Protect=
+            # entries. Surfaced so the UI can badge protected cards
+            # in the cuts list with a 🔒 — the auto-curate path
+            # already strips these, but the audit endpoint produces
+            # advisory suggestions and the user might still want to
+            # see what the advisor flagged.
+            "protected_cards": read_protected_cards(original),
         })
 
     @bp.route("/api/audit/stream")
@@ -612,6 +620,12 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                             # data is available.
                             "salt_warning": project_salt_warning(
                                 original, salt_map, bracket,
+                            ),
+                            # Per-deck protected-cards list from
+                            # [metadata] Protect= entries — same
+                            # surface as the sync endpoint.
+                            "protected_cards": read_protected_cards(
+                                original,
                             ),
                         })
                         continue

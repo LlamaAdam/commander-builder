@@ -662,6 +662,105 @@ def project_average_deck_preview(
 
 
 # ---------------------------------------------------------------------------
+# Protected-cards list — pet cards the curator must not propose for cut
+# ---------------------------------------------------------------------------
+#
+# Per-deck protection lives in the .dck file's ``[metadata]`` section as
+# ``Protect=`` entries. Forge ignores unknown metadata keys, so the
+# list travels with the deck file across imports, Moxfield round-trips,
+# and version bumps without polluting anything Forge cares about.
+#
+# Format (either / both work, unioned):
+#
+#     [metadata]
+#     Name=Goblin
+#     Moxfield=abc123
+#     Protect=Krenko, Mob Boss
+#     Protect=Goblin Lackey, Skirk Prospector
+#
+# Comma-separated on a single line OR multiple Protect= lines; both
+# accepted. Card names preserve casing on read so the UI can render
+# them faithfully — comparison against cut suggestions folds case at
+# the call site.
+
+
+def read_protected_cards(deck_text: str) -> list[str]:
+    """Parse ``[metadata] Protect=`` entries out of a .dck blob.
+
+    Convention: **one card per Protect= line**, comma is literal.
+    This way the most common case — protecting your commander —
+    works naturally without quoting:
+
+        Protect=Krenko, Mob Boss
+        Protect=Jaya Ballard, Task Mage
+        Protect=Sol Ring
+
+    All three are single cards. To protect multiple cards, use
+    multiple Protect= lines (not comma-separated).
+
+    Compact comma-separated form is supported only when entries are
+    wrapped in double quotes, so users who want a one-line list of
+    no-comma names can still do:
+
+        Protect="Sol Ring", "Lightning Bolt", "Counterspell"
+
+    Quoted form mixes safely with bare lines on the same .dck.
+
+    Returns a list preserving input order with duplicates collapsed
+    case-insensitively. Empty list when no Protect= entries exist —
+    the caller treats this as "no protection list configured."
+
+    Whitespace trimmed per entry; empty entries silently dropped.
+    """
+    import re as _re
+    # Quoted-entry pattern: matches `"..."` sequences. We pull each
+    # quoted chunk out separately and treat unquoted leftover as a
+    # single bare entry (preserves the comma-in-name case).
+    _quoted_re = _re.compile(r'"([^"]*)"')
+
+    protected: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        n = name.strip()
+        if not n:
+            return
+        key = n.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        protected.append(n)
+
+    in_metadata = False
+    for raw in deck_text.splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_metadata = s.lower() == "[metadata]"
+            continue
+        if not in_metadata or "=" not in s:
+            continue
+        key, _, value = s.partition("=")
+        if key.strip().lower() != "protect":
+            continue
+        value = value.strip()
+        if not value:
+            continue
+        if '"' in value:
+            # Quoted form: pull each "..." chunk out; ignore any
+            # commas / whitespace between chunks.
+            for m in _quoted_re.finditer(value):
+                _add(m.group(1))
+        else:
+            # Bare form: the entire value is ONE card name. Commas
+            # inside the name (e.g. "Krenko, Mob Boss") stay literal
+            # rather than splitting the name in half — which is the
+            # whole point of this rule, since commanders are almost
+            # always comma-named.
+            _add(value)
+    return protected
+
+
+# ---------------------------------------------------------------------------
 # Salt-list warning aggregator
 # ---------------------------------------------------------------------------
 #

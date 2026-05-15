@@ -360,6 +360,12 @@ class Proposal:
     # the threshold. Surfaced so the iteration log can record "Claude wanted
     # Smothering Tithe at B2 — filtered" without losing the signal.
     dropped_for_bracket: list[str] = field(default_factory=list)
+    # Cards Claude proposed for cut that match the user's protected list
+    # ([metadata] Protect= entries + --protect CLI flags). Sliced before
+    # ``cuts`` is returned, so the curator never wastes a slot on a pet
+    # card the user locked. Surfaced so the iteration log + CLI summary
+    # can show "Claude wanted to cut Goblin Lackey but you protected it."
+    dropped_for_protection: list[str] = field(default_factory=list)
     # Populated by apply_proposal_to_deck. Empty until that call.
     applied_adds: list[str] = field(default_factory=list)
     applied_cuts: list[str] = field(default_factory=list)
@@ -434,6 +440,9 @@ genuinely improve the deck at the target bracket. Respect these rules:
   will strip them anyway, but don't waste a slot recommending them).
 - Pick adds and cuts that pair — if you add a finisher, cut a redundant
   filler, not a key utility piece.
+- NEVER propose cutting a card in the user's PROTECTED CARDS list. Those
+  are locked pet cards; any cut you propose against them gets stripped
+  by the post-filter and wastes a curator slot. Pick a different cut.
 - Justify briefly. Two sentences max.
 
 Return ONLY a JSON object with this exact shape:
@@ -454,18 +463,27 @@ def auto_propose(
     max_adds: int = 5,
     max_cuts: int = 5,
     model: str = "claude-sonnet-4-5",
+    protected_cards: "Iterable[str]" = (),
 ) -> Proposal:
     """Curate an advisor's candidate pool into a small applicable Proposal.
 
     Inputs:
-      deck_path     — .dck file; contents are sent to Claude as context.
-      bracket       — target bracket (1-5). Drives game-changer enforcement.
-      advice_report — dict shape from ``AdviceReport.to_manifest()``.
-                      We feed the ``added`` + ``removed`` lists to Claude
-                      as the candidate pool plus ``rationale`` for hint.
-      max_adds      — hard cap on returned adds (default 5).
-      max_cuts      — hard cap on returned cuts (default 5).
-      model         — Anthropic model id (default sonnet-4-5).
+      deck_path        — .dck file; contents are sent to Claude as context.
+      bracket          — target bracket (1-5). Drives game-changer
+                         enforcement.
+      advice_report    — dict shape from ``AdviceReport.to_manifest()``.
+                         We feed the ``added`` + ``removed`` lists to
+                         Claude as the candidate pool plus ``rationale``
+                         for hint.
+      max_adds         — hard cap on returned adds (default 5).
+      max_cuts         — hard cap on returned cuts (default 5).
+      model            — Anthropic model id (default sonnet-4-5).
+      protected_cards  — names the user has locked against cuts. Listed
+                         in the Claude prompt so the curator doesn't
+                         waste a slot proposing to cut a pet card; any
+                         that slip through anyway are post-filtered to
+                         ``Proposal.dropped_for_protection``. Case-
+                         insensitive match. Same pattern as bracket caps.
 
     Side effects: none. ``apply_proposal_to_deck`` does the file write.
 
@@ -492,12 +510,26 @@ def auto_propose(
     candidates_added = list(advice_report.get("added", []) or [])
     candidates_removed = list(advice_report.get("removed", []) or [])
     advisor_rationale = str(advice_report.get("rationale", ""))
+    protected_list = list(protected_cards)
+    protected_lower = {p.lower() for p in protected_list}
+
+    # Build a PROTECTED CARDS block in the user message so Claude knows
+    # not to propose them for cut. Skip the block entirely when the
+    # list is empty — keeps the prompt clean for the common case.
+    protected_block = ""
+    if protected_list:
+        protected_block = (
+            "PROTECTED CARDS (locked — NEVER propose for cut):\n"
+            + "\n".join(f"- {c}" for c in protected_list)
+            + "\n\n"
+        )
 
     user_msg = (
         f"Target bracket: {bracket}\n"
         f"Deck file: {deck_path.name}\n\n"
         f"CURRENT DECK (Forge .dck format):\n```\n{deck_text}\n```\n\n"
-        f"CANDIDATE ADDS (from EDHREC heuristic advisor):\n"
+        + protected_block
+        + f"CANDIDATE ADDS (from EDHREC heuristic advisor):\n"
         + "\n".join(f"- {c}" for c in candidates_added)
         + "\n\nCANDIDATE CUTS (from EDHREC heuristic advisor):\n"
         + "\n".join(f"- {c}" for c in candidates_removed)
@@ -544,8 +576,22 @@ def auto_propose(
     # Bracket-cap filter BEFORE applying max_adds so the cap counts only
     # bracket-allowed cards.
     kept_adds, dropped_for_bracket = enforce_bracket_caps(raw_adds, bracket)
+
+    # Protection filter: strip any cut Claude proposed against the
+    # user's locked list. Same pattern as bracket caps — done BEFORE
+    # max_cuts slicing so the cap counts only allowed cuts. Claude
+    # was told about the list in the prompt; this is the safety net
+    # for the rare case it ignored the instruction.
+    kept_cuts: list[str] = []
+    dropped_for_protection: list[str] = []
+    for c in raw_cuts:
+        if c.lower() in protected_lower:
+            dropped_for_protection.append(c)
+        else:
+            kept_cuts.append(c)
+
     capped_adds = kept_adds[:max_adds]
-    capped_cuts = raw_cuts[:max_cuts]
+    capped_cuts = kept_cuts[:max_cuts]
 
     return Proposal(
         adds=capped_adds,
@@ -553,6 +599,7 @@ def auto_propose(
         rationale=rationale,
         source="claude-auto",
         dropped_for_bracket=dropped_for_bracket,
+        dropped_for_protection=dropped_for_protection,
     )
 
 
@@ -660,12 +707,29 @@ def apply_proposal_to_deck(
     # Build SwapRecommendation-shape objects so _apply_swaps_to_dck
     # accepts them. The helper only reads .card and .action — the
     # reason field is unused on this path but required by the dataclass.
+    #
+    # Defense-in-depth: even if auto_propose's protection filter let
+    # something through (e.g. proposal was hand-constructed or came
+    # from a test path), strip protected cuts here too. The protect
+    # list lives in the deck's [metadata] section so we read it
+    # straight from disk — no extra arg-passing needed.
+    from .web._helpers import read_protected_cards
+    src_text_for_protect = src_path.read_text(encoding="utf-8")
+    protected_lower = {p.lower() for p in read_protected_cards(src_text_for_protect)}
+    cuts_to_apply: list[str] = []
+    for c in proposal.cuts:
+        if c.lower() in protected_lower:
+            if c not in proposal.dropped_for_protection:
+                proposal.dropped_for_protection.append(c)
+        else:
+            cuts_to_apply.append(c)
+
     recs: list[SwapRecommendation] = [
         SwapRecommendation(card=c, action="add", reason="claude-auto")
         for c in proposal.adds
     ] + [
         SwapRecommendation(card=c, action="cut", reason="claude-auto")
-        for c in proposal.cuts
+        for c in cuts_to_apply
     ]
 
     text = src_path.read_text(encoding="utf-8")
@@ -753,6 +817,15 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--db-path",
                    help="Override the knowledge_log SQLite path "
                         "(default: vendor/knowledge_log.sqlite).")
+    p.add_argument("--protect", action="append", default=[],
+                   metavar="CARD",
+                   help="Lock a card against cuts. Repeatable. Unioned "
+                        "with [metadata] Protect= entries in the .dck "
+                        "and any --protect-from file.")
+    p.add_argument("--protect-from", default=None, metavar="PATH",
+                   help="Path to a file with one card name per line, "
+                        "all protected against cuts. Unioned with "
+                        "--protect and [metadata] Protect=.")
     args = p.parse_args(argv)
 
     if not args.deck_path.exists():
@@ -780,6 +853,42 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         print(f"      advisor produced {candidate_add_count} candidate adds, "
               f"{candidate_cut_count} candidate cuts", flush=True)
 
+    # Resolve the protected-cards set from all three sources:
+    #   - [metadata] Protect= entries in the .dck (persistent, per-deck)
+    #   - --protect CLI flag (repeatable, ad-hoc override)
+    #   - --protect-from <file> (bulk reusable list)
+    # Order-preserving union so the prompt + summary read in a stable
+    # order; case-insensitive dedup.
+    from .web._helpers import read_protected_cards
+    protected_combined: list[str] = []
+    seen_lower: set[str] = set()
+    def _add_protected(name: str) -> None:
+        n = name.strip()
+        if not n:
+            return
+        key = n.lower()
+        if key in seen_lower:
+            return
+        seen_lower.add(key)
+        protected_combined.append(n)
+
+    deck_text_for_protect = args.deck_path.read_text(encoding="utf-8")
+    for c in read_protected_cards(deck_text_for_protect):
+        _add_protected(c)
+    for c in args.protect:
+        _add_protected(c)
+    if args.protect_from:
+        pf = Path(args.protect_from)
+        if not pf.exists():
+            print(f"ERROR: --protect-from file not found: {pf}", flush=True)
+            return 2
+        for line in pf.read_text(encoding="utf-8").splitlines():
+            _add_protected(line)
+
+    if not args.json and protected_combined:
+        print(f"      {len(protected_combined)} protected cards locked "
+              f"against cuts", flush=True)
+
     # Step 2: curator.
     if not args.json:
         print(f"[2/3] Curating via {args.model}...", flush=True)
@@ -791,6 +900,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             max_adds=args.max_adds,
             max_cuts=args.max_cuts,
             model=args.model,
+            protected_cards=protected_combined,
         )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", flush=True)
@@ -849,6 +959,11 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
               f"{len(proposal.dropped_for_bracket)}")
         for c in proposal.dropped_for_bracket:
             print(f"  ! {c}")
+    if proposal.dropped_for_protection:
+        print(f"Dropped because protected (user-locked): "
+              f"{len(proposal.dropped_for_protection)}")
+        for c in proposal.dropped_for_protection:
+            print(f"  🔒 {c}")
     if proposal.dropped_for_balance:
         print(f"Dropped to keep deck size legal "
               f"(adds/cuts unbalanced): {len(proposal.dropped_for_balance)}")
@@ -924,6 +1039,7 @@ def _log_auto_curate_iteration(
         "rationale": proposal.rationale,
         "source": proposal.source,
         "dropped_for_bracket": list(proposal.dropped_for_bracket),
+        "dropped_for_protection": list(proposal.dropped_for_protection),
         "dropped_for_balance": list(proposal.dropped_for_balance),
         "padded_count": proposal.padded_count,
         "padded_breakdown": dict(proposal.padded_breakdown),
