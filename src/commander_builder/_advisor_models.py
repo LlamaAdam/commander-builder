@@ -19,7 +19,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .edhrec_client import AverageDeck
 
 
 @dataclass
@@ -84,6 +87,22 @@ class AdviceReport:
     # the source pill so users can tell when the LLM had archetype-
     # specific data vs. just EDHREC averages.
     bracket_peer_ref_count: int = 0
+    # EDHREC's bracket-specific sample build for this commander. When
+    # present, the audit UI surfaces a collapsible "Average deck
+    # preview" panel showing the FULL ~75-100 card reference list (not
+    # just the cards being recommended for adds). None when EDHREC has
+    # no published average deck for this commander+bracket, or when
+    # the fetch failed. Kept as the raw dataclass so the route can
+    # project it however the UI needs without coupling the report
+    # to the projection shape.
+    average_deck: Optional["AverageDeck"] = None
+    # Card-name → EDHREC section header map (lowercase keys) sourced
+    # from the commander page's ``category_lists``. Used by the audit
+    # route to categorize average-deck preview entries (Creatures /
+    # Lands / Instants / Sorceries / Mana Artifacts / Game Changers /
+    # ...) so the UI can group the preview list. Empty dict when no
+    # commander page was fetched or no categories were parsed.
+    edhrec_categories: dict[str, str] = field(default_factory=dict)
 
     def to_manifest(self) -> dict:
         """Render as an audit_manifest.json-compatible dict so this feeds

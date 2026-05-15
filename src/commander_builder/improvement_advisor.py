@@ -743,6 +743,20 @@ def _advise_steps(
         fallback_reason=fallback_reason,
     )
 
+    # Build the lowercase-name → EDHREC-section-header map so the
+    # audit route can categorize the average-deck preview without
+    # holding onto the heavy ``CommanderPage`` object. Cards present
+    # in multiple sections take the first header seen — EDHREC's
+    # category_lists rarely overlap, so the collision rate is
+    # negligible. Empty dict on the no-page path (fallback returns
+    # a valid AdviceReport with zero recommendations).
+    edhrec_categories: dict[str, str] = {}
+    if edhrec_page is not None:
+        for category, entries in (edhrec_page.category_lists or {}).items():
+            for entry in entries:
+                key = entry.name.lower()
+                edhrec_categories.setdefault(key, category)
+
     report = AdviceReport(
         deck_filename=deck_path.name,
         deck_id=deck_id,
@@ -755,6 +769,8 @@ def _advise_steps(
         fallback_reason=fallback_reason,
         skipped_for_saturation=skipped_for_saturation,
         bracket_peer_ref_count=bracket_peer_ref_count,
+        average_deck=average_deck,
+        edhrec_categories=edhrec_categories,
     )
     if rationale_override:
         report.diagnosis.pattern_summary = rationale_override
