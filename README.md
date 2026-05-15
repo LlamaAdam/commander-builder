@@ -36,9 +36,14 @@ system runs without Forge — only modules that hit the JVM
 (`forge_runner`, `pool_curator`, `run_match`, `compare_versions`,
 `iteration_loop`) need it.
 
-For live LLM analyst, set `ANTHROPIC_API_KEY` in your environment OR
-provide a key through the web UI's BYO-key flow (per-request, never
-persisted server-side).
+For live LLM analyst, configure `ANTHROPIC_API_KEY` via one of:
+
+- `commander-config init` → edit `~/.commander-builder/credentials`
+  (the credentials file lives **outside the repo** so it can never be
+  committed by accident). See [docs/SECRETS.md](docs/SECRETS.md).
+- Or set the env var directly in your shell (overrides the file).
+- Or provide a key through the web UI's BYO-key flow (per-request,
+  never persisted server-side).
 
 ## Run the web app
 

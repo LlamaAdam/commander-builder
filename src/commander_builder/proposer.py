@@ -902,6 +902,15 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "--protect and [metadata] Protect=.")
     args = p.parse_args(argv)
 
+    # Load the external credentials file (~/.commander-builder/credentials
+    # or $COMMANDER_BUILDER_CREDENTIALS) BEFORE any code reads
+    # os.environ["ANTHROPIC_API_KEY"]. Shell env wins if both are set,
+    # so production deployments using container secrets are unaffected.
+    # Silent when no file exists (some users prefer shell-only); a hint
+    # surfaces to stderr only if they later hit a "key missing" error.
+    from ._secrets import load_credentials
+    load_credentials(quiet=True)
+
     if not args.deck_path.exists():
         print(f"ERROR: deck not found: {args.deck_path}", flush=True)
         return 2

@@ -267,8 +267,17 @@ def main(argv: list[str] | None = None) -> int:
                         "stdout. Useful for archival comparison.")
     args = p.parse_args(argv)
 
+    # Load external credentials so users who configured the key in
+    # ~/.commander-builder/credentials don't need to set the env var
+    # explicitly. Shell env still wins if both are set.
+    from commander_builder._secrets import load_credentials
+    load_credentials(quiet=True)
+
     if "ANTHROPIC_API_KEY" not in os.environ:
-        print("ERROR: ANTHROPIC_API_KEY required in environment.")
+        print(
+            "ERROR: ANTHROPIC_API_KEY required. Run `commander-config init` "
+            "to create the credentials file, or set the env var directly.",
+        )
         return 2
     # Resolve to absolute path BEFORE passing to advise() — the advisor
     # treats relative paths as deck_dir-relative, which doubles the
