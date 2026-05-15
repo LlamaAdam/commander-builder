@@ -565,3 +565,97 @@ def _iteration_to_dict(it) -> dict:
         "margin": it.margin,
         "created_at": it.created_at,
     }
+
+
+# ---------------------------------------------------------------------------
+# EDHREC average-deck preview projection
+# ---------------------------------------------------------------------------
+#
+# AdviceReport carries an Optional[AverageDeck] (commit 4ee8a0e) and a
+# lowercase-name → category map sourced from the commander page. This
+# helper turns those into a JSON-friendly dict the audit-panel UI
+# renders inside a collapsible <details> section. The UI doesn't open
+# the section by default — most users only need it when they want to
+# compare their list to the bracket archetype.
+
+
+def _user_deck_card_names(deck_text: str) -> set[str]:
+    """Extract the lowercase set of card names from a Forge .dck blob.
+
+    Handles both bare ``1 Sol Ring`` and ``1 Sol Ring|CLB|871`` lines
+    by stripping the optional edition tail. Section headers, metadata,
+    and blank lines are ignored — only quantity-prefixed cards count.
+    """
+    import re as _re
+    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+    out: set[str] = set()
+    for raw in deck_text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("["):
+            continue
+        m = line_pattern.match(stripped)
+        if m:
+            out.add(m.group(2).strip().lower())
+    return out
+
+
+def project_average_deck_preview(
+    average_deck,        # Optional[AverageDeck] — forward-typed to avoid cycle
+    edhrec_categories,   # dict[str, str] — lowercase name → category
+    user_deck_text: str,
+):
+    """Project an AverageDeck → JSON-friendly preview dict.
+
+    Returns ``None`` when there's nothing to show:
+      - ``average_deck`` is None (EDHREC unreachable, no published
+        average deck for this commander+bracket)
+      - ``average_deck.cards`` is empty (page parsed but produced
+        zero entries)
+
+    Otherwise returns::
+
+        {
+          "bracket_slug": str | None,
+          "card_count": int,
+          "cards": [
+            {"name": str, "inclusion_pct": float,
+             "category": str | None, "in_user_deck": bool},
+            ...
+          ]
+        }
+
+    Card ordering preserves the input list — EDHREC's average-deck page
+    ranks by typical-build prominence and that ordering is meaningful.
+
+    in_user_deck folds case both ways: the average-deck card name and
+    the .dck-extracted name set are both lowercased before comparison.
+
+    category match is also case-insensitive against ``edhrec_categories``;
+    cards missing from the map surface ``category=None`` so the UI can
+    group them under an 'Other' bucket without the helper inventing
+    a label.
+    """
+    if average_deck is None:
+        return None
+    cards = list(getattr(average_deck, "cards", []) or [])
+    if not cards:
+        return None
+
+    user_names = _user_deck_card_names(user_deck_text)
+    # Categories map is keyed lowercase already (the advisor builds it
+    # that way); fold the average-deck card name for the lookup.
+    projected = []
+    for entry in cards:
+        key = (entry.name or "").lower()
+        projected.append({
+            "name": entry.name,
+            "inclusion_pct": float(getattr(entry, "inclusion_pct", 0.0) or 0.0),
+            "category": edhrec_categories.get(key),
+            "in_user_deck": key in user_names,
+        })
+
+    return {
+        "bracket_slug": getattr(average_deck, "bracket_slug", None),
+        "card_count": len(projected),
+        "cards": projected,
+    }

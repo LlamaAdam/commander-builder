@@ -1469,6 +1469,90 @@ def test_audit_endpoint_503_when_advisor_fails(client, monkeypatch):
     assert body["error"] == "audit failed"
 
 
+def test_audit_endpoint_surfaces_average_deck_preview(client, monkeypatch):
+    """When the advisor produces an AverageDeck on the AdviceReport,
+    the audit response carries it under 'average_deck_preview' with
+    the canonical projected shape (per-card name/inclusion_pct/category/
+    in_user_deck). UI follows the contract pinned in
+    tests/test_avg_deck_preview.py."""
+    from types import SimpleNamespace
+    from commander_builder.edhrec_client import AverageDeck, CardEntry
+
+    avg = AverageDeck(
+        commander_name="Atraxa, Praetors' Voice",
+        slug="atraxa",
+        url="https://edhrec.com/average-decks/atraxa/upgraded",
+        bracket_slug="upgraded",
+        budget_slug=None,
+        cards=[
+            CardEntry(name="Sol Ring", inclusion_pct=95.5),
+            CardEntry(name="Cultivate", inclusion_pct=72.0),
+            CardEntry(name="Unknown Card", inclusion_pct=40.0),
+        ],
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(
+                pattern_summary="", weakness_signals=[],
+            ),
+            source="heuristic",
+            average_deck=avg,
+            edhrec_categories={
+                "sol ring": "Mana Artifacts",
+                "cultivate": "Ramp",
+            },
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+
+    preview = body.get("average_deck_preview")
+    assert preview is not None, "expected average_deck_preview when advisor returned an AverageDeck"
+    assert preview["bracket_slug"] == "upgraded"
+    assert preview["card_count"] == 3
+    # Sol Ring is in the test fixture deck text → in_user_deck=True;
+    # categorized as Mana Artifacts.
+    sol = next(c for c in preview["cards"] if c["name"] == "Sol Ring")
+    assert sol["inclusion_pct"] == 95.5
+    assert sol["category"] == "Mana Artifacts"
+    # Unknown Card has no category entry → null.
+    unknown = next(c for c in preview["cards"] if c["name"] == "Unknown Card")
+    assert unknown["category"] is None
+    assert unknown["in_user_deck"] is False
+
+
+def test_audit_endpoint_average_deck_preview_is_null_when_advisor_omits_it(
+    client, monkeypatch,
+):
+    """Legacy AdviceReport (no average_deck attr) → preview = None.
+    Pinning so the UI's null-guard never starts assuming the key is
+    always populated."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(
+                pattern_summary="", weakness_signals=[],
+            ),
+            source="heuristic",
+            # No average_deck attribute → getattr default kicks in
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    assert resp.get_json()["average_deck_preview"] is None
+
+
 def test_audit_endpoint_404_on_missing_deck(client):
     resp = client.get("/api/audit?deck=Ghost")
     assert resp.status_code == 404

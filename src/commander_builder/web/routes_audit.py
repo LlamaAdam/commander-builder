@@ -40,6 +40,7 @@ from ._helpers import (
     _pad_main_to_99,
     _resolve_deck_path,
     _total_price_for_deck_text,
+    project_average_deck_preview,
 )
 
 
@@ -341,6 +342,16 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             "price_delta_usd": price_delta,
             "n_priced_cards_original": original_priced,
             "n_priced_cards_proposed": proposed_priced,
+            # EDHREC bracket-specific sample build — feeds the
+            # audit panel's collapsible "Average deck preview"
+            # section. None when EDHREC has no published average
+            # deck for this commander+bracket or the fetch failed,
+            # so the UI knows to hide the <details> entirely.
+            "average_deck_preview": project_average_deck_preview(
+                getattr(report, "average_deck", None),
+                getattr(report, "edhrec_categories", {}) or {},
+                original,
+            ),
         })
 
     @bp.route("/api/audit/stream")
@@ -577,6 +588,15 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                             "price_delta_usd": price_delta,
                             "n_priced_cards_original": original_priced,
                             "n_priced_cards_proposed": proposed_priced,
+                            # EDHREC average-deck preview — mirrors the
+                            # sync /api/audit endpoint. None when no
+                            # average deck is available; the UI hides
+                            # the <details> panel accordingly.
+                            "average_deck_preview": project_average_deck_preview(
+                                getattr(report, "average_deck", None),
+                                getattr(report, "edhrec_categories", {}) or {},
+                                original,
+                            ),
                         })
                         continue
                     # Intermediate phases (diagnosis / manabase / primary)
