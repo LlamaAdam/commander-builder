@@ -50,6 +50,7 @@ commander-history    = "commander_builder.report:main"
 commander-export     = "commander_builder.export:main"
 commander-advise     = "commander_builder.improvement_advisor:main"
 commander-meta-test  = "commander_builder.meta_test:main"
+commander-auto-curate = "commander_builder.proposer:auto_curate_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
