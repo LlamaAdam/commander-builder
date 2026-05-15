@@ -713,6 +713,253 @@ def test_audit_iteration_log_records_protected_lists(
 
 
 # ---------------------------------------------------------------------------
+# enforce_color_identity -- off-color rejection for the curator's adds
+# ---------------------------------------------------------------------------
+
+def _patch_scryfall_lookup(monkeypatch, ci_map: dict):
+    """Install a fake scryfall_client.lookup_card whose ``color_identity``
+    field comes from ``ci_map`` (lowercase name -> list of WUBRG letters).
+
+    Cards not in the map return None (matches Scryfall's 404 behavior
+    for unknown card names)."""
+    def _fake_lookup(name, cache=True):
+        key = (name or "").lower()
+        if key not in ci_map:
+            return None
+        return {
+            "name": name,
+            "color_identity": ci_map[key],
+            "type_line": "Creature",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake_lookup,
+    )
+
+
+def test_enforce_color_identity_passes_in_color_cards(monkeypatch):
+    """Mono-red deck adding red cards: all pass through."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "lightning bolt": ["R"],
+        "shock": ["R"],
+        "monastery swiftspear": ["R"],
+    })
+    kept, dropped = enforce_color_identity(
+        ["Lightning Bolt", "Shock", "Monastery Swiftspear"],
+        deck_color_identity="R",
+    )
+    assert kept == ["Lightning Bolt", "Shock", "Monastery Swiftspear"]
+    assert dropped == []
+
+
+def test_enforce_color_identity_rejects_off_color_in_mono(monkeypatch):
+    """Regression target: mono-red deck + green creature -- the
+    green creature gets stripped. Without this, Claude's occasional
+    hallucination of Llanowar Elves into a Krenko deck would make
+    the .dck illegal."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "lightning bolt": ["R"],
+        "llanowar elves": ["G"],
+        "counterspell": ["U"],
+    })
+    kept, dropped = enforce_color_identity(
+        ["Lightning Bolt", "Llanowar Elves", "Counterspell"],
+        deck_color_identity="R",
+    )
+    assert kept == ["Lightning Bolt"]
+    assert set(dropped) == {"Llanowar Elves", "Counterspell"}
+
+
+def test_enforce_color_identity_handles_colorless_cards(monkeypatch):
+    """Colorless cards (Sol Ring, artifacts) have CI=[] which is a
+    subset of any deck CI -- legal in mono-red, in mono-anything,
+    even in colorless decks."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "sol ring": [],
+        "wastes": [],
+        "ornithopter": [],
+    })
+    kept, _ = enforce_color_identity(
+        ["Sol Ring", "Wastes", "Ornithopter"],
+        deck_color_identity="R",
+    )
+    assert kept == ["Sol Ring", "Wastes", "Ornithopter"]
+
+
+def test_enforce_color_identity_dual_color_accepts_both(monkeypatch):
+    """Izzet (UR) accepts blue, red, multi-blue-red, AND colorless.
+    Green gets rejected."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "counterspell": ["U"],
+        "lightning bolt": ["R"],
+        "expressive iteration": ["U", "R"],
+        "sol ring": [],
+        "llanowar elves": ["G"],
+    })
+    kept, dropped = enforce_color_identity(
+        ["Counterspell", "Lightning Bolt", "Expressive Iteration",
+         "Sol Ring", "Llanowar Elves"],
+        deck_color_identity="UR",
+    )
+    assert kept == ["Counterspell", "Lightning Bolt",
+                    "Expressive Iteration", "Sol Ring"]
+    assert dropped == ["Llanowar Elves"]
+
+
+def test_enforce_color_identity_atraxa_wubg_rejects_red(monkeypatch):
+    """Atraxa (WUBG, four-color, no red) accepts any subset of those
+    four. A red card gets rejected."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "esper sentinel": ["W"],
+        "rhystic study": ["U"],
+        "necropotence": ["B"],
+        "rampant growth": ["G"],
+        "purphoros, god of the forge": ["R"],
+        "esper charm": ["W", "U", "B"],
+    })
+    kept, dropped = enforce_color_identity(
+        ["Esper Sentinel", "Rhystic Study", "Necropotence",
+         "Rampant Growth", "Purphoros, God of the Forge", "Esper Charm"],
+        deck_color_identity="WUBG",
+    )
+    assert "Purphoros, God of the Forge" in dropped
+    assert "Esper Charm" in kept  # WUB is subset of WUBG
+
+
+def test_enforce_color_identity_colorless_deck_strict(monkeypatch):
+    """Colorless commander (Karn, Kozilek) accepts ONLY colorless
+    cards. Even Lightning Bolt is illegal."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "sol ring": [],
+        "lightning bolt": ["R"],
+        "ornithopter": [],
+    })
+    kept, dropped = enforce_color_identity(
+        ["Sol Ring", "Lightning Bolt", "Ornithopter"],
+        deck_color_identity="",
+    )
+    assert "Sol Ring" in kept
+    assert "Ornithopter" in kept
+    assert "Lightning Bolt" in dropped
+
+
+def test_enforce_color_identity_hybrid_mana_requires_all_colors(monkeypatch):
+    """Hybrid mana cards (Lightning Helix = {R/W}) have BOTH colors
+    in CI per Scryfall. Mono-white deck can't run Lightning Helix
+    because R is not in the deck's CI."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "lightning helix": ["R", "W"],
+        "dryad militant": ["W", "G"],
+    })
+    kept, dropped = enforce_color_identity(
+        ["Lightning Helix", "Dryad Militant"],
+        deck_color_identity="W",
+    )
+    # Both illegal in mono-W: Helix needs R too; Dryad needs G too.
+    assert kept == []
+    assert "Lightning Helix" in dropped
+    assert "Dryad Militant" in dropped
+
+
+def test_enforce_color_identity_unknown_card_kept(monkeypatch):
+    """Cards Scryfall returns None for (typo / custom card / Claude
+    hallucination) are kept rather than rejected. The name_known
+    flag elsewhere catches hallucinations; the color filter doesn't
+    need to double-duty."""
+    from commander_builder.proposer import enforce_color_identity
+    _patch_scryfall_lookup(monkeypatch, {
+        "lightning bolt": ["R"],
+    })
+    kept, dropped = enforce_color_identity(
+        ["Lightning Bolt", "Made Up Card 9000"],
+        deck_color_identity="R",
+    )
+    assert kept == ["Lightning Bolt", "Made Up Card 9000"]
+    assert dropped == []
+
+
+def test_enforce_color_identity_scryfall_failure_degrades_gracefully(
+    monkeypatch,
+):
+    """If lookup_card raises (network blip), treat the card as
+    in-color rather than stripping the whole proposal. Better noisy
+    than empty."""
+    from commander_builder.proposer import enforce_color_identity
+
+    def _boom(name, cache=True):
+        raise ConnectionError("Scryfall unreachable")
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _boom,
+    )
+    kept, _ = enforce_color_identity(
+        ["Lightning Bolt", "Llanowar Elves"], deck_color_identity="R",
+    )
+    assert kept == ["Lightning Bolt", "Llanowar Elves"]
+
+
+def test_enforce_color_identity_empty_adds_returns_empty():
+    """Defensive: empty input -> empty output, no Scryfall calls."""
+    from commander_builder.proposer import enforce_color_identity
+    kept, dropped = enforce_color_identity([], "WUBRG")
+    assert kept == []
+    assert dropped == []
+
+
+def test_auto_propose_strips_off_color_adds_end_to_end(tmp_path, monkeypatch):
+    """End-to-end: Claude returns mixed in-color + off-color adds for
+    a mono-red Goblin deck. After auto_propose:
+      - Off-color cards land in proposal.dropped_for_color_identity
+      - In-color + colorless adds are kept
+    Regression net for the whole feature."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["Lightning Bolt", "Llanowar Elves", "Counterspell",
+                 "Sol Ring"],
+        "cuts": ["OldCard"],
+        "rationale": "mixed",
+    }))
+    _patch_scryfall_lookup(monkeypatch, {
+        "krenko, mob boss": ["R"],   # commander -> mono-red deck CI
+        "lightning bolt": ["R"],
+        "llanowar elves": ["G"],
+        "counterspell": ["U"],
+        "sol ring": [],
+    })
+
+    deck = tmp_path / "[USER] Krenko [B4].dck"
+    deck.write_text(
+        "[metadata]\nName=Krenko\n[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n1 OldCard\n",
+        encoding="utf-8",
+    )
+
+    from commander_builder.proposer import auto_propose
+    proposal = auto_propose(
+        deck_path=deck, bracket=4,
+        advice_report=_stub_advice_report(),
+        max_adds=5, max_cuts=5,
+    )
+
+    assert "Llanowar Elves" not in proposal.adds
+    assert "Counterspell" not in proposal.adds
+    assert set(proposal.dropped_for_color_identity) == {
+        "Llanowar Elves", "Counterspell",
+    }
+    assert "Lightning Bolt" in proposal.adds
+    assert "Sol Ring" in proposal.adds
+
+
+# ---------------------------------------------------------------------------
 # enforce_bracket_caps — game-changer filter at low brackets
 # ---------------------------------------------------------------------------
 

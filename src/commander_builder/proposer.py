@@ -366,6 +366,15 @@ class Proposal:
     # card the user locked. Surfaced so the iteration log + CLI summary
     # can show "Claude wanted to cut Goblin Lackey but you protected it."
     dropped_for_protection: list[str] = field(default_factory=list)
+    # Cards Claude proposed as ADDS that violate the deck's color
+    # identity (e.g. a green creature for a mono-red Goblin deck).
+    # The curator system prompt asks for color-identity respect but
+    # Claude occasionally hallucinates off-color picks. Filtering them
+    # out post-response prevents auto-curate from writing an illegal
+    # .dck file (Commander disallows off-color cards; Forge refuses
+    # to load such decks). Same defensive pattern as bracket caps +
+    # protection.
+    dropped_for_color_identity: list[str] = field(default_factory=list)
     # Populated by apply_proposal_to_deck. Empty until that call.
     applied_adds: list[str] = field(default_factory=list)
     applied_cuts: list[str] = field(default_factory=list)
@@ -424,6 +433,93 @@ def enforce_bracket_caps(
             dropped.append(card)
         else:
             kept.append(card)
+    return kept, dropped
+
+
+def _safe_lookup_card(lookup_fn, name: str):
+    """Wrap a scryfall_client.lookup_card call so a network blip on
+    one card doesn't cascade into the broader curator pipeline.
+    Returns the card dict or None on any failure."""
+    try:
+        return lookup_fn(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def enforce_color_identity(
+    adds: list[str], deck_color_identity: Optional[str],
+) -> tuple[list[str], list[str]]:
+    """Split ``adds`` into (kept, dropped) by the deck's color identity.
+
+    Commander format requires every mainboard card's color identity
+    to be a subset of the deck's commander color identity. A green
+    creature in a mono-red Goblin deck is illegal; Forge refuses to
+    load such decks. The curator system prompt asks for this rule
+    explicitly, but Claude occasionally proposes off-color picks --
+    especially at high model temperature or when the deck's CI is
+    unusual (colorless, partner pairs).
+
+    ``deck_color_identity`` semantics:
+      "WUBRG"  -- five-color deck, anything goes
+      "R"      -- mono-red, only red + colorless legal
+      ""       -- colorless commander (e.g. Karn), only colorless OK
+      None     -- COULDN'T RESOLVE the commander's identity. Skip the
+                  filter entirely -- pass through all adds. Better
+                  noisy than empty when we can't verify; this avoids
+                  rejecting every add against a phantom "colorless"
+                  deck when the commander isn't in Scryfall (typo,
+                  test fixture, etc.).
+
+    Lookups go through ``scryfall_client.lookup_card`` which is disk-
+    cached, so a 5-add filter typically costs ~0 wall time on a warm
+    cache. Cards Scryfall doesn't return (typos, custom cards) are
+    treated as IN-color so a Scryfall outage doesn't strip every add
+    -- we don't reject what we can't verify.
+
+    Returns (kept, dropped) preserving input order. Same shape as
+    ``enforce_bracket_caps`` so the auto_propose pipeline can chain
+    the two filters identically.
+    """
+    if not adds:
+        return [], []
+    # None deck CI = couldn't resolve, skip filter entirely so
+    # unverifiable decks don't strip everything.
+    if deck_color_identity is None:
+        return list(adds), []
+    # Empty deck CI = colorless commander (e.g. Karn). Empty target
+    # only permits cards that are themselves colorless. Build the
+    # allowed-letter set from the WUBRG-ordered string.
+    deck_set = set(deck_color_identity.upper()) if deck_color_identity else set()
+
+    # Lazy import: scryfall_client.lookup_card has side effects (disk
+    # cache) that we don't want firing on module-load test collection.
+    from .scryfall_client import lookup_card
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for card_name in adds:
+        try:
+            card = lookup_card(card_name)
+        except Exception:  # noqa: BLE001 -- a Scryfall failure shouldn't
+            # take down the whole curator call. Treat unverifiable cards
+            # as in-color (better than rejecting everything on outage).
+            kept.append(card_name)
+            continue
+        if card is None:
+            # Scryfall 404 -- typo, custom card, or a name Claude
+            # invented. Treat as in-color rather than rejecting silently;
+            # the existing hallucination flag (name_known) catches this
+            # category elsewhere in the response.
+            kept.append(card_name)
+            continue
+        card_ci = {
+            c.upper() for c in (card.get("color_identity") or [])
+            if isinstance(c, str)
+        }
+        if card_ci.issubset(deck_set):
+            kept.append(card_name)
+        else:
+            dropped.append(card_name)
     return kept, dropped
 
 
@@ -715,6 +811,44 @@ def auto_propose(
     # bracket-allowed cards.
     kept_adds, dropped_for_bracket = enforce_bracket_caps(raw_adds, bracket)
 
+    # Color-identity filter: strip any add whose color identity isn't
+    # a subset of the deck's commander CI. The curator system prompt
+    # asks Claude to respect color identity, but it occasionally
+    # hallucinates off-color picks (especially on partner decks /
+    # colorless commanders). Filtering after-the-fact prevents an
+    # illegal .dck from landing on disk -- Forge refuses to load decks
+    # with off-color cards.
+    #
+    # Lookups go through scryfall_client (disk-cached) so this adds
+    # ~0 wall time on a warm cache. Done AFTER bracket caps to keep
+    # the dropped_for_color_identity bucket distinct from
+    # dropped_for_bracket -- the user can debug each reason separately.
+    #
+    # Disambiguate "deck is colorless" from "couldn't resolve commander":
+    # color_identity_for_commander returns "" for both cases. We need
+    # to distinguish so a test-fixture commander like "Test Commander"
+    # (not in Scryfall) doesn't reject every add against a phantom
+    # colorless CI. If the commander resolves to a real card, the CI
+    # (including "") is authoritative; if no commander resolves, pass
+    # None so enforce_color_identity skips the filter entirely.
+    from .scryfall_client import (
+        _parse_commander_names_from_dck,
+        color_identity_for_commander,
+        lookup_card,
+    )
+    commander_names = _parse_commander_names_from_dck(deck_path)
+    commander_resolved = bool(commander_names) and any(
+        _safe_lookup_card(lookup_card, n) for n in commander_names
+    )
+    deck_color_identity: Optional[str]
+    if commander_resolved:
+        deck_color_identity = color_identity_for_commander(deck_path)
+    else:
+        deck_color_identity = None
+    kept_adds, dropped_for_color_identity = enforce_color_identity(
+        kept_adds, deck_color_identity,
+    )
+
     # Protection filter: strip any cut Claude proposed against the
     # user's locked list. Same pattern as bracket caps -- done BEFORE
     # max_cuts slicing so the cap counts only allowed cuts. Claude
@@ -738,6 +872,7 @@ def auto_propose(
         source="claude-auto",
         dropped_for_bracket=dropped_for_bracket,
         dropped_for_protection=dropped_for_protection,
+        dropped_for_color_identity=dropped_for_color_identity,
     )
 
 
@@ -1232,6 +1367,11 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
               f"{len(proposal.dropped_for_protection)}")
         for c in proposal.dropped_for_protection:
             print(f"  [LOCKED] {c}")
+    if proposal.dropped_for_color_identity:
+        print(f"Dropped for color identity (off-color): "
+              f"{len(proposal.dropped_for_color_identity)}")
+        for c in proposal.dropped_for_color_identity:
+            print(f"  ! {c}")
     if proposal.dropped_for_balance:
         print(f"Dropped to keep deck size legal "
               f"(adds/cuts unbalanced): {len(proposal.dropped_for_balance)}")
@@ -1600,6 +1740,7 @@ def _log_auto_curate_iteration(
         "source": proposal.source,
         "dropped_for_bracket": list(proposal.dropped_for_bracket),
         "dropped_for_protection": list(proposal.dropped_for_protection),
+        "dropped_for_color_identity": list(proposal.dropped_for_color_identity),
         "dropped_for_balance": list(proposal.dropped_for_balance),
         "padded_count": proposal.padded_count,
         "padded_breakdown": dict(proposal.padded_breakdown),
