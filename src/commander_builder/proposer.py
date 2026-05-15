@@ -337,6 +337,19 @@ class Proposal:
     bracket``, the audited bracket itself). Serializable via ``to_dict()``
     so iteration_loop / knowledge_log can persist it alongside the
     iteration row without bespoke encoders.
+
+    Fields split into REQUESTED (what Claude asked for) and APPLIED
+    (what actually landed in the .dck after balancing/padding):
+
+      adds / cuts                — what Claude proposed.
+      dropped_for_bracket        — game-changers stripped at B1/B2.
+      applied_adds / applied_cuts — what landed after balancing via
+                                    min(adds, cuts). Populated by
+                                    apply_proposal_to_deck.
+      dropped_for_balance        — adds OR cuts sliced off because
+                                    the lists were unequal length.
+      padded_count + padded_breakdown — basics synthesized to bring
+                                        the proposed deck to 99 main.
     """
     adds: list[str] = field(default_factory=list)
     cuts: list[str] = field(default_factory=list)
@@ -347,6 +360,12 @@ class Proposal:
     # the threshold. Surfaced so the iteration log can record "Claude wanted
     # Smothering Tithe at B2 — filtered" without losing the signal.
     dropped_for_bracket: list[str] = field(default_factory=list)
+    # Populated by apply_proposal_to_deck. Empty until that call.
+    applied_adds: list[str] = field(default_factory=list)
+    applied_cuts: list[str] = field(default_factory=list)
+    dropped_for_balance: list[str] = field(default_factory=list)
+    padded_count: int = 0
+    padded_breakdown: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -582,14 +601,6 @@ def _bump_version_filename(name: str) -> str:
     return f"{name} v2"
 
 
-# Card-line pattern for the [Main] section. Matches:
-#   1 Sol Ring
-#   1 Sol Ring|CLB|871
-#   3 Forest|CMM|384
-# Group 1: quantity, group 2: card name (trimmed), group 3: optional edition tail.
-_DCK_CARD_LINE_RE = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
-
-
 def apply_proposal_to_deck(
     src_path: Path,
     proposal: Proposal,
@@ -600,69 +611,93 @@ def apply_proposal_to_deck(
     ``proposal.cuts`` removed from the [Main] section.
 
     Returns the path of the new file. In ``dry_run`` mode returns the
-    path it WOULD have written without touching disk.
+    path it WOULD have written without touching disk; the proposal's
+    ``applied_*`` fields are still populated so the CLI can show what
+    would have landed.
 
     The new file lives next to the source with a bumped version
     (``[USER] Foo [B3].dck`` → ``[USER] Foo v2 [B3].dck``). Bracket
     suffix preserved as the last token.
 
-    Mutation rules:
+    Deck-legality invariants — shared with the audit-endpoint path
+    via ``web/_helpers._apply_swaps_to_dck`` and ``_pad_main_to_99``:
+
+      1. Adds and cuts are balanced via ``min(len(adds), len(cuts))``.
+         Both lists are sliced to the smaller length so the resulting
+         deck stays at the same mainboard size. Bigger of the two
+         contributes its surplus to ``proposal.dropped_for_balance``
+         so the iteration log records what Claude wanted but didn't
+         apply.
+
+      2. If the SOURCE deck was already short of 99 mainboard (some
+         imports land at 71-95), the proposed deck inherits the
+         deficit and gets padded with basics matching the deck's
+         existing color distribution. Padded count + breakdown
+         surface on ``proposal.padded_count`` /
+         ``proposal.padded_breakdown``.
+
+    This mirrors the invariants the web UI's /api/audit endpoint
+    already enforces. The two flows are now in sync — same balancing,
+    same padding, same legal output.
+
+    Mutation rules within the file:
       - [metadata], [Commander], and other sections pass through.
-      - [Main] is rebuilt: drop any line whose card name matches a cut
-        (case-insensitive); append `1 <name>` lines for each add.
+      - [Main] is rebuilt: drop any line whose card name matches a
+        kept cut (case-insensitive); append `1 <name>` lines for each
+        kept add.
       - Card-line matching handles edition codes (``|CLB|871``).
-      - No balancing: if adds outnumber cuts the deck will be too big
-        and Forge will refuse to load it — but that's the user's
-        problem to resolve (the curator picks its own counts).
     """
+    # Lazy import — proposer.py is library-level, web/_helpers is the
+    # web layer's internal helpers module. The helpers themselves are
+    # pure Python (no Flask coupling) so the import is clean, but
+    # importing at module-load time would create a circular risk if
+    # the web layer ever imports proposer.
+    from ._advisor_models import SwapRecommendation
+    from .web._helpers import _apply_swaps_to_dck, _pad_main_to_99
+
     out_path = src_path.parent / _bump_version_filename(src_path.name)
+
+    # Build SwapRecommendation-shape objects so _apply_swaps_to_dck
+    # accepts them. The helper only reads .card and .action — the
+    # reason field is unused on this path but required by the dataclass.
+    recs: list[SwapRecommendation] = [
+        SwapRecommendation(card=c, action="add", reason="claude-auto")
+        for c in proposal.adds
+    ] + [
+        SwapRecommendation(card=c, action="cut", reason="claude-auto")
+        for c in proposal.cuts
+    ]
+
+    text = src_path.read_text(encoding="utf-8")
+    proposed_text, applied_adds, applied_cuts, kept_count = _apply_swaps_to_dck(
+        text, recs,
+    )
+
+    # Pad the proposed deck to 99 mainboard if it's short. The audit
+    # endpoint does this same step for the same reason: some imports
+    # ship sub-99 main and Forge refuses to load them.
+    post_swap_main = kept_count + len(applied_adds)
+    proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
+        proposed_text, post_swap_main,
+    )
+
+    # Record what actually happened so the CLI summary + iteration
+    # log can distinguish "Claude wanted X" from "the new .dck has Y".
+    proposal.applied_adds = list(applied_adds)
+    proposal.applied_cuts = list(applied_cuts)
+    applied_add_set = {a.lower() for a in applied_adds}
+    applied_cut_set = {c.lower() for c in applied_cuts}
+    proposal.dropped_for_balance = (
+        [a for a in proposal.adds if a.lower() not in applied_add_set]
+        + [c for c in proposal.cuts if c.lower() not in applied_cut_set]
+    )
+    proposal.padded_count = padded_count
+    proposal.padded_breakdown = dict(padded_breakdown)
+
     if dry_run:
         return out_path
 
-    cut_set = {c.lower() for c in proposal.cuts}
-    text = src_path.read_text(encoding="utf-8")
-
-    out_lines: list[str] = []
-    in_main = False
-    appended = False  # safety: only append adds once when leaving [Main]
-
-    def _append_adds() -> None:
-        nonlocal appended
-        if appended:
-            return
-        for name in proposal.adds:
-            out_lines.append(f"1 {name}")
-        appended = True
-
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            # Leaving a section: if it was [Main], flush adds here so
-            # they sit inside the section rather than after the next
-            # header.
-            if in_main:
-                _append_adds()
-            in_main = stripped.lower() == "[main]"
-            out_lines.append(raw)
-            continue
-
-        if in_main and stripped:
-            m = _DCK_CARD_LINE_RE.match(stripped)
-            if m:
-                name = m.group(2).strip().lower()
-                if name in cut_set:
-                    continue  # drop this line
-        out_lines.append(raw)
-
-    # If [Main] was the trailing section, the append-on-section-change
-    # path never fired. Catch it here.
-    if in_main:
-        _append_adds()
-
-    new_text = "\n".join(out_lines)
-    if not new_text.endswith("\n"):
-        new_text += "\n"
-    out_path.write_text(new_text, encoding="utf-8")
+    out_path.write_text(proposed_text, encoding="utf-8")
     return out_path
 
 
@@ -800,17 +835,30 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     print()
-    print(f"Adds ({len(proposal.adds)}):")
-    for c in proposal.adds:
+    # Surface what Claude REQUESTED vs what actually LANDED. The two
+    # can differ when adds and cuts are unbalanced — apply_proposal_
+    # to_deck slices both to min() so the deck stays the right size.
+    print(f"Adds requested ({len(proposal.adds)}) → applied ({len(proposal.applied_adds)}):")
+    for c in proposal.applied_adds:
         print(f"  + {c}")
-    print(f"Cuts ({len(proposal.cuts)}):")
-    for c in proposal.cuts:
+    print(f"Cuts requested ({len(proposal.cuts)}) → applied ({len(proposal.applied_cuts)}):")
+    for c in proposal.applied_cuts:
         print(f"  - {c}")
     if proposal.dropped_for_bracket:
         print(f"Dropped for B{args.bracket} (game-changers): "
               f"{len(proposal.dropped_for_bracket)}")
         for c in proposal.dropped_for_bracket:
             print(f"  ! {c}")
+    if proposal.dropped_for_balance:
+        print(f"Dropped to keep deck size legal "
+              f"(adds/cuts unbalanced): {len(proposal.dropped_for_balance)}")
+        for c in proposal.dropped_for_balance:
+            print(f"  ~ {c}")
+    if proposal.padded_count:
+        breakdown_str = ", ".join(
+            f"{n}× {b}" for b, n in proposal.padded_breakdown.items()
+        )
+        print(f"Padded with basics: +{proposal.padded_count} ({breakdown_str})")
     print()
     print(f"Rationale: {proposal.rationale}")
     print()
@@ -866,12 +914,21 @@ def _log_auto_curate_iteration(
     parent_id = prior[-1].id if prior else None
 
     deck_snapshot = new_deck_path.read_text(encoding="utf-8")
+    # Record what ACTUALLY LANDED in the .dck — these are the changes
+    # that produced the new deck snapshot. ``requested_*`` fields
+    # preserve Claude's intent for analysis (which adds did the curator
+    # want but balancing dropped?) without conflating the two.
     audit_manifest = {
-        "added": list(proposal.adds),
-        "removed": list(proposal.cuts),
+        "added": list(proposal.applied_adds),
+        "removed": list(proposal.applied_cuts),
         "rationale": proposal.rationale,
         "source": proposal.source,
         "dropped_for_bracket": list(proposal.dropped_for_bracket),
+        "dropped_for_balance": list(proposal.dropped_for_balance),
+        "padded_count": proposal.padded_count,
+        "padded_breakdown": dict(proposal.padded_breakdown),
+        "requested_adds": list(proposal.adds),
+        "requested_cuts": list(proposal.cuts),
         "src_deck": src_deck_path.name,
     }
 

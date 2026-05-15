@@ -330,29 +330,41 @@ def _make_dck(tmp_path, name: str, main_cards: list[str]) -> Path:
 
 
 def test_apply_proposal_writes_new_dck_with_adds_and_without_cuts(tmp_path):
+    """Happy path with a BALANCED proposal: 2 adds + 2 cuts. All four
+    cards land/leave because adds and cuts are pair-matched and the
+    balancing step is a no-op.
+
+    The 'unbalanced lists silently drop adds' scenario is covered
+    separately in test_apply_proposal_balances_excess_adds_via_min."""
     src = _make_dck(
         tmp_path, "[USER] Foo [B3].dck",
-        ["Sol Ring", "OldCard A", "OldCard B"],
+        ["Sol Ring", "OldCard A", "OldCard B", "Filler"],
     )
     proposal = Proposal(
-        adds=["NewCard A", "NewCard B"], cuts=["OldCard A"],
-        rationale="trim duds", source="claude-auto",
+        adds=["NewCard A", "NewCard B"],
+        cuts=["OldCard A", "OldCard B"],
+        rationale="trim duds, add finishers", source="claude-auto",
     )
     out_path = apply_proposal_to_deck(src, proposal)
 
     assert out_path.exists()
     assert out_path != src
     text = out_path.read_text(encoding="utf-8")
-    # Adds appended.
+    # Both adds landed.
     assert "1 NewCard A" in text
     assert "1 NewCard B" in text
-    # Cut card is gone.
+    # Both cuts applied.
     assert "1 OldCard A" not in text
+    assert "1 OldCard B" not in text
     # Other untouched cards survive.
     assert "1 Sol Ring" in text
-    assert "1 OldCard B" in text
+    assert "1 Filler" in text
     # Commander section preserved.
     assert "1 Test Commander" in text
+    # Balancing was a no-op (lengths matched).
+    assert proposal.dropped_for_balance == []
+    assert proposal.applied_adds == ["NewCard A", "NewCard B"]
+    assert proposal.applied_cuts == ["OldCard A", "OldCard B"]
 
 
 def test_apply_proposal_dry_run_does_not_write_or_mutate(tmp_path):
@@ -403,31 +415,183 @@ def test_apply_proposal_handles_filename_without_bracket_suffix(tmp_path):
 def test_apply_proposal_case_insensitive_cuts(tmp_path):
     """Card names in .dck files can have different casing from EDHREC
     scrape output. Cuts should match case-insensitively so a 'sol ring'
-    cut still finds the deck's '1 Sol Ring' line."""
-    src = _make_dck(tmp_path, "[USER] Foo [B3].dck", ["Sol Ring"])
-    proposal = Proposal(adds=[], cuts=["sol ring"], rationale="x")
+    cut still finds the deck's '1 Sol Ring' line. Pinned with a
+    balanced 1-add/1-cut proposal so the balancing step doesn't drop
+    the cut before it gets a chance to match."""
+    src = _make_dck(tmp_path, "[USER] Foo [B3].dck", ["Sol Ring", "Filler"])
+    proposal = Proposal(
+        adds=["Brainstorm"], cuts=["sol ring"], rationale="x",
+    )
     out = apply_proposal_to_deck(src, proposal)
-    assert "1 Sol Ring" not in out.read_text(encoding="utf-8")
+    text = out.read_text(encoding="utf-8")
+    # The Sol Ring main-section line is gone. The substring "Sol Ring"
+    # might survive elsewhere (e.g. metadata Name field), but no
+    # quantity-prefixed line remains.
+    assert "1 Sol Ring" not in text
+    assert "1 Brainstorm" in text
+    assert "1 Filler" in text
 
 
 def test_apply_proposal_handles_edition_codes_in_card_lines(tmp_path):
     """Real .dck lines look like ``1 Sol Ring|CLB|871`` — the cut matcher
-    must compare the name portion before the pipe, not the whole line."""
+    must compare the name portion before the pipe, not the whole line.
+    Balanced 2-add/2-cut proposal so both cuts land."""
     p = tmp_path / "[USER] Foo [B3].dck"
     p.write_text(
         "[metadata]\nName=Test\n[Commander]\n1 Krenko, Mob Boss|FDN|204\n"
-        "[Main]\n1 Sol Ring|CLB|871\n1 Lightning Bolt|PLST|E01-54\n",
+        "[Main]\n1 Sol Ring|CLB|871\n1 Lightning Bolt|PLST|E01-54\n"
+        "1 Forest\n",
         encoding="utf-8",
     )
     proposal = Proposal(
-        adds=[], cuts=["Sol Ring", "Lightning Bolt"], rationale="x",
+        adds=["Brainstorm", "Counterspell"],
+        cuts=["Sol Ring", "Lightning Bolt"],
+        rationale="x",
     )
     out = apply_proposal_to_deck(p, proposal)
     text = out.read_text(encoding="utf-8")
-    assert "Sol Ring" not in text
-    assert "Lightning Bolt" not in text
+    # Both cut main-section lines are gone.
+    assert "1 Sol Ring|CLB|871" not in text
+    assert "1 Lightning Bolt|PLST|E01-54" not in text
+    # Both adds landed.
+    assert "1 Brainstorm" in text
+    assert "1 Counterspell" in text
     # Commander line untouched.
     assert "1 Krenko, Mob Boss|FDN|204" in text
+
+
+# ---------------------------------------------------------------------------
+# Balancing + padding — the legal-deck invariants
+# ---------------------------------------------------------------------------
+
+def test_apply_proposal_balances_excess_adds_via_min(tmp_path):
+    """If Claude proposes more adds than cuts, the surplus adds get
+    sliced off so the resulting deck stays the same size. The dropped
+    cards land on Proposal.dropped_for_balance so the iteration log
+    records 'Claude wanted X but we dropped it to keep the deck legal'."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["A", "B", "C", "D", "OldOne", "OldTwo"],
+    )
+    proposal = Proposal(
+        adds=["Add1", "Add2", "Add3", "Add4", "Add5"],  # 5 adds
+        cuts=["OldOne", "OldTwo"],                       # 2 cuts
+        rationale="curated", source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    # Only the first 2 adds landed (min(5, 2) = 2). Order preserved.
+    assert "1 Add1" in text
+    assert "1 Add2" in text
+    assert "1 Add3" not in text
+    assert "1 Add4" not in text
+    assert "1 Add5" not in text
+    # Both cuts applied.
+    assert "1 OldOne" not in text
+    assert "1 OldTwo" not in text
+    # Proposal records what got dropped.
+    assert proposal.applied_adds == ["Add1", "Add2"]
+    assert proposal.applied_cuts == ["OldOne", "OldTwo"]
+    assert set(proposal.dropped_for_balance) == {"Add3", "Add4", "Add5"}
+
+
+def test_apply_proposal_balances_excess_cuts_via_min(tmp_path):
+    """Mirror case: more cuts than adds → surplus cuts sliced off so
+    the proposed deck doesn't shrink below its original size."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["A", "B", "C", "D", "E"],
+    )
+    proposal = Proposal(
+        adds=["Add1"],                            # 1 add
+        cuts=["A", "B", "C", "D"],                # 4 cuts
+        rationale="curated", source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+
+    assert proposal.applied_adds == ["Add1"]
+    assert proposal.applied_cuts == ["A"]  # only first cut survives min()
+    # The surplus cuts surface on dropped_for_balance.
+    assert set(proposal.dropped_for_balance) == {"B", "C", "D"}
+
+
+def test_apply_proposal_pads_short_deck_to_99(tmp_path):
+    """Source decks shorter than 99 main get padded with basics
+    mirroring the deck's existing color distribution. Without this,
+    the proposed deck inherits the deficit and Forge refuses to load
+    it. proposal.padded_count records the synthesis so the user sees
+    'we added 27 basics' instead of being surprised by the deck size."""
+    # Build a sub-99 deck: 5 main cards including 3 Forests.
+    src = _make_dck(
+        tmp_path, "[USER] Short [B3].dck",
+        ["Forest", "Forest", "Forest", "Sol Ring", "Cultivate"],
+    )
+    proposal = Proposal(
+        adds=["Brainstorm"], cuts=["Sol Ring"], rationale="x",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    # The deck got padded.
+    assert proposal.padded_count > 0
+    # Padded with basics matching the deck's existing distribution —
+    # Forest is the only basic present, so all padding goes to Forest.
+    assert "Forest" in proposal.padded_breakdown
+    # Final main count check: count quantity-prefixed [Main] lines.
+    import re as _re
+    in_main = False
+    total = 0
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_main = s.lower() == "[main]"
+            continue
+        if in_main:
+            m = _re.match(r"^(\d+)\s+([^|]+)", s)
+            if m:
+                total += int(m.group(1))
+    assert total == 99
+
+
+def test_apply_proposal_does_not_pad_when_deck_already_legal(tmp_path):
+    """If the source deck is at 99 main already, padding is a no-op
+    and proposal.padded_count == 0. Pin so a refactor doesn't start
+    over-padding legal decks."""
+    # Build a 99-card mainboard.
+    main_cards = ["Forest"] * 50 + ["Sol Ring"] + ["Mountain"] * 48
+    src = _make_dck(tmp_path, "[USER] Legal [B3].dck", main_cards)
+    proposal = Proposal(
+        adds=["Brainstorm"], cuts=["Sol Ring"], rationale="x",
+    )
+    apply_proposal_to_deck(src, proposal)
+    assert proposal.padded_count == 0
+    assert proposal.padded_breakdown == {}
+
+
+def test_apply_proposal_records_applied_fields_on_dry_run(tmp_path):
+    """Dry-run skips the file write but still populates the
+    applied_adds / applied_cuts / dropped_for_balance / padded_count
+    fields so the CLI summary can preview what WOULD have landed."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "OldA", "OldB"],
+    )
+    proposal = Proposal(
+        adds=["NewA", "NewB", "NewC"],
+        cuts=["OldA"],
+        rationale="x",
+    )
+    out_path = apply_proposal_to_deck(src, proposal, dry_run=True)
+
+    assert not out_path.exists()
+    # Source still untouched.
+    src_text = src.read_text(encoding="utf-8")
+    assert "1 NewA" not in src_text
+    # But the proposal carries the projected result.
+    assert proposal.applied_adds == ["NewA"]  # min(3, 1) = 1
+    assert proposal.applied_cuts == ["OldA"]
+    assert set(proposal.dropped_for_balance) == {"NewB", "NewC"}
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +726,93 @@ def test_auto_curate_main_writes_versioned_file_without_dry_run(
     assert "Random Filler" not in text
 
 
+def test_auto_curate_main_summary_surfaces_dropped_for_balance(
+    tmp_path, monkeypatch, capsys,
+):
+    """When Claude proposes more adds than cuts (or vice versa), the
+    CLI summary tells the user what got dropped to keep the deck
+    legal. Without this surfacing, an unattended overnight run would
+    silently produce balanced .dcks with no way to audit what Claude
+    wanted vs what landed."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    # Claude proposes 3 adds + 1 cut → 2 adds get dropped for balance.
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["KeepMe", "DropA", "DropB"],
+        "cuts": ["OldCard"],
+        "rationale": "+draw -filler",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] Imbalanced [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Imbalanced\nMoxfield=imb-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 OldCard\n1 Filler\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+    ])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    # Headline shows requested → applied counts.
+    assert "Adds requested (3) → applied (1)" in out
+    assert "Cuts requested (1) → applied (1)" in out
+    # The "Dropped to keep deck size legal" block surfaces with the
+    # specific cards that didn't land.
+    assert "Dropped to keep deck size legal" in out
+    assert "DropA" in out
+    assert "DropB" in out
+
+
+def test_auto_curate_main_json_mode_surfaces_applied_fields(
+    tmp_path, monkeypatch, capsys,
+):
+    """JSON output includes applied_adds / applied_cuts / dropped_for_
+    balance / padded_count so batch drivers can verify what landed
+    in the .dck without re-parsing the file."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A1", "A2", "A3"],
+        "cuts": ["OldA"],
+        "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    deck = tmp_path / "[USER] JsonImb [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=JsonImb\nMoxfield=json-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 OldA\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--dry-run", "--json",
+    ])
+    assert rc == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    prop = payload["proposal"]
+    assert prop["adds"] == ["A1", "A2", "A3"]            # requested
+    assert prop["applied_adds"] == ["A1"]                # min(3,1)=1
+    assert prop["applied_cuts"] == ["OldA"]
+    assert set(prop["dropped_for_balance"]) == {"A2", "A3"}
+
+
 def test_auto_curate_main_returns_nonzero_on_missing_deck(tmp_path, capsys):
     """A batch driver should treat exit code != 0 as 'skip this deck'.
     Missing file → 2 (argparse-style 'invocation error')."""
@@ -632,8 +883,13 @@ def test_auto_curate_main_logs_iteration_to_knowledge_log(
     assert it.bracket == 3
     assert it.verdict == "pending"
     assert it.audit_version == "claude-auto"
+    # Manifest's added/removed reflect what ACTUALLY LANDED (after
+    # balancing). With 1 add + 1 cut, both land — applied == requested.
     assert it.audit_manifest["added"] == ["Brainstorm"]
     assert it.audit_manifest["removed"] == ["Random Filler"]
+    # requested_* fields preserve Claude's original intent for analysis.
+    assert it.audit_manifest["requested_adds"] == ["Brainstorm"]
+    assert it.audit_manifest["requested_cuts"] == ["Random Filler"]
     assert it.audit_manifest["source"] == "claude-auto"
     assert it.audit_manifest["src_deck"] == "[USER] LogTest [B3].dck"
     # Deck snapshot captured for reproducibility.
