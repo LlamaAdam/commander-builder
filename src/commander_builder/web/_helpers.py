@@ -369,11 +369,17 @@ def _apply_swaps_to_dck(
 
     Handling:
     - The [Commander] section is preserved as-is (audits never cut commanders).
-    - The [Main] section is rebuilt: drop any line whose card name
-      matches a `cut` recommendation; append `1 <card>` for each `add`.
+    - The [Main] section is rebuilt: each cut DECREMENTS the matching
+      card's total quantity by 1 (not the line-remove-by-name behavior
+      this had pre-2026-05-15). For ``cuts=["Mountain", "Mountain"]``
+      on a deck containing ``27 Mountain|EXP|123``, the line becomes
+      ``25 Mountain|EXP|123`` — not gone entirely. A cut that drives
+      the quantity to zero drops the whole line.
+    - Adds always create new quantity-1 lines (no merging into an
+      existing line of the same name; Forge handles duplicates).
     - Other sections (sideboard, considering, metadata) are preserved.
 
-    **Adds and cuts are balanced** — Commander needs exactly 99 main +
+    **Adds and cuts are balanced** -- Commander needs exactly 99 main +
     1 commander. The advisor's heuristic produces M adds and N cuts
     independently and they're often unequal, leaving an illegal deck
     that Forge refuses to load. We trim whichever list is longer so
@@ -383,21 +389,43 @@ def _apply_swaps_to_dck(
     in EDHREC top/synergy" guesses).
 
     Card names are matched case-insensitively against the leading
-    ``<qty> <Name>[|<SET>|<CN>]`` pattern.
+    ``<qty> <Name>[|<SET>|<CN>]`` pattern. The edition tail (|SET|CN)
+    is preserved verbatim when a line is rewritten with a smaller
+    quantity.
+
+    ``removed_card_names`` returned reflects what ACTUALLY came out
+    of the deck, one entry per instance. With cuts=["Mountain",
+    "Mountain"] against a 27-Mountain stack, ``removed`` is
+    ``["Mountain", "Mountain"]``. With cuts=["Mountain", "Mountain"]
+    against a 1-Mountain deck, ``removed`` is ``["Mountain"]`` (only
+    one instance was actually available to remove).
     """
     import re as _re
+    from collections import Counter as _Counter
+
     add_names = [r.card for r in recommendations if r.action == "add"]
     cuts = [r.card for r in recommendations if r.action == "cut"]
     # Balance to keep Commander deck size legal.
     n = min(len(add_names), len(cuts))
     add_names = add_names[:n]
     cuts = cuts[:n]
-    cut_set = {c.lower() for c in cuts}
+    # Quantity-aware cut budget -- count occurrences so duplicate cuts
+    # ("Mountain" listed twice) decrement the named card by 2 rather
+    # than collapsing to a single line-remove.
+    cuts_remaining: _Counter = _Counter(c.lower() for c in cuts)
+    # Map case-folded card name -> canonical casing from the cut
+    # request. Used so ``removed`` returns the casing the caller
+    # passed in (matches what audit-panel rows show) regardless of
+    # how the .dck file capitalized the name on disk. First-occurrence
+    # wins on dedup.
+    cut_canonical: dict[str, str] = {}
+    for c in cuts:
+        cut_canonical.setdefault(c.lower(), c)
 
     out_lines: list[str] = []
     in_main = False
     main_kept = 0
-    in_metadata = False
+    removed: list[str] = []
     line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
 
     for raw in original_text.splitlines():
@@ -413,32 +441,57 @@ def _apply_swaps_to_dck(
                 for name in add_names:
                     out_lines.append(_format_added_line(name))
             in_main = stripped.lower() == "[main]"
-            in_metadata = stripped.lower() == "[metadata]"
             out_lines.append(raw)
             continue
 
-        if in_main:
-            m = line_pattern.match(stripped)
-            if m:
-                name = m.group(2).strip().lower()
-                if name in cut_set:
-                    continue  # drop this line
-                # Sum the quantity prefix, not the line count — `5 Forest`
-                # is one line but five cards. Counting lines made the UI
-                # report '83 mainboard' on a deck Forge actually loaded
-                # as the legal 99.
-                try:
-                    main_kept += int(m.group(1))
-                except (TypeError, ValueError):
-                    main_kept += 1
+        if not in_main:
+            # Non-main section content passes through unchanged.
             out_lines.append(raw)
             continue
 
-        # Non-main section content passes through.
-        out_lines.append(raw)
+        m = line_pattern.match(stripped)
+        if not m:
+            # Lines that don't match the qty/name pattern (rare) pass
+            # through unchanged. main_kept is unaffected.
+            out_lines.append(raw)
+            continue
+
+        try:
+            qty = int(m.group(1))
+        except (TypeError, ValueError):
+            qty = 1
+        raw_name = m.group(2).strip()
+        edition_tail = m.group(3) or ""
+        name_lower = raw_name.lower()
+
+        requested = cuts_remaining.get(name_lower, 0)
+        if requested <= 0:
+            # Not a cut target -- preserve line as-is.
+            main_kept += qty
+            out_lines.append(raw)
+            continue
+
+        # Decrement this line's quantity by the smaller of (requested,
+        # available). Spillover decrements stay in cuts_remaining so a
+        # next line of the same name (rare but legal -- e.g. two
+        # different printings of the same card) gets the rest.
+        to_remove = min(requested, qty)
+        cuts_remaining[name_lower] = requested - to_remove
+        if cuts_remaining[name_lower] == 0:
+            del cuts_remaining[name_lower]
+        canonical = cut_canonical.get(name_lower, raw_name)
+        for _ in range(to_remove):
+            removed.append(canonical)
+
+        new_qty = qty - to_remove
+        if new_qty <= 0:
+            # Line fully cut -- drop it.
+            continue
+        # Partial cut -- rewrite the line preserving casing + edition.
+        out_lines.append(f"{new_qty} {raw_name}{edition_tail}")
+        main_kept += new_qty
 
     # If [Main] was the last section, append-on-exit didn't fire above.
-    # Detect by checking whether all add_names already landed.
     if in_main:
         for name in add_names:
             out_lines.append(_format_added_line(name))
@@ -446,7 +499,7 @@ def _apply_swaps_to_dck(
     new_text = "\n".join(out_lines)
     if not new_text.endswith("\n"):
         new_text += "\n"
-    return new_text, add_names, cuts, main_kept
+    return new_text, list(add_names), removed, main_kept
 
 
 def _total_price_for_deck_text(text: str) -> tuple[Optional[float], int]:

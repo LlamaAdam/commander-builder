@@ -1135,6 +1135,139 @@ def test_apply_swaps_case_insensitive_cut_match():
     assert added == ["Mana Vault"]
 
 
+# ---------------------------------------------------------------------------
+# Quantity-aware cuts (2026-05-15 fix) -- previously, ``cuts=["Mountain",
+# "Mountain"]`` on a deck with one ``27 Mountain|...`` stack removed the
+# WHOLE line. New semantics decrement the quantity by the number of
+# duplicate cut entries.
+# ---------------------------------------------------------------------------
+
+def test_apply_swaps_duplicate_cut_decrements_quantity():
+    """``cuts=["Mountain", "Mountain"]`` on a 27-Mountain stack should
+    leave ``25 Mountain``, not remove the whole line. Regression for
+    the live-smoke bug discovered during auto-curate testing."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n27 Mountain|EXP|123\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Mountain", action="cut", reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="cut", reason="", evidence={}),
+        SimpleNamespace(card="Path of Ancestry", action="add",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Secluded Courtyard", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    # The Mountain line still exists, with 2 fewer copies.
+    assert "25 Mountain|EXP|123" in new_text
+    # Removed accounts BOTH cuts.
+    assert removed == ["Mountain", "Mountain"]
+    # Sol Ring untouched.
+    assert "1 Sol Ring" in new_text
+    # kept_count = 25 Mountains + 1 Sol Ring.
+    assert kept == 26
+
+
+def test_apply_swaps_cut_to_zero_removes_line():
+    """If decrement drives the line's quantity to zero, the whole line
+    drops. Same effect as the old line-remove behavior for quantity-1
+    lines (single Sol Ring etc.)."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Sol Ring|CLB|871\n1 Brainstorm\n"
+    recs = [
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Counterspell", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    # Sol Ring's line is gone entirely.
+    assert "Sol Ring" not in new_text
+    # Removed entry uses the cut's canonical casing.
+    assert removed == ["Sol Ring"]
+    # Brainstorm + Counterspell remain.
+    assert "1 Brainstorm" in new_text
+    assert "1 Counterspell" in new_text
+    assert kept == 1
+
+
+def test_apply_swaps_three_cuts_two_in_line_drops_line():
+    """If the user asks for 3 cuts but only 2 exist, drop the 2 that
+    exist and leave the 3rd unmatched. ``removed`` reports only what
+    actually came out."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n2 Mountain\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Mountain", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="A", action="add", reason="", evidence={}),
+        SimpleNamespace(card="B", action="add", reason="", evidence={}),
+        SimpleNamespace(card="C", action="add", reason="", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    # All 2 Mountains removed, line gone.
+    assert "Mountain" not in new_text
+    # removed reports only 2 (matches what actually happened); 3rd cut
+    # was unmatched and silently dropped.
+    assert removed == ["Mountain", "Mountain"]
+    # All 3 adds appended.
+    assert "1 A" in new_text
+    assert "1 B" in new_text
+    assert "1 C" in new_text
+
+
+def test_apply_swaps_cuts_across_multiple_lines_for_same_name():
+    """Rare but legal: same card name on two different printing
+    lines (e.g. 1 Mountain|CLB|... + 1 Mountain|EXP|...). A single
+    Mountain cut decrements the FIRST matching line (in deck order).
+    Two Mountain cuts decrement both lines, dropping each."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = (
+        "[Main]\n"
+        "1 Mountain|CLB|871\n"
+        "1 Mountain|EXP|123\n"
+        "1 Sol Ring\n"
+    )
+    recs = [
+        SimpleNamespace(card="Mountain", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="A", action="add", reason="", evidence={}),
+        SimpleNamespace(card="B", action="add", reason="", evidence={}),
+    ]
+    new_text, _, removed, kept = _apply_swaps_to_dck(original, recs)
+    # Both Mountain lines gone.
+    assert "Mountain" not in new_text
+    assert removed == ["Mountain", "Mountain"]
+    # Sol Ring untouched.
+    assert "1 Sol Ring" in new_text
+
+
+def test_apply_swaps_preserves_edition_codes_on_partial_cut():
+    """When a partial cut leaves a quantity > 0, the rewritten line
+    preserves the edition code suffix (|SET|CN) verbatim."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n5 Forest|CMM|384\n"
+    recs = [
+        SimpleNamespace(card="Forest", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Brainstorm", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, _, removed, _ = _apply_swaps_to_dck(original, recs)
+    assert "4 Forest|CMM|384" in new_text
+    assert removed == ["Forest"]
+
+
 def test_format_added_line_resolves_set_and_cn(monkeypatch):
     """Appended cards should write '1 <name>|<SET>|<CN>' so Forge's
     deck loader doesn't trip on ambiguous name-only resolution."""
@@ -1446,9 +1579,19 @@ def test_audit_endpoint_returns_full_proposed_deck(client, monkeypatch):
     resp = client.get("/api/audit?deck=Alpha&bracket=3")
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
-    # Full proposed deck text — Cultivate dropped, Lotus Cobra added.
+    # The add lands as a new line.
     assert "1 Lotus Cobra" in body["proposed_text"]
-    assert "Cultivate" not in body["proposed_text"]
+    # The cut decrements Cultivate count by 1 (quantity-aware semantics
+    # added 2026-05-15 -- see _apply_swaps_to_dck). The test fixture
+    # ships 5 Cultivate lines for ample test data; one cut means we
+    # expect EXACTLY 4 Cultivate lines remaining, not zero.
+    cultivate_lines = sum(
+        1 for line in body["proposed_text"].splitlines()
+        if "Cultivate" in line and line.strip().startswith("1 ")
+    )
+    assert cultivate_lines == 4, (
+        f"expected 4 surviving Cultivate lines after 1 cut, got {cultivate_lines}"
+    )
     # Diff payload populated.
     assert any(a["card"] == "Lotus Cobra" for a in body["added"])
     assert any(r["card"] == "Cultivate" for r in body["removed"])
