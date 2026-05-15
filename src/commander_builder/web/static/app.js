@@ -823,6 +823,18 @@ function setAnthropicKey(k) {
   } catch (_e) { /* ignore */ }
 }
 
+// Whitelist of valid audit source values. Must mirror the server-side
+// validation in routes_audit.py and _AUDIT_SOURCE_OPTIONS above.
+// Anything not in this set is treated as no-override so the user's
+// stored preference applies. Belt-and-suspenders against the kind of
+// bug discovered 2026-05-15: ``button.addEventListener("click",
+// loadAdvise)`` passes the PointerEvent as the first positional arg,
+// which serialized as "[object PointerEvent]" in the URL and made
+// the server reject the audit. Even with the binding fixed (callers
+// now wrap in `() => loadAdvise()`), the type check here keeps a
+// future regression from reaching the server.
+const _VALID_AUDIT_SOURCES = new Set(["heuristic", "claude", "bracket_peers"]);
+
 async function loadAdvise(sourceOverride) {
   // ``sourceOverride`` (optional) bypasses the user's stored
   // preference for THIS call only — used by the dashboard's
@@ -830,6 +842,16 @@ async function loadAdvise(sourceOverride) {
   // a user click and shouldn't consume a Claude API quota), and
   // by the "Run with Claude" upgrade button (forces "claude").
   // When omitted, the user's stored preference applies as before.
+  //
+  // Defensive: only honor sourceOverride if it's a known-good string.
+  // A DOM event (PointerEvent etc.) accidentally passed by a careless
+  // binding is truthy but not a valid source — coerce to undefined so
+  // the stored pref applies instead of letting "[object PointerEvent]"
+  // reach the server.
+  if (typeof sourceOverride !== "string"
+      || !_VALID_AUDIT_SOURCES.has(sourceOverride)) {
+    sourceOverride = undefined;
+  }
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
   if (!sug) return;
@@ -2496,7 +2518,10 @@ function renderDashboard(data, iterations) {
 
   const auditBtn = el("button", {}, "Run audit");
   auditBtn.title = "Generate swap suggestions via heuristic + EDHREC";
-  auditBtn.addEventListener("click", loadAdvise);
+  // Wrap in an arrow so the PointerEvent isn't passed as a positional
+  // arg to loadAdvise (where it would be misread as sourceOverride
+  // and serialize as "[object PointerEvent]" in the URL).
+  auditBtn.addEventListener("click", () => loadAdvise());
   actions.appendChild(auditBtn);
 
   const editBtn = el("button", {}, "Edit deck");
@@ -2579,7 +2604,9 @@ function renderDashboard(data, iterations) {
     renderSuggestions(sugPanel, data.suggested_adds);
   } else {
     const btn = el("button", { class: "advise-btn" }, "Get suggestions");
-    btn.addEventListener("click", loadAdvise);
+    // Wrap so the PointerEvent isn't passed as sourceOverride -- same
+    // bug shape as the "Run audit" button above.
+    btn.addEventListener("click", () => loadAdvise());
     sugPanel.appendChild(btn);
     sugPanel.appendChild(el(
       "p", { class: "muted" },
