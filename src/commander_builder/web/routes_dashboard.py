@@ -28,6 +28,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from ..deck_dashboard import build_dashboard
 from ..knowledge_log import (
+    iteration_graph_for_deck,
     iterations_for_deck,
     pricing_series_for_deck,
     recent_iterations,
@@ -150,6 +151,37 @@ def make_dashboard_blueprint(
             "deck_id": deck_id,
             "count": len(points),
             "points": points,
+        })
+
+    @bp.route("/api/iteration_graph")
+    def iteration_graph_route():
+        """Nodes + edges projection of one deck's iteration chain.
+
+        Returns the shape from ``iteration_graph_for_deck``:
+
+            {
+              "deck_id": str,
+              "nodes": [{id, iteration_n, bracket, verdict,
+                         created_at, card_count, price_usd,
+                         audit_version}, ...],
+              "edges": [{from_id, to_id, applied_adds, applied_cuts,
+                         rationale, price_delta_usd, bracket_delta}, ...]
+            }
+
+        Empty nodes/edges arrays when the deck has no iterations —
+        client hides the "View graph" panel rather than crashing
+        on null.
+        """
+        deck_id = request.args.get("deck")
+        if not deck_id:
+            return jsonify({"error": "deck is required"}), 400
+        try:
+            graph = iteration_graph_for_deck(deck_id, db_path=knowledge_db)
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({
+            "deck_id": deck_id,
+            **graph,
         })
 
     @bp.route("/api/verdict_breakdown")

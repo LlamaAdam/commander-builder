@@ -380,6 +380,161 @@ def verdict_breakdown_for_deck(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Iteration graph projection — feeds the SVG dashboard view
+# ---------------------------------------------------------------------------
+#
+# The iteration table is a self-referencing tree (parent_id → another
+# row in the same table). Each row carries the DIFF that produced it
+# from its parent (audit_manifest.added / .removed). For visualization
+# we want a nodes+edges projection the client can render directly as
+# an SVG flow chart.
+#
+# Shape:
+#   {
+#     "nodes": [{id, iteration_n, bracket, verdict, created_at,
+#                card_count, price_usd, audit_version}, ...],
+#     "edges": [{from_id, to_id, applied_adds, applied_cuts, rationale,
+#                price_delta_usd, bracket_delta}, ...]
+#   }
+#
+# The helper does no rendering — just the projection. UI choices like
+# layout, sorting within the visual, or cap on adds/cuts displayed live
+# in the client.
+
+
+import re as _re
+
+_MAIN_LINE_RE = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+
+
+def _count_main_cards(deck_snapshot: Optional[str]) -> int:
+    """Count quantity-summed [Main] cards in a .dck snapshot.
+
+    Walks line-by-line; only counts lines inside the [Main] section.
+    Commander, sideboard, considering sections are excluded — they
+    don't change between iterations in a way that's worth surfacing
+    on the graph. Returns 0 for None / empty snapshot.
+    """
+    if not deck_snapshot:
+        return 0
+    total = 0
+    in_main = False
+    for raw in deck_snapshot.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_main = stripped.lower() == "[main]"
+            continue
+        if in_main:
+            m = _MAIN_LINE_RE.match(stripped)
+            if m:
+                try:
+                    total += int(m.group(1))
+                except (TypeError, ValueError):
+                    total += 1
+    return total
+
+
+def _node_price_from_manifest(manifest: Optional[dict]) -> Optional[float]:
+    """Pull total_price_usd out of audit_manifest.pricing if present.
+
+    Mirrors the lookup pricing_series_for_deck does. Returns None
+    when the manifest is missing, the pricing block is missing, or
+    the price is non-numeric — never crashes, never invents a 0.
+    """
+    if not isinstance(manifest, dict):
+        return None
+    pricing = manifest.get("pricing")
+    if not isinstance(pricing, dict):
+        return None
+    price = pricing.get("total_price_usd")
+    if isinstance(price, (int, float)):
+        return float(price)
+    return None
+
+
+def iteration_graph_for_deck(
+    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+) -> dict:
+    """Project one deck's iteration chain as a JSON-friendly graph.
+
+    Returns ``{"nodes": [...], "edges": [...]}`` ready for the SVG
+    renderer. Empty graph (both lists empty) when the deck has no
+    iterations — caller can hide the panel rather than crash on
+    null.
+
+    Nodes are ordered by iteration id (== chronological). Edges
+    come from parent_id; iterations without a parent contribute no
+    edge (chain roots). Forked chains (rare but possible) render as
+    separate components — the renderer can lay them out side-by-side.
+
+    Edge fields:
+      applied_adds / applied_cuts — the child's audit_manifest's
+        added/removed lists. Empty when the manifest is missing
+        or the row pre-dates the enrichment.
+      rationale — the child's audit_manifest.rationale, empty on miss.
+      price_delta_usd — child.price - parent.price. None if either
+        side lacks pricing; treating absence as 0 would lie.
+      bracket_delta — child.bracket - parent.bracket. Signed int.
+    """
+    init_db(db_path)
+    nodes_by_id: dict[int, dict] = {}
+    iterations: list[Iteration] = []
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT * FROM iterations WHERE deck_id = ? ORDER BY id ASC",
+            (deck_id,),
+        )
+        iterations = [Iteration.from_row(r) for r in cur.fetchall()]
+
+    if not iterations:
+        return {"nodes": [], "edges": []}
+
+    nodes: list[dict] = []
+    for idx, it in enumerate(iterations):
+        node = {
+            "id": it.id,
+            "iteration_n": idx + 1,
+            "bracket": it.bracket,
+            "verdict": it.verdict,
+            "created_at": it.created_at,
+            "audit_version": it.audit_version,
+            "card_count": _count_main_cards(it.deck_snapshot),
+            "price_usd": _node_price_from_manifest(it.audit_manifest),
+        }
+        nodes.append(node)
+        nodes_by_id[it.id] = node
+
+    edges: list[dict] = []
+    for it in iterations:
+        if it.parent_id is None or it.parent_id not in nodes_by_id:
+            continue
+        parent_node = nodes_by_id[it.parent_id]
+        child_node = nodes_by_id[it.id]
+        manifest = it.audit_manifest if isinstance(it.audit_manifest, dict) else {}
+
+        parent_price = parent_node.get("price_usd")
+        child_price = child_node.get("price_usd")
+        if isinstance(parent_price, (int, float)) and isinstance(child_price, (int, float)):
+            price_delta: Optional[float] = round(child_price - parent_price, 2)
+        else:
+            price_delta = None
+
+        edges.append({
+            "from_id": it.parent_id,
+            "to_id": it.id,
+            "applied_adds": list(manifest.get("added") or []),
+            "applied_cuts": list(manifest.get("removed") or []),
+            "rationale": str(manifest.get("rationale") or ""),
+            "price_delta_usd": price_delta,
+            "bracket_delta": (child_node["bracket"] or 0) - (parent_node["bracket"] or 0),
+        })
+
+    return {"nodes": nodes, "edges": edges}
+
+
 if __name__ == "__main__":
     # Smoke entry: print stats for the default DB.
     s = stats_summary()
