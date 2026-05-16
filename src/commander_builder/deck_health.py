@@ -389,18 +389,61 @@ def compute_spell_density(deck_text: str) -> dict:
 # `{X}` token to identify variable-cost spells.
 _X_COST_RE = re.compile(r"\{X\}")
 
+# Pure-mana activated-ability cost: an activation whose cost is one or
+# more mana symbols (digits, color letters, hybrid slash, Phyrexian,
+# snow) followed by a colon, with NO ``{T}`` / ``{Q}`` and no non-mana
+# cost segment. Catches Walking Ballista's ``{4}: ...``, Spikeshot
+# Goblin's ``{R}: ...``, Inkmoth Nexus's ``{1}: ...``, etc.
+_MANA_SINK_ACTIVATION_RE = re.compile(
+    r"\{[0-9XWUBRGCPS/]+\}(?:\s*,\s*\{[0-9XWUBRGCPS/]+\})*\s*:",
+)
+
+# Used by the self-untap-loop heuristic to detect any mana symbol in
+# the cost segment of an activated ability (including ``{N}, {T}:``).
+_ANY_MANA_SYMBOL_RE = re.compile(r"\{[0-9XWUBRGCPS/]+\}")
+
+
+def _has_self_untap_loop(card_name: str, oracle_text: str) -> bool:
+    """Staff-of-Domination pattern: at least one activated ability has
+    mana in its cost AND the oracle text contains ``Untap <self_name>``.
+    The self-untap recycles the tap, so arbitrary mana can be poured
+    into the prior activations over a single turn.
+
+    The substring check on the literal card name keeps the heuristic
+    narrow: ``Untap target creature`` and similar generic effects
+    don't match.
+    """
+    if not card_name or not oracle_text:
+        return False
+    if f"Untap {card_name}" not in oracle_text:
+        return False
+    for line in oracle_text.split("\n"):
+        if ":" not in line:
+            continue
+        cost = line.split(":", 1)[0]
+        if _ANY_MANA_SYMBOL_RE.search(cost):
+            return True
+    return False
+
 
 def count_mana_sinks(deck_text: str) -> dict:
     """Count cards that can repeatedly consume mana for value.
 
-    The MVP heuristic: any spell with ``{X}`` in its mana_cost. This
-    catches X-spells (Genesis Wave, Comet Storm, Walking Ballista,
-    Hangarback Walker, Profane Command, Pull from Tomorrow, etc.)
-    which are the dominant "what do I do with 12 mana on turn 9"
-    category. Misses uncapped activated abilities (e.g. Staff of
-    Domination, Throne of the God-Pharaoh) -- those would need
-    oracle_text scanning. Tracked as a follow-up if the count
-    proves systematically too low.
+    Three heuristics, OR'd per card:
+
+    1. ``{X}`` in mana_cost — X-spells (Genesis Wave, Comet Storm,
+       Walking Ballista, Hangarback Walker, Profane Command,
+       Pull from Tomorrow, etc.). The dominant "what do I do with
+       12 mana on turn 9" category.
+    2. Pure-mana activated ability — oracle text contains
+       ``{cost}: ...`` where the cost is mana-only (no ``{T}``).
+       Catches Spikeshot Goblin (``{R}:``), Inkmoth Nexus (``{1}:``),
+       Walking Ballista's ``{4}:`` add-counter ability, etc. (X-cost
+       creatures hit both #1 and #2; deduped via ``seen_lower``.)
+    3. Self-untap loop — ``Untap <self_name>`` clause plus at least
+       one activated ability with mana in its cost. Catches Staff of
+       Domination's loop (every ability is ``{N}, {T}:`` but the
+       self-untap recycles the tap).
 
     Returns ``{"count": int, "cards": [str, ...]}``.
     """
@@ -418,7 +461,22 @@ def count_mana_sinks(deck_text: str) -> dict:
             faces = card.get("card_faces") or []
             if faces:
                 mana_cost = (faces[0] or {}).get("mana_cost") or ""
-        if _X_COST_RE.search(mana_cost):
+        # oracle_text similarly may live on either the top level (most
+        # cards) or split across ``card_faces`` (MDFCs, split, adventure).
+        oracle_text = card.get("oracle_text") or ""
+        if not oracle_text:
+            faces = card.get("card_faces") or []
+            if faces:
+                oracle_text = "\n".join(
+                    (f or {}).get("oracle_text") or "" for f in faces
+                )
+        card_name = card.get("name") or name
+        is_sink = bool(
+            _X_COST_RE.search(mana_cost)
+            or _MANA_SINK_ACTIVATION_RE.search(oracle_text)
+            or _has_self_untap_loop(card_name, oracle_text)
+        )
+        if is_sink:
             count += qty
             key = name.lower()
             if key not in seen_lower:

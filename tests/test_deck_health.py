@@ -416,6 +416,151 @@ def test_count_mana_sinks_zero_for_fixed_cost_deck(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Oracle-text activated-ability mana sinks (TIER-2.1 fix). The
+# {X}-in-mana_cost heuristic misses Spikeshot Goblin's ``{R}: ...``,
+# Inkmoth Nexus's ``{1}: ...``, and self-untap loops like Staff of
+# Domination. Oracle text below is sourced verbatim from Scryfall
+# (scryfall.com/search?q=!"<card name>").
+# ---------------------------------------------------------------------------
+
+def test_count_mana_sinks_finds_pure_mana_activated_ability(monkeypatch):
+    """Spikeshot Goblin's ``{R}: deal 1 damage`` is a mana sink: pay
+    {R} repeatedly for value. Missed by the {X}-cost heuristic because
+    the printed mana_cost is the fixed ``{1}{R}``."""
+    def _fake(name, **_kw):
+        return {
+            "name": name,
+            "mana_cost": "{1}{R}",
+            "oracle_text": "{R}: Spikeshot Goblin deals 1 damage to any target.",
+            "type_line": "Creature — Goblin",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    deck = "[Main]\n1 Spikeshot Goblin\n"
+    result = deck_health.count_mana_sinks(deck)
+    assert result["count"] == 1
+    assert "Spikeshot Goblin" in result["cards"]
+
+
+def test_count_mana_sinks_finds_manland_activation(monkeypatch):
+    """Inkmoth Nexus's ``{1}: Inkmoth Nexus becomes a 1/1 [...]`` is a
+    sink: in long games you keep pumping mana into manland activations
+    plus combat damage."""
+    def _fake(name, **_kw):
+        return {
+            "name": name,
+            "mana_cost": "",
+            "oracle_text": (
+                "{T}: Add {C}.\n"
+                "{1}: Inkmoth Nexus becomes a 1/1 Phyrexian Insect "
+                "artifact creature with flying and infect until end "
+                "of turn. It's still a land."
+            ),
+            "type_line": "Land",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    deck = "[Main]\n1 Inkmoth Nexus\n"
+    result = deck_health.count_mana_sinks(deck)
+    assert result["count"] == 1
+    assert "Inkmoth Nexus" in result["cards"]
+
+
+def test_count_mana_sinks_finds_self_untap_loop(monkeypatch):
+    """Staff of Domination loops via the ``{5}, {T}: Untap Staff of
+    Domination.`` clause: arbitrary mana can be poured into the prior
+    activations over a single turn, so it's a sink even though every
+    individual ability has ``{T}`` in its cost."""
+    def _fake(name, **_kw):
+        return {
+            "name": name,
+            "mana_cost": "{5}",
+            "oracle_text": (
+                "{1}, {T}: You gain 1 life.\n"
+                "{2}, {T}: Untap up to two target creatures.\n"
+                "{3}, {T}: Draw a card.\n"
+                "{4}, {T}: Each opponent loses 1 life.\n"
+                "{5}, {T}: Untap Staff of Domination."
+            ),
+            "type_line": "Artifact",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    deck = "[Main]\n1 Staff of Domination\n"
+    result = deck_health.count_mana_sinks(deck)
+    assert result["count"] == 1
+    assert "Staff of Domination" in result["cards"]
+
+
+def test_count_mana_sinks_skips_tap_only_abilities(monkeypatch):
+    """Activated abilities gated on ``{T}`` with no self-untap aren't
+    sinks (they're once-per-turn). Sol Ring (tap for mana), Mind Stone
+    (tap+mana+sac for one-shot draw), and Icy Manipulator (``{1}, {T}:
+    Tap ...``) should NOT count."""
+    cards = {
+        "sol ring": {
+            "name": "Sol Ring",
+            "mana_cost": "{1}",
+            "oracle_text": "{T}: Add {C}{C}.",
+            "type_line": "Artifact",
+        },
+        "mind stone": {
+            "name": "Mind Stone",
+            "mana_cost": "{2}",
+            "oracle_text": (
+                "{T}: Add {C}.\n"
+                "{1}, {T}, Sacrifice Mind Stone: Draw a card."
+            ),
+            "type_line": "Artifact",
+        },
+        "icy manipulator": {
+            "name": "Icy Manipulator",
+            "mana_cost": "{4}",
+            "oracle_text": (
+                "{1}, {T}: Tap target artifact, creature, or land."
+            ),
+            "type_line": "Artifact",
+        },
+    }
+
+    def _fake(name, **_kw):
+        return cards.get(name.lower())
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    deck = "[Main]\n1 Sol Ring\n1 Mind Stone\n1 Icy Manipulator\n"
+    result = deck_health.count_mana_sinks(deck)
+    assert result["count"] == 0
+
+
+def test_count_mana_sinks_does_not_double_count_x_spell_with_activation(monkeypatch):
+    """Walking Ballista is both an X-cost spell AND has a ``{4}: ...``
+    activation. Count it once, not twice."""
+    def _fake(name, **_kw):
+        return {
+            "name": name,
+            "mana_cost": "{X}{X}",
+            "oracle_text": (
+                "Walking Ballista enters with X +1/+1 counters on it.\n"
+                "{4}: Put a +1/+1 counter on Walking Ballista.\n"
+                "Remove a +1/+1 counter from Walking Ballista: "
+                "It deals 1 damage to any target."
+            ),
+            "type_line": "Artifact Creature — Construct",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    deck = "[Main]\n1 Walking Ballista\n"
+    result = deck_health.count_mana_sinks(deck)
+    assert result["count"] == 1
+    assert result["cards"] == ["Walking Ballista"]
+
+
+# ---------------------------------------------------------------------------
 # compute_deck_health -- the aggregator
 # ---------------------------------------------------------------------------
 
