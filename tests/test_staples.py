@@ -385,13 +385,15 @@ def test_count_deck_roles_counts_per_role(monkeypatch):
     # produces deterministic buckets.
     fake_db = {
         "sol ring": ("Add {C}{C}.", "Artifact"),
-        # Arcane Signet's real oracle reads "Add one mana of any color in
-        # your commander's color identity." which the classifier's strict
-        # `add \{X\}` regex doesn't catch — it falls through to "other".
-        # Use a fake-but-regex-friendly variant here so the test exercises
-        # the "this is a ramp card" path explicitly. Real-world Arcane
-        # Signet undercounting is tracked as a known classifier gap.
-        "arcane signet": ("Add {W} or {U}.", "Artifact"),
+        # Arcane Signet now classifies via its REAL oracle template
+        # ("Add one mana of any color in your commander's color
+        # identity") after the 2026-05-16 natural-language ramp regex
+        # was added. Real text lives in tests/fixtures/real_oracles.py;
+        # pinned here too so this test exercises the same path.
+        "arcane signet": (
+            "{T}: Add one mana of any color in your commander's color identity.",
+            "Artifact",
+        ),
         "rampant growth": (
             "Search your library for a basic land card and put it onto the battlefield tapped.",
             "Sorcery",

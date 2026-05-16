@@ -59,6 +59,21 @@ from __future__ import annotations
 # Card name → ``{"oracle_text": str, "type_line": str}`` dict, sourced
 # verbatim from Scryfall. Keys sorted alphabetically by card name.
 ORACLES: dict[str, dict[str, str]] = {
+    # Arcane Signet — natural-language "Add one mana of any color"
+    # template that didn't match the classifier's strict
+    # ``add \{[wubrgc]\}`` regex. Live-audit follow-up 2026-05-16
+    # caught it falling through to "other"; the test_staples
+    # ramp-detection test used a fake-but-regex-friendly variant
+    # ("Add {W} or {U}.") as a workaround. Real oracle pinned here
+    # so the regex stays honest going forward.
+    "Arcane Signet": {
+        "oracle_text": (
+            "{T}: Add one mana of any color in your commander's "
+            "color identity."
+        ),
+        "type_line": "Artifact",
+    },
+
     # Coalition Victory — uses "You win the game" idiom which the
     # original ``_WIN_CONDITION_PATTERNS`` didn't cover. Pinned in
     # commit b2ff2b9.

@@ -581,6 +581,21 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         # "land", which Three Visits replaces with "Forest".
         (r"search your library[^.]{0,80}\b(?:forest|island|plains|swamp|mountain)\b card", None, 80),
         (r"add\s+\{[wubrgc]\}", None, 50),  # mana producers, colored or colorless
+        # Natural-language mana-producer template ("Add one mana of
+        # any color [in your commander's color identity]", "Add two
+        # mana of any one color", "Add an amount of {C} equal to..."
+        # etc.) — covers Arcane Signet, Chromatic Lantern, Coalition
+        # Relic, Birds of Paradise, Mana Drain's deferred-add clause,
+        # X-mana rituals like Mana Geyser, and the bulk of modern
+        # colorless rocks that Scryfall templates without a literal
+        # ``{X}`` symbol after "Add". Live audit follow-up 2026-05-16
+        # caught Arcane Signet falling through to "other" on the
+        # Krenko Goblin B4 dashboard.
+        (
+            r"\badd (?:one|two|three|four|five|six|seven|eight|nine|ten|"
+            r"x|that much|an? amount of) mana\b",
+            None, 50,
+        ),
         (r"(?:put|return)[^.]+land card[^.]+(?:onto the battlefield|to the battlefield)", None, 80),
         (r"create a treasure token", None, 40),
     ]),

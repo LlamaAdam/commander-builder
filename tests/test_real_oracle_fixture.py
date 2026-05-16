@@ -32,6 +32,7 @@ from tests.fixtures.real_oracles import ORACLES, oracle
 # focused on holding the Scryfall data — the assertion of what role
 # each card SHOULD be lives in the test module that enforces it.
 EXPECTED_ROLE: dict[str, str] = {
+    "Arcane Signet":       "ramp",
     "Coalition Victory":   "win_condition",
     "Craterhoof Behemoth": "win_condition",
     "Crux of Fate":        "wipe",
