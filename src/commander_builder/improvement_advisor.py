@@ -268,6 +268,93 @@ def _role_for_card(card_name: str) -> str:
     return _impl(card_name)
 
 
+def _category_from_type_line(type_line: str) -> Optional[str]:
+    """Map a Scryfall ``type_line`` to an EDHREC-style section header.
+
+    Used as a fallback when the EDHREC commander page's
+    ``category_lists`` doesn't cover an average-deck entry — without
+    this, ~21% of preview cards land in the UI's catch-all 'Other'
+    bucket. Section names mirror EDHREC's headers so grouping stays
+    consistent with EDHREC-categorized cards.
+
+    Priority order matters for compound types:
+    - ``Artifact Creature`` → ``Creatures`` (matches EDHREC's bucketing)
+    - ``Legendary Planeswalker`` → ``Planeswalkers``
+    - ``Basic Land — Forest`` → ``Lands``
+
+    Returns ``None`` for empty / unrecognized type lines (e.g. ``Tribal``,
+    ``Phenomenon``) so the UI's null-category 'Other' fallback still
+    kicks in rather than the helper inventing a label.
+    """
+    if not type_line:
+        return None
+    tl = type_line.lower()
+    if "creature" in tl:
+        return "Creatures"
+    if "planeswalker" in tl:
+        return "Planeswalkers"
+    if "battle" in tl:
+        return "Battles"
+    if "land" in tl:
+        return "Lands"
+    if "instant" in tl:
+        return "Instants"
+    if "sorcery" in tl:
+        return "Sorceries"
+    if "enchantment" in tl:
+        return "Enchantments"
+    if "artifact" in tl:
+        return "Artifacts"
+    return None
+
+
+def _enrich_edhrec_categories_from_scryfall(
+    edhrec_categories: dict,
+    average_deck,
+    lookup_fn=None,
+) -> dict:
+    """Mutate-and-return ``edhrec_categories`` with Scryfall-derived
+    fallback entries for any ``average_deck`` card missing from the
+    EDHREC commander-page map.
+
+    Cards Scryfall can't resolve (custom cards, typos, transient
+    outage) or whose ``type_line`` doesn't map to a known section
+    stay absent from the dict — the UI surfaces those as 'Other'.
+
+    ``lookup_fn`` is the Scryfall lookup callable; defaults to the
+    shared ``scryfall_client.lookup_card`` (disk-cached). Injected
+    for testability. Per-card exceptions are swallowed so a network
+    blip on one card doesn't poison the whole enrichment pass.
+    """
+    if average_deck is None:
+        return edhrec_categories
+    cards = getattr(average_deck, "cards", None) or []
+    if not cards:
+        return edhrec_categories
+    if lookup_fn is None:
+        lookup_fn = lookup_card
+    for entry in cards:
+        name = getattr(entry, "name", None) or ""
+        key = name.lower()
+        if not key or key in edhrec_categories:
+            continue
+        try:
+            card = lookup_fn(name)
+        except Exception:
+            card = None
+        if card is None:
+            continue
+        type_line = card.get("type_line") or ""
+        if not type_line:
+            faces = card.get("card_faces") or []
+            if faces:
+                type_line = (faces[0] or {}).get("type_line") or ""
+        fallback = _category_from_type_line(type_line)
+        if fallback:
+            edhrec_categories[key] = fallback
+    return edhrec_categories
+
+
 
 
 # --- Bracket-peers recommender (sources from other tuned builds) ----------
@@ -756,6 +843,15 @@ def _advise_steps(
             for entry in entries:
                 key = entry.name.lower()
                 edhrec_categories.setdefault(key, category)
+
+    # Back-fill from Scryfall type_line for average-deck cards that
+    # weren't covered by EDHREC's category_lists. Without this, ~21%
+    # of preview cards landed under the UI's catch-all "Other" bucket.
+    # Lookups go through the shared Scryfall disk cache — warm cache
+    # is ~0ms; cold cache is one HTTP call per unmapped card.
+    _enrich_edhrec_categories_from_scryfall(
+        edhrec_categories, average_deck,
+    )
 
     report = AdviceReport(
         deck_filename=deck_path.name,
