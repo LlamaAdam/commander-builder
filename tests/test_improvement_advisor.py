@@ -949,6 +949,117 @@ def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     assert "Forest" not in cuts
 
 
+def test_advise_strips_off_color_adds_via_color_identity_filter(tmp_path, monkeypatch):
+    """The advisor's CI post-filter must drop off-color add recommendations
+    so the suggestions panel / /api/advise / /api/audit can't surface
+    cards illegal in the user's commander color identity (caught
+    in-the-wild on 2026-05-16: Krenko mono-red deck was getting
+    multi-color tribal Goblin support suggestions). Cut recs are
+    pass-through — they're already in the user's deck."""
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+
+    # Mono-red commander; deck CI is {R}.
+    deck = _write_dck(
+        deck_dir, "[USER] Krenko [B4].dck",
+        commanders=["Krenko, Mob Boss"],
+        main=["Sol Ring", "Mountain", "Goblin Recruiter"],
+    )
+
+    # EDHREC heuristic surfaces a mix of in-color and off-color picks.
+    # Goblin King = R (kept), Wort = BR (dropped), Sliver Hivelord =
+    # WUBRG (dropped), Path of Ancestry = colorless (kept).
+    fake_page = _fake_edhrec_page(
+        top=[("Goblin King", 80.0), ("Wort, Boggart Auntie", 65.0),
+             ("Sliver Hivelord", 60.0), ("Path of Ancestry", 90.0)]
+            + [(f"Filler-{i}", 70.0) for i in range(55)],
+        synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+
+    # Stub Scryfall lookups: commander resolves to mono-red Krenko;
+    # each candidate gets a synthetic color_identity that drives the
+    # filter. lookup_card is called by color_identity_for_commander
+    # too — return Krenko for the commander name.
+    def _fake_lookup(name, **_kw):
+        ci_map = {
+            "krenko, mob boss": ["R"],
+            "goblin king": ["R"],
+            "wort, boggart auntie": ["B", "R"],
+            "sliver hivelord": ["W", "U", "B", "R", "G"],
+            "path of ancestry": [],
+            "goblin recruiter": ["R"],
+            "sol ring": [],
+            "mountain": [],
+        }
+        key = name.lower()
+        if key not in ci_map:
+            return None
+        return {
+            "name": name,
+            "color_identity": ci_map[key],
+            "type_line": "Creature — Goblin"
+                if "goblin" in key or "wort" in key
+                else "Land" if key in {"path of ancestry", "mountain"}
+                else "Artifact",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake_lookup,
+    )
+
+    report = advise(deck, bracket=4, deck_dir=deck_dir, match_dir=match_dir)
+    adds = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Goblin King" in adds, "in-color creature must survive filter"
+    assert "Path of Ancestry" in adds, "colorless card must survive filter"
+    assert "Wort, Boggart Auntie" not in adds, (
+        "BR creature must be dropped from a mono-red deck"
+    )
+    assert "Sliver Hivelord" not in adds, (
+        "5-color creature must be dropped from a mono-red deck"
+    )
+
+
+def test_advise_skips_ci_filter_when_commander_unresolvable(tmp_path, monkeypatch):
+    """When the commander can't be resolved via Scryfall (typo /
+    custom card / network blip), the CI filter must skip rather than
+    rejecting every add against a phantom colorless deck."""
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+
+    deck = _write_dck(
+        deck_dir, "[USER] Made-Up [B3].dck",
+        commanders=["Made-Up Commander Card"],
+        main=["Sol Ring"],
+    )
+
+    fake_page = _fake_edhrec_page(
+        top=[("Goblin King", 80.0)]
+            + [(f"Filler-{i}", 70.0) for i in range(55)],
+        synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    # Scryfall returns None for everything → CI unresolvable → skip filter.
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_kw: None,
+    )
+
+    report = advise(deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir)
+    adds = {r.card for r in report.recommendations if r.action == "add"}
+    # Goblin King survives because the filter was skipped (None CI).
+    assert "Goblin King" in adds
+
+
 def test_advise_to_manifest_matches_audit_schema(tmp_path, monkeypatch):
     deck_dir = tmp_path / "decks"
     match_dir = tmp_path / "matches"

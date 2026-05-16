@@ -813,6 +813,30 @@ def _advise_steps(
     role_counts = count_deck_roles(main_cards)
     recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
 
+    # Color-identity post-filter: strip add recs whose color identity
+    # isn't a subset of the commander's. Mirrors the auto-curator's
+    # enforce_color_identity defensive filter — EDHREC heuristic,
+    # bracket-peers, and Claude advisor can all surface off-color
+    # picks (e.g. multi-color tribal Goblin support on a mono-red
+    # Krenko deck) that would produce an illegal proposed deck.
+    # Cut recs are pass-through (always cards the user already runs).
+    # None CI = unresolvable commander; the filter skips so we don't
+    # nuke every add against a phantom colorless deck.
+    try:
+        from .scryfall_client import color_identity_for_commander
+        from ._proposer_filters import enforce_color_identity
+        deck_ci = color_identity_for_commander(deck_path)
+    except Exception:  # noqa: BLE001 -- defensive; better to skip filter
+        deck_ci = None  # than crash the audit on a Scryfall blip.
+    if deck_ci is not None:
+        add_names = [r.card for r in recs if r.action == "add"]
+        kept_adds, _dropped_ci = enforce_color_identity(add_names, deck_ci)
+        kept_set = {n.lower() for n in kept_adds}
+        recs = [
+            r for r in recs
+            if r.action != "add" or r.card.lower() in kept_set
+        ]
+
     _validate_card_names(recs)
 
     # Structured per-recommendation logging (opt-in via the
