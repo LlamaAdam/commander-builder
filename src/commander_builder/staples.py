@@ -321,11 +321,29 @@ def detect_tribal_type(oracle_text: str, type_line: str = "") -> Optional[str]:
 
 # Lands every tribal deck wants regardless of color identity. All are
 # colorless mana cost so they fit any deck.
+#
+# Order = recommendation priority. Cavern of Souls leads because
+# uncounterable on tribe commanders is unique; tribe-typed colorless
+# filters (Secluded / Unclaimed / Three Tree City) come next; Path of
+# Ancestry trails because its "mana of any color" filter is dead
+# weight on mono-color tribal decks (the scry-1 trigger is still
+# useful but it's a slower payoff than the up-front mana-fixing wins
+# from the others).
 _TRIBAL_LANDS = (
     "Cavern of Souls",      # mana of any color + uncounterable for the tribe
-    "Path of Ancestry",     # filter mana + scry 1 on tribe entry
+    "Three Tree City",      # taps for {C}, or tribe-typed mana of any color
     "Secluded Courtyard",   # tribe-typed mana
     "Unclaimed Territory",  # tribe-typed mana
+    "Path of Ancestry",     # filter mana + scry 1 on tribe entry
+)
+
+# Extra tribal-relevant lands for MONO-COLOR tribal decks. Nykthos
+# scales with devotion, which is overwhelmingly stronger in a deck
+# where every creature contributes a single coloured pip than in a
+# rainbow tribal deck. Listed separately so multi-color tribal decks
+# don't get a Nykthos rec they can't fully exploit.
+_MONO_TRIBAL_LANDS = (
+    "Nykthos, Shrine to Nyx",  # devotion-scaling ramp; auto-include for mono tribal
 )
 
 
@@ -483,17 +501,35 @@ def detect_themes(deck_oracles: list[tuple[str, str]]) -> list[str]:
     return [slug for slug, _ in qualifying[:3]]
 
 
-def tribal_essential_lands(tribe: Optional[str]) -> list[str]:
+def tribal_essential_lands(
+    tribe: Optional[str], color_identity=None,
+) -> list[str]:
     """Return the canonical tribal-utility lands for ``tribe``.
 
     Returns an empty list when ``tribe`` is None (deck isn't tribal).
-    All four lands are colorless mana cost, so they fit any color
+    All lands here are colorless mana cost, so they fit any color
     identity — the manabase recommender appends them on top of the
     color-gated ABU duals / fetches / shocks / bond lands.
+
+    ``color_identity`` (optional WUBRG-letter set/iterable) lets the
+    recommender add the mono-color tribal extension list: Nykthos,
+    Shrine to Nyx for any tribal deck whose CI is a single color.
+    Nykthos's devotion-scaling ramp is degenerate on mono-color
+    tribal but mostly dead on rainbow tribal, so it's surfaced only
+    when the identity check passes. Pass None / empty / multi-color
+    to get the base tribal land list unchanged.
     """
     if not tribe:
         return []
-    return list(_TRIBAL_LANDS)
+    base = list(_TRIBAL_LANDS)
+    if color_identity is not None:
+        identity = {
+            c.upper() for c in color_identity
+            if isinstance(c, str) and c.upper() in "WUBRG"
+        }
+        if len(identity) == 1:
+            return base + list(_MONO_TRIBAL_LANDS)
+    return base
 
 
 def is_land(card_name: str) -> bool:

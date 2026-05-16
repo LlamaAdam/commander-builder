@@ -61,7 +61,11 @@ def _missing_manabase_recommendations(
     for the tribe-utility set.
     """
     essentials = essential_manabase_for_colors(color_identity, budget=budget)
-    tribal = tribal_essential_lands(tribe)
+    # Pass color_identity so mono-color tribal decks pick up Nykthos,
+    # Shrine to Nyx (devotion-scaling ramp is degenerate on mono-color
+    # tribal but mostly dead on rainbow tribal). Multi-color tribal
+    # decks get the base tribal land list unchanged.
+    tribal = tribal_essential_lands(tribe, color_identity=color_identity)
     if not essentials and not tribal:
         return []
     deck_lc = {c.lower() for c in deck_cards}

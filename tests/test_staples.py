@@ -761,6 +761,62 @@ def test_tribal_essential_lands_empty_for_none():
     assert tribal_essential_lands(None) == []
 
 
+def test_tribal_essential_lands_includes_three_tree_city():
+    """Three Tree City (taps for {C} or tribe-typed mana) belongs in
+    every tribal deck regardless of color identity. Added 2026-05-16."""
+    from commander_builder.staples import tribal_essential_lands
+    out = tribal_essential_lands("Goblin")
+    assert "Three Tree City" in out
+
+
+def test_tribal_essential_lands_mono_color_includes_nykthos():
+    """Mono-color tribal decks (e.g. Krenko Goblins, all-R) get
+    Nykthos, Shrine to Nyx for devotion-scaling ramp. Multi-color
+    tribal decks don't because rainbow devotion is dead."""
+    from commander_builder.staples import tribal_essential_lands
+    out = tribal_essential_lands("Goblin", color_identity={"R"})
+    assert "Nykthos, Shrine to Nyx" in out
+
+
+def test_tribal_essential_lands_multi_color_skips_nykthos():
+    """Two-color tribal (e.g. Slivers WG, Dragons all-five) shouldn't
+    surface Nykthos — devotion doesn't scale well when half the
+    creatures contribute different pips."""
+    from commander_builder.staples import tribal_essential_lands
+    out_2c = tribal_essential_lands("Sliver", color_identity={"W", "G"})
+    assert "Nykthos, Shrine to Nyx" not in out_2c
+    out_5c = tribal_essential_lands(
+        "Dragon", color_identity={"W", "U", "B", "R", "G"},
+    )
+    assert "Nykthos, Shrine to Nyx" not in out_5c
+
+
+def test_tribal_essential_lands_default_no_color_identity_unchanged():
+    """Legacy callers that don't pass color_identity still get the
+    base tribal land set — Nykthos requires the mono-color signal."""
+    from commander_builder.staples import tribal_essential_lands
+    out = tribal_essential_lands("Goblin")
+    assert "Nykthos, Shrine to Nyx" not in out
+
+
+def test_tribal_essential_lands_orders_path_of_ancestry_last():
+    """Path of Ancestry's filter mana is dead weight on a mono-color
+    tribal deck; the up-front fixers (Secluded Courtyard / Unclaimed
+    Territory / Three Tree City) should outrank it in the recommended
+    order. Pinned so a future ordering change doesn't silently regress
+    the user-reported priority issue from 2026-05-16."""
+    from commander_builder.staples import tribal_essential_lands
+    out = tribal_essential_lands("Goblin")
+    idx_path = out.index("Path of Ancestry")
+    for higher_priority in (
+        "Cavern of Souls", "Three Tree City",
+        "Secluded Courtyard", "Unclaimed Territory",
+    ):
+        assert out.index(higher_priority) < idx_path, (
+            f"{higher_priority} must rank above Path of Ancestry"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Utility fixing lands — colorless-mana-cost any-color lands for 3+ color decks
 # ---------------------------------------------------------------------------
