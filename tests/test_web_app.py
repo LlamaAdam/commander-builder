@@ -455,6 +455,96 @@ def test_iterations_400_on_bad_limit(seeded_client):
 
 
 # ---------------------------------------------------------------------------
+# PATCH /api/iterations/<id>/verdict — manual verdict assignment (Tier 1.3)
+# ---------------------------------------------------------------------------
+
+def _first_iteration_id(seeded_client) -> int:
+    """Pull the lowest iteration id from the seeded DB so the verdict
+    tests don't have to know the seed's specific autoincrement values."""
+    resp = seeded_client.get("/api/iterations?deck=omnath")
+    rows = resp.get_json()["iterations"]
+    assert rows, "seeded knowledge_log should have at least one iteration"
+    return rows[0]["id"]
+
+
+def test_patch_verdict_marks_iteration_kept(seeded_client):
+    """Happy-path: PATCH with verdict='kept' returns 200 + flips the
+    row's verdict column. Subsequent GET reflects the change."""
+    iteration_id = _first_iteration_id(seeded_client)
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/verdict",
+        json={"verdict": "kept", "notes": "manual review confirmed"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {
+        "ok": True, "iteration_id": iteration_id, "verdict": "kept",
+    }
+    # Verify the change actually landed via the same listing endpoint.
+    listing = seeded_client.get("/api/iterations?deck=omnath").get_json()
+    matched = [r for r in listing["iterations"] if r["id"] == iteration_id]
+    assert matched and matched[0]["verdict"] == "kept"
+
+
+def test_patch_verdict_accepts_pending_to_clear(seeded_client):
+    """Setting verdict back to 'pending' is allowed so the UI can undo
+    a misclick without needing a separate delete endpoint."""
+    iteration_id = _first_iteration_id(seeded_client)
+    seeded_client.patch(
+        f"/api/iterations/{iteration_id}/verdict",
+        json={"verdict": "reverted"},
+    )
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/verdict",
+        json={"verdict": "pending"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["verdict"] == "pending"
+
+
+def test_patch_verdict_rejects_unknown_value(seeded_client):
+    """400 on any verdict outside the allowed set — defensive against
+    typos and bypassing the curator/sim pipeline."""
+    iteration_id = _first_iteration_id(seeded_client)
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/verdict",
+        json={"verdict": "approved"},
+    )
+    assert resp.status_code == 400
+    assert "kept/reverted/neutral/pending" in resp.get_json()["error"]
+
+
+def test_patch_verdict_rejects_missing_body(seeded_client):
+    """Empty body → 400, not a crash."""
+    iteration_id = _first_iteration_id(seeded_client)
+    resp = seeded_client.patch(f"/api/iterations/{iteration_id}/verdict")
+    assert resp.status_code == 400
+
+
+def test_patch_verdict_rejects_non_string_notes(seeded_client):
+    """notes is free-text; reject non-string types so the sqlite
+    write doesn't smuggle in JSON objects."""
+    iteration_id = _first_iteration_id(seeded_client)
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/verdict",
+        json={"verdict": "kept", "notes": {"oops": "object"}},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_verdict_unknown_id_succeeds_silently(seeded_client):
+    """update_verdict() issues a bare UPDATE with no rowcount check,
+    so an unknown iteration_id returns 200 without raising. Pinning
+    that contract here so a future change to fail-loud doesn't
+    silently regress the UI's optimistic-update flow."""
+    resp = seeded_client.patch(
+        "/api/iterations/9999999/verdict",
+        json={"verdict": "kept"},
+    )
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # /api/dashboard?advise=1 + /api/advise
 # ---------------------------------------------------------------------------
 

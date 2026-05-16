@@ -2109,7 +2109,96 @@ function renderIterationGraph(data) {
     svg.appendChild(g);
   }
 
-  return svg;
+  // Wrap the SVG in a container so we can attach a verdict-control
+  // panel beneath it. Manual web iterations land with verdict=pending
+  // and the CLI's --run-sim path is the only auto-writer; before this
+  // panel, those pending rows stayed pending forever (Tier-1.3).
+  const wrap = el("div", { class: "iteration-graph-wrap" });
+  wrap.appendChild(svg);
+  const verdictPanel = _renderVerdictPanel(nodes);
+  if (verdictPanel) {
+    wrap.appendChild(verdictPanel);
+  }
+  return wrap;
+}
+
+function _renderVerdictPanel(nodes) {
+  // Surface every pending iteration as a row of buttons so the user
+  // can mark it kept / reverted / neutral after manual play. Hidden
+  // when nothing is pending — non-pending rows are read-only here so
+  // we don't accidentally walk over a CLI-sim verdict.
+  const pending = (nodes || []).filter((n) => n.verdict === "pending");
+  if (!pending.length) return null;
+  const panel = el("div", { class: "iteration-verdict-panel" });
+  panel.appendChild(el(
+    "p", { class: "muted" },
+    `Mark verdict for ${pending.length} pending iteration${pending.length === 1 ? "" : "s"}:`,
+  ));
+  // Sort by iteration_n so v2 lands before v3.
+  pending.sort((a, b) => (a.iteration_n || 0) - (b.iteration_n || 0));
+  for (const node of pending) {
+    panel.appendChild(_renderVerdictRow(node));
+  }
+  return panel;
+}
+
+function _renderVerdictRow(node) {
+  const row = el("div", {
+    class: "iteration-verdict-row",
+    "data-iteration-id": node.id,
+    style: "display: flex; gap: 8px; align-items: center; margin: 6px 0;",
+  });
+  row.appendChild(el(
+    "span", { style: "min-width: 90px; font-weight: 600;" },
+    `v${node.iteration_n} · B${node.bracket}`,
+  ));
+  const status = el("span", { class: "verdict pending" }, "pending");
+  const makeBtn = (label, verdict) => {
+    const btn = el("button", {
+      type: "button",
+      class: "btn-sm",
+      "data-verdict": verdict,
+    }, label);
+    btn.addEventListener("click", () => _patchVerdict(node.id, verdict, row, status));
+    return btn;
+  };
+  row.appendChild(makeBtn("Kept", "kept"));
+  row.appendChild(makeBtn("Reverted", "reverted"));
+  row.appendChild(makeBtn("Neutral", "neutral"));
+  row.appendChild(status);
+  return row;
+}
+
+async function _patchVerdict(iterationId, verdict, row, status) {
+  // Disable buttons during the PATCH so a fast double-click doesn't
+  // race two updates. Status starts as "saving…" so the user sees
+  // immediate feedback even on slow networks.
+  const buttons = row.querySelectorAll("button");
+  buttons.forEach((b) => (b.disabled = true));
+  status.textContent = "saving…";
+  status.className = "verdict pending";
+  try {
+    const resp = await fetch(`/api/iterations/${iterationId}/verdict`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verdict }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${resp.status}`);
+    }
+    status.textContent = verdict;
+    status.className = `verdict ${verdict}`;
+    // Re-enable only the non-active buttons so the user can change
+    // their mind without re-rendering the whole graph.
+    buttons.forEach((b) => {
+      b.disabled = b.dataset.verdict === verdict;
+    });
+  } catch (err) {
+    status.textContent = `error: ${err.message}`;
+    status.className = "verdict pending";
+    buttons.forEach((b) => (b.disabled = false));
+  }
 }
 
 function _verdictBgColor(verdict) {

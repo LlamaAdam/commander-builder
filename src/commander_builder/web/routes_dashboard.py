@@ -32,6 +32,7 @@ from ..knowledge_log import (
     iterations_for_deck,
     pricing_series_for_deck,
     recent_iterations,
+    update_verdict,
     verdict_breakdown_for_deck,
 )
 from ._helpers import (
@@ -182,6 +183,54 @@ def make_dashboard_blueprint(
         return jsonify({
             "deck_id": deck_id,
             **graph,
+        })
+
+    _VALID_VERDICTS = {"kept", "reverted", "neutral", "pending"}
+
+    @bp.route("/api/iterations/<int:iteration_id>/verdict", methods=["PATCH"])
+    def update_iteration_verdict(iteration_id: int):
+        """Mark a manual web iteration's verdict (Tier-1.3 fix).
+
+        Before this endpoint existed, the CLI's ``--run-sim`` path was the
+        only writer for the verdict column on knowledge_log iteration
+        rows. Manual web iterations (audit → propose → apply without a
+        Forge sim) landed with ``verdict='pending'`` and stayed pending
+        forever, leaving the iteration-graph badges and
+        ``/api/verdict_breakdown`` numbers permanently incomplete.
+
+        Body: JSON with ``verdict`` (required, one of
+        kept/reverted/neutral/pending) and optional ``notes`` free-text.
+        Returns ``{ok: true, iteration_id, verdict}`` on success.
+
+        Errors:
+          400  verdict missing or not in the allowed set
+          500  sqlite update failed (rare; surfaced for debugging)
+
+        Idempotent — calling with the same verdict twice is a no-op
+        at the SQL level (single UPDATE row write). 'pending' is
+        accepted explicitly so the UI can clear a verdict that was
+        set by mistake.
+        """
+        body = request.get_json(silent=True) or {}
+        verdict = body.get("verdict")
+        if not isinstance(verdict, str) or verdict not in _VALID_VERDICTS:
+            return jsonify({
+                "error": "verdict must be one of kept/reverted/neutral/pending",
+            }), 400
+        notes = body.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            return jsonify({"error": "notes must be a string"}), 400
+        try:
+            update_verdict(
+                iteration_id, verdict=verdict, notes=notes,
+                db_path=knowledge_db,
+            )
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({
+            "ok": True,
+            "iteration_id": iteration_id,
+            "verdict": verdict,
         })
 
     @bp.route("/api/verdict_breakdown")
