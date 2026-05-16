@@ -8,8 +8,10 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](docs/architecture.md).
 
-**Last updated:** 2026-05-15 (overnight 7-phase enrichment session)
-**Phase status:** Phase 2 complete + FP-006 web GUI shipped + 80+ commits
+**Last updated:** 2026-05-16 (auto-curate pipeline + Tier-3 refactor)
+**Phase status:** Phase 2 complete + FP-006 web GUI shipped +
+`commander-auto-curate` end-to-end loop (advisor → Claude curator →
+apply → Forge A/B sim → knowledge_log verdict) shipped. 110+ commits
 on `feature/2026-04-28-session` ahead of `master`. Phase 3 (ML
 predictor) still data-gated.
 
@@ -17,10 +19,35 @@ predictor) still data-gated.
 
 ## State of the tree
 
-- **Tests:** 875 passing (+9 from the prior recap), ~111s offline. Zero
-  warnings under `python -W default`.
-- **Branch:** `feature/2026-04-28-session` (80+ commits ahead of
-  `origin/feature/2026-04-28-session`).
+- **Tests:** 1194 passing (+319 from the 2026-05-15 recap), ~167s
+  offline. Zero warnings under `python -W default`.
+- **Branch:** `feature/2026-04-28-session` (110+ commits ahead of
+  `master`, in sync with `origin`).
+
+### 2026-05-15/16 session — auto-curate loop + audit polish + Tier-3 refactor
+
+29 commits landed; see [CHANGELOG.md](CHANGELOG.md) for the full
+breakdown. Highlights:
+
+- **`commander-auto-curate` end-to-end loop** — advisor → Claude
+  curator → apply → optional Forge A/B sim → knowledge_log row with
+  empirical verdict. `--mode polish/overhaul/free` presets, color-
+  identity post-filter, bracket-aware filler picking, protected-card
+  list, `--run-sim` closes the loop.
+- **5 deck-health signals** in the audit panel (MDFC, spell density,
+  mana sinks with activated-ability detection, wincon protection,
+  self-mill).
+- **EDHREC category fallback** via Scryfall type_line — was 21%
+  uncategorized, now ~0%.
+- **Manual verdict UI** — `PATCH /api/iterations/<id>/verdict` plus
+  Kept/Reverted/Neutral buttons in the iteration-graph view.
+- **`refresh_card_lists` script** — diff hardcoded `_MDFC_LANDS`
+  against current Scryfall.
+- **`proposer.py` split** (Tier-3 refactor): 1766 → 944 lines,
+  three new private modules (`_proposer_filters`, `_proposer_sim`,
+  `_proposer_cli`). Zero behavior change; all symbols re-exported.
+- **External credentials file** at `~/.commander-builder/credentials`
+  keeps `ANTHROPIC_API_KEY` outside the repo.
 
 ### 2026-05-14/15 overnight session (7 phases)
 
@@ -177,12 +204,13 @@ Each phase was a self-contained commit with live-server verification:
 
 ### Tier 3 — Deferred until prerequisites exist
 
-10. **`commander-iterate --auto-propose` programmatic.** Replace the
-    manual audit-prompt paste with a Claude API call.
-    [proposer.py](src/commander_builder/proposer.py) has the wiring
-    sketch; `claude_propose` body needs filling in. ~30 lines + a few
-    integration tests with mocked `anthropic.Anthropic`. Promote when
-    a routine LLM workflow becomes useful.
+10. ~~**`commander-iterate --auto-propose` programmatic.**~~ ✅
+    Shipped as the `commander-auto-curate` CLI (commits `b859463`,
+    `023134e`, plus 25+ refinement commits). Full advisor → Claude
+    curator → apply → optional Forge A/B sim pipeline with `--mode`
+    presets, color-identity filter, protected-card list, and
+    knowledge_log row writer. See [CHANGELOG.md](CHANGELOG.md)
+    2026-05-15/16 entry for the full breakdown.
 
 11. **Phase 3 ML training (FP-002).** Predict swap outcomes from deck +
     swap features. `ml_dataset.py` ready (25 features, deck-level

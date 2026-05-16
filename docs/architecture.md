@@ -114,7 +114,11 @@ layers never import higher.
 | `_advisor_manabase` | Curated manabase essentials (`_missing_manabase_recommendations`) | Role-based adds. That's other advisor paths. |
 | `_advisor_role_helpers` | Thin role-classifier wrapper for advisor use | Core classification. That's `staples.classify_role_extended`. |
 | `analyst` | Verdict (`kept` / `reverted` / `neutral`) with confidence + reasoning + lessons | Running the comparison itself. |
-| `proposer` | Router for manual / Claude / Ollama proposers; falls back gracefully | Validating proposals. `compare_versions` + `analyst` do. |
+| `proposer` (orchestrator) | Router for manual / Claude / Ollama proposers; the `Proposal` dataclass; `auto_propose()` curator pipeline; `apply_proposal_to_deck`; `_extract_curator_json` | Validating proposals. `compare_versions` + `analyst` do. |
+| `_proposer_filters` | Post-response curator filters: `enforce_bracket_caps` (game-changers stripped at B1/B2), `enforce_color_identity` (off-color adds rejected via Scryfall CI), `_load_game_changers` | Recommendation logic. The advisor / curator generate; filters reject. |
+| `_proposer_sim` | Forge A/B sim glue: `_verdict_from_ab` (margin → kept/reverted/neutral), `_ab_to_iteration_fields`, bracket-aware `_pick_filler_decks`, `_run_sim_and_record`, `_log_auto_curate_iteration` | Running the sim itself. `forge_runner` + `compare_versions` do. |
+| `_proposer_cli` | `auto_curate_main` (the `commander-auto-curate` console_script) — argparse + end-to-end orchestration of advisor → curator → apply → sim | Pipeline stages themselves; lives here only as a thin wrapper. |
+| `_card_list_refresh` | Hardcoded-list staleness diff helpers (`diff_card_lists`, `parse_mdfc_lands_from_response`, `fetch_mdfc_lands`); used by `scripts/refresh_card_lists.py` | Mutating `deck_health`'s lists. Manual review only. |
 | `iteration_loop` | Wiring compare → analyst → knowledge_log; `propose_then_iterate()` | Multi-iteration loop (FP-012 territory). |
 | `knowledge_log` | SQLite-backed iteration history; lineage chains via `parent_id`; legacy deck_id migration | Reporting. `report.py` does. |
 | `report` | Markdown rendering of one deck's iteration lineage; cross-deck recent-iterations summary | Mutating the log. Read-only. |

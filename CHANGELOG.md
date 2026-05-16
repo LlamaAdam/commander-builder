@@ -6,6 +6,142 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-05-15/16 — auto-curate pipeline + audit polish + Tier-3 refactor
+
+29 commits landed on `feature/2026-04-28-session`. Tests: 875 → 1194.
+
+#### Added — `commander-auto-curate` end-to-end loop
+
+- **`feat(curator)`: `commander-auto-curate` — advisor + Claude curator
+  + apply.** New CLI that runs the improvement advisor on a deck, hands
+  the AdviceReport to a Claude curator, and writes a versioned `.dck`
+  with the proposed swaps. Replaces the manual prompt-paste workflow
+  for unattended overnight runs. (`b859463`)
+- **`feat(curator)`: `--run-sim` closes the loop with Forge A/B verdict.**
+  After the proposal lands, runs a head-to-head Forge A/B sim between
+  the old and new decks (default 5 games). The empirical verdict
+  (`kept` / `reverted` / `neutral`) plus full `ABResult` metrics
+  populate the knowledge_log row that previously stayed at
+  `verdict='pending'` forever. (`023134e`)
+- **`feat(curator)`: `--mode` preset (polish / overhaul / free).**
+  `polish` = 5 adds + 5 cuts (safe overnight default), `overhaul` =
+  15 + 15 (deliberate revision), `free` = unbounded. Per-CLI
+  `--max-adds` / `--max-cuts` override the preset. (`a080901`)
+- **`feat(curator)`: protect pet cards from being proposed for cuts.**
+  `[metadata] Protect=` in the `.dck` plus `--protect` CLI flags
+  defines a pet-card list. The curator strips matching cuts pre-prompt
+  and post-response so user favorites survive every iteration. (`fe54c4b`)
+- **`feat(curator)`: bracket-aware filler picking for `--run-sim`.**
+  Filler decks for the 4-player A/B pod are picked by bracket distance
+  to the user's deck, defeating the noise-dominated verdicts a B4 deck
+  got when matched against B5 cEDH + B2 casual fillers. (`8e84962`)
+- **`fix(curator)`: post-filter Claude's off-color adds via Scryfall
+  CI check.** Defensive filter rejects any add whose Scryfall
+  `color_identity` isn't a subset of the commander's CI. Hybrid mana
+  is required to fit fully. None CI = couldn't resolve commander →
+  skip filter (test fixtures, custom commanders). (`962776a`)
+- **`feat(curator)`: writes a pending iteration row.** Each
+  auto-curate run lands a row in the knowledge_log with
+  `verdict='pending'` so the iteration chain stays threaded even
+  before `--run-sim` fills in the empirical result. (`f0e06a0`)
+
+#### Added — audit panel signals
+
+- **`feat(audit)`: deck-health tile row — 5 construction-quality
+  signals.** MDFC count, spell density, mana sinks, wincon
+  protection, self-mill enablement. Surfaces shape problems the
+  advisor's narrative diagnosis doesn't. (`68a420c`)
+- **`feat(audit)`: detect activated-ability mana sinks (Tier-2.1).**
+  `count_mana_sinks` now picks up `{R}: ...`-style pure-mana
+  activations (Spikeshot Goblin, Inkmoth Nexus) and self-untap loops
+  (Staff of Domination), in addition to the existing `{X}`-cost
+  spell heuristic. (`a06e5dc`)
+- **`feat(audit)`: back-fill EDHREC categories from Scryfall
+  type_line (Tier-2.2).** Roughly 21% of average-deck preview cards
+  weren't bucketed by EDHREC and fell into the UI's catch-all
+  'Other' pile. The advisor now back-fills via Scryfall `type_line`
+  with priority-ordered mapping (Artifact Creature → Creatures,
+  Legendary Planeswalker → Planeswalkers, etc.). (`7c72993`)
+- **`feat(ui)`: EDHREC average-deck preview `<details>` in audit
+  panel.** Collapsible section ranking what a typical deck for this
+  commander+bracket includes; cards in the user's deck are
+  highlighted, missing categories surface holes. (`a061d10`)
+- **`feat(ui)`: salt-warning banner above audit at B1-B3.** Aggregate
+  EDHREC salt-score signal flagged at the top of the panel for casual
+  brackets so the user can swap out hostile cards before play. (`dc3b5ee`)
+- **`feat(ui)`: iteration-graph SVG view in dashboard history panel.**
+  Nodes (iterations) + edges (swap rationales) projected as an SVG
+  graph from the knowledge_log; verdict tinting at a glance. (`51c7b04`)
+- **`feat(web)`: manual verdict UI for pending iterations
+  (Tier-1.3).** New `PATCH /api/iterations/<id>/verdict` endpoint plus
+  Kept/Reverted/Neutral buttons in the iteration-graph view. Manual
+  web iterations no longer stay at `verdict='pending'` forever. (`be6a659`)
+- **`fix(audit)`: quantity-aware cuts in `_apply_swaps_to_dck`.**
+  Cutting Mountain twice from a 27-Mountain stack now decrements to
+  25 instead of dropping the whole line. (`fb628eb`)
+- **`fix(audit)`: quantity-aware adds in `_apply_swaps_to_dck`
+  (Tier-1.1).** Symmetric to the cut fix — adds for cards already in
+  the deck increment the existing line (preserving the `|SET|CN`
+  edition tail) instead of appending a duplicate `1 <Name>` line.
+  Duplicate add entries collapse to one summed line. (`6e0836f`)
+
+#### Added — secrets + bulk import
+
+- **`feat(secrets)`: external credentials file outside the repo.**
+  `~/.commander-builder/credentials` loaded by every commander-* CLI
+  entry; keeps `ANTHROPIC_API_KEY` out of repo + dotfiles. (`41e1b3d`)
+- **`feat(import)`: bulk Moxfield import — CLI + API + UI tab.**
+  Paste 50 Moxfield URLs, import them all to `vendor/forge/userdata/
+  decks/commander/` in one go. (`36f08b0`)
+
+#### Added — tooling
+
+- **`feat(scripts)`: `refresh_card_lists` for hardcoded `deck_health`
+  staleness checks (Tier-2.3).** New CLI diffs `_MDFC_LANDS` against
+  current Scryfall (`layout:modal_dfc` + at-least-one-Land filter)
+  and prints stale + candidate reports. `_WINCON_PROTECTION` and
+  `_SELF_MILL_ENABLERS` get manual-curation reminders. Pure helpers
+  in `_card_list_refresh.py` with 15 tests. (`4b57e79`)
+- **`tool`: `scripts/compare_curator_modes` — A/B verification for
+  `--mode`.** Same deck through polish / overhaul / free with
+  side-by-side curator output. (`62e3e41`)
+
+#### Added — refactor
+
+- **`refactor(proposer)`: split into filters / sim / cli modules
+  (Tier-3).** `proposer.py` 1766 → 944 lines. New private modules:
+  `_proposer_filters.py` (post-response filters), `_proposer_sim.py`
+  (A/B sim helpers + knowledge_log writer), `_proposer_cli.py`
+  (`auto_curate_main` + argparse). All public symbols re-exported
+  from `proposer.py`; zero behavior change. (`8ba5b0a`)
+
+#### Fixed — live-auto-curate smoke bugs
+
+- **`fix(curator)`: four bugs from live auto-curate smoke.** Cp1252
+  encoding handling for `.dck` reads, deck-path doubling on Windows,
+  empty-env-var-shadow over the credentials file, JSON extraction
+  for prose-prefixed Claude responses. (`82b3dd0`)
+- **`fix(curator)`: balance + pad to produce legal decks.** Curator
+  output is balanced via `min(adds, cuts)` and padded to 99 main
+  with basic lands. Forge would refuse short decks; now every
+  auto-curate output is legal. (`5b2e52b`)
+- **`fix(audit)`: `main_count` counts proposed_text directly (was
+  inflated).** UI badge now matches the actual deck size after
+  swaps. (`03dc8c8`)
+- **`fix(ui)`: audit button passed PointerEvent as source — Audit
+  failed 400.** Defensive arrow-function wrap; pinned with backend
+  validation. (`5c96e3d`, `bbdd327`)
+
+#### Process
+
+- **`prompt(curator)`: caps are ceilings, not targets.** System
+  prompt explicitly tells Claude not to fill `--max-adds` just
+  because it can — quality beats quantity. (`fb07599`)
+- **`test(isolation)`: autouse fixture redirects `DEFAULT_DB_PATH` to
+  `tmp_path`.** Prevents test runs from polluting the real
+  knowledge_log. (`4e77154`)
+
+
 ### 2026-05-13 — doc consolidation + EDHREC retry polish
 
 #### Added

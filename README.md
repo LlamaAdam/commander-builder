@@ -70,6 +70,13 @@ commander-snapshot "[USER] My Deck [B3].dck" --version v1
 # Heuristic/Claude swap recommendations (no browser session needed)
 commander-advise --user "[USER] My Deck v1 [B3].dck" --bracket 3
 
+# End-to-end auto-curate: advisor -> Claude curator -> apply -> optional
+# A/B sim with empirical kept/reverted/neutral verdict written back to
+# the knowledge_log. ~$0.20-$0.50 in Anthropic + ~5-15 min Forge per run.
+commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --run-sim
+# Polish (default, 5+5 swaps), overhaul (15+15), or free (unbounded).
+commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --mode overhaul
+
 # Old-vs-new head-to-head A/B sim
 commander-compare \
     --old "[USER] My Deck v1 [B3].dck" \
