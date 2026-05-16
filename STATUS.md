@@ -124,23 +124,26 @@ Each phase was a self-contained commit with live-server verification:
 
 ### Tier 1 — Worth doing soon
 
-0. **Curated real-oracle test fixture.** The 2026-05-14 session caught
-   9 production-only bugs that hid behind synthetic-text unit tests.
-   Codify the "use byte-exact Scryfall oracle text" lesson into a
-   shared fixture (`tests/fixtures/real_oracles.py`) and migrate
-   existing classifier tests to source from it. ~1 h.
+0. ~~**Curated real-oracle test fixture.**~~ ✅ Shipped.
+   `tests/fixtures/real_oracles.py` holds 10 verbatim-Scryfall card
+   entries covering every classifier role (`win_condition`, `wipe`,
+   `tutor`, `draw`, `ramp`). `tests/test_real_oracle_fixture.py`
+   self-tests via `EXPECTED_ROLE` so any new fixture entry must
+   declare its expected role and any regex regression breaks a
+   named parametrized test. Remaining synthetic-text classifier
+   tests are intentional degenerate cases (empty string,
+   "nothing-matches" text).
 
-0a. **Move `_resolve_deck_path` into `web/_helpers.py`.** The blueprint
-    refactor left this helper in `web/app.py` and each of the 5
-    blueprint factories takes it as a parameter. Moving it to
-    `_helpers.py` lets blueprints import directly and shrinks
-    `app.py`'s argument-threading. ~30 min.
+0a. ~~**Move `_resolve_deck_path` into `web/_helpers.py`.**~~ ✅
+    Shipped during the 2026-05-13 blueprint refactor. Lives at
+    `web/_helpers.py:32`; the 5 blueprints + `web/app.py` import
+    it directly.
 
-0b. **Structured per-recommendation debug logging.** Tier-3 #3.4 from
-    the original audit. Single line per rec
-    (`card=Cyclonic Rift role=wipe source=heuristic`) feeds a
-    `_audit_decisions.log` file so the next misclassification surfaces
-    in seconds, not via Chrome screenshot. ~45 min.
+0b. ~~**Structured per-recommendation debug logging.**~~ ✅ Shipped.
+    `_advisor_logging.log_decisions()` writes one line per rec to
+    `<deck_dir>.parent.parent/_audit_decisions.log`; gated by the
+    `COMMANDER_BUILDER_LOG_DECISIONS` env var so prod runs stay
+    quiet. Called from `improvement_advisor._advise_steps`.
 
 1. ~~**Wire `/api/forge_version` into the topbar badge.**~~ ✅ Shipped
    in commit `1ac9d53`.
@@ -188,10 +191,10 @@ Each phase was a self-contained commit with live-server verification:
 
 ### Tier 2 — Bigger but tractable
 
-7. **Proposed-deck price in audit response.** `/api/audit` returns
-   `proposed_text` but doesn't aggregate its price. Compute post-swap
-   total so the cost-evolution chart can show per-swap delta. Needs
-   threading through the audit pipeline. ~2–3 h.
+7. ~~**Proposed-deck price in audit response.**~~ ✅ Shipped.
+   `/api/audit` returns `original_price_usd`, `proposed_price_usd`,
+   `n_priced_cards_proposed`. UI shows `$X → $Y (Δ)` headline above
+   the audit. SSE streaming endpoint emits the same fields.
 
 8. **Card-image lazy fetcher (FP-008).** Render card images alongside
    oracle text in the suggestions panel. Scryfall image CDN, lazy-fetch
