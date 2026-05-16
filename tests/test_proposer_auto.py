@@ -1006,6 +1006,136 @@ def test_enforce_bracket_caps_case_insensitive_match(monkeypatch):
     assert len(dropped) == 2
 
 
+# ---------------------------------------------------------------------------
+# enforce_bracket_caps — WotC 3-card cap at B3/B4 (2026-05-16 follow-up)
+# ---------------------------------------------------------------------------
+
+def test_enforce_bracket_caps_b3_caps_game_changers_at_three(monkeypatch):
+    """B3/B4 (Upgraded/Optimized) allow at most 3 game-changers per
+    deck. When the current deck has zero, the curator can add up to 3."""
+    monkeypatch.setattr(
+        "commander_builder._proposer_filters._load_game_changers",
+        lambda: {"Smothering Tithe", "Rhystic Study", "Cyclonic Rift",
+                 "Mana Drain", "Mana Crypt"},
+    )
+    adds = [
+        "Smothering Tithe", "Rhystic Study", "Cyclonic Rift", "Mana Drain",
+        "Sol Ring",  # not a game-changer
+    ]
+    kept, dropped = enforce_bracket_caps(
+        adds, bracket=3, current_game_changer_count=0,
+    )
+    # First 3 game-changer adds kept, 4th dropped. Sol Ring passes through.
+    assert kept == ["Smothering Tithe", "Rhystic Study", "Cyclonic Rift",
+                    "Sol Ring"]
+    assert dropped == ["Mana Drain"]
+
+
+def test_enforce_bracket_caps_b3_respects_existing_game_changers(monkeypatch):
+    """When the deck already has 2 game-changers, only 1 more is
+    allowed under the 3-card cap. Additional GCs get dropped."""
+    monkeypatch.setattr(
+        "commander_builder._proposer_filters._load_game_changers",
+        lambda: {"Mana Drain", "Cyclonic Rift", "Smothering Tithe"},
+    )
+    adds = ["Mana Drain", "Cyclonic Rift", "Smothering Tithe"]
+    kept, dropped = enforce_bracket_caps(
+        adds, bracket=4, current_game_changer_count=2,
+    )
+    # Only 1 slot remains (3 - 2 = 1).
+    assert kept == ["Mana Drain"]
+    assert dropped == ["Cyclonic Rift", "Smothering Tithe"]
+
+
+def test_enforce_bracket_caps_b3_full_cap_drops_all_game_changers(monkeypatch):
+    """When the deck already has 3 game-changers, no more are allowed.
+    All curator GC adds get dropped; non-GC adds still pass through."""
+    monkeypatch.setattr(
+        "commander_builder._proposer_filters._load_game_changers",
+        lambda: {"Mana Drain", "Cyclonic Rift"},
+    )
+    adds = ["Mana Drain", "Sol Ring", "Cyclonic Rift", "Lightning Greaves"]
+    kept, dropped = enforce_bracket_caps(
+        adds, bracket=3, current_game_changer_count=3,
+    )
+    assert kept == ["Sol Ring", "Lightning Greaves"]
+    assert dropped == ["Mana Drain", "Cyclonic Rift"]
+
+
+def test_enforce_bracket_caps_b3_over_cap_clamps_to_zero(monkeypatch):
+    """Decks that ALREADY violate the 3-card cap (e.g. legacy import
+    with 5 game-changers) should still cleanly reject new ones rather
+    than crashing on a negative remaining-budget."""
+    monkeypatch.setattr(
+        "commander_builder._proposer_filters._load_game_changers",
+        lambda: {"Mana Crypt"},
+    )
+    kept, dropped = enforce_bracket_caps(
+        ["Mana Crypt"], bracket=3, current_game_changer_count=5,
+    )
+    assert kept == []
+    assert dropped == ["Mana Crypt"]
+
+
+def test_enforce_bracket_caps_b3_legacy_signature_is_pass_through(monkeypatch):
+    """When ``current_game_changer_count`` is None (the legacy default,
+    older callers), B3+ behavior stays pass-through. Pinned so the
+    add-the-kwarg change doesn't silently break callers that haven't
+    been updated."""
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: {"Smothering Tithe"},
+    )
+    kept, dropped = enforce_bracket_caps(
+        ["Smothering Tithe", "Sol Ring"], bracket=3,
+    )
+    assert kept == ["Smothering Tithe", "Sol Ring"]
+    assert dropped == []
+
+
+def test_enforce_bracket_caps_b5_unbounded(monkeypatch):
+    """B5 (cEDH) has no game-changer cap. Pass through regardless of
+    current count."""
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: {"Mana Crypt", "Mana Drain"},
+    )
+    kept, dropped = enforce_bracket_caps(
+        ["Mana Crypt", "Mana Drain"], bracket=5,
+        current_game_changer_count=10,
+    )
+    assert kept == ["Mana Crypt", "Mana Drain"]
+    assert dropped == []
+
+
+def test_count_game_changers_in_deck_quantity_aware(monkeypatch):
+    """count_game_changers_in_deck sums quantities so ``2 Smothering
+    Tithe`` (legal but unusual) counts as 2 against the cap, matching
+    WotC's deck-level audit."""
+    monkeypatch.setattr(
+        "commander_builder._proposer_filters._load_game_changers",
+        lambda: {"Smothering Tithe", "Mana Drain"},
+    )
+    from commander_builder._proposer_filters import count_game_changers_in_deck
+    deck = (
+        "[Commander]\n1 Krenko\n"
+        "[Main]\n2 Smothering Tithe\n1 Mana Drain\n1 Sol Ring\n"
+    )
+    assert count_game_changers_in_deck(deck) == 3
+
+
+def test_count_game_changers_in_deck_zero_when_none_present(monkeypatch):
+    """Clean deck → 0; sanity-check the entry point for auto_propose
+    so the cap math starts from 0 instead of misreading an empty deck."""
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: {"Smothering Tithe"},
+    )
+    from commander_builder._proposer_filters import count_game_changers_in_deck
+    deck = "[Commander]\n1 Krenko\n[Main]\n1 Sol Ring\n"
+    assert count_game_changers_in_deck(deck) == 0
+
+
 def test_auto_propose_b2_proposal_cannot_add_game_changers(tmp_path, monkeypatch):
     """Even if Claude picks a game-changer for a B2 deck, the bracket-cap
     enforcement strips it before the call returns. End-to-end check."""

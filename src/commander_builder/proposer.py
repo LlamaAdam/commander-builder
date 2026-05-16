@@ -356,9 +356,12 @@ class Proposal:
     rationale: str = ""
     source: str = "claude-auto"
     # Cards Claude wanted to add but enforce_bracket_caps stripped because
-    # they're WotC-designated game-changers and the target bracket is below
-    # the threshold. Surfaced so the iteration log can record "Claude wanted
-    # Smothering Tithe at B2 -- filtered" without losing the signal.
+    # of the bracket's game-changer rule. At B1/B2 ALL game-changers are
+    # stripped; at B3/B4 the deck-level 3-card cap kicks in and adds
+    # beyond ``3 - current_gc_count`` get dropped. Surfaced so the
+    # iteration log can record "Claude wanted Smothering Tithe at B2 --
+    # filtered" or "the deck already has 3 GCs, Mana Drain was dropped"
+    # without losing the signal.
     dropped_for_bracket: list[str] = field(default_factory=list)
     # Cards Claude proposed for cut that match the user's protected list
     # ([metadata] Protect= entries + --protect CLI flags). Sliced before
@@ -684,8 +687,16 @@ def auto_propose(
     rationale = str(payload.get("rationale", "")).strip()
 
     # Bracket-cap filter BEFORE applying max_adds so the cap counts only
-    # bracket-allowed cards.
-    kept_adds, dropped_for_bracket = enforce_bracket_caps(raw_adds, bracket)
+    # bracket-allowed cards. At B3/B4 the WotC guideline caps the deck
+    # at 3 game-changers total; we count the current deck's GCs so the
+    # curator can only add what remains under the cap. At B1/B2 the
+    # count is ignored (all GCs are stripped); at B5 the cap is no-op.
+    from ._proposer_filters import count_game_changers_in_deck
+    current_gc_count = count_game_changers_in_deck(deck_text)
+    kept_adds, dropped_for_bracket = enforce_bracket_caps(
+        raw_adds, bracket,
+        current_game_changer_count=current_gc_count,
+    )
 
     # Color-identity filter: strip any add whose color identity isn't
     # a subset of the deck's commander CI. The curator system prompt

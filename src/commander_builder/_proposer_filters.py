@@ -24,12 +24,12 @@ from __future__ import annotations
 from typing import Optional
 
 
-# Threshold below which game-changers get filtered out. Comes from the WotC
-# bracket guidelines: B1 (Exhibition), B2 (Core) -- no game-changers allowed.
-# B3 (Upgraded) and B4 (Optimized) permit up to 3; B5 (cEDH) is unbounded.
-# We currently only enforce the binary 'allowed at all' line -- the 3-card
-# cap at B3/B4 is a follow-up.
+# Threshold below which game-changers get filtered out entirely. Comes
+# from the WotC bracket guidelines: B1 (Exhibition), B2 (Core) -- no
+# game-changers allowed. B3 (Upgraded) and B4 (Optimized) permit up to
+# ``_BRACKET_B3_B4_GAME_CHANGER_CAP`` (3); B5 (cEDH) is unbounded.
 _BRACKET_NO_GAME_CHANGERS_THRESHOLD = 3
+_BRACKET_B3_B4_GAME_CHANGER_CAP = 3
 
 
 def _load_game_changers() -> set[str]:
@@ -46,32 +46,85 @@ def _load_game_changers() -> set[str]:
 
 def enforce_bracket_caps(
     adds: list[str], bracket: int,
+    *,
+    current_game_changer_count: Optional[int] = None,
 ) -> tuple[list[str], list[str]]:
     """Split ``adds`` into (kept, dropped) by the bracket cap rule.
 
     Below B3 (i.e. B1 + B2), game-changers are stripped from adds and
-    returned separately so the caller can log them. At B3+ this is a
-    no-op pass-through -- game-changers are allowed and the WotC 3-card
-    cap is enforced elsewhere (deck-level audit, not the curator).
+    returned separately so the caller can log them.
+
+    At B3 + B4 (Upgraded + Optimized), the WotC guideline caps the deck
+    at 3 game-changers total. When ``current_game_changer_count`` is
+    provided, the curator's proposed game-changer adds are limited to
+    ``3 - current_game_changer_count`` (clamped to 0) so the resulting
+    deck doesn't exceed the cap. Non-game-changer adds always pass
+    through. ``None`` (the legacy default) means "don't enforce the
+    3-card cap" — used by callers that haven't been wired to count
+    existing game-changers yet, preserving pre-2026-05-16 pass-through
+    behavior.
+
+    At B5 (cEDH), there is no cap; this function is a pass-through.
 
     Card-name comparison is case-insensitive: the game-changers set
     holds the canonical Scryfall casing, but EDHREC scrape / Moxfield
     export sometimes vary, so we fold both sides before comparing.
     """
-    if bracket >= _BRACKET_NO_GAME_CHANGERS_THRESHOLD:
+    # B5 (cEDH): unbounded.
+    if bracket > _BRACKET_B3_B4_GAME_CHANGER_CAP + 1:
         return list(adds), []
 
     gc_set = _load_game_changers()
     gc_lower = {g.lower() for g in gc_set}
 
-    kept: list[str] = []
-    dropped: list[str] = []
+    # B1/B2: strip ALL game-changers.
+    if bracket < _BRACKET_NO_GAME_CHANGERS_THRESHOLD:
+        kept: list[str] = []
+        dropped: list[str] = []
+        for card in adds:
+            if card.lower() in gc_lower:
+                dropped.append(card)
+            else:
+                kept.append(card)
+        return kept, dropped
+
+    # B3/B4: pass-through unless caller provided the existing count
+    # so we can enforce the 3-card cap.
+    if current_game_changer_count is None:
+        return list(adds), []
+
+    remaining = max(0, _BRACKET_B3_B4_GAME_CHANGER_CAP - int(current_game_changer_count))
+    kept = []
+    dropped = []
+    used = 0
     for card in adds:
         if card.lower() in gc_lower:
-            dropped.append(card)
+            if used < remaining:
+                kept.append(card)
+                used += 1
+            else:
+                dropped.append(card)
         else:
             kept.append(card)
     return kept, dropped
+
+
+def count_game_changers_in_deck(deck_text: str) -> int:
+    """Count distinct game-changer cards in the [Main] section of a
+    .dck blob. Used by the B3/B4 cap enforcement so the curator can
+    only add as many game-changers as remain under the 3-card limit.
+
+    Quantity-aware: ``2 Smothering Tithe`` counts as 2 against the cap,
+    matching how WotC's deck-level audit reads the rule. Comparison
+    is case-insensitive.
+    """
+    from .deck_health import _iter_main_cards
+    gc_lower = {g.lower() for g in _load_game_changers()}
+    total = 0
+    for qty, name in _iter_main_cards(deck_text):
+        if name.lower() in gc_lower:
+            total += qty
+    return total
 
 
 def _safe_lookup_card(lookup_fn, name: str):
