@@ -117,7 +117,38 @@ def make_dashboard_blueprint(
 
         try:
             if deck_id:
-                rows = iterations_for_deck(deck_id, db_path=knowledge_db)
+                # The frontend keys decks by filename stem, but auto-curate
+                # writes rows keyed by the Moxfield publicId from the .dck
+                # metadata. Query under BOTH ids and merge so iteration
+                # history shows up regardless of whether the deck was
+                # Moxfield-imported (publicId-keyed rows) or hand-built
+                # locally (stem-keyed rows). The two ID schemes never
+                # collide so duplicate-row risk is zero. See
+                # ``iteration_loop.resolve_deck_id`` for the publicId
+                # lookup contract.
+                rows = list(iterations_for_deck(deck_id, db_path=knowledge_db))
+                public_id: Optional[str] = None
+                candidate = (deck_dir / f"{deck_id}.dck")
+                if candidate.exists():
+                    from ..iteration_loop import resolve_deck_id
+                    try:
+                        public_id = resolve_deck_id(
+                            candidate, fallback=None,
+                        )
+                    except Exception:
+                        public_id = None
+                if public_id and public_id != deck_id:
+                    extra = list(iterations_for_deck(
+                        public_id, db_path=knowledge_db,
+                    ))
+                    # Merge by id, preserving chronological order
+                    # (iterations_for_deck returns oldest-first).
+                    seen = {r.id for r in rows}
+                    for r in extra:
+                        if r.id not in seen:
+                            rows.append(r)
+                            seen.add(r.id)
+                    rows.sort(key=lambda r: r.created_at or "")
             else:
                 rows = recent_iterations(limit=limit, db_path=knowledge_db)
         except Exception as exc:  # pragma: no cover - sqlite errors
@@ -176,8 +207,27 @@ def make_dashboard_blueprint(
         deck_id = request.args.get("deck")
         if not deck_id:
             return jsonify({"error": "deck is required"}), 400
+        # Same filename-stem / publicId resolution as /api/iterations:
+        # auto-curate writes rows under the Moxfield publicId; the
+        # frontend queries by filename stem. Resolve the .dck's
+        # publicId and prefer that when it has data, so the verdict
+        # UI panel actually surfaces pending rows for Moxfield decks.
         try:
             graph = iteration_graph_for_deck(deck_id, db_path=knowledge_db)
+            if not graph.get("nodes"):
+                candidate = (deck_dir / f"{deck_id}.dck")
+                if candidate.exists():
+                    from ..iteration_loop import resolve_deck_id
+                    try:
+                        public_id = resolve_deck_id(
+                            candidate, fallback=None,
+                        )
+                    except Exception:
+                        public_id = None
+                    if public_id and public_id != deck_id:
+                        graph = iteration_graph_for_deck(
+                            public_id, db_path=knowledge_db,
+                        )
         except Exception as exc:  # pragma: no cover - sqlite errors
             return jsonify({"error": str(exc)}), 500
         return jsonify({

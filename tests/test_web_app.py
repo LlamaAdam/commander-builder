@@ -455,6 +455,136 @@ def test_iterations_400_on_bad_limit(seeded_client):
 
 
 # ---------------------------------------------------------------------------
+# /api/iterations + /api/iteration_graph — Moxfield publicId fallback
+# (2026-05-16 fix). The frontend keys decks by filename stem but
+# auto-curate writes rows keyed by the Moxfield publicId from the
+# .dck metadata. Without this resolution step, iteration history
+# never surfaces for Moxfield-imported decks and the new Tier-1.3
+# verdict panel can't render its rows.
+# ---------------------------------------------------------------------------
+
+def _moxfield_deck_setup(tmp_path):
+    """Build a tmp deck_dir + sqlite db with one iteration row keyed
+    by Moxfield publicId 'abc123', plus a matching .dck file at
+    ``<deck_dir>/[USER] Moxy [B3].dck`` that carries ``Moxfield=abc123``
+    in its metadata."""
+    from commander_builder.knowledge_log import Iteration, record_iteration
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    stem = "[USER] Moxy [B3]"
+    deck = deck_dir / f"{stem}.dck"
+    deck.write_text(
+        "[metadata]\nName=Moxy\nMoxfield=abc123\n"
+        "[Commander]\n1 Edgar Markov\n"
+        "[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "klog.sqlite"
+    it = Iteration(
+        deck_id="abc123",           # publicId — NOT the filename stem
+        deck_name=stem,
+        bracket=3,
+        parent_id=None,
+        audit_version="claude-auto",
+        audit_manifest={"added": [], "removed": [], "rationale": "x"},
+        verdict="pending",
+        deck_snapshot=deck.read_text(encoding="utf-8"),
+    )
+    record_iteration(it, db_path=db)
+    return deck_dir, db, stem
+
+
+def test_iterations_endpoint_resolves_filename_stem_to_publicId(tmp_path):
+    """Filename-stem query falls through to the .dck's Moxfield
+    publicId so iteration history surfaces for Moxfield-imported decks."""
+    deck_dir, db, stem = _moxfield_deck_setup(tmp_path)
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    from urllib.parse import quote
+    resp = client.get(f"/api/iterations?deck={quote(stem)}")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["count"] == 1
+    assert body["iterations"][0]["deck_id"] == "abc123"
+
+
+def test_iteration_graph_endpoint_resolves_filename_stem_to_publicId(tmp_path):
+    """Same resolution for the graph endpoint — without it the new
+    Tier-1.3 verdict panel can't render Kept/Reverted/Neutral buttons
+    for pending Moxfield-deck iterations."""
+    deck_dir, db, stem = _moxfield_deck_setup(tmp_path)
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    from urllib.parse import quote
+    resp = client.get(f"/api/iteration_graph?deck={quote(stem)}")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert len(body["nodes"]) == 1
+    assert body["nodes"][0]["verdict"] == "pending"
+
+
+def test_iterations_endpoint_prefers_stem_when_both_have_rows(tmp_path):
+    """Defensive: when rows exist under BOTH the filename stem AND the
+    publicId (rare — e.g. legacy stem-keyed iterations + new publicId-
+    keyed ones), the merge returns the union sorted chronologically
+    without dropping either set or producing duplicates."""
+    from commander_builder.knowledge_log import Iteration, record_iteration
+    deck_dir, db, stem = _moxfield_deck_setup(tmp_path)
+    # Add a legacy stem-keyed row too.
+    record_iteration(
+        Iteration(
+            deck_id=stem, deck_name=stem, bracket=3,
+            parent_id=None, audit_version="legacy",
+            audit_manifest={"added": [], "removed": [], "rationale": "legacy"},
+            verdict="kept",
+        ),
+        db_path=db,
+    )
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    from urllib.parse import quote
+    body = client.get(f"/api/iterations?deck={quote(stem)}").get_json()
+    assert body["count"] == 2
+    # Both deck_ids present, no duplicates.
+    seen_ids = {r["id"] for r in body["iterations"]}
+    assert len(seen_ids) == 2
+
+
+def test_iterations_endpoint_no_moxfield_metadata_falls_back_to_stem(tmp_path):
+    """Hand-built local deck with no Moxfield= line: filename-stem
+    iteration rows still surface (no false-negative from the publicId
+    branch)."""
+    from commander_builder.knowledge_log import Iteration, record_iteration
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    stem = "[USER] LocalOnly [B2]"
+    deck = deck_dir / f"{stem}.dck"
+    deck.write_text(
+        "[Commander]\n1 Test\n[Main]\n1 Sol Ring\n", encoding="utf-8",
+    )
+    db = tmp_path / "klog.sqlite"
+    record_iteration(
+        Iteration(
+            deck_id=stem, deck_name=stem, bracket=2,
+            parent_id=None, audit_version="manual",
+            audit_manifest={"added": [], "removed": [], "rationale": ""},
+            verdict="pending",
+        ),
+        db_path=db,
+    )
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    from urllib.parse import quote
+    body = client.get(f"/api/iterations?deck={quote(stem)}").get_json()
+    assert body["count"] == 1
+    assert body["iterations"][0]["deck_id"] == stem
+
+
+# ---------------------------------------------------------------------------
 # PATCH /api/iterations/<id>/verdict — manual verdict assignment (Tier 1.3)
 # ---------------------------------------------------------------------------
 
