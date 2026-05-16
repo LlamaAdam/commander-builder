@@ -215,3 +215,89 @@ def test_color_identity_when_lookup_fails(tmp_path, monkeypatch):
         lambda name, **_: None,
     )
     assert color_identity_for_commander(p) == ""
+
+
+# ---------------------------------------------------------------------------
+# format_card_for_display + diff_oracle_text — FP-009 parity API
+# ---------------------------------------------------------------------------
+
+def test_format_card_for_display_renders_known_card(monkeypatch):
+    from commander_builder.scryfall_client import format_card_for_display
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: {
+            "name": "Lightning Bolt",
+            "mana_cost": "{R}",
+            "type_line": "Instant",
+            "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+            "cmc": 1.0,
+            "color_identity": ["R"],
+        },
+    )
+    text = format_card_for_display("Lightning Bolt")
+    assert "Lightning Bolt" in text
+    assert "{R}" in text
+    assert "Instant" in text
+    assert "deals 3 damage" in text
+    assert "Color identity: R" in text
+    assert "CMC: 1" in text
+
+
+def test_format_card_for_display_returns_empty_when_unknown(monkeypatch):
+    from commander_builder.scryfall_client import format_card_for_display
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: None,
+    )
+    assert format_card_for_display("Made Up") == ""
+
+
+def test_format_card_for_display_includes_pt_for_creatures(monkeypatch):
+    from commander_builder.scryfall_client import format_card_for_display
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: {
+            "name": "Llanowar Elves", "mana_cost": "{G}",
+            "type_line": "Creature - Elf Druid",
+            "oracle_text": "{T}: Add {G}.",
+            "cmc": 1.0, "color_identity": ["G"],
+            "power": 1, "toughness": 1,
+        },
+    )
+    assert "1/1" in format_card_for_display("Llanowar Elves")
+
+
+def test_format_card_for_display_handles_empty_name(monkeypatch):
+    from commander_builder.scryfall_client import format_card_for_display
+    assert format_card_for_display("") == ""
+
+
+def test_diff_oracle_text_detects_change(monkeypatch):
+    from commander_builder.scryfall_client import diff_oracle_text
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: {"name": "Bolt", "oracle_text": "Old text."},
+    )
+    diff = diff_oracle_text("Bolt", "New text.")
+    assert diff is not None
+    assert diff["changed"] is True
+    assert diff["before"] == "Old text."
+    assert diff["after"] == "New text."
+
+
+def test_diff_oracle_text_reports_no_change(monkeypatch):
+    from commander_builder.scryfall_client import diff_oracle_text
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: {"name": "Bolt", "oracle_text": "Same."},
+    )
+    assert diff_oracle_text("Bolt", "Same.")["changed"] is False
+
+
+def test_diff_oracle_text_returns_none_when_unknown(monkeypatch):
+    from commander_builder.scryfall_client import diff_oracle_text
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: None,
+    )
+    assert diff_oracle_text("Mystery", "anything") is None

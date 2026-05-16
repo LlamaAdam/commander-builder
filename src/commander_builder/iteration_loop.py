@@ -26,24 +26,22 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import re
 
 from .analyst import AnalystConfig, AnalystInput, Verdict, analyze
-from .compare_versions import COMPARE_OUT_DIR, ComparisonReport, compare
+from .compare_versions import ComparisonReport, compare
 from .forge_runner import VENDOR_FORGE
 from .knowledge_log import (
     DEFAULT_DB_PATH,
     Iteration,
     record_iteration,
-    update_verdict,
 )
 from .proposer import ProposerConfig, ProposerInput, propose
-from .snapshot_deck import snapshot, versioned_path
+from .snapshot_deck import snapshot
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
 

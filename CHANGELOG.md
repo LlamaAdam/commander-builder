@@ -6,18 +6,328 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
-### Project management
-- New `BACKLOG.md` with 25 numbered gaps across 4 tiers (3 closed this session)
-- New `STATUS.md` for current operational state
-- New `CHANGELOG.md` (this file)
-- New `docs/architecture.md` module map with layered diagram + responsibility table
-- New `pyproject.toml` — `pip install -e .` works, `PYTHONPATH=src` no longer
-  required. CLI entry points: `commander-import`, `commander-snapshot`,
-  `commander-curate`, `commander-match`, `commander-compare`, `commander-iterate`,
-  `commander-push`
-- New `CONTRIBUTING.md` — dev setup walkthrough, conventions, ADR template
-- README.md rewritten to reflect Phase 2 workflow (closes GAP-016)
-- `.gitignore` extended to cover `*.log`, `.cache/`, `*.sqlite` artifacts
+### 2026-05-15/16 — auto-curate pipeline + audit polish + Tier-3 refactor
+
+29 commits landed on `feature/2026-04-28-session`. Tests: 875 → 1194.
+
+#### Added — `commander-auto-curate` end-to-end loop
+
+- **`feat(curator)`: `commander-auto-curate` — advisor + Claude curator
+  + apply.** New CLI that runs the improvement advisor on a deck, hands
+  the AdviceReport to a Claude curator, and writes a versioned `.dck`
+  with the proposed swaps. Replaces the manual prompt-paste workflow
+  for unattended overnight runs. (`b859463`)
+- **`feat(curator)`: `--run-sim` closes the loop with Forge A/B verdict.**
+  After the proposal lands, runs a head-to-head Forge A/B sim between
+  the old and new decks (default 5 games). The empirical verdict
+  (`kept` / `reverted` / `neutral`) plus full `ABResult` metrics
+  populate the knowledge_log row that previously stayed at
+  `verdict='pending'` forever. (`023134e`)
+- **`feat(curator)`: `--mode` preset (polish / overhaul / free).**
+  `polish` = 5 adds + 5 cuts (safe overnight default), `overhaul` =
+  15 + 15 (deliberate revision), `free` = unbounded. Per-CLI
+  `--max-adds` / `--max-cuts` override the preset. (`a080901`)
+- **`feat(curator)`: protect pet cards from being proposed for cuts.**
+  `[metadata] Protect=` in the `.dck` plus `--protect` CLI flags
+  defines a pet-card list. The curator strips matching cuts pre-prompt
+  and post-response so user favorites survive every iteration. (`fe54c4b`)
+- **`feat(curator)`: bracket-aware filler picking for `--run-sim`.**
+  Filler decks for the 4-player A/B pod are picked by bracket distance
+  to the user's deck, defeating the noise-dominated verdicts a B4 deck
+  got when matched against B5 cEDH + B2 casual fillers. (`8e84962`)
+- **`fix(curator)`: post-filter Claude's off-color adds via Scryfall
+  CI check.** Defensive filter rejects any add whose Scryfall
+  `color_identity` isn't a subset of the commander's CI. Hybrid mana
+  is required to fit fully. None CI = couldn't resolve commander →
+  skip filter (test fixtures, custom commanders). (`962776a`)
+- **`feat(curator)`: writes a pending iteration row.** Each
+  auto-curate run lands a row in the knowledge_log with
+  `verdict='pending'` so the iteration chain stays threaded even
+  before `--run-sim` fills in the empirical result. (`f0e06a0`)
+
+#### Added — audit panel signals
+
+- **`feat(audit)`: deck-health tile row — 5 construction-quality
+  signals.** MDFC count, spell density, mana sinks, wincon
+  protection, self-mill enablement. Surfaces shape problems the
+  advisor's narrative diagnosis doesn't. (`68a420c`)
+- **`feat(audit)`: detect activated-ability mana sinks (Tier-2.1).**
+  `count_mana_sinks` now picks up `{R}: ...`-style pure-mana
+  activations (Spikeshot Goblin, Inkmoth Nexus) and self-untap loops
+  (Staff of Domination), in addition to the existing `{X}`-cost
+  spell heuristic. (`a06e5dc`)
+- **`feat(audit)`: back-fill EDHREC categories from Scryfall
+  type_line (Tier-2.2).** Roughly 21% of average-deck preview cards
+  weren't bucketed by EDHREC and fell into the UI's catch-all
+  'Other' pile. The advisor now back-fills via Scryfall `type_line`
+  with priority-ordered mapping (Artifact Creature → Creatures,
+  Legendary Planeswalker → Planeswalkers, etc.). (`7c72993`)
+- **`feat(ui)`: EDHREC average-deck preview `<details>` in audit
+  panel.** Collapsible section ranking what a typical deck for this
+  commander+bracket includes; cards in the user's deck are
+  highlighted, missing categories surface holes. (`a061d10`)
+- **`feat(ui)`: salt-warning banner above audit at B1-B3.** Aggregate
+  EDHREC salt-score signal flagged at the top of the panel for casual
+  brackets so the user can swap out hostile cards before play. (`dc3b5ee`)
+- **`feat(ui)`: iteration-graph SVG view in dashboard history panel.**
+  Nodes (iterations) + edges (swap rationales) projected as an SVG
+  graph from the knowledge_log; verdict tinting at a glance. (`51c7b04`)
+- **`feat(web)`: manual verdict UI for pending iterations
+  (Tier-1.3).** New `PATCH /api/iterations/<id>/verdict` endpoint plus
+  Kept/Reverted/Neutral buttons in the iteration-graph view. Manual
+  web iterations no longer stay at `verdict='pending'` forever. (`be6a659`)
+- **`fix(audit)`: quantity-aware cuts in `_apply_swaps_to_dck`.**
+  Cutting Mountain twice from a 27-Mountain stack now decrements to
+  25 instead of dropping the whole line. (`fb628eb`)
+- **`fix(audit)`: quantity-aware adds in `_apply_swaps_to_dck`
+  (Tier-1.1).** Symmetric to the cut fix — adds for cards already in
+  the deck increment the existing line (preserving the `|SET|CN`
+  edition tail) instead of appending a duplicate `1 <Name>` line.
+  Duplicate add entries collapse to one summed line. (`6e0836f`)
+
+#### Added — secrets + bulk import
+
+- **`feat(secrets)`: external credentials file outside the repo.**
+  `~/.commander-builder/credentials` loaded by every commander-* CLI
+  entry; keeps `ANTHROPIC_API_KEY` out of repo + dotfiles. (`41e1b3d`)
+- **`feat(import)`: bulk Moxfield import — CLI + API + UI tab.**
+  Paste 50 Moxfield URLs, import them all to `vendor/forge/userdata/
+  decks/commander/` in one go. (`36f08b0`)
+
+#### Added — tooling
+
+- **`feat(scripts)`: `refresh_card_lists` for hardcoded `deck_health`
+  staleness checks (Tier-2.3).** New CLI diffs `_MDFC_LANDS` against
+  current Scryfall (`layout:modal_dfc` + at-least-one-Land filter)
+  and prints stale + candidate reports. `_WINCON_PROTECTION` and
+  `_SELF_MILL_ENABLERS` get manual-curation reminders. Pure helpers
+  in `_card_list_refresh.py` with 15 tests. (`4b57e79`)
+- **`tool`: `scripts/compare_curator_modes` — A/B verification for
+  `--mode`.** Same deck through polish / overhaul / free with
+  side-by-side curator output. (`62e3e41`)
+
+#### Added — refactor
+
+- **`refactor(proposer)`: split into filters / sim / cli modules
+  (Tier-3).** `proposer.py` 1766 → 944 lines. New private modules:
+  `_proposer_filters.py` (post-response filters), `_proposer_sim.py`
+  (A/B sim helpers + knowledge_log writer), `_proposer_cli.py`
+  (`auto_curate_main` + argparse). All public symbols re-exported
+  from `proposer.py`; zero behavior change. (`8ba5b0a`)
+
+#### Fixed — live-auto-curate smoke bugs
+
+- **`fix(curator)`: four bugs from live auto-curate smoke.** Cp1252
+  encoding handling for `.dck` reads, deck-path doubling on Windows,
+  empty-env-var-shadow over the credentials file, JSON extraction
+  for prose-prefixed Claude responses. (`82b3dd0`)
+- **`fix(curator)`: balance + pad to produce legal decks.** Curator
+  output is balanced via `min(adds, cuts)` and padded to 99 main
+  with basic lands. Forge would refuse short decks; now every
+  auto-curate output is legal. (`5b2e52b`)
+- **`fix(audit)`: `main_count` counts proposed_text directly (was
+  inflated).** UI badge now matches the actual deck size after
+  swaps. (`03dc8c8`)
+- **`fix(ui)`: audit button passed PointerEvent as source — Audit
+  failed 400.** Defensive arrow-function wrap; pinned with backend
+  validation. (`5c96e3d`, `bbdd327`)
+
+#### Process
+
+- **`prompt(curator)`: caps are ceilings, not targets.** System
+  prompt explicitly tells Claude not to fill `--max-adds` just
+  because it can — quality beats quantity. (`fb07599`)
+- **`test(isolation)`: autouse fixture redirects `DEFAULT_DB_PATH` to
+  `tmp_path`.** Prevents test runs from polluting the real
+  knowledge_log. (`4e77154`)
+
+
+### 2026-05-13 — doc consolidation + EDHREC retry polish
+
+#### Added
+- **`feat(edhrec)`: honor `Retry-After` header + log each retry.** RFC 7231
+  parsing for both `delta-seconds` and HTTP-date forms; falls back to exp
+  backoff on malformed input. `MAX_RETRY_AFTER_SEC=30` caps the honored
+  delay so a CDN incident sending "wait 5 min" can't pin the audit. Each
+  retry emits a `[edhrec] retry N/3 after HTTP 503 — sleeping 1.0s` line;
+  happy path stays quiet. 6 new tests cover seconds form, HTTP-date,
+  capping, malformed fallback, log emission, no-log-on-success.
+
+#### Project management
+- **Docs consolidated from 15 files to 4.** README + STATUS + CHANGELOG
+  (this file) + `docs/architecture.md`. Removed: `PROJECT.md`,
+  `BACKLOG.md`, `FUTURE_PLANS.md`, `CONTRIBUTING.md`,
+  `docs/audit_workflow.md`, `docs/SPEEDUP_TRACK_1.md`,
+  `docs/HANDOFF_2026-05-06.md`. Content was synthesized into the
+  surviving four rather than concatenated. Earlier session snapshots
+  (`HANDOFF_2026-04-26`, `HANDOFF_2026-04-27_afk`,
+  `docs/session_state_2026-04-28`, `docs/evaluation_retrospective_2026-04-28`)
+  were deleted as superseded in a separate commit.
+
+### 2026-05-12/13 — Track 1 speedup + LLM analyst + Track 2 prep + audit polish
+
+8 commits landed on `feature/2026-04-28-session`. Tests: 559 → 674.
+
+#### Added — Track 1 (A/B sim wall-time)
+- **`feat(speedup)`: parallel pods + adaptive early-stop + intra-pod abort.**
+  `compare_versions.compare()` now dispatches pods through
+  `ThreadPoolExecutor` (workers = `min(len(pods), cpu_count())`);
+  `parallel=False` preserves sequential behavior for tests. Adaptive
+  early-stop cancels queued pod futures when `|margin| > games_remaining`;
+  `report.stopped_early` + `pods_planned` reflect what actually ran.
+  Sprint 1C (originally "JVM persistence") **reframed to per-pod
+  intra-pod abort** — `forge_runner._run_streaming` gained an
+  `abort_check(line) -> bool` callback that parses `Game Result:` lines
+  and kills the JVM as soon as the in-pod margin exceeds games-left.
+  `_synthesize_match_result(state)` builds a `Match Result:` summary so
+  `log_parser` sees a complete record. Pod result dict gains
+  `intra_pod_aborted` + `games_actually_played`. Auto-scaled
+  `auto_filler_pairs()` returns `min(4, max(2, cpu_count() or 2))`.
+
+  **Measured impact** (theoretical on 4-core box, decisive matchup):
+
+  | Mode | Sequential | After 1A only | After 1A+1B+1C |
+  |---|---|---|---|
+  | 1v1 5g (decisive) | 30 s | 30 s | ~18 s (kill at game 3) |
+  | Pod 5g (2 pairs, decisive) | ~7 min | ~3.5 min | ~2 min |
+  | Pod 20g (2 pairs, decisive) | ~28 min | ~14 min | ~5 min |
+  | Pod 5g (2 pairs, close) | ~7 min | ~3.5 min | ~3.5 min (no abort) |
+
+  Close matches don't speed up — abort only fires when the verdict is
+  uncatchable. Sprint 1D (result cache) skipped as low-leverage; real-use
+  cache hits are rare (each propose-swap stages a fresh proposed file).
+
+#### Added — LLM analyst + BYO key
+- **`feat(web)`: `/api/audit?llm=claude` with BYO key.** Key arrives via
+  `X-Anthropic-API-Key` header, injected into env for the call's lifetime,
+  restored in `finally` so it never leaks across requests. Per
+  FP-011-shaped plan.
+- **Claude model dropdown** (Haiku 4.5 / Sonnet 4.5 / Opus 4.5) stored in
+  `localStorage`. Default Sonnet. `advise(claude_model=...)` plumbs to
+  the Anthropic SDK call.
+- **`AdviceReport.fallback_reason`** threads the actual exception cause
+  through. UI now surfaces e.g. *"Reason: claude advisor failed
+  (BadRequestError: Error code: 400 - credit balance too low)"* instead
+  of a generic "unavailable" string.
+- **`feat(audit)`: card-name validator flags Claude hallucinations.** New
+  `_validate_card_names(recs)` cross-checks every recommended card
+  against the Scryfall cache. `SwapRecommendation.name_known` is
+  `True` (Scryfall returned a card), `False` (404 — fake), or `None`
+  (lookup raised; never accuse a real card on transient failure).
+  `/api/audit` surfaces `name_known` per add/remove entry plus
+  `unknown_card_count`. UI renders a `⚠ not in Scryfall` pill inline +
+  a summary near the headline.
+
+#### Added — knowledge log
+- **`feat(klog)`: POST `/api/save_iteration`** persists audit_manifest +
+  sim_report + verdict to `knowledge_log.sqlite`. Verdict dropdown
+  (kept/reverted/neutral/pending) under propose-swap result; "Save
+  audit (no sim)" button on the audit panel persists pending rows for
+  Phase 3 ML data even without a sim.
+- **`feat(klog)`: pricing snapshot in iteration manifest.** Optional
+  top-level `total_price_usd` in payload → merged as
+  `audit_manifest.pricing = {total_price_usd, captured_at}`. Caller-
+  supplied pricing wins; zero is legal; non-numeric and bool both 400.
+  UI captures `stat_tiles.est_price_usd` in `renderDashboard` and forwards
+  via both save payloads.
+
+#### Added — Track 2 prep (forge_py multi-deck sim)
+- **`feat(track2)`: forge_py correlation harness (opt-in).** New module
+  `forge_py_correlation` runs `forge_py.combat.run_multiplayer_game`
+  alongside Forge for paired-verdict logging.
+  `run_forge_py_ab(old, new, games, mode)` returns `ForgePyABResult`.
+  `log_correlation_row(...)` appends CSV.
+  `correlation_summary(log_path)` reports `{rows, agree, disagree,
+  agreement_rate, errors}`. CLI: `python -m
+  commander_builder.forge_py_correlation` + `--json` flag. Endpoint:
+  `/api/correlation_summary`. Topbar surface in `loadHealth()` shows
+  `forge_py 75% agree (12)` when rows exist. Opt-in via
+  `COMMANDER_BUILDER_CORRELATE_FORGE_PY=1`. `forge_py` imported
+  lazily — missing install returns `ForgePyABResult(error="forge_py not
+  importable")`.
+
+#### Added — forge_runner + edhrec_client robustness
+- **`feat(forge)`: detect bundled jar version + warn when stale.** New
+  `detect_forge_version(forge_dir)` parses the version out of the jar
+  filename and reads `vendor/forge/build.txt` for the build timestamp.
+  Returns `ForgeVersionInfo(version, build_date, age_days, is_stale)`;
+  `is_stale=True` only when age > 90 d AND build_date is known.
+  `create_app` prints `[startup] Forge jar 2.0.12 (19d old)` or
+  `[startup] WARN: Forge jar 2.0.12 is 134d old — consider updating
+  from github.com/Card-Forge/forge/releases`. New `/api/forge_version`
+  endpoint.
+- **`feat(edhrec)`: retry transient HTTP failures with exponential
+  backoff.** New `_http_get_text_with_retry` retries 5xx, 429,
+  URLError, TimeoutError with `base_delay * 2 ** attempt` (1s/2s/4s);
+  skips 404 + other 4xx (deterministic). Plumbed into both
+  `fetch_commander_page` and `fetch_average_deck`. Sephiroth's 503
+  from 2026-05-06 now self-heals instead of falling through to None.
+
+#### Added — UX polish
+- **`feat(ux)`: bracket auto-inference + modal scroll fix.** Dashboard
+  emits `inferred_bracket` alongside declared `bracket`. UI warns when
+  heuristic suggests higher than declared. `.modal { overflow-y: auto }`
+  + sticky header keeps close button reachable on tall content.
+- **Soft refresh.** New `selectDeck(deckId, li, { soft: true })` keeps
+  prior dashboard rendered while next data fetches. Used by Edit-deck
+  save and Attach-Moxfield. Avoids 5+s "Loading…" blank on Scryfall
+  lookups for new cards.
+- **Sub-100 source padding.** `_pad_main_to_99()` tops up short decks
+  (e.g. Goblin at 71 main) with basic lands matching the deck's
+  existing color distribution. Audit response includes `basics_padded`
+  + `basics_padded_breakdown`.
+- **Stale-file cleanup at boot.** `_cleanup_stale_staged_files()`
+  sweeps interrupted `*_proposed_<ts>.dck` / `*_converted_<ts>.dck`
+  files older than 60 s. Runs in `create_app`.
+- **JS error collector.** New `/api/log_error` endpoint + browser
+  bootstrap on `window.error` / `unhandledrejection`. Appends to
+  `vendor/_js_errors.log`; returns a ref token (`20260429023316-a1b2`)
+  the user can paste into chat.
+
+#### Fixed
+- **`fix(moxfield)`: convert pipe-delimited lines to parens format.**
+  Moxfield rejects Forge's `1 Arcane Signet|MIC|157` format. New
+  `to_moxfield_line()` helper converts to `1 Arcane Signet (MIC) 157`.
+  `dck_to_textarea` runs every emitted line through it.
+- **TDZ ReferenceError on `runProposeSwap`** — `mode` was read before
+  declaration; now hoisted.
+
+### Earlier 2026-04-28 — project-manager session
+
+- New web app: Flask scaffold + 7-panel dashboard. Routes:
+  `/api/health`, `/api/decks`, `/api/dashboard?deck=<id>`,
+  `/api/iterations[?deck=<id>]`. Path-traversal guard validates deck
+  inputs against `deck_dir`. `pyproject.toml` adds `[web]` extra
+  (`flask>=3.0`). 21 tests cover route shapes + traversal guard.
+- Knowledge-log demo seeder writes a 4-iteration arc
+  (pending → kept → reverted → neutral) for a fictional Omnath deck. Lets
+  the UI's version-history strip develop end-to-end before real Forge
+  data exists. 6 tests.
+
+### Earlier 2026-04-27 — autonomous-improvement session
+
+- **Shared `mtg_cards/` folder** at `C:\dev\mtg_cards\`. Both
+  commander_builder and forge_py resolve their card cache via
+  `MTG_CARDS_DIR` env var.
+- **`scryfall_client.refresh_card()`** + `forge_py.cards.refresh()` —
+  force-fetch bypassing cache (live-text directive).
+- **`staples.py`** canonical universal-staples + `classify_role` +
+  frequency labels + confidence tiers. Deduplicated
+  `meta_test.UNIVERSAL_STAPLES`.
+- **Suggestion-quality pass**: staples-exclusion, role-tagged adds,
+  diagnosis-driven re-ranking. All four FP-006 suggestion-quality gates
+  closed.
+
+### Earlier 2026-04-26 — initial project management
+
+- `BACKLOG.md`, `STATUS.md`, `CHANGELOG.md`, `docs/architecture.md`,
+  `pyproject.toml` (`pip install -e .` works; `PYTHONPATH=src` no
+  longer required). CLI entry points: `commander-import`,
+  `commander-snapshot`, `commander-curate`, `commander-match`,
+  `commander-compare`, `commander-iterate`, `commander-push`.
+- `CONTRIBUTING.md` — dev setup walkthrough, conventions, ADR template.
+- README.md rewritten to reflect Phase 2 workflow.
+- `.gitignore` extended to cover `*.log`, `.cache/`, `*.sqlite`.
 
 ### Added
 - New `archetype.py` module with heuristic classifier (filename hint →

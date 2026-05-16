@@ -45,7 +45,6 @@ from typing import Optional
 
 from .compare_versions import COMPARE_OUT_DIR, ComparisonReport, compare
 from .edhrec_client import (
-    AverageDeck,
     fetch_average_deck,
     fetch_commander_page,
 )

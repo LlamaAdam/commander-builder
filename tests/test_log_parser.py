@@ -160,3 +160,45 @@ def test_confirm_action_attribution_uses_normalized_names():
     parsed = parse(stdout)
     # Looked up via normalized form.
     assert parsed.confirm_action_by_deck.get("Foo Deck") == 1
+
+
+def test_parse_uses_last_match_result_for_constructed_format():
+    """Forge's ``constructed`` format emits a Match Result line per
+    game with cumulative win counts; the LAST line is the final tally.
+    Forge's ``commander`` format emits one Match Result at the very
+    end. Both should parse correctly with "use last" semantics."""
+    # Synthetic constructed-format stdout: 3 games, cumulative tallies.
+    stdout = (
+        "Game Result: Game 1 ended in 5000 ms. Ai(2)-Bar has won!\n"
+        "Match Result: Ai(1)-Foo: 0 Ai(2)-Bar: 1\n"
+        "Game Result: Game 2 ended in 5000 ms. Ai(1)-Foo has won!\n"
+        "Match Result: Ai(1)-Foo: 1 Ai(2)-Bar: 1\n"
+        "Game Result: Game 3 ended in 5000 ms. Ai(1)-Foo has won!\n"
+        "Match Result: Ai(1)-Foo: 2 Ai(2)-Bar: 1\n"
+    )
+    parsed = parse(stdout)
+    # The LAST Match Result line is the final tally (Foo 2, Bar 1),
+    # not the first (Foo 0, Bar 1).
+    foo = next((d for d in parsed.deck_results if d.name == "Foo"), None)
+    bar = next((d for d in parsed.deck_results if d.name == "Bar"), None)
+    assert foo is not None
+    assert bar is not None
+    assert foo.wins == 2
+    assert bar.wins == 1
+
+
+def test_parse_commander_format_unchanged_with_use_last_fix():
+    """One Match Result line at the end of all games — typical
+    commander format output. The "use last" change must not regress
+    this case."""
+    stdout = (
+        "Game Result: Game 1 ended in 80000 ms. Ai(3)-Allies has won!\n"
+        "Game Result: Game 2 ended in 90000 ms. Ai(2)-Hash has won!\n"
+        "Game Result: Game 3 ended in 70000 ms. Ai(3)-Allies has won!\n"
+        "Match Result: Ai(1)-Hakbal: 0 Ai(2)-Hash: 1 Ai(3)-Allies: 2 Ai(4)-Yuriko: 0\n"
+    )
+    parsed = parse(stdout)
+    by_name = {d.name: d.wins for d in parsed.deck_results}
+    assert by_name == {
+        "Hakbal": 0, "Hash": 1, "Allies": 2, "Yuriko": 0,
+    }

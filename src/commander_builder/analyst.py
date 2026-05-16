@@ -14,8 +14,11 @@ Verdict taxonomy:
 The analyst itself is just a function. It can be implemented three ways:
 
   1. Heuristic-only (no LLM)        — `heuristic_verdict()` below
-  2. Claude API (high quality)       — `claude_verdict()` (stub for now)
-  3. Local Ollama (cost saving)      — `ollama_verdict()` (stub for now)
+  2. Claude API (high quality)       — `claude_verdict()` (live;
+     falls back to NotImplementedError if anthropic SDK or
+     ANTHROPIC_API_KEY missing — router degrades to heuristic)
+  3. Local Ollama (cost saving)      — `ollama_verdict()` (live;
+     falls back to NotImplementedError if Ollama isn't reachable)
 
 The default `analyze()` runs the heuristic and falls back to higher-quality
 sources only when the heuristic is uncertain. This keeps the loop running
@@ -189,7 +192,7 @@ def _extract_swap_lessons(manifest: dict, label: str) -> list[str]:
     return []
 
 
-# --- Claude backend (stub) -------------------------------------------------
+# --- Claude backend --------------------------------------------------------
 
 # System prompt for `claude_verdict`. Stable across calls so prompt caching
 # at the SDK level reuses the prefix and saves tokens.
@@ -301,7 +304,7 @@ def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     )
 
 
-# --- Ollama backend (stub) -------------------------------------------------
+# --- Ollama backend --------------------------------------------------------
 
 def ollama_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     """Render a verdict via a local Ollama model.

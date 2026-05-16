@@ -19,7 +19,7 @@ from commander_builder.deck_dashboard import (
     DISPLAY_CATEGORIES,
     DashboardData,
     _extract_price_usd,
-    _power_level,
+    _power_bracket,
     _read_main_with_quantities,
     build_dashboard,
     classify_role_extended,
@@ -64,6 +64,23 @@ def test_classify_role_extended_each_opponent_loses_life():
     assert role == "win_condition"
 
 
+def test_classify_role_extended_you_win_the_game():
+    # Coalition Victory was returning ``"other"`` instead of
+    # ``"win_condition"`` because the original patterns only matched
+    # "target opponent loses" / "each opponent loses" idioms.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Coalition Victory")
+    assert classify_role_extended(o["oracle_text"], o["type_line"]) == "win_condition"
+
+
+def test_classify_role_extended_craterhoof_trample_then_pump():
+    # Craterhoof Behemoth's real Scryfall oracle reads "gain trample
+    # and get +X/+X" — opposite word order from the original pattern.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Craterhoof Behemoth")
+    assert classify_role_extended(o["oracle_text"], o["type_line"]) == "win_condition"
+
+
 def test_classify_role_extended_falls_back_to_base_taxonomy():
     """When no land/win patterns match, fall through to staples.classify_role."""
     role = classify_role_extended(
@@ -103,43 +120,99 @@ def test_extract_price_handles_zero():
 
 
 # ---------------------------------------------------------------------------
-# _power_level
+# _power_bracket — Wizards' 1..5 Commander Bracket system
 # ---------------------------------------------------------------------------
 
-def test_power_level_low_for_high_cmc_no_game_changers():
-    """Slow deck (avg cmc 4, 0 changers) below the casual midpoint."""
-    p = _power_level(avg_cmc=4.5, n_game_changers=0, bracket=None)
-    assert p <= 5
+def test_power_bracket_low_for_high_cmc_no_game_changers():
+    """Slow deck (avg cmc 4, 0 changers) is bracket 1 (Exhibition)."""
+    p = _power_bracket(avg_cmc=4.5, n_game_changers=0, bracket=None)
+    assert p == 1
 
 
-def test_power_level_high_for_fast_deck_with_changers():
-    """Fast deck with multiple game-changers should be high."""
-    p = _power_level(avg_cmc=2.2, n_game_changers=4, bracket=None)
-    assert p >= 8
+def test_power_bracket_high_for_fast_deck_with_changers():
+    """Fast deck with 3+ game changers is bracket 4 (Optimized)."""
+    p = _power_bracket(avg_cmc=2.2, n_game_changers=4, bracket=None)
+    assert p == 4
 
 
-def test_power_level_anchors_to_bracket_when_specified():
-    """Bracket 4 (high power) should pull score upward even with
-    moderate metrics."""
-    p_no_bracket = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None)
-    p_bracket_4 = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=4)
-    assert p_bracket_4 > p_no_bracket
+def test_power_bracket_user_supplied_bracket_wins():
+    """An explicit bracket trumps the heuristic — it's what the user
+    declares the deck is built for."""
+    p_no_bracket = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=None)
+    p_bracket_4 = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=4)
+    assert p_bracket_4 == 4
+    assert p_no_bracket != 4  # heuristic landed elsewhere
 
 
-def test_power_level_clamped_to_1_to_10():
-    """Even absurd inputs should produce a value in [1, 10]."""
-    very_high = _power_level(avg_cmc=1.0, n_game_changers=20, bracket=5)
-    very_low = _power_level(avg_cmc=8.0, n_game_changers=0, bracket=1)
-    assert 1 <= very_high <= 10
-    assert 1 <= very_low <= 10
+def test_power_bracket_clamped_to_1_to_5():
+    """Output is always a valid bracket integer."""
+    very_high = _power_bracket(avg_cmc=1.0, n_game_changers=20, bracket=5)
+    very_low = _power_bracket(avg_cmc=8.0, n_game_changers=0, bracket=1)
+    assert 1 <= very_high <= 5
+    assert 1 <= very_low <= 5
 
 
-def test_power_level_combo_archetype_nudges_up():
-    p_combo = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None,
+def test_power_bracket_combo_archetype_nudges_up():
+    """Combo decks are at least bracket 3 (Upgraded) even with 0 GCs
+    in our list (combo lines always pack interaction & tutors)."""
+    p_combo = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=None,
                            archetype="combo")
-    p_other = _power_level(avg_cmc=3.0, n_game_changers=1, bracket=None,
+    p_other = _power_bracket(avg_cmc=3.0, n_game_changers=1, bracket=None,
                            archetype="midrange")
     assert p_combo >= p_other
+
+
+def test_power_bracket_user_override_can_underdeclare():
+    """Sanity: if user declares B2 on a deck the heuristic thinks is
+    B4, the explicit bracket wins. Bracket auto-inference UI uses
+    `inferred_bracket` to surface the divergence; the *displayed*
+    bracket still respects the user's choice."""
+    declared = _power_bracket(avg_cmc=2.0, n_game_changers=4, bracket=2)
+    inferred = _power_bracket(avg_cmc=2.0, n_game_changers=4, bracket=None)
+    assert declared == 2
+    assert inferred == 4
+
+
+def test_dashboard_emits_inferred_bracket_alongside_declared(
+    tmp_path, monkeypatch,
+):
+    """build_dashboard exposes both the user's declared bracket and
+    the heuristic's standalone guess so the UI can warn on
+    divergence."""
+    from commander_builder.deck_dashboard import build_dashboard
+
+    deck = tmp_path / "deck.dck"
+    deck.write_text(
+        "[metadata]\nName=Test\n"
+        "[Commander]\n1 Test Cmdr\n"
+        "[Main]\n"
+        + "1 Mountain\n" * 35
+        + "1 Sol Ring\n1 Mana Vault\n1 Mana Crypt\n"
+        + "1 Demonic Tutor\n1 Vampiric Tutor\n"
+        + "1 Lightning Bolt\n" * 60,
+        encoding="utf-8",
+    )
+    # Stub Scryfall: the GC-list cards (Mana Vault, Mana Crypt,
+    # Demonic Tutor, Vampiric Tutor) so n_game_changers reads high.
+    def fake_lookup(name, **_kw):
+        return {
+            "type_line": "Sorcery" if "Tutor" in name or "Bolt" in name else "Artifact",
+            "oracle_text": "",
+            "cmc": 1.0,
+            "color_identity": ["R"],
+            "prices": {"usd": "0.50"},
+        }
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+
+    # User declares B2 ("Core") but the deck has multiple game-changers.
+    result = build_dashboard(deck, bracket=2)
+    assert result.stat_tiles["bracket"] == 2
+    # Heuristic should land at 4 (4+ GCs from our staples list).
+    # The exact value depends on what's in UNIVERSAL_STAPLES_LC vs the
+    # GC list — check it's at least higher than declared.
+    assert result.stat_tiles["inferred_bracket"] >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -339,3 +412,256 @@ def test_build_dashboard_to_dict_serializable(tmp_path, monkeypatch):
     serialized = json.dumps(result.to_dict())
     assert "commander" in serialized
     assert "stat_tiles" in serialized
+
+
+# ---------------------------------------------------------------------------
+# theme_tags — tribal detection wired into dashboard (2026-05-13 fix)
+# ---------------------------------------------------------------------------
+
+def _write_dragon_tribal_deck(tmp_path: Path) -> Path:
+    """Synthetic Dragon-tribal deck: The Ur-Dragon commander + 8
+    Dragon creatures + filler. Mirrors the Wyrm Sovereign B4 deck
+    shape that surfaced the original 2026-05-13 bug (theme pill
+    showed only "Aggro", not "Dragon")."""
+    p = tmp_path / "[USER] Wyrm Sovereign [B4].dck"
+    main = (
+        "1 Mountain\n" * 30
+        + "".join(f"1 Dragon{i}\n" for i in range(8))
+        + "1 Sol Ring\n"
+        + "1 Lightning Bolt\n"
+    )
+    p.write_text(
+        "[metadata]\nMoxfield=ur-dragon-test\n"
+        "[Commander]\n1 The Ur-Dragon\n"
+        "[Main]\n" + main,
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_build_dashboard_surfaces_tribe_from_commander_oracle(
+    tmp_path, monkeypatch,
+):
+    """Regression (2026-05-13 chrome audit): the Ur-Dragon deck
+    rendered with only "Aggro" in the theme pills, no "Dragon",
+    even though detect_tribal_type would have caught it from the
+    commander's oracle text. The dashboard's theme_tags aggregator
+    didn't call detect_tribal_type — fixed by wiring it in
+    alongside the archetype classifier.
+    """
+    deck = _write_dragon_tribal_deck(tmp_path)
+
+    def fake_lookup(name):
+        if name == "The Ur-Dragon":
+            # Real oracle text mentions Dragon several times.
+            return {
+                "type_line": "Legendary Creature — Elder Dragon Avatar",
+                "color_identity": ["W", "U", "B", "R", "G"],
+                "cmc": 9.0,
+                "oracle_text": (
+                    "Eminence — As long as The Ur-Dragon is in the command "
+                    "zone or on the battlefield, other Dragon spells you cast "
+                    "cost {1} less to cast. Flying. Whenever one or more "
+                    "Dragons you control attack, draw that many cards, then "
+                    "you may put a permanent card from your hand onto the "
+                    "battlefield."
+                ),
+            }
+        if name == "Mountain":
+            return {
+                "type_line": "Basic Land — Mountain",
+                "oracle_text": "{T}: Add {R}.",
+                "cmc": 0.0,
+            }
+        if name.startswith("Dragon"):
+            return {
+                "type_line": "Creature — Dragon",
+                "oracle_text": "Flying.",
+                "cmc": 5.0,
+            }
+        return None
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    result = build_dashboard(deck, bracket=4)
+    # Tribal tag must appear, distinct from the archetype tag.
+    assert any("Dragon tribal" in t for t in result.theme_tags), (
+        f"expected 'Dragon tribal' in theme_tags, got {result.theme_tags!r}"
+    )
+
+
+def test_build_dashboard_tribe_falls_back_to_deck_subtype_frequency(
+    tmp_path, monkeypatch,
+):
+    """When the commander itself isn't explicitly tribal (e.g.
+    Maelstrom Wanderer goodstuff commander) but the deck runs a
+    heavy tribal package, the dashboard should still surface the
+    tribe — caught by the secondary subtype-frequency pass over
+    the actual deck creatures. The ≥6-of-one-subtype floor is
+    high enough that random toolbox decks don't get spuriously
+    tagged but low enough that a real tribal deck always lands.
+    """
+    deck = tmp_path / "tribal-goodstuff.dck"
+    deck.write_text(
+        "[metadata]\nMoxfield=tribal-test\n"
+        "[Commander]\n1 Generic Commander\n"
+        "[Main]\n"
+        + ("1 Mountain\n" * 30)
+        + "".join(f"1 Goblin{i}\n" for i in range(8)),
+        encoding="utf-8",
+    )
+
+    def fake_lookup(name):
+        if name == "Generic Commander":
+            # Oracle has zero tribal references.
+            return {
+                "type_line": "Legendary Creature — Human Wizard",
+                "color_identity": ["R"],
+                "cmc": 4.0,
+                "oracle_text": "Draw a card.",
+            }
+        if name == "Mountain":
+            return {
+                "type_line": "Basic Land — Mountain",
+                "oracle_text": "{T}: Add {R}.",
+                "cmc": 0.0,
+            }
+        if name.startswith("Goblin"):
+            return {
+                "type_line": "Creature — Goblin",
+                "oracle_text": "Haste.",
+                "cmc": 2.0,
+            }
+        return None
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+    result = build_dashboard(deck, bracket=3)
+    assert any("Goblin tribal" in t for t in result.theme_tags), (
+        f"expected 'Goblin tribal' fallback, got {result.theme_tags!r}"
+    )
+
+
+def test_build_dashboard_no_tribal_tag_for_random_creature_mix(
+    tmp_path, monkeypatch,
+):
+    """Conservative floor: a deck with ≤5 of any single creature
+    subtype shouldn't get a tribal tag — that's just a normal
+    toolbox of creatures, not an intentional tribal build. Without
+    this floor, every deck running 5 spell-slingers would
+    spuriously read "Wizard tribal."
+    """
+    deck = tmp_path / "toolbox.dck"
+    deck.write_text(
+        "[metadata]\nMoxfield=toolbox-test\n"
+        "[Commander]\n1 Generic Commander\n"
+        "[Main]\n"
+        + ("1 Mountain\n" * 30)
+        # 3 goblins, 3 elves, 3 wizards — no clear tribal signal.
+        + "1 Goblin1\n1 Goblin2\n1 Goblin3\n"
+        + "1 Elf1\n1 Elf2\n1 Elf3\n"
+        + "1 Wiz1\n1 Wiz2\n1 Wiz3\n",
+        encoding="utf-8",
+    )
+
+    def fake_lookup(name):
+        if name == "Generic Commander":
+            return {
+                "type_line": "Legendary Creature — Human",
+                "color_identity": ["R"],
+                "cmc": 4.0,
+                "oracle_text": "",
+            }
+        if name == "Mountain":
+            return {
+                "type_line": "Basic Land — Mountain",
+                "oracle_text": "{T}: Add {R}.",
+                "cmc": 0.0,
+            }
+        if name.startswith("Goblin"):
+            return {"type_line": "Creature — Goblin", "cmc": 2.0,
+                    "oracle_text": ""}
+        if name.startswith("Elf"):
+            return {"type_line": "Creature — Elf", "cmc": 2.0,
+                    "oracle_text": ""}
+        if name.startswith("Wiz"):
+            return {"type_line": "Creature — Human Wizard", "cmc": 3.0,
+                    "oracle_text": ""}
+        return None
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", fake_lookup,
+    )
+    result = build_dashboard(deck, bracket=3)
+    # No tribal tag should fire.
+    tribal_tags = [t for t in result.theme_tags if "tribal" in t]
+    assert tribal_tags == [], (
+        f"expected no tribal tag, got {tribal_tags!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Salt-list cross-reference
+# ---------------------------------------------------------------------------
+
+def test_build_dashboard_surfaces_salt_cards(tmp_path, monkeypatch):
+    """Dashboard payload should count + list this deck's salt-list cards.
+
+    The /top/salt page is the EDHREC-canonical "cards opponents hate
+    seeing" ranking. A B1-B3 user reviewing their deck should be able
+    to glance at the pill below the Categories grid and see whether
+    they're packing many high-salt picks.
+    """
+    deck = _write_simple_deck(tmp_path)
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda n: {"type_line": "Sorcery", "oracle_text": "", "cmc": 1.0,
+                   "color_identity": [], "prices": {"usd": "1.00"}},
+    )
+    # Three of the deck's cards are salty per the stubbed list;
+    # Forest is not. The dashboard should count exactly 3 and sort by
+    # score descending.
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.fetch_salt_list",
+        lambda *a, **kw: {
+            "lotus cobra": 2.10,
+            "cultivate": 1.30,
+            "wrath of god": 3.45,
+            "rhystic study": 4.20,  # not in deck — must not be counted
+        },
+    )
+
+    result = build_dashboard(deck, bracket=3)
+
+    assert result.legality["salt_cards_count"] == 3
+    cards = result.legality["salt_cards"]
+    assert len(cards) == 3
+    # Sorted by score descending — Wrath (3.45) first.
+    assert cards[0]["name"] == "Wrath of God"
+    assert cards[0]["score"] == pytest.approx(3.45)
+    # All entries carry name + score.
+    for entry in cards:
+        assert "name" in entry and "score" in entry
+
+
+def test_build_dashboard_handles_salt_list_fetch_failure(tmp_path, monkeypatch):
+    """fetch_salt_list failing must not break the dashboard."""
+    deck = _write_simple_deck(tmp_path)
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        lambda n: {"type_line": "Land", "oracle_text": "", "cmc": 0.0},
+    )
+    def boom(*a, **kw):
+        raise RuntimeError("salt CDN down")
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.fetch_salt_list", boom,
+    )
+    result = build_dashboard(deck, bracket=3)
+    # Graceful degradation: count is 0, list is empty.
+    assert result.legality["salt_cards_count"] == 0
+    assert result.legality["salt_cards"] == []

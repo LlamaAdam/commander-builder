@@ -75,10 +75,42 @@ class CommanderPage:
     top_cards: list[CardEntry] = field(default_factory=list)
     high_synergy_cards: list[CardEntry] = field(default_factory=list)
     new_cards: list[CardEntry] = field(default_factory=list)
+    # Per-category card lists keyed by EDHREC's section header
+    # (``"Creatures"``, ``"Instants"``, ``"Sorceries"``, ``"Lands"``,
+    # ``"Mana Artifacts"``, ``"Game Changers"``, etc.). The
+    # 2026-05-14 live-audit investigation revealed EDHREC ships
+    # 200+ cards per commander split across ~14 sections, but the
+    # original parser only kept the 25 cards in top_cards +
+    # high_synergy + new_cards. Capturing all sections gives the
+    # heuristic 5-10× more signal for both adds and cuts.
+    category_lists: dict[str, list[CardEntry]] = field(default_factory=dict)
     related_commanders: list[str] = field(default_factory=list)
     average_deck_url: Optional[str] = None
     deck_count: Optional[int] = None
     raw_size_bytes: int = 0
+
+    def all_known_cards(self) -> set[str]:
+        """Return the lowercase union of every card across every section.
+
+        Used by the heuristic cut path to answer "is this deck card
+        in EDHREC's data for this commander?" — before the
+        2026-05-14 parser expansion the answer relied only on
+        top_cards + high_synergy (25 cards), so ~80% of any 99-card
+        deck looked off-archetype. With all 14 sections captured
+        the typical set is 200+ cards, comparable to the real
+        EDHREC page.
+        """
+        out: set[str] = set()
+        for c in self.top_cards:
+            out.add(c.name.lower())
+        for c in self.high_synergy_cards:
+            out.add(c.name.lower())
+        for c in self.new_cards:
+            out.add(c.name.lower())
+        for cards in self.category_lists.values():
+            for c in cards:
+                out.add(c.name.lower())
+        return out
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -89,8 +121,15 @@ class CommanderPage:
 
 def commander_slug(commander_name: str) -> str:
     """EDHREC's URL slugs are lowercase + hyphenated, with apostrophes / commas
-    stripped. `Atraxa, Praetors' Voice` → `atraxa-praetors-voice`."""
-    s = commander_name.lower()
+    stripped. `Atraxa, Praetors' Voice` → `atraxa-praetors-voice`.
+
+    Double-faced commanders (DFCs) like
+    ``Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel`` use
+    only the front face on EDHREC. Split on ``//`` and slugify the
+    front half — this matches EDHREC's URL convention exactly.
+    """
+    name = commander_name.split("//")[0].strip()
+    s = name.lower()
     s = re.sub(r"[',.]", "", s)
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
     return s or "unknown"
@@ -115,6 +154,115 @@ def _http_get_text(url: str) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
+# HTTP status codes that indicate a transient server-side problem and are
+# worth retrying. 429 is rate-limiting (back off harder). 4xx other than
+# 404 / 429 means the request itself is wrong — don't retry.
+_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
+# Upper bound on Retry-After honor. EDHREC sits behind a CDN that
+# occasionally sends Retry-After: 300+ during incidents — long enough
+# that the user would rather see a degraded result than block. Cap so
+# a misbehaving server can't pin the audit forever.
+MAX_RETRY_AFTER_SEC = 30.0
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Parse a Retry-After header per RFC 7231 §7.1.3.
+
+    Returns the indicated delay in seconds, or None when the header is
+    missing or malformed. Supports both forms the spec allows:
+    ``delta-seconds`` (e.g., ``"60"``) and ``HTTP-date`` (e.g.,
+    ``"Wed, 21 Oct 2026 07:28:00 GMT"``). Negative deltas clamp to 0.
+    """
+    if value is None:
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    # delta-seconds form first — most common from CDNs.
+    try:
+        return max(0.0, float(s))
+    except ValueError:
+        pass
+    # HTTP-date form.
+    try:
+        from email.utils import parsedate_to_datetime
+        target = parsedate_to_datetime(s)
+        if target is None:
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        delta = (target - datetime.now(target.tzinfo)).total_seconds()
+        return max(0.0, delta)
+    except (TypeError, ValueError):
+        return None
+
+
+def _http_get_text_with_retry(
+    url: str,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> str:
+    """GET ``url`` with exponential backoff on transient failures.
+
+    Retries on 5xx HTTPError, 429 (rate-limited), and URLError (network /
+    DNS / timeout). 404 is deterministic — caller decides whether the
+    miss is fatal — and propagates without retrying. Other 4xx (400,
+    401, 403) are caller-bug class errors and also don't retry.
+
+    Backoff: when the server sends a ``Retry-After`` header (RFC 7231),
+    honor it (clamped to ``MAX_RETRY_AFTER_SEC`` so a 300+s instruction
+    can't pin the audit). Otherwise fall back to ``base_delay * 2 **
+    attempt``, so ``max_retries=3`` with ``base_delay=1.0`` yields
+    sleeps of 1s, 2s, 4s between 4 total attempts.
+
+    Each retry emits a single line to stdout so the operator sees
+    "EDHREC was 503, retried" instead of silent slowdowns. The happy
+    path stays quiet. Raises the final exception when retries are
+    exhausted; callers downstream of ``fetch_*`` functions translate
+    that into a graceful ``None`` return.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _http_get_text(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in _RETRYABLE_HTTP_CODES:
+                raise
+            last_exc = exc
+        except urllib.error.URLError as exc:
+            last_exc = exc
+        except TimeoutError as exc:
+            last_exc = exc
+        if attempt >= max_retries:
+            break
+        # Prefer the server's own backoff hint over our exp curve.
+        delay: Optional[float] = None
+        if isinstance(last_exc, urllib.error.HTTPError):
+            hdrs = getattr(last_exc, "headers", None)
+            raw = hdrs.get("Retry-After") if hdrs is not None else None
+            hint = _parse_retry_after(raw)
+            if hint is not None:
+                delay = min(hint, MAX_RETRY_AFTER_SEC)
+        if delay is None:
+            delay = base_delay * (2 ** attempt)
+        # Single-line log so flaky EDHREC traffic is diagnosable from
+        # the server log. Match the rest of the codebase's print style.
+        reason = (
+            f"HTTP {last_exc.code}"
+            if isinstance(last_exc, urllib.error.HTTPError)
+            else type(last_exc).__name__
+        )
+        print(
+            f"[edhrec] retry {attempt + 1}/{max_retries} "
+            f"after {reason} — sleeping {delay:.1f}s",
+            flush=True,
+        )
+        time.sleep(delay)
+    assert last_exc is not None  # the loop only exits via return or here
+    raise last_exc
+
+
 def _extract_next_data(html: str) -> dict:
     """Pull the `__NEXT_DATA__` JSON out of an EDHREC HTML page. Raises
     ValueError if the blob isn't present (page changed shape, or we hit a
@@ -132,11 +280,28 @@ def _walk_for_cardlists(node, out: dict[str, list[CardEntry]]) -> None:
     """Recursively walk the next-data blob looking for objects that look like
     EDHREC cardlist entries (`{name, inclusion, synergy, num_decks, ...}`).
     EDHREC's schema isn't strictly typed across page versions, so we hunt by
-    shape rather than by path."""
+    shape rather than by path.
+
+    Sections we recognize explicitly (kept under stable keys):
+      - "high_synergy"  ← "High Synergy Cards"
+      - "new_cards"     ← "New Cards"
+      - "top_cards"     ← "Top Cards" / unheadered top section
+
+    Every OTHER section ("Creatures", "Instants", "Sorceries",
+    "Lands", "Mana Artifacts", "Game Changers", etc.) is bucketed
+    under ``category:<original-header>`` so callers can reach all
+    14ish sections EDHREC ships (~200+ cards total per page) via
+    ``CommanderPage.category_lists``. Live audit 2026-05-14
+    revealed the original parser was discarding 90% of EDHREC's
+    data by ignoring every header that wasn't one of the three
+    above — Muxus, Path to Exile, and most other staples lived in
+    the broader category sections.
+    """
     if isinstance(node, dict):
         # An EDHREC cardlist section typically has `header` and `cardviews`.
         if "header" in node and isinstance(node.get("cardviews"), list):
-            header = str(node.get("header", "")).lower()
+            raw_header = str(node.get("header", ""))
+            header = raw_header.lower()
             bucket: list[CardEntry] = []
             for cv in node["cardviews"]:
                 if not isinstance(cv, dict):
@@ -155,6 +320,15 @@ def _walk_for_cardlists(node, out: dict[str, list[CardEntry]]) -> None:
                 out.setdefault("new_cards", []).extend(bucket)
             elif "top card" in header or header.strip() == "":
                 out.setdefault("top_cards", []).extend(bucket)
+            else:
+                # Per-category sections: Creatures, Instants, Sorceries,
+                # Lands, Mana Artifacts, Game Changers, Utility Lands,
+                # Utility Artifacts, Enchantments, Planeswalkers,
+                # Battles, etc. Keyed by the original header so the
+                # CommanderPage.category_lists dict mirrors EDHREC's
+                # own organization.
+                key = f"category:{raw_header}"
+                out.setdefault(key, []).extend(bucket)
         for v in node.values():
             _walk_for_cardlists(v, out)
     elif isinstance(node, list):
@@ -226,6 +400,15 @@ def _parse_commander_page(commander_name: str, slug: str, html: str) -> Commande
     page.top_cards = buckets.get("top_cards", [])
     page.high_synergy_cards = buckets.get("high_synergy", [])
     page.new_cards = buckets.get("new_cards", [])
+    # Per-category sections (Creatures, Instants, Sorceries, Lands,
+    # Mana Artifacts, Game Changers, etc.) — strip the
+    # ``"category:"`` prefix and keep the original EDHREC header
+    # as the dict key.
+    page.category_lists = {
+        k[len("category:"):]: v
+        for k, v in buckets.items()
+        if k.startswith("category:")
+    }
 
     # Recursively hunt for the "Average Deck" Moxfield URL — schema varies.
     page.average_deck_url = _walk_for_moxfield_url(next_data)
@@ -267,8 +450,212 @@ def fetch_commander_page(
 
     url = f"{EDHREC_BASE}/commanders/{urllib.parse.quote(slug)}"
     time.sleep(REQUEST_SLEEP_SEC)
-    html = _http_get_text(url)
+    try:
+        html = _http_get_text_with_retry(url)
+    except urllib.error.HTTPError as exc:
+        # 404 happens when the slug doesn't match EDHREC's
+        # canonical name (newly released commanders, edge-case
+        # spellings). Return None instead of crashing the audit;
+        # the caller falls back to no-EDHREC heuristics. Exhausted
+        # retries on 5xx land here too — same graceful fallback.
+        if exc.code == 404:
+            return None
+        return None
+    except Exception:
+        return None
     page = _parse_commander_page(commander_or_slug, slug, html)
+    if cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(page.to_json(), encoding="utf-8")
+    return page
+
+
+# Common tribal-tag slug mappings. EDHREC's tag URLs use lowercase
+# plural forms with hyphens. Most tribes pluralize with `-s`
+# ("dragon" → "dragons"), but a handful are irregular (elf →
+# elves, merfolk stays "merfolk"). Curated here so callers don't
+# need to special-case.
+_TRIBE_TO_TAG_SLUG: dict[str, str] = {
+    "Dragon": "dragons",
+    "Goblin": "goblins",
+    "Sliver": "slivers",
+    "Elf": "elves",
+    "Vampire": "vampires",
+    "Zombie": "zombies",
+    "Spirit": "spirits",
+    "Angel": "angels",
+    "Demon": "demons",
+    "Beast": "beasts",
+    "Wizard": "wizards",
+    "Knight": "knights",
+    "Merfolk": "merfolk",
+    "Ninja": "ninjas",
+    "Pirate": "pirates",
+    "Dinosaur": "dinosaurs",
+    "Faerie": "faeries",
+    "Eldrazi": "eldrazi",
+    "Werewolf": "werewolves",
+    "Cat": "cats",
+    "Bird": "birds",
+    "Hydra": "hydras",
+    "Treefolk": "treefolk",
+    "Giant": "giants",
+    "Minotaur": "minotaurs",
+    "Druid": "druids",
+    "Warrior": "warriors",
+    "Soldier": "soldiers",
+    "Human": "humans",
+}
+
+
+def tribe_tag_slug(tribe_name: str) -> Optional[str]:
+    """Map a tribe display name (``"Dragon"``) to the EDHREC tag
+    URL slug (``"dragons"``). Returns None when the tribe isn't in
+    the curated map — caller skips the tag-page fetch.
+
+    Matches ``detect_tribal_type``'s canonical tribal-type list.
+    """
+    return _TRIBE_TO_TAG_SLUG.get(tribe_name)
+
+
+def fetch_salt_list(
+    cache: bool = True,
+    ttl_hours: int = 168,  # 7 days — salt scores change slowly
+) -> dict[str, float]:
+    """Fetch EDHREC's ``/top/salt`` page and return a mapping of
+    ``{card_name_lowercase: salt_score}``.
+
+    Salt scores are EDHREC's 0-5 measure of how unpopular a card
+    is with opponents (Smothering Tithe, Rhystic Study, Cyclonic
+    Rift, Stasis, etc.). Higher = more "salt" = more likely to
+    cause table-talk problems. Used by the audit to flag
+    bracket-mismatched picks (a B1/B2 Exhibition/Core deck
+    shouldn't include the top-10 saltiest cards).
+
+    Returns an empty dict on fetch failure. Cached for 168h
+    (a week) since salt scores update slowly and the URL doesn't
+    take any parameters.
+    """
+    cache_path = CACHE_DIR.parent / "edhrec_salt" / "top-salt.json"
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass  # Cache corruption → fresh fetch.
+
+    url = f"{EDHREC_BASE}/top/salt"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        html = _http_get_text_with_retry(url)
+    except Exception:  # noqa: BLE001
+        return {}
+
+    try:
+        next_data = _extract_next_data(html)
+    except ValueError:
+        return {}
+
+    # Walk the blob looking for a section with cards carrying a
+    # ``label: "Salt Score: X.XX"`` annotation. There's exactly
+    # one such section on the /top/salt page; the parser tolerates
+    # any header text.
+    salt_map: dict[str, float] = {}
+    def _walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("cardviews"), list):
+                for cv in node["cardviews"]:
+                    if not isinstance(cv, dict):
+                        continue
+                    name = cv.get("name") or cv.get("sanitized")
+                    label = cv.get("label", "")
+                    if not name or "Salt Score" not in label:
+                        continue
+                    # "Salt Score: 3.06" → 3.06
+                    import re as _re
+                    m = _re.search(r"([\d.]+)", label)
+                    if m:
+                        try:
+                            salt_map[name.lower()] = float(m.group(1))
+                        except ValueError:
+                            pass
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+    _walk(next_data)
+
+    if cache and salt_map:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(salt_map), encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return salt_map
+
+
+def fetch_tag_page(
+    tag_slug: str,
+    cache: bool = True,
+    ttl_hours: int = CACHE_TTL_HOURS,
+) -> Optional[CommanderPage]:
+    """Fetch + parse an EDHREC ``/tags/<slug>`` page.
+
+    Tag pages have IDENTICAL structure to commander pages: same
+    14ish sections (Top Cards / High Synergy / New Cards / Game
+    Changers / Creatures / Instants / Sorceries / Lands / Mana
+    Artifacts / ...) and the same ``__NEXT_DATA__`` shape. So we
+    reuse ``_parse_commander_page`` verbatim — the returned
+    ``CommanderPage`` is structurally identical, just sourced from
+    a tag instead of a commander.
+
+    Returns None on 404 (unknown tag slug) or any other fetch
+    failure. Cached separately from commander pages under
+    ``.cache/edhrec_tag/<slug>.json``.
+
+    Use case: tribal/themed decks (Dragon, Goblin, Sliver, Tokens,
+    Spellslinger, …). The commander-specific page covers what THIS
+    commander runs; the tag page covers the broader archetype
+    pool. Folding both into the heuristic's known-card set gives
+    fuller coverage for cut decisions, and the tag page's high-
+    synergy/top sections surface archetype staples the commander
+    page might miss.
+    """
+    if not tag_slug:
+        return None
+    safe_slug = tag_slug.strip().lower()
+    if not safe_slug:
+        return None
+    cache_path = CACHE_DIR.parent / "edhrec_tag" / f"{safe_slug}.json"
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return _page_from_dict(data)
+        except (OSError, ValueError):
+            pass  # Cache corruption → fresh fetch.
+
+    url = f"{EDHREC_BASE}/tags/{urllib.parse.quote(safe_slug)}"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        html = _http_get_text_with_retry(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        return None
+    except Exception:
+        return None
+    # Reuse the commander-page parser — tag pages have the same
+    # __NEXT_DATA__ shape. The ``commander_name`` field on the
+    # returned CommanderPage carries the tag slug (no real
+    # commander name for tag pages); downstream code that cares
+    # about display can grep for ``"slug": tag``.
+    page = _parse_commander_page(
+        commander_name=f"tag:{safe_slug}",
+        slug=safe_slug,
+        html=html,
+    )
     if cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(page.to_json(), encoding="utf-8")
@@ -286,6 +673,10 @@ def _page_from_dict(d: dict) -> CommanderPage:
         top_cards=card_list(d.get("top_cards", [])),
         high_synergy_cards=card_list(d.get("high_synergy_cards", [])),
         new_cards=card_list(d.get("new_cards", [])),
+        category_lists={
+            k: card_list(v)
+            for k, v in (d.get("category_lists") or {}).items()
+        },
         related_commanders=list(d.get("related_commanders", [])),
         average_deck_url=d.get("average_deck_url"),
         deck_count=d.get("deck_count"),
@@ -455,7 +846,7 @@ def fetch_average_deck(
 
     try:
         time.sleep(REQUEST_SLEEP_SEC)
-        html = _http_get_text(url)
+        html = _http_get_text_with_retry(url)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None

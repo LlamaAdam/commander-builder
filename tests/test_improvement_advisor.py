@@ -11,7 +11,9 @@ from commander_builder.improvement_advisor import (
     SwapRecommendation,
     _aggregate_match_history,
     _heuristic_swap_recommendations,
+    _validate_card_names,
     advise,
+    main as _advise_main,
 )
 
 
@@ -79,9 +81,15 @@ def test_heuristic_filters_by_inclusion_threshold():
 
 
 def test_heuristic_recommends_cuts_for_off_archetype_cards():
+    # Note: MIN_EDHREC_SIGNAL_FOR_CUTS gates cut emission behind a
+    # 30-card EDHREC-page threshold (live 2026-05-14 audit revealed
+    # EDHREC ships only ~20 cards per commander, which makes the
+    # cut signal unreliable). Padding the fake page above the
+    # threshold so this test exercises the cut path that fires
+    # when EDHREC data is rich enough.
     deck = {"Random Off-Archetype", "Sol Ring", "Forest"}
     page = _fake_edhrec_page(
-        top=[("Sol Ring", 95.0)],
+        top=[("Sol Ring", 95.0)] + [(f"Top Card {i}", 70.0) for i in range(55)],
         synergy=[],
     )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
@@ -92,9 +100,309 @@ def test_heuristic_recommends_cuts_for_off_archetype_cards():
     assert "Forest" not in cuts
 
 
+def test_heuristic_surfaces_new_cards_as_add_recommendations():
+    """EDHREC ships a ``New Cards`` section (5 recently-printed
+    cards with early inclusion data for this commander). The
+    original parser captured them but the heuristic never used
+    them. 2026-05-14 audit caught this — we were throwing away a
+    valid signal. Recently-printed cards are interesting adds
+    because the meta hasn't fully absorbed them; surfacing them
+    gives users early-adopter recommendations.
+
+    Pinned because the bucket label matters: new_cards should
+    carry ``source: edhrec.new_cards`` (distinct from
+    ``edhrec.top_cards`` and ``edhrec.high_synergy``) so the
+    rationale + per-recommendation logging can disambiguate.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    deck = {"Existing Card"}
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(5)],
+        high_synergy_cards=[],
+        new_cards=[
+            CardEntry(name="Newly Printed Card", inclusion_pct=15.0,
+                      synergy_pct=8.0),
+        ],
+    )
+    recs = _heuristic_swap_recommendations(deck, page, add_limit=10)
+    adds = [r for r in recs if r.action == "add"]
+    by_name = {r.card: r for r in adds}
+    assert "Newly Printed Card" in by_name, (
+        f"new_cards should surface as adds; got {list(by_name)}"
+    )
+    rec = by_name["Newly Printed Card"]
+    assert rec.evidence["source"] == "edhrec.new_cards"
+    # Rationale mentions "recently" so users understand why it's
+    # surfacing despite a low inclusion%.
+    assert "recently" in rec.reason.lower()
+
+
+def test_heuristic_surfaces_average_deck_cards_as_adds():
+    """EDHREC publishes a per-commander, per-bracket "average deck"
+    — a curated 73-98 card sample build (vs. the 200+ uncategorized
+    cards on the commander page). It's the strongest possible
+    "what does a tuned deck of this commander run" signal.
+
+    The heuristic now surfaces cards in the average deck but NOT
+    in the user's deck as a separate add bucket, tagged
+    ``source: edhrec.average_deck``. Rationale references the
+    bracket so the user understands the recommendation came from
+    a bracket-appropriate sample.
+    """
+    from commander_builder.edhrec_client import (
+        AverageDeck, CardEntry, CommanderPage,
+    )
+
+    deck = {"Sol Ring"}  # Single user card; everything else is new.
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        top_cards=[], high_synergy_cards=[], new_cards=[],
+    )
+    avg = AverageDeck(
+        commander_name="Test", slug="test",
+        url="https://edhrec.com/average-decks/test/optimized",
+        bracket_slug="optimized", budget_slug=None,
+        cards=[
+            CardEntry(name="Tuned Pick One"),
+            CardEntry(name="Tuned Pick Two"),
+            CardEntry(name="Sol Ring"),  # in user deck — should dedupe
+        ],
+    )
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=10, average_deck=avg,
+    )
+    adds = [r for r in recs if r.action == "add"]
+    by_name = {r.card: r for r in adds}
+    # Both unique cards from the average deck surface; Sol Ring
+    # (already in user deck) does NOT.
+    assert "Tuned Pick One" in by_name
+    assert "Tuned Pick Two" in by_name
+    assert "Sol Ring" not in by_name
+    # Source label distinguishes this bucket from top/synergy/new.
+    assert by_name["Tuned Pick One"].evidence["source"] == "edhrec.average_deck"
+    # Rationale mentions the bracket so the recommendation is
+    # transparent: "from the OPTIMIZED sample deck", not just
+    # "EDHREC said so."
+    assert "optimized" in by_name["Tuned Pick One"].reason.lower()
+
+
+def test_heuristic_surfaces_tag_page_cards_as_adds():
+    """Tag-page integration (Tier-2 work): EDHREC's
+    ``/tags/<tribe-or-theme>`` pages have the same 14-section
+    structure as commander pages and surface the BROADER
+    archetype pool (Dragon staples across all Dragon commanders,
+    Token spawners across all Token commanders, etc.).
+
+    When a deck has a detected tribe and the tag-page fetch
+    succeeds, the heuristic uses the tag page's high_synergy +
+    top_cards as additional add candidates, tagged
+    ``source: edhrec.tag_high_synergy`` or
+    ``edhrec.tag_top_cards``. Tag-page cards are also folded into
+    the cut-decision known set so niche tribal staples don't get
+    wrongly recommended for cutting.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    deck = {"Sol Ring"}
+    page = CommanderPage(
+        commander_name="Test Commander", slug="test", fetched_at="2026-05-14",
+        top_cards=[CardEntry(name=f"CmdTop {i}", inclusion_pct=70.0)
+                   for i in range(5)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    # Tag page = the broader archetype pool. Different cards
+    # from the commander page to make the test unambiguous.
+    tag_page = CommanderPage(
+        commander_name="tag:dragons", slug="dragons",
+        fetched_at="2026-05-14",
+        top_cards=[CardEntry(name="Tribal Staple", inclusion_pct=60.0)],
+        high_synergy_cards=[
+            CardEntry(name="Tribal Lord", inclusion_pct=40.0,
+                      synergy_pct=70.0),
+        ],
+        new_cards=[],
+    )
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=20, tag_page=tag_page,
+    )
+    adds_by_name = {r.card: r for r in recs if r.action == "add"}
+    assert "Tribal Lord" in adds_by_name
+    assert "Tribal Staple" in adds_by_name
+    # Source labels include the tag-page provenance so the audit
+    # log + per-rec debug output can disambiguate.
+    assert adds_by_name["Tribal Lord"].evidence["source"] == "edhrec.tag_high_synergy"
+    assert adds_by_name["Tribal Staple"].evidence["source"] == "edhrec.tag_top_cards"
+    # Rationale mentions the archetype name so the user sees why
+    # the card surfaced.
+    assert "dragons" in adds_by_name["Tribal Lord"].reason.lower()
+
+
+def test_heuristic_uses_tag_page_to_protect_archetype_cards_from_cuts():
+    """Tag-page cards must join the cut-known set so niche tribal/
+    theme picks (e.g. a Sliver lord that isn't on First Sliver's
+    commander page but IS on /tags/slivers) don't get flagged as
+    off-archetype.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so cut path engages.
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(55)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    tag_page = CommanderPage(
+        commander_name="tag:slivers", slug="slivers",
+        fetched_at="2026-05-14",
+        top_cards=[],
+        high_synergy_cards=[],
+        new_cards=[],
+        category_lists={
+            "Creatures": [CardEntry(name="Niche Sliver", inclusion_pct=200.0)],
+        },
+    )
+    deck = {"Niche Sliver", "Random Off-Archetype"}
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=0, tag_page=tag_page,
+    )
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Niche Sliver" not in cut_cards
+    assert "Random Off-Archetype" in cut_cards
+
+
+def test_heuristic_uses_average_deck_to_protect_archetype_cards_from_cuts():
+    """An average-deck card that's currently in the user's deck
+    must NEVER be recommended for cutting — EDHREC's sample build
+    explicitly included it, which is the highest-confidence
+    "this belongs here" signal we have.
+
+    Pinned because the commander page's flat category lists can
+    miss archetype-essential picks (e.g. niche tribal lords); the
+    average deck is the safety net.
+    """
+    from commander_builder.edhrec_client import (
+        AverageDeck, CardEntry, CommanderPage,
+    )
+
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-14",
+        # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so the cut path
+        # engages.
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(55)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    avg = AverageDeck(
+        commander_name="Test", slug="test",
+        url="https://edhrec.com/average-decks/test",
+        bracket_slug=None, budget_slug=None,
+        cards=[CardEntry(name="Niche Archetype Card")],
+    )
+    deck = {"Niche Archetype Card", "Random Off-Archetype"}
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=0, average_deck=avg,
+    )
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Niche Archetype Card" not in cut_cards, (
+        f"Average-deck cards should be protected from cuts. "
+        f"Cuts: {cut_cards}"
+    )
+    # Sanity: the genuinely-off-archetype card still gets flagged.
+    assert "Random Off-Archetype" in cut_cards
+
+
+def test_heuristic_uses_all_category_lists_for_cut_decisions():
+    """The 2026-05-14 parser expansion captures all 14 EDHREC
+    sections (Creatures, Instants, Sorceries, Lands, Mana
+    Artifacts, Game Changers, etc.) totaling ~200+ cards per
+    commander. The heuristic's cut path must consult
+    ``all_known_cards()`` (the union across every section), not
+    just top + high_synergy.
+
+    Without this, Muxus from Krenko (in the Creatures section,
+    NOT the 10-card top_cards list) gets wrongly recommended for
+    cutting — exactly the bug the live two-deck audit caught.
+    """
+    from commander_builder.edhrec_client import CardEntry, CommanderPage
+
+    page = CommanderPage(
+        commander_name="Krenko, Mob Boss", slug="krenko-mob-boss",
+        fetched_at="2026-05-14",
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(10)],
+        high_synergy_cards=[CardEntry(name=f"Synergy {i}",
+                                       inclusion_pct=30.0,
+                                       synergy_pct=50.0)
+                            for i in range(10)],
+        new_cards=[],
+        category_lists={
+            "Creatures": [
+                CardEntry(name="Muxus, Goblin Grandee",
+                          inclusion_pct=8000.0),
+            ] + [CardEntry(name=f"Creature {i}", inclusion_pct=5000.0)
+                 for i in range(49)],
+            "Instants": [CardEntry(name=f"Instant {i}",
+                                    inclusion_pct=4000.0)
+                         for i in range(25)],
+        },
+    )
+    # all_known_cards should now contain ~95 entries — well above
+    # the 50-card MIN_EDHREC_SIGNAL_FOR_CUTS gate.
+    assert len(page.all_known_cards()) >= 50
+    deck = {"Muxus, Goblin Grandee", "Random Off-Archetype"}
+    recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Muxus, Goblin Grandee" not in cut_cards, (
+        f"Muxus is in EDHREC's Creatures section — should not be "
+        f"recommended for cutting. Cuts: {cut_cards}"
+    )
+    # Sanity: actually-off-archetype cards still get cut.
+    assert "Random Off-Archetype" in cut_cards
+
+
+def test_heuristic_skips_cuts_when_edhrec_signal_too_sparse():
+    """Live two-deck comparison (2026-05-14) caught a production
+    bug: EDHREC's commander page returns only ~20 cards per
+    commander, so the cut heuristic flagged ~80% of every deck as
+    off-archetype — including obvious staples like Muxus from
+    Krenko Goblin and Path to Exile from a Sliver deck.
+
+    Fix: when the combined top_cards + high_synergy_cards size is
+    below ``MIN_EDHREC_SIGNAL_FOR_CUTS`` (30), don't emit ANY cuts.
+    Better to emit zero cuts than wrong cuts; users who want
+    high-signal cuts can switch to source=bracket_peers which
+    sources from 5 tuned same-bracket decks.
+    """
+    deck = {"Muxus", "Path to Exile", "Krenko's Will", "Random Card"}
+    # Realistic sparse page — 10 top + 10 high-synergy = 20, below
+    # the 30-card threshold. Mirrors the actual 2026-05-14 EDHREC
+    # page shape for Krenko, Mob Boss.
+    page = _fake_edhrec_page(
+        top=[(f"Top Card {i}", 70.0) for i in range(10)],
+        synergy=[(f"Synergy Card {i}", 30.0, 50.0) for i in range(10)],
+    )
+    recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
+    cuts = [r for r in recs if r.action == "cut"]
+    assert cuts == [], (
+        f"Expected zero cuts when EDHREC signal is sparse (20 cards "
+        f"< 30 threshold), got: {[r.card for r in cuts]}"
+    )
+
+
 def test_heuristic_protects_universal_staples_from_cuts():
+    # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS (30) so the cut path
+    # engages — the sparse-signal gate (added 2026-05-14) would
+    # otherwise short-circuit and emit zero cuts, making the
+    # "Off Card" assertion vacuous.
     deck = {"Sol Ring", "Arcane Signet", "Command Tower", "Forest", "Off Card"}
-    page = _fake_edhrec_page(top=[], synergy=[])
+    page = _fake_edhrec_page(
+        top=[(f"Top Card {i}", 70.0) for i in range(55)],
+        synergy=[],
+    )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=0)
     cuts = {r.card for r in recs if r.action == "cut"}
     for protected in ("Sol Ring", "Arcane Signet", "Command Tower", "Forest"):
@@ -166,6 +474,46 @@ def test_heuristic_role_lookup_handles_offline_gracefully(monkeypatch):
     recs = _heuristic_swap_recommendations(deck, page, add_limit=2)
     adds = [r for r in recs if r.action == "add"]
     assert adds[0].evidence.get("role") == "unknown"
+
+
+def test_role_for_card_surfaces_extended_taxonomy_win_condition(monkeypatch):
+    """The advisor's role tagger must agree with the dashboard's
+    categories panel: a card with a "target opponent loses the game"
+    finisher line should bucket as ``win_condition`` (extended
+    taxonomy), not the base ``finisher`` role. Without consolidation,
+    the dashboard panel reads win_condition=1 while the advisor's
+    evidence pill reads "finisher" for the same card — confusing
+    drift the chrome audit (2026-05-13) flagged.
+    """
+    from commander_builder.improvement_advisor import _role_for_card
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "Target opponent loses the game.",
+            "type_line": "Sorcery",
+        },
+    )
+    assert _role_for_card("Coalition Victory") == "win_condition"
+
+
+def test_role_for_card_surfaces_extended_taxonomy_land_payoff(monkeypatch):
+    """Same consolidation contract for landfall-style payoffs. A card
+    matching ``classify_role_extended``'s land_payoff patterns should
+    surface as ``land_payoff`` through the advisor too — not as
+    ``threat`` (the base taxonomy's creature fallback).
+    """
+    from commander_builder.improvement_advisor import _role_for_card
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "Landfall — Whenever a land enters the battlefield "
+                           "under your control, create a 2/2 Cat token.",
+            "type_line": "Creature — Cat",
+        },
+    )
+    assert _role_for_card("Felidar Retreat") == "land_payoff"
 
 
 def test_signals_to_priority_roles_high_draw_rate():
@@ -250,12 +598,19 @@ def test_heuristic_reranks_by_diagnosis_priority(monkeypatch):
         "commander_builder.improvement_advisor.lookup_card", fake_lookup
     )
 
-    # Diagnosis says: deck can't close (priority: finisher first).
-    diag = DeckDiagnosis(priority_roles=["finisher", "wipe", "tutor"])
+    # Diagnosis says: deck can't close (priority: closer-buckets first).
+    # After the 2026-05-13 role-classifier consolidation, Craterhoof
+    # tags as ``win_condition`` (its "each opponent loses 10 life"
+    # text matches the wincon patterns) rather than the older base
+    # ``finisher`` bucket. priority_roles lists both so any
+    # closer-shape card surfaces — this matches the
+    # ``_SIGNAL_TO_ROLES`` mapping the orchestrator builds.
+    diag = DeckDiagnosis(priority_roles=["finisher", "win_condition", "wipe", "tutor"])
     recs = _heuristic_swap_recommendations(deck, page, add_limit=10, diagnosis=diag)
     adds = [r for r in recs if r.action == "add"]
-    # Craterhoof (finisher) should now be first, even though Cultivate (ramp)
-    # came first in the original synergy/inclusion ordering.
+    # Craterhoof (win_condition / finisher synonym) should now be
+    # first, even though Cultivate (ramp) came first in the original
+    # synergy/inclusion ordering.
     assert adds[0].card == "Craterhoof Behemoth"
 
 
@@ -284,9 +639,16 @@ def test_heuristic_no_diagnosis_keeps_original_order(monkeypatch):
 
 
 def test_heuristic_respects_add_and_cut_limits():
+    # 55 top_cards padding so the page clears
+    # MIN_EDHREC_SIGNAL_FOR_CUTS (50) and the cut path engages.
+    # ``add_limit`` only caps the CORE buckets (high_synergy +
+    # top_cards + new_cards) post the 2026-05-15 split-pool
+    # refactor; supplemental sources (average_deck + tag_pages)
+    # are unlimited. This deck has only top_cards (core), so the
+    # limit applies as before.
     deck = {f"Off-{i}" for i in range(20)}
     page = _fake_edhrec_page(
-        top=[(f"Top-{i}", 80.0) for i in range(20)],
+        top=[(f"Top-{i}", 80.0) for i in range(55)],
         synergy=[],
     )
     recs = _heuristic_swap_recommendations(deck, page, add_limit=3, cut_limit=4)
@@ -294,6 +656,52 @@ def test_heuristic_respects_add_and_cut_limits():
     cuts = [r for r in recs if r.action == "cut"]
     assert len(adds) == 3
     assert len(cuts) == 4
+
+
+def test_heuristic_add_limit_does_not_trim_supplemental_buckets():
+    """The 2026-05-15 split-pool refactor: ``add_limit`` only caps
+    core EDHREC-page buckets (high_synergy / top_cards /
+    new_cards). Supplemental sources (average_deck + tag_pages)
+    bypass the cap because they're coherent reference builds the
+    user wants to browse fully in the "Also suggested" panel.
+
+    Pinned because the previous 12-card global cap was silently
+    dropping 60+ average-deck recs on 5-color decks.
+    """
+    from commander_builder.edhrec_client import (
+        AverageDeck, CardEntry, CommanderPage,
+    )
+    deck = {"Sol Ring"}
+    # Core EDHREC page with 5 top_cards (would all survive the
+    # cap by themselves).
+    page = CommanderPage(
+        commander_name="Test", slug="test", fetched_at="2026-05-15",
+        top_cards=[CardEntry(name=f"Top {i}", inclusion_pct=70.0)
+                   for i in range(5)],
+        high_synergy_cards=[], new_cards=[],
+    )
+    # Average deck with 20 cards — way over the default
+    # ``add_limit`` of 12.
+    avg = AverageDeck(
+        commander_name="Test", slug="test",
+        url="https://edhrec.com/average-decks/test",
+        bracket_slug=None, budget_slug=None,
+        cards=[CardEntry(name=f"AvgCard {i}") for i in range(20)],
+    )
+    recs = _heuristic_swap_recommendations(
+        deck, page, add_limit=3, average_deck=avg,
+    )
+    adds = [r for r in recs if r.action == "add"]
+    by_source: dict[str, int] = {}
+    for r in adds:
+        s = r.evidence.get("source", "?")
+        by_source[s] = by_source.get(s, 0) + 1
+    # Core (top_cards) is capped to 3 by add_limit.
+    assert by_source.get("edhrec.top_cards", 0) == 3
+    # Supplemental (average_deck) is NOT capped — all 20 surface.
+    assert by_source.get("edhrec.average_deck", 0) == 20
+    # Total adds: 3 + 20 = 23 (no limit on supplemental).
+    assert len(adds) == 23
 
 
 # --- _aggregate_match_history ----------------------------------------------
@@ -359,6 +767,147 @@ def test_aggregate_match_history_skips_corrupt_json(tmp_path):
 
 # --- advise() — full pipeline (EDHREC mocked) ------------------------------
 
+def test_advise_steps_yields_expected_phase_sequence(tmp_path, monkeypatch):
+    """The streaming generator should yield phases in this order:
+    diagnosis → manabase → primary → complete. Stage A of the
+    streaming-audit work (2026-05-13) refactored the synchronous
+    ``advise()`` to consume this generator; the contract pinned
+    here is what the SSE endpoint will rely on for progressive
+    rendering.
+    """
+    from commander_builder.improvement_advisor import (
+        _advise_steps, AdvicePhase,
+    )
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Test [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring", "Old Card"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    # No Scryfall lookups — commander card details aren't needed
+    # for the phase-order check; manabase phase fires with empty
+    # recs in that case (graceful degradation).
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda n: None,
+    )
+
+    phases = list(_advise_steps(
+        deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    phase_names = [p.phase for p in phases]
+    assert phase_names == ["diagnosis", "manabase", "primary", "complete"]
+    # Each phase yields an AdvicePhase instance — not a bare dict —
+    # so the SSE endpoint can dispatch on phase.phase cleanly.
+    assert all(isinstance(p, AdvicePhase) for p in phases)
+
+
+def test_advise_steps_diagnosis_phase_carries_commanders_and_diagnosis(
+    tmp_path, monkeypatch,
+):
+    """The first phase must carry enough context for the UI to render
+    the diagnosis panel immediately — commander names + the parsed
+    DeckDiagnosis. This is what lets the streaming UI show "weak vs
+    early aggression" pills while Claude is still running."""
+    from commander_builder.improvement_advisor import _advise_steps
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Test [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", lambda n: None,
+    )
+
+    phases = list(_advise_steps(
+        deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    diag = next(p for p in phases if p.phase == "diagnosis")
+    assert diag.data["deck_filename"] == "[USER] Test [B3].dck"
+    assert diag.data["bracket"] == 3
+    assert "Hakbal of the Surging Soul" in diag.data["commander_names"]
+    assert "diagnosis" in diag.data
+    # diagnosis is asdict'd so it's a plain dict the SSE layer can
+    # json.dumps without further conversion.
+    assert isinstance(diag.data["diagnosis"], dict)
+
+
+def test_advise_steps_emits_error_phase_on_missing_deck(tmp_path):
+    """Missing deck files surface as an ``error`` phase rather than
+    raising mid-stream. The synchronous ``advise()`` wrapper still
+    re-raises FileNotFoundError to preserve the legacy contract,
+    but the streaming endpoint needs to emit an SSE error event
+    instead of breaking the response stream."""
+    from commander_builder.improvement_advisor import _advise_steps
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    phases = list(_advise_steps(
+        Path("nonexistent.dck"), bracket=3,
+        deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    assert len(phases) == 1
+    assert phases[0].phase == "error"
+    assert phases[0].data["type"] == "FileNotFoundError"
+    assert "nonexistent.dck" in phases[0].data["reason"]
+
+
+def test_advise_steps_primary_phase_carries_effective_source(
+    tmp_path, monkeypatch,
+):
+    """When a requested source falls back (e.g. claude → heuristic
+    because no API key), the ``primary`` phase must surface BOTH
+    the requested source and the effective source, plus the
+    fallback_reason. The UI uses this to show "Claude analyst fell
+    back to EDHREC" without waiting for the final assembly."""
+    from commander_builder.improvement_advisor import _advise_steps
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", lambda n: None,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    phases = list(_advise_steps(
+        deck, bracket=3, source="claude",
+        deck_dir=deck_dir, match_dir=match_dir,
+    ))
+    primary = next(p for p in phases if p.phase == "primary")
+    assert primary.data["requested_source"] == "claude"
+    assert primary.data["effective_source"] == "heuristic"
+    assert "unavailable" in (primary.data["fallback_reason"] or "")
+
+
 def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     deck_dir = tmp_path / "decks"
     match_dir = tmp_path / "matches"
@@ -372,8 +921,11 @@ def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     )
 
     # Fake EDHREC page recommends a synergy card and flags Old Card as off.
+    # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS (30) so the cut path
+    # engages — see test_heuristic_skips_cuts_when_edhrec_signal_too_sparse.
     fake_page = _fake_edhrec_page(
-        top=[("Sol Ring", 95.0), ("Coat of Arms", 60.0)],
+        top=[("Sol Ring", 95.0), ("Coat of Arms", 60.0)]
+            + [(f"Filler-{i}", 70.0) for i in range(55)],
         synergy=[("Kindred Discovery", 40.0, 50.0)],
     )
     monkeypatch.setattr(
@@ -397,6 +949,117 @@ def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     assert "Forest" not in cuts
 
 
+def test_advise_strips_off_color_adds_via_color_identity_filter(tmp_path, monkeypatch):
+    """The advisor's CI post-filter must drop off-color add recommendations
+    so the suggestions panel / /api/advise / /api/audit can't surface
+    cards illegal in the user's commander color identity (caught
+    in-the-wild on 2026-05-16: Krenko mono-red deck was getting
+    multi-color tribal Goblin support suggestions). Cut recs are
+    pass-through — they're already in the user's deck."""
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+
+    # Mono-red commander; deck CI is {R}.
+    deck = _write_dck(
+        deck_dir, "[USER] Krenko [B4].dck",
+        commanders=["Krenko, Mob Boss"],
+        main=["Sol Ring", "Mountain", "Goblin Recruiter"],
+    )
+
+    # EDHREC heuristic surfaces a mix of in-color and off-color picks.
+    # Goblin King = R (kept), Wort = BR (dropped), Sliver Hivelord =
+    # WUBRG (dropped), Path of Ancestry = colorless (kept).
+    fake_page = _fake_edhrec_page(
+        top=[("Goblin King", 80.0), ("Wort, Boggart Auntie", 65.0),
+             ("Sliver Hivelord", 60.0), ("Path of Ancestry", 90.0)]
+            + [(f"Filler-{i}", 70.0) for i in range(55)],
+        synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+
+    # Stub Scryfall lookups: commander resolves to mono-red Krenko;
+    # each candidate gets a synthetic color_identity that drives the
+    # filter. lookup_card is called by color_identity_for_commander
+    # too — return Krenko for the commander name.
+    def _fake_lookup(name, **_kw):
+        ci_map = {
+            "krenko, mob boss": ["R"],
+            "goblin king": ["R"],
+            "wort, boggart auntie": ["B", "R"],
+            "sliver hivelord": ["W", "U", "B", "R", "G"],
+            "path of ancestry": [],
+            "goblin recruiter": ["R"],
+            "sol ring": [],
+            "mountain": [],
+        }
+        key = name.lower()
+        if key not in ci_map:
+            return None
+        return {
+            "name": name,
+            "color_identity": ci_map[key],
+            "type_line": "Creature — Goblin"
+                if "goblin" in key or "wort" in key
+                else "Land" if key in {"path of ancestry", "mountain"}
+                else "Artifact",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake_lookup,
+    )
+
+    report = advise(deck, bracket=4, deck_dir=deck_dir, match_dir=match_dir)
+    adds = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Goblin King" in adds, "in-color creature must survive filter"
+    assert "Path of Ancestry" in adds, "colorless card must survive filter"
+    assert "Wort, Boggart Auntie" not in adds, (
+        "BR creature must be dropped from a mono-red deck"
+    )
+    assert "Sliver Hivelord" not in adds, (
+        "5-color creature must be dropped from a mono-red deck"
+    )
+
+
+def test_advise_skips_ci_filter_when_commander_unresolvable(tmp_path, monkeypatch):
+    """When the commander can't be resolved via Scryfall (typo /
+    custom card / network blip), the CI filter must skip rather than
+    rejecting every add against a phantom colorless deck."""
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+
+    deck = _write_dck(
+        deck_dir, "[USER] Made-Up [B3].dck",
+        commanders=["Made-Up Commander Card"],
+        main=["Sol Ring"],
+    )
+
+    fake_page = _fake_edhrec_page(
+        top=[("Goblin King", 80.0)]
+            + [(f"Filler-{i}", 70.0) for i in range(55)],
+        synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    # Scryfall returns None for everything → CI unresolvable → skip filter.
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_kw: None,
+    )
+
+    report = advise(deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir)
+    adds = {r.card for r in report.recommendations if r.action == "add"}
+    # Goblin King survives because the filter was skipped (None CI).
+    assert "Goblin King" in adds
+
+
 def test_advise_to_manifest_matches_audit_schema(tmp_path, monkeypatch):
     deck_dir = tmp_path / "decks"
     match_dir = tmp_path / "matches"
@@ -409,7 +1072,11 @@ def test_advise_to_manifest_matches_audit_schema(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "commander_builder.improvement_advisor.fetch_commander_page",
         lambda name, **kw: _fake_edhrec_page(
-            top=[("Coat of Arms", 60.0)], synergy=[],
+            # Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so the cut
+            # path engages and "Old" surfaces in removed.
+            top=[("Coat of Arms", 60.0)]
+                + [(f"Filler-{i}", 70.0) for i in range(55)],
+            synergy=[],
         ),
     )
 
@@ -514,3 +1181,1612 @@ def test_advise_uses_claude_when_wired(tmp_path, monkeypatch):
     assert "Old" in cards
     # Rationale propagates to the diagnosis pattern_summary.
     assert "test rationale" in report.diagnosis.pattern_summary
+
+
+# --- _validate_card_names — hallucination defense for Claude analyst -------
+
+def test_validate_marks_known_cards_true(monkeypatch):
+    """Scryfall returns a card dict → name_known is True."""
+    recs = [
+        SwapRecommendation(card="Sol Ring", action="add", reason=""),
+        SwapRecommendation(card="Cultivate", action="cut", reason=""),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name, "type_line": "Artifact"},
+    )
+    _validate_card_names(recs)
+    assert all(r.name_known is True for r in recs)
+
+
+def test_validate_marks_unknown_cards_false(monkeypatch):
+    """Scryfall returns None (404) → name_known is False — hallucinated."""
+    recs = [
+        SwapRecommendation(card="Accursed Marauder", action="add", reason=""),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: None,
+    )
+    _validate_card_names(recs)
+    assert recs[0].name_known is False
+
+
+def test_validate_leaves_name_known_none_on_lookup_exception(monkeypatch):
+    """Network failure / cache corruption → leave name_known as None.
+
+    None means 'we couldn't check'; we never want to flag a legitimate
+    card as hallucinated because Scryfall happened to be down.
+    """
+    recs = [SwapRecommendation(card="Sol Ring", action="add", reason="")]
+    def boom(name):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", boom,
+    )
+    _validate_card_names(recs)
+    assert recs[0].name_known is None
+
+
+def test_validate_handles_empty_list(monkeypatch):
+    """No-op on empty list; should not call lookup_card."""
+    calls = []
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: calls.append(name) or {"name": name},
+    )
+    _validate_card_names([])
+    assert calls == []
+
+
+def test_validate_mixed_known_and_unknown(monkeypatch):
+    """Each rec gets independently flagged."""
+    recs = [
+        SwapRecommendation(card="Sol Ring", action="add", reason=""),
+        SwapRecommendation(card="Fake Card", action="add", reason=""),
+        SwapRecommendation(card="Cultivate", action="cut", reason=""),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name} if name != "Fake Card" else None,
+    )
+    _validate_card_names(recs)
+    assert recs[0].name_known is True
+    assert recs[1].name_known is False
+    assert recs[2].name_known is True
+
+
+def test_advise_populates_name_known_on_recommendations(tmp_path, monkeypatch):
+    """End-to-end: advise() runs the validator so every rec carries a flag."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring", "Old"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            top=[("Coat of Arms", 60.0)], synergy=[],
+        ),
+    )
+    # Pretend Scryfall knows "Coat of Arms" and "Old" but not anything else.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name} if name in {"Coat of Arms", "Old"} else None,
+    )
+
+    report = advise(deck, bracket=3, deck_dir=deck_dir, match_dir=deck_dir)
+    # Every rec has name_known set (not None).
+    assert all(r.name_known is not None for r in report.recommendations), (
+        "validator should have populated name_known on every rec"
+    )
+
+
+def test_advise_flags_hallucinated_claude_card(tmp_path, monkeypatch):
+    """When Claude invents a non-existent card, name_known=False on that rec
+    while real cards remain True."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(deck_dir, "[USER] X [B3].dck",
+                     commanders=["Hakbal"], main=["Sol Ring"])
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+
+    fake_response_json = json.dumps({
+        "rationale": "test",
+        "added": ["Sol Ring", "Accursed Marauder"],  # second one is fake
+        "removed": [],
+    })
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _Msg(fake_response_json)
+            return M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"name": name} if name != "Accursed Marauder" else None,
+    )
+
+    report = advise(deck, bracket=3, use_claude=True,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    by_card = {r.card: r.name_known for r in report.recommendations}
+    assert by_card.get("Sol Ring") is True
+    assert by_card.get("Accursed Marauder") is False
+
+
+# --- _bracket_peers_recommendations — N highest-liked decks at bracket -----
+# This is the alternative to the EDHREC aggregate path. The Ur-Dragon B4
+# audit (2026-05-13) revealed EDHREC's cross-bracket average produced
+# generic ramp adds for a deck that already had 12+ ramp pieces, while
+# missing archetype-specific cards like Moat. Bracket-peers sources
+# recommendations from other tuned builds of the same commander at the
+# same bracket — should be archetype-appropriate by construction.
+
+def _moxfield_deck_with_cards(public_id: str, cards: list[str]) -> dict:
+    """Synthesize a Moxfield deck JSON shape with the given main cards."""
+    return {
+        "publicId": public_id,
+        "name": f"Deck {public_id}",
+        "boards": {
+            "mainboard": {
+                "cards": {
+                    f"card-{i}": {"card": {"name": name}, "quantity": 1}
+                    for i, name in enumerate(cards)
+                }
+            },
+        },
+    }
+
+
+def test_bracket_peers_recommends_must_add_cards(monkeypatch):
+    """Cards appearing in ALL references that the user is missing
+    surface as add recommendations with full confidence ('unanimous')."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    deck_cards = {"Sol Ring", "Forest"}  # user is missing the staples below
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", [
+            "Sol Ring", "Moat", "Last March of the Ents", "Forest",
+        ]),
+        _moxfield_deck_with_cards("d2", [
+            "Sol Ring", "Moat", "Last March of the Ents", "Mountain",
+        ]),
+        _moxfield_deck_with_cards("d3", [
+            "Sol Ring", "Moat", "Last March of the Ents", "Plains",
+        ]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda name, bracket=None, n=5, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    recs, ref_count = _bracket_peers_recommendations(
+        commander_name="The Ur-Dragon",
+        bracket=4,
+        deck_cards=deck_cards,
+    )
+    assert ref_count == 3
+    add_names = {r.card for r in recs if r.action == "add"}
+    # Both cards appeared in all 3 references; user is missing both.
+    assert "Moat" in add_names
+    assert "Last March of the Ents" in add_names
+    # Universal staples (Sol Ring) must NOT surface as must-add even
+    # when they appear in all references.
+    assert "Sol Ring" not in add_names
+
+
+def test_bracket_peers_recommends_cut_for_truly_off_meta(monkeypatch):
+    """Cards in user's deck that appear in NO references AND aren't
+    universal staples are cut candidates."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    deck_cards = {"Sol Ring", "Forest", "Goofy Janky Card"}
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Sol Ring", "Moat", "Forest"]),
+        _moxfield_deck_with_cards("d2", ["Sol Ring", "Moat", "Mountain"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda name, bracket=None, n=5, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="The Ur-Dragon", bracket=4, deck_cards=deck_cards,
+    )
+    cut_names = {r.card for r in recs if r.action == "cut"}
+    assert "Goofy Janky Card" in cut_names
+    # Sol Ring is universal — never cut even if absent from refs.
+    assert "Sol Ring" not in cut_names
+
+
+def test_bracket_peers_carries_frequency_evidence(monkeypatch):
+    """Each add rec should tag in_n_references / total_references so the
+    UI can show 'in 5/5 reference decks' for ranking. The frequency
+    label feeds the existing render_frequency_label helper."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Mana Crypt"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Other Card"]),
+        _moxfield_deck_with_cards("d3", ["Moat", "Other Card"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda name, bracket=None, n=5, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(),
+    )
+    by_card = {r.card: r for r in recs if r.action == "add"}
+    # Moat appeared in all 3, "Other Card" in 2/3 ("majority"),
+    # Mana Crypt is a universal staple so it's filtered.
+    assert by_card["Moat"].evidence.get("in_n_references") == 3
+    assert by_card["Moat"].evidence.get("total_references") == 3
+    assert "in 3/3 reference decks" in by_card["Moat"].reason \
+        or "unanimous" in by_card["Moat"].reason
+    if "Other Card" in by_card:
+        assert by_card["Other Card"].evidence.get("in_n_references") == 2
+
+
+def test_bracket_peers_returns_empty_when_no_references(monkeypatch):
+    """When the Moxfield fetch returns no decks (commander too obscure,
+    network down), the recommender returns empty — caller falls back."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+    recs, ref_count = _bracket_peers_recommendations(
+        commander_name="Obscure Commander", bracket=3, deck_cards={"Foo"},
+    )
+    assert recs == []
+    assert ref_count == 0
+
+
+def test_bracket_peers_tags_role_on_adds(monkeypatch):
+    """Adds inherit role classification so the UI can group them
+    consistently with the heuristic / claude paths."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat"]),
+        _moxfield_deck_with_cards("d2", ["Moat"]),
+    ]
+
+    def fake_lookup(name):
+        if name == "Moat":
+            return {
+                "oracle_text": "Creatures without flying can't attack.",
+                "type_line": "Enchantment",
+            }
+        return None
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(),
+    )
+    moat = next(r for r in recs if r.card == "Moat")
+    # role tagging via staples.classify_role — Moat is "protection"
+    # (creatures without flying can't attack). Whatever the classifier
+    # returns, the field must be present so the UI render isn't lossy.
+    assert "role" in moat.evidence
+    assert moat.evidence["role"] != ""
+
+
+def test_bracket_peers_never_cuts_nonbasic_lands(monkeypatch):
+    """Regression for the 2026-05-13 Ur-Dragon audit: bracket-peers
+    cut Savannah ($200 ABU dual) because none of the top-5 references
+    happened to run it. Manabase is deliberate — the advisor must
+    never auto-recommend cutting any land (basic, dual, fetch, etc.).
+    """
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    # User runs Savannah; none of the references do. Without the land
+    # guard the old code would emit Savannah in the cut list.
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Sol Ring", "Mountain"]),
+        _moxfield_deck_with_cards("d2", ["Sol Ring", "Mountain"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    # Savannah's Scryfall hit says "Land" in the type_line, so
+    # staples.is_land() returns True and the cut path skips it.
+    def fake_lookup(name):
+        if name == "Savannah":
+            return {"type_line": "Land — Plains Forest", "oracle_text": ""}
+        return {"type_line": "Creature — Dragon", "oracle_text": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="The Ur-Dragon", bracket=4,
+        deck_cards={"Savannah", "Some Other Card"},
+    )
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Savannah" not in cut_cards
+    # Sanity: the non-land "Some Other Card" still gets recommended
+    # for cut (so the guard isn't accidentally over-broad).
+    assert "Some Other Card" in cut_cards
+
+
+def test_heuristic_never_cuts_nonbasic_lands(monkeypatch):
+    """Same guard as above, applied to the EDHREC heuristic cut path.
+
+    Padded above MIN_EDHREC_SIGNAL_FOR_CUTS so the cut path
+    engages.
+    """
+    deck_cards = {"Savannah", "Some Other Card"}
+    page = _fake_edhrec_page(
+        top=[("Sol Ring", 90.0)] + [(f"Filler-{i}", 70.0) for i in range(55)],
+        synergy=[],
+    )
+    def fake_lookup(name):
+        if name == "Savannah":
+            return {"type_line": "Land — Plains Forest", "oracle_text": ""}
+        return {"type_line": "Creature — Dragon", "oracle_text": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+    recs = _heuristic_swap_recommendations(deck_cards, page)
+    cut_cards = {r.card for r in recs if r.action == "cut"}
+    assert "Savannah" not in cut_cards
+    assert "Some Other Card" in cut_cards
+
+
+def test_bracket_peers_excludes_user_cards_from_adds(monkeypatch):
+    """A card already in the user's deck must NEVER appear as an add
+    even if it's in every reference — that's a no-op recommendation."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Cyclonic Rift"]),
+        _moxfield_deck_with_cards("d2", ["Cyclonic Rift"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards={"Cyclonic Rift"},
+    )
+    assert all(r.card != "Cyclonic Rift" for r in recs)
+
+
+# --- advise(source="bracket_peers") integration ----------------------------
+
+def test_advise_with_bracket_peers_source_routes_through_new_path(
+    tmp_path, monkeypatch,
+):
+    """advise(source='bracket_peers') skips EDHREC entirely and uses
+    the bracket-peers recommender."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring", "Old Card"],
+    )
+    # EDHREC must NOT be called when source=bracket_peers — pin it.
+    def edhrec_should_not_fire(*a, **kw):
+        raise AssertionError("EDHREC fetch must not run in bracket_peers mode")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        edhrec_should_not_fire,
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Sol Ring"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Sol Ring"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    assert report.source == "bracket_peers"
+    add_cards = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Moat" in add_cards
+
+
+def test_advise_bracket_peers_falls_back_to_heuristic_on_empty_refs(
+    tmp_path, monkeypatch,
+):
+    """When Moxfield returns no references (obscure commander, network),
+    fall back to the EDHREC heuristic so the audit still produces output.
+    fallback_reason names the cause for UI surfacing."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Obscure"], main=["Sol Ring"],
+    )
+    fake_page = _fake_edhrec_page(
+        top=[("Coat of Arms", 60.0)], synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    # Fell back to heuristic when no refs found.
+    assert report.source == "heuristic"
+    assert report.fallback_reason is not None
+    assert "no bracket-peer references" in report.fallback_reason.lower() \
+        or "no references" in report.fallback_reason.lower()
+
+
+def test_advise_bracket_peers_validates_card_names(tmp_path, monkeypatch):
+    """The hallucination-defense pass still runs in bracket-peers mode —
+    if a reference deck somehow has a typo, the name_known flag surfaces
+    it. (Less likely than Claude inventing names, but the pipeline shape
+    stays uniform across all sources.)"""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["X"], main=["Sol Ring"],
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Real Card", "Typo Card"]),
+        _moxfield_deck_with_cards("d2", ["Real Card", "Typo Card"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: ({"oracle_text": "", "type_line": ""}
+                      if name == "Real Card" else None),
+    )
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    by_card = {r.card: r.name_known for r in report.recommendations}
+    assert by_card.get("Real Card") is True
+    assert by_card.get("Typo Card") is False
+
+
+# --- Role-saturation guard (the Ur-Dragon "stop suggesting more ramp" fix) -
+# Motivation: the 2026-05-13 Ur-Dragon B4 audit recommended 5 ramp/cost-
+# reducer adds to a deck already running 12+ ramp pieces. The advisor
+# was role-blind on the deck side. This filter sits in the rec pipeline
+# and drops add candidates whose role bucket is already saturated.
+
+
+def test_filter_for_saturation_drops_ramp_when_deck_has_too_much(monkeypatch):
+    """Adds tagged as 'ramp' get filtered out when the deck already has
+    ≥ROLE_SATURATION_THRESHOLDS['ramp'] ramp pieces."""
+    from commander_builder.improvement_advisor import _filter_for_saturation
+    from commander_builder.staples import ROLE_SATURATION_THRESHOLDS
+
+    threshold = ROLE_SATURATION_THRESHOLDS["ramp"]
+
+    candidates = [
+        SwapRecommendation(
+            card="Sol Ring",  # universal staple but rec'd anyway in this synth
+            action="add", reason="",
+            evidence={"role": "ramp"},
+        ),
+        SwapRecommendation(
+            card="Cyclonic Rift", action="add", reason="",
+            evidence={"role": "wipe"},
+        ),
+        SwapRecommendation(
+            card="Old Card", action="cut", reason="",
+            evidence={"role": "other"},
+        ),
+    ]
+    # Pretend the deck has saturated ramp but no wipes.
+    role_counts = {"ramp": threshold, "wipe": 2}
+
+    kept, skipped = _filter_for_saturation(candidates, role_counts)
+    kept_cards = {r.card for r in kept}
+    assert "Sol Ring" not in kept_cards     # dropped — ramp saturated
+    assert "Cyclonic Rift" in kept_cards    # kept — wipe not saturated
+    assert "Old Card" in kept_cards         # cut, never filtered
+    # The skipped record names the role + the count so the UI can show
+    # "skipped: you already have 12 ramp pieces".
+    assert any(
+        s["card"] == "Sol Ring" and s["role"] == "ramp"
+        and s["deck_count"] == threshold
+        and s["threshold"] == threshold
+        for s in skipped
+    )
+
+
+def test_filter_for_saturation_keeps_everything_when_no_role_saturated(
+    monkeypatch,
+):
+    """Backward-compat: when no role bucket is saturated, the filter is
+    a no-op."""
+    from commander_builder.improvement_advisor import _filter_for_saturation
+
+    candidates = [
+        SwapRecommendation(card="A", action="add", reason="",
+                           evidence={"role": "ramp"}),
+        SwapRecommendation(card="B", action="add", reason="",
+                           evidence={"role": "draw"}),
+    ]
+    role_counts = {"ramp": 4, "draw": 3}  # nowhere near threshold
+    kept, skipped = _filter_for_saturation(candidates, role_counts)
+    assert [r.card for r in kept] == ["A", "B"]
+    assert skipped == []
+
+
+def test_filter_for_saturation_treats_missing_role_as_other(monkeypatch):
+    """Old recs without evidence.role (legacy or stub) bucket as 'other'
+    which never saturates — they always pass through."""
+    from commander_builder.improvement_advisor import _filter_for_saturation
+    candidates = [
+        SwapRecommendation(card="A", action="add", reason="", evidence={}),
+    ]
+    kept, skipped = _filter_for_saturation(candidates, {"ramp": 99})
+    assert [r.card for r in kept] == ["A"]
+    assert skipped == []
+
+
+def test_advise_heuristic_drops_redundant_ramp_adds(tmp_path, monkeypatch):
+    """End-to-end through advise(): a deck with 12+ ramp shouldn't get
+    EDHREC's ramp recommendations applied. The Ur-Dragon failure mode."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    # Synthesize a deck text whose main cards will all classify as ramp.
+    ramp_card_names = [f"Ramp Piece {i}" for i in range(1, 14)]  # 13 ramp
+    deck = _write_dck(
+        deck_dir, "[USER] RampHeavy [B3].dck",
+        commanders=["Some Commander"],
+        main=ramp_card_names + ["Old Filler"],
+    )
+    # EDHREC offers two more ramp candidates and one wipe.
+    fake_page = _fake_edhrec_page(
+        top=[
+            ("Cultivate", 90.0),
+            ("Rampant Growth", 85.0),
+            ("Cyclonic Rift", 70.0),
+        ],
+        synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    # Tag every recommended/existing card with appropriate roles.
+    def fake_lookup(name):
+        if name in ("Cultivate", "Rampant Growth"):
+            return {
+                "oracle_text": "Search your library for a basic land card",
+                "type_line": "Sorcery",
+            }
+        if name == "Cyclonic Rift":
+            return {
+                "oracle_text": "destroy all nonland permanents",
+                "type_line": "Instant",
+            }
+        if name.startswith("Ramp Piece"):
+            return {
+                "oracle_text": "Add {G}",
+                "type_line": "Artifact",
+            }
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+
+    report = advise(deck, bracket=3,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_names = {r.card for r in report.recommendations if r.action == "add"}
+    # Ramp adds dropped (deck has 13 ramp pieces, threshold is 12).
+    assert "Cultivate" not in add_names
+    assert "Rampant Growth" not in add_names
+    # Wipe ad survives — that bucket isn't saturated.
+    assert "Cyclonic Rift" in add_names
+    # Saturation report names which roles got filtered.
+    assert hasattr(report, "skipped_for_saturation")
+    skipped_roles = {s["role"] for s in report.skipped_for_saturation}
+    assert "ramp" in skipped_roles
+
+
+def test_advise_bracket_peers_drops_redundant_ramp_adds(tmp_path, monkeypatch):
+    """Same redundancy guard, but in the bracket_peers source path."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    ramp_card_names = [f"Ramp Piece {i}" for i in range(1, 14)]
+    deck = _write_dck(
+        deck_dir, "[USER] RampHeavy [B4].dck",
+        commanders=["X"], main=ramp_card_names,
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Cultivate", "Cyclonic Rift"]),
+        _moxfield_deck_with_cards("d2", ["Cultivate", "Cyclonic Rift"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+
+    def fake_lookup(name):
+        if name == "Cultivate":
+            return {
+                "oracle_text": "Search your library for a basic land card",
+                "type_line": "Sorcery",
+            }
+        if name == "Cyclonic Rift":
+            return {
+                "oracle_text": "destroy all nonland permanents",
+                "type_line": "Instant",
+            }
+        if name.startswith("Ramp Piece"):
+            return {"oracle_text": "Add {G}", "type_line": "Artifact"}
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+
+    report = advise(
+        deck, bracket=4, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    add_names = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Cultivate" not in add_names
+    assert "Cyclonic Rift" in add_names
+
+
+def test_bracket_peers_drops_singleton_references(monkeypatch):
+    """Phase A gap #3: with 5 references, a card in only 1/5 is a weak
+    signal — surface it as 'consider' (lower confidence) not as a
+    must-add. Default min_refs filters to majority of references."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Common Pick", "Rare Pick"]),
+        _moxfield_deck_with_cards("d2", ["Common Pick"]),
+        _moxfield_deck_with_cards("d3", ["Common Pick"]),
+        _moxfield_deck_with_cards("d4", ["Common Pick"]),
+        _moxfield_deck_with_cards("d5", ["Common Pick"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(), n=5,
+    )
+    add_cards = {r.card for r in recs if r.action == "add"}
+    assert "Common Pick" in add_cards         # in 5/5 — kept
+    assert "Rare Pick" not in add_cards       # in only 1/5 — dropped
+
+
+def test_bracket_peers_respects_explicit_min_refs(monkeypatch):
+    """Caller can override the default threshold."""
+    from commander_builder.improvement_advisor import _bracket_peers_recommendations
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Card A", "Card B"]),
+        _moxfield_deck_with_cards("d2", ["Card A"]),
+        _moxfield_deck_with_cards("d3", ["Card A"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+    # min_refs=1 — include singletons
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(), n=3, min_refs=1,
+    )
+    add_cards = {r.card for r in recs if r.action == "add"}
+    assert "Card B" in add_cards     # 1/3 — kept under min_refs=1
+    # min_refs=3 — only ALL-refs survive
+    recs2, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(), n=3, min_refs=3,
+    )
+    add_cards2 = {r.card for r in recs2 if r.action == "add"}
+    assert "Card A" in add_cards2
+    assert "Card B" not in add_cards2  # 1/3 — dropped under min_refs=3
+
+
+def test_bracket_peers_reranks_by_diagnosis_priority_roles(monkeypatch):
+    """Phase A gap #5: when the deck's diagnosis flags weakness signals
+    that map to priority roles, the bracket-peers recommender should
+    surface those roles first (matches the heuristic path's behavior)."""
+    from commander_builder.improvement_advisor import (
+        _bracket_peers_recommendations,
+    )
+    from commander_builder.improvement_advisor import DeckDiagnosis
+
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Ramp Card", "Finisher Card"]),
+        _moxfield_deck_with_cards("d2", ["Ramp Card", "Finisher Card"]),
+    ]
+
+    def fake_lookup(name):
+        if name == "Ramp Card":
+            return {"oracle_text": "Add {G}", "type_line": "Sorcery"}
+        if name == "Finisher Card":
+            return {
+                "oracle_text": "Target opponent loses the game.",
+                "type_line": "Sorcery",
+            }
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+
+    # Diagnosis says deck has no closer → finisher / win_condition role
+    # should surface first. After the 2026-05-13 role-classifier
+    # consolidation, "Target opponent loses the game" tags as
+    # ``win_condition`` (more specific than the base ``finisher``).
+    # priority_roles includes both so the rerank floats either label.
+    diagnosis = DeckDiagnosis(priority_roles=["win_condition", "finisher", "wipe"])
+    recs, _ = _bracket_peers_recommendations(
+        commander_name="X", bracket=4, deck_cards=set(),
+        diagnosis=diagnosis, min_refs=1,
+    )
+    adds = [r for r in recs if r.action == "add"]
+    # First add must be a closer (win_condition is the consolidated
+    # label) because diagnosis priority kicks it ahead of ramp.
+    assert adds[0].evidence.get("role") == "win_condition"
+
+
+def test_peer_card_frequency_counts_each_deck_once_per_card():
+    """Helper bug fix: basics that appear N times in one deck's
+    mainboard count as 1 toward that card's reference frequency, not
+    N. Previously _collect_bracket_peer_summary duplicated frequency
+    logic with the wrong semantics — Forest x30 in a single ref
+    inflated the prompt's 'in_n_refs' figure into nonsense."""
+    from commander_builder.improvement_advisor import _peer_card_frequency
+    fake_decks = [
+        # Deck 1: 30 copies of "Forest" + 1 "Moat".
+        {"boards": {"mainboard": {"cards": {
+            **{f"forest-{i}": {"card": {"name": "Forest"}, "quantity": 1}
+               for i in range(30)},
+            "moat": {"card": {"name": "Moat"}, "quantity": 1},
+        }}}},
+        # Deck 2: 30 Forests + 1 Moat.
+        {"boards": {"mainboard": {"cards": {
+            **{f"forest-{i}": {"card": {"name": "Forest"}, "quantity": 1}
+               for i in range(30)},
+            "moat": {"card": {"name": "Moat"}, "quantity": 1},
+        }}}},
+    ]
+    freq, case_map = _peer_card_frequency(fake_decks)
+    # Each card counts once per deck regardless of duplicates within.
+    assert freq["forest"] == 2
+    assert freq["moat"] == 2
+    # Case is preserved (first-seen wins).
+    assert case_map["forest"] == "Forest"
+
+
+def test_peer_card_frequency_empty_list():
+    """No decks → empty Counter + empty map, never raises."""
+    from commander_builder.improvement_advisor import _peer_card_frequency
+    freq, case_map = _peer_card_frequency([])
+    assert dict(freq) == {}
+    assert case_map == {}
+
+
+def test_collect_bracket_peer_summary_builds_frequency_map(monkeypatch):
+    """The summary used by the Claude prompt is a compact frequency
+    representation — for each card that appears in any reference, the
+    count of references containing it. Lets Claude see at a glance
+    'this card is in 5/5 references but missing here' without parsing
+    full decklists."""
+    from commander_builder.improvement_advisor import (
+        _collect_bracket_peer_summary_for_prompt,
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Last March", "Sol Ring"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Last March"]),
+        _moxfield_deck_with_cards("d3", ["Moat"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    summary = _collect_bracket_peer_summary_for_prompt(
+        "The Ur-Dragon", bracket=4, n=5,
+    )
+    assert summary is not None
+    assert summary["ref_count"] == 3
+    by_name = {c["name"]: c["in_n_refs"] for c in summary["cards_by_frequency"]}
+    assert by_name["Moat"] == 3
+    assert by_name["Last March"] == 2
+    assert by_name["Sol Ring"] == 1
+
+
+def test_collect_bracket_peer_summary_returns_none_when_no_refs(monkeypatch):
+    """Empty references → None so callers can detect 'no peer data
+    available' and skip enrichment."""
+    from commander_builder.improvement_advisor import (
+        _collect_bracket_peer_summary_for_prompt,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+    assert _collect_bracket_peer_summary_for_prompt(
+        "X", bracket=4, n=5,
+    ) is None
+
+
+def test_collect_bracket_peer_summary_includes_ref_metadata(monkeypatch):
+    """The summary should carry minimal reference-deck metadata
+    (publicId + name) so Claude can cite which references support a
+    recommendation in its rationale."""
+    from commander_builder.improvement_advisor import (
+        _collect_bracket_peer_summary_for_prompt,
+    )
+    fake_refs = [
+        {"publicId": "abc-123", "name": "The Ur-Dragon Strawman",
+         "boards": {"mainboard": {"cards": {
+             "x": {"card": {"name": "Moat"}, "quantity": 1},
+         }}}},
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+    summary = _collect_bracket_peer_summary_for_prompt(
+        "X", bracket=4, n=5,
+    )
+    assert len(summary["ref_metadata"]) == 1
+    assert summary["ref_metadata"][0]["public_id"] == "abc-123"
+    assert summary["ref_metadata"][0]["name"] == "The Ur-Dragon Strawman"
+
+
+def test_claude_prompt_includes_bracket_peer_data_when_available(
+    tmp_path, monkeypatch,
+):
+    """End-to-end: when source='claude' and bracket-peer references
+    are fetchable, the request body sent to Anthropic includes them
+    so Claude can reason about 'what's missing from this deck vs.
+    same-bracket peers'. Pinning this prevents a future refactor
+    from silently dropping the enrichment."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Ur-Dragon"], main=["Sol Ring", "Cultivate"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            top=[("Coat of Arms", 60.0)], synergy=[],
+        ),
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards("d1", ["Moat", "Last March"]),
+        _moxfield_deck_with_cards("d2", ["Moat", "Last March"]),
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+
+    captured_message = {}
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            captured_message["user"] = kw["messages"][0]["content"]
+            captured_message["system"] = kw.get("system", "")
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    advise(deck, bracket=4, source="claude",
+           deck_dir=deck_dir, match_dir=deck_dir)
+
+    # User message must include bracket-peer reference data.
+    user_payload = captured_message["user"]
+    assert "bracket_peer_references" in user_payload
+    assert "Moat" in user_payload
+    # System prompt must mention how to use the references.
+    assert "bracket_peer_references" in captured_message["system"] \
+        or "reference deck" in captured_message["system"].lower()
+
+
+def test_advise_claude_records_peer_ref_count_on_report(tmp_path, monkeypatch):
+    """When the Claude path successfully attaches bracket-peer refs to
+    its prompt, the AdviceReport exposes how many references were used.
+    Lets the UI disclose 'Claude analyst (5 peer refs)' so users can
+    tell when the LLM had archetype data vs. just EDHREC averages."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    fake_refs = [
+        _moxfield_deck_with_cards(f"d{i}", ["Card A"]) for i in range(3)
+    ]
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: fake_refs,
+    )
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    report = advise(deck, bracket=4, source="claude",
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    assert report.bracket_peer_ref_count == 3
+
+
+def test_advise_claude_peer_ref_count_zero_when_no_refs(tmp_path, monkeypatch):
+    """Obscure commander → no Moxfield references → count stays 0,
+    matches the dataclass default. UI can then suppress the
+    '(N peer refs)' suffix entirely."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Obscure"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],
+    )
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    report = advise(deck, bracket=4, source="claude",
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    assert report.bracket_peer_ref_count == 0
+
+
+def test_claude_prompt_omits_peer_section_when_no_refs(tmp_path, monkeypatch):
+    """When Moxfield returns no references, Claude still runs — just
+    without the peer-data section. Backward-compat for obscure
+    commanders + the graceful degradation case."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["Obscure"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.find_top_liked_decks_for_commander",
+        lambda *a, **kw: [],   # no references found
+    )
+
+    captured_message = {}
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class _M:
+        def create(self, **kw):
+            captured_message["user"] = kw["messages"][0]["content"]
+            return _Msg(json.dumps({
+                "rationale": "ok", "added": [], "removed": [],
+            }))
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _M()
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {"oracle_text": "", "type_line": ""},
+    )
+
+    advise(deck, bracket=4, source="claude",
+           deck_dir=deck_dir, match_dir=deck_dir)
+    user_payload = captured_message["user"]
+    # The user payload should not include a non-empty peer section.
+    # We're tolerant of an explicit None / "null" — what matters is
+    # that the absence isn't accompanied by spurious peer card names.
+    # Specifically: no card names from the synthetic ref fixtures used
+    # in other tests should leak through.
+    assert "Moat" not in user_payload
+    assert "Last March" not in user_payload
+
+
+def test_missing_manabase_recommendations_for_five_color(monkeypatch):
+    """5-color deck missing ABU duals → all 10 surface as adds."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    # Deck contains only Sol Ring — none of the ABU duals.
+    deck_cards = {"Sol Ring"}
+    recs = _missing_manabase_recommendations(deck_cards, {"W", "U", "B", "R", "G"})
+    add_cards = {r.card for r in recs}
+    for dual in ["Bayou", "Savannah", "Tropical Island", "Volcanic Island"]:
+        assert dual in add_cards
+
+
+def test_missing_manabase_skips_already_owned_lands(monkeypatch):
+    """The user's existing duals shouldn't surface as adds. Case-
+    insensitive matching so `bayou` in the deck matches `Bayou` in
+    the essentials map."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    deck_cards = {"Bayou", "Badlands", "Plateau"}  # owns 3 duals
+    recs = _missing_manabase_recommendations(deck_cards, {"W", "U", "B", "R", "G"})
+    add_cards = {r.card for r in recs}
+    assert "Bayou" not in add_cards
+    assert "Badlands" not in add_cards
+    assert "Plateau" not in add_cards
+    # But missing duals still surface.
+    assert "Tundra" in add_cards
+
+
+def test_missing_manabase_off_color_lands_filtered(monkeypatch):
+    """Mono-red deck shouldn't see Bayou (BG) or Plateau (RW) but
+    SHOULD see no duals at all (all are 2-color, and red+anything-
+    else isn't in mono-red's identity)."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    deck_cards = {"Mountain"}
+    recs = _missing_manabase_recommendations(deck_cards, {"R"})
+    add_cards = {r.card for r in recs}
+    assert "Bayou" not in add_cards
+    assert "Plateau" not in add_cards
+
+
+def test_missing_manabase_recs_tagged_as_land_role(monkeypatch):
+    """Each manabase rec should carry evidence.role='land' so the UI
+    can group it with other land suggestions, and evidence.source so
+    the user knows it came from the curated safety net (not a peer
+    reference)."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    recs = _missing_manabase_recommendations({}, {"W", "G"})
+    assert recs, "Expected some recs for WG deck"
+    for r in recs:
+        assert r.action == "add"
+        assert r.evidence.get("role") == "land"
+        assert r.evidence.get("source") == "manabase_essentials"
+
+
+def test_missing_manabase_includes_tribal_lands_for_dragon_commander():
+    """Tribal commander → Cavern of Souls + Path of Ancestry + etc.
+    surface as adds alongside the color-gated duals/fetches/etc."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    recs = _missing_manabase_recommendations(
+        {"Mountain"}, {"W", "U", "B", "R", "G"}, tribe="Dragon",
+    )
+    add_cards = {r.card for r in recs}
+    assert "Cavern of Souls" in add_cards
+    assert "Path of Ancestry" in add_cards
+    # Tagged so the UI can group these separately.
+    tribal_recs = [r for r in recs
+                   if (r.evidence or {}).get("source") == "tribal_essentials"]
+    assert tribal_recs
+    assert all(r.evidence.get("tribe") == "Dragon" for r in tribal_recs)
+
+
+def test_missing_manabase_no_tribal_lands_when_tribe_none():
+    """Non-tribal commander → no Cavern of Souls / Path of Ancestry."""
+    from commander_builder.improvement_advisor import (
+        _missing_manabase_recommendations,
+    )
+    recs = _missing_manabase_recommendations(
+        {"Mountain"}, {"R"}, tribe=None,
+    )
+    add_cards = {r.card for r in recs}
+    assert "Cavern of Souls" not in add_cards
+    assert "Path of Ancestry" not in add_cards
+
+
+def test_advise_recommends_cavern_of_souls_for_tribal_commander(
+    tmp_path, monkeypatch,
+):
+    """End-to-end: a 5-color Dragon-tribal commander (Ur-Dragon) →
+    Cavern of Souls surfaces in the recommendations. Pinning the
+    user's stated requirement: "tribal decks should have cavern of
+    souls.\""""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B4].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+    # Commander oracle mentions "Dragon" multiple times → tribal.
+    ur_dragon_oracle = (
+        "Eminence — As long as The Ur-Dragon is in the command zone "
+        "or on the battlefield, other Dragon spells you cast cost 1 "
+        "less to cast. Flying. Whenever one or more Dragons you "
+        "control attack, draw a card for each."
+    )
+    def fake_lookup(name):
+        if name == "The Ur-Dragon":
+            return {
+                "oracle_text": ur_dragon_oracle,
+                "type_line": "Legendary Creature — Dragon Avatar",
+                "color_identity": ["W", "U", "B", "R", "G"],
+            }
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    report = advise(deck, bracket=4,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_cards = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Cavern of Souls" in add_cards
+
+
+def test_advise_appends_manabase_essentials_to_heuristic_path(
+    tmp_path, monkeypatch,
+):
+    """Integration: advise(source='heuristic') should now include the
+    color-identity-appropriate manabase essentials in its
+    recommendations, prepended before / mixed with EDHREC adds."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    # 5-color Ur-Dragon deck missing every dual.
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring", "Some Filler"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            top=[("Coat of Arms", 60.0)], synergy=[],
+        ),
+    )
+    # Stub the commander color-identity lookup → WUBRG.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "",
+            "type_line": "Creature — Dragon Avatar",
+            "color_identity": ["W", "U", "B", "R", "G"],
+        },
+    )
+    report = advise(deck, bracket=3,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_cards = {r.card for r in report.recommendations if r.action == "add"}
+    # At least one ABU dual should surface — pinning the integration,
+    # not enumerating all 10 (_apply_swaps_to_dck balancing may trim).
+    assert any(d in add_cards for d in [
+        "Bayou", "Savannah", "Tropical Island", "Volcanic Island",
+    ])
+
+
+def test_advise_dedupes_overlap_between_manabase_and_primary_source(
+    tmp_path, monkeypatch,
+):
+    """Live-browser audit 2026-05-13 caught a real bug: the manabase
+    safety net prepends shock lands (Steam Vents, Blood Crypt, etc.)
+    for a 5-color deck, AND the bracket_peers source ALSO
+    recommends those shock lands because they appear in 4/5 peer
+    decks and aren't in the user's deck. Without dedup, the combined
+    list contains "Steam Vents" twice, the audit response renders it
+    twice, and the proposed .dck has ``1 Steam Vents`` listed twice
+    — illegal under singleton Commander rules; Forge rejects it.
+
+    This test pins that ``advise()`` filters duplicates from the
+    merged ``manabase + primary`` adds list, keeping the manabase
+    entry (which has the more specific source tag).
+    """
+    from commander_builder.improvement_advisor import (
+        SwapRecommendation, _advise_steps, advise, AdvicePhase,
+    )
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] X [B3].dck",
+        commanders=["The Ur-Dragon"], main=["Sol Ring", "Filler"],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(
+            # Bracket-peers source path doesn't use EDHREC, but the
+            # default fallback does. Keep this minimal.
+            top=[], synergy=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card",
+        lambda name: {
+            "oracle_text": "",
+            "type_line": "Creature — Dragon Avatar",
+            "color_identity": ["W", "U", "B", "R", "G"],
+        },
+    )
+
+    # Inject a bracket-peers result that includes Steam Vents (a
+    # shock land manabase essentials will also recommend) — simulates
+    # the real overlap that surfaced in the live audit.
+    def fake_peers(commander_name, bracket, deck_cards, **kw):
+        return [
+            SwapRecommendation(
+                card="Steam Vents", action="add",
+                reason="in 5/5 reference decks",
+                evidence={
+                    "in_n_references": 5, "total_references": 5,
+                    "source": "bracket_peers", "role": "land",
+                },
+            ),
+        ], 5
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._bracket_peers_recommendations",
+        fake_peers,
+    )
+
+    report = advise(
+        deck, bracket=3, source="bracket_peers",
+        deck_dir=deck_dir, match_dir=deck_dir,
+    )
+    add_cards = [r.card for r in report.recommendations if r.action == "add"]
+    # Steam Vents must appear at most once.
+    assert add_cards.count("Steam Vents") <= 1, (
+        f"Steam Vents duplicated in adds: {add_cards}"
+    )
+    # When dedup keeps the manabase entry (prepended first), the
+    # surviving Steam Vents rec carries the manabase source tag.
+    sv_recs = [
+        r for r in report.recommendations
+        if r.action == "add" and r.card == "Steam Vents"
+    ]
+    if sv_recs:
+        # Should be the manabase one, not the bracket_peers one.
+        assert (sv_recs[0].evidence or {}).get("source") == "manabase_essentials"
+
+
+def test_advise_saturation_filter_preserves_when_threshold_not_hit(
+    tmp_path, monkeypatch,
+):
+    """Don't break the existing happy path: a normal deck with 8 ramp
+    pieces (under the threshold of 12) should still receive ramp
+    recommendations."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] NormalDeck [B3].dck",
+        commanders=["Some Commander"],
+        main=[f"Ramp {i}" for i in range(1, 9)] + ["Filler"],  # 8 ramp
+    )
+    fake_page = _fake_edhrec_page(
+        top=[("Cultivate", 90.0)], synergy=[],
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: fake_page,
+    )
+    def fake_lookup(name):
+        if name == "Cultivate":
+            return {
+                "oracle_text": "Search your library for a basic land card",
+                "type_line": "Sorcery",
+            }
+        if name.startswith("Ramp "):
+            return {"oracle_text": "Add {G}", "type_line": "Artifact"}
+        return {"oracle_text": "", "type_line": ""}
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+    report = advise(deck, bracket=3,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    add_names = {r.card for r in report.recommendations if r.action == "add"}
+    assert "Cultivate" in add_names  # not saturated, kept
+
+
+# --- commander-advise CLI flags --------------------------------------------
+
+def test_cli_source_flag_routes_to_bracket_peers(tmp_path, monkeypatch, capsys):
+    """`commander-advise --source bracket_peers` must call advise()
+    with source='bracket_peers' so the CLI matches the web-app
+    Source dropdown's expressive power. Was a gap from the original
+    #8 self-audit."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        seen["claude_model"] = kwargs.get("claude_model")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # Ensure relative-path resolution finds the test deck.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    rc = _advise_main([
+        "--user", deck.name,
+        "--bracket", "3",
+        "--source", "bracket_peers",
+    ])
+    assert rc == 0
+    assert seen["source"] == "bracket_peers"
+
+
+def test_cli_use_claude_legacy_flag_still_maps_to_claude(
+    tmp_path, monkeypatch,
+):
+    """The legacy --use-claude flag continues to work — existing
+    scripts shouldn't break."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    _advise_main([
+        "--user", deck.name, "--bracket", "3", "--use-claude",
+    ])
+    assert seen["source"] == "claude"
+
+
+def test_cli_source_overrides_use_claude_when_both_passed(
+    tmp_path, monkeypatch,
+):
+    """When both --source and --use-claude appear, --source wins —
+    it's the more expressive new-style argument."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["source"] = kwargs.get("source")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    _advise_main([
+        "--user", deck.name, "--bracket", "3",
+        "--use-claude", "--source", "bracket_peers",
+    ])
+    assert seen["source"] == "bracket_peers"
+
+
+def test_cli_budget_flag_forwards_to_advise(tmp_path, monkeypatch):
+    """--budget on the CLI should set advise(budget=True) so users can
+    opt out of expensive manabase recommendations without touching the
+    web UI."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["budget"] = kwargs.get("budget", False)
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    # Without --budget → False.
+    _advise_main(["--user", deck.name, "--bracket", "3"])
+    assert seen["budget"] is False
+    # With --budget → True.
+    _advise_main(["--user", deck.name, "--bracket", "3", "--budget"])
+    assert seen["budget"] is True
+
+
+def test_cli_claude_model_flag_forwards_to_advise(tmp_path, monkeypatch):
+    """--claude-model claude-haiku-4-5 must flow to advise() so users
+    can pick the cheap tier from the CLI."""
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal [B3].dck",
+        commanders=["Hakbal"], main=["Sol Ring"],
+    )
+    seen = {}
+
+    def fake_advise(deck_path, bracket, **kwargs):
+        seen["claude_model"] = kwargs.get("claude_model")
+        return AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Hakbal"],
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.DECK_DIR", deck_dir,
+    )
+    _advise_main([
+        "--user", deck.name, "--bracket", "3",
+        "--source", "claude",
+        "--claude-model", "claude-haiku-4-5",
+    ])
+    assert seen["claude_model"] == "claude-haiku-4-5"

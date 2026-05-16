@@ -39,6 +39,37 @@ from typing import Optional
 # Forge .dck section markers we recognize.
 _SECTION_RE = re.compile(r"^\[([A-Za-z]+)\]$")
 
+# Forge card line: "<qty> <Name>|<SET>|<CN>" (set+cn optional).
+# Group 1: qty, group 2: name, group 3: set (optional), group 4: collector
+# number (optional).
+_DCK_LINE_RE = re.compile(
+    r"^(\d+)\s+(.+?)(?:\|([A-Za-z0-9]+)\|([A-Za-z0-9*]+))?\s*$",
+)
+
+
+def to_moxfield_line(line: str) -> str:
+    """Convert one Forge .dck card line to Moxfield's bulk-paste format.
+
+    Moxfield rejects the ``|SET|CN`` pipe suffix Forge uses; it accepts
+    either bare ``"1 Arcane Signet"`` or printing-locked
+    ``"1 Arcane Signet (MIC) 157"``. We emit the printing-locked form
+    when the .dck has set+cn so Moxfield faithfully reproduces the
+    chosen printing; bare names pass through unchanged.
+
+    Examples:
+      ``"1 Arcane Signet|MIC|157"`` → ``"1 Arcane Signet (MIC) 157"``
+      ``"1 Forest"``                → ``"1 Forest"``
+      ``"1 Sephiroth // One-Winged Angel|FIN|115"``
+        → ``"1 Sephiroth // One-Winged Angel (FIN) 115"``
+    """
+    m = _DCK_LINE_RE.match(line.strip())
+    if not m:
+        return line.rstrip()
+    qty, name, set_code, cn = m.group(1), m.group(2).strip(), m.group(3), m.group(4)
+    if set_code and cn:
+        return f"{qty} {name} ({set_code.upper()}) {cn}"
+    return f"{qty} {name}"
+
 
 def parse_dck_lines(deck_path: Path) -> dict[str, list[str]]:
     """Split a .dck into named sections of card lines.
@@ -71,7 +102,12 @@ def parse_dck_lines(deck_path: Path) -> dict[str, list[str]]:
 
 def dck_to_textarea(deck_path: Path) -> str:
     """Render a .dck file as the line-list format Moxfield's bulk-edit textarea
-    accepts: `<qty> <Name>` (or `<qty> <Name>|<SET>|<CN>` if printing locked).
+    accepts: ``<qty> <Name>`` or ``<qty> <Name> (SET) <CN>`` if printing locked.
+
+    Forge's pipe-suffixed lines (``1 Arcane Signet|MIC|157``) are rejected by
+    Moxfield's parser, so we run every card line through ``to_moxfield_line()``
+    before joining. That converter rewrites pipe form into Moxfield's
+    parenthesized form and passes bare names through unchanged.
 
     Includes commanders, mainboard, and any other sections found. Moxfield's
     parser is permissive about the order; commanders auto-route by card type.
@@ -82,12 +118,12 @@ def dck_to_textarea(deck_path: Path) -> str:
     # Moxfield's parser. Commanders first → mainboard → sideboard → considering.
     for key in ("commander", "main", "sideboard", "considering"):
         if key in sections:
-            lines.extend(sections[key])
+            lines.extend(to_moxfield_line(s) for s in sections[key])
     # Anything Moxfield-recognized but not in the canonical order goes last.
     for key, val in sections.items():
         if key in {"commander", "main", "sideboard", "considering", "metadata"}:
             continue
-        lines.extend(val)
+        lines.extend(to_moxfield_line(s) for s in val)
     return "\n".join(lines)
 
 

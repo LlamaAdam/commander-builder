@@ -321,6 +321,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Don't attempt Ollama daemon connection.")
     args = p.parse_args(argv)
 
+    # Load external credentials BEFORE running the env-var checks so
+    # ``_check_anthropic_key`` sees keys that the user has configured
+    # in ~/.commander-builder/credentials. Shell env still wins.
+    from ._secrets import load_credentials
+    load_credentials(quiet=True)
+
     report = run_doctor(skip_ollama=args.skip_ollama)
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))

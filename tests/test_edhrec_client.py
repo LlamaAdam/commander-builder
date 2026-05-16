@@ -12,6 +12,7 @@ from commander_builder.edhrec_client import (
     CardEntry,
     CommanderPage,
     _extract_next_data,
+    _http_get_text_with_retry,
     _is_cache_fresh,
     _page_from_dict,
     _parse_commander_page,
@@ -37,6 +38,21 @@ def test_commander_slug_collapses_whitespace_and_strips_punctuation():
 
 def test_commander_slug_empty_returns_unknown():
     assert commander_slug("...") == "unknown"
+
+
+def test_commander_slug_dfc_uses_front_face():
+    """Double-faced commanders use only the front face on EDHREC.
+    Without the front-face split, the slug would include both halves
+    and EDHREC returns 404."""
+    slug = commander_slug(
+        "Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel",
+    )
+    assert slug == "sephiroth-fabled-soldier"
+
+
+def test_commander_slug_dfc_keeps_apostrophe_strip():
+    slug = commander_slug("Brimaz, Blight of Oreskos // Brimaz, King of Oreskos")
+    assert slug == "brimaz-blight-of-oreskos"
 
 
 # --- _walk_for_cardlists ---------------------------------------------------
@@ -329,6 +345,59 @@ def test_fetch_average_deck_returns_none_when_blob_has_no_cards(tmp_path, monkey
     assert fetch_average_deck("Foo", bracket=3) is None
 
 
+def test_fetch_salt_list_parses_salt_scores(tmp_path, monkeypatch):
+    """``fetch_salt_list`` returns a dict mapping lowercased card
+    name to a 0-5 salt score, parsed from EDHREC's
+    ``label: "Salt Score: X.XX"`` annotation."""
+    from commander_builder.edhrec_client import fetch_salt_list
+
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+
+    salt_html = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        '{"props": {"data": {"cardlist": {"header": "Salty",'
+        ' "cardviews": ['
+        '{"name": "Smothering Tithe", "label": "Salt Score: 2.58"},'
+        '{"name": "Stasis", "label": "Salt Score: 3.06"},'
+        '{"name": "Boring Card", "label": "no salt here"}'
+        ']}}}}</script>'
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", lambda url: salt_html,
+    )
+    salt = fetch_salt_list()
+    assert salt["stasis"] == 3.06
+    assert salt["smothering tithe"] == 2.58
+    # Cards without a "Salt Score:" label are skipped.
+    assert "boring card" not in salt
+
+
+def test_fetch_salt_list_returns_empty_dict_on_fetch_failure(
+    tmp_path, monkeypatch,
+):
+    """Best-effort: HTTP errors must not break the audit."""
+    from commander_builder.edhrec_client import fetch_salt_list
+
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+
+    def boom(url):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", boom,
+    )
+    assert fetch_salt_list() == {}
+
+
 def test_fetch_average_deck_uses_direct_url_when_provided(tmp_path, monkeypatch):
     from commander_builder.edhrec_client import fetch_average_deck
     monkeypatch.setattr("commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache")
@@ -375,3 +444,361 @@ def test_average_deck_to_moxfield_shape_routes_commander(tmp_path, monkeypatch):
                for c in cmdrs.values())
     assert any(c["card"]["name"] == "Sol Ring" for c in main.values())
     assert any(c["card"]["name"] == "Forest" for c in main.values())
+
+
+# --- _http_get_text_with_retry — backoff on transient failures ------------
+
+def _make_http_error(code: int):
+    """Construct a urllib HTTPError with a given status code.
+
+    Pass an explicit empty BytesIO for ``fp`` so Python's HTTPError
+    doesn't allocate its own SpooledTemporaryFile under the hood —
+    that tempfile triggers a ResourceWarning at GC time when the
+    exception is raised + caught without being explicitly closed
+    (12 such warnings surfaced under -W default before this fix).
+    """
+    import io
+    import urllib.error
+    return urllib.error.HTTPError(
+        url="https://edhrec.com/x", code=code, msg="boom",
+        hdrs=None, fp=io.BytesIO(b""),
+    )
+
+
+def test_retry_succeeds_after_503_then_ok(monkeypatch):
+    """503 then 200 — wrapper retries and returns the success body."""
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error(503)
+        return "<html>ok</html>"
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", flaky)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    body = _http_get_text_with_retry(
+        "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+    )
+    assert body == "<html>ok</html>"
+    assert calls["n"] == 2
+    # One backoff slept between attempt 1 and attempt 2.
+    assert sleeps == [1.0]
+
+
+def test_retry_uses_exponential_backoff(monkeypatch):
+    """Successive failures should sleep 1s, 2s, 4s."""
+    import commander_builder.edhrec_client as ec
+
+    def always_503(url):
+        raise _make_http_error(503)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", always_503)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError):
+        _http_get_text_with_retry(
+            "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+        )
+    # 3 retries → 3 backoffs between 4 attempts.
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_retry_does_not_retry_on_404(monkeypatch):
+    """404 is deterministic — no retries."""
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def four_oh_four(url):
+        calls["n"] += 1
+        raise _make_http_error(404)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", four_oh_four)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError) as info:
+        _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+    assert info.value.code == 404
+    assert calls["n"] == 1  # exactly one attempt
+    assert sleeps == []
+
+
+def test_retry_on_urlerror_then_succeeds(monkeypatch):
+    """Network failure (URLError / timeout) is also retried."""
+    import commander_builder.edhrec_client as ec
+    import urllib.error
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("connection refused")
+        return "<html>ok</html>"
+
+    monkeypatch.setattr(ec, "_http_get_text", flaky)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    body = _http_get_text_with_retry(
+        "https://edhrec.com/x", max_retries=3, base_delay=0.01,
+    )
+    assert body == "<html>ok</html>"
+    assert calls["n"] == 2
+
+
+def test_retry_does_not_retry_4xx_other_than_429(monkeypatch):
+    """Client errors (400, 401, 403) are deterministic — don't retry."""
+    import commander_builder.edhrec_client as ec
+    import urllib.error
+    calls = {"n": 0}
+
+    def forbidden(url):
+        calls["n"] += 1
+        raise _make_http_error(403)
+
+    monkeypatch.setattr(ec, "_http_get_text", forbidden)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    with pytest.raises(urllib.error.HTTPError):
+        _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+    assert calls["n"] == 1
+
+
+def test_retry_retries_on_429_rate_limit(monkeypatch):
+    """429 means EDHREC is rate-limiting us — back off and retry."""
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def rate_limited(url):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _make_http_error(429)
+        return "<html>finally</html>"
+
+    monkeypatch.setattr(ec, "_http_get_text", rate_limited)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    body = _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+    assert body == "<html>finally</html>"
+    assert calls["n"] == 3
+
+
+# --- fetch_commander_page — integration with retry -------------------------
+
+def test_fetch_commander_page_recovers_from_transient_503(tmp_path, monkeypatch):
+    """503 then valid HTML → page is returned, cache is written."""
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.time.sleep", lambda s: None,
+    )
+    next_data = {
+        "props": {"pageProps": {"data": {"deck_count": 7, "cardlists": []}}}
+    }
+    html = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(next_data) + '</script>'
+    )
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error(503)
+        return html
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", flaky,
+    )
+
+    page = fetch_commander_page("Sephiroth")
+    assert page is not None
+    assert page.deck_count == 7
+    assert calls["n"] == 2
+
+
+def test_fetch_commander_page_returns_none_after_exhausted_retries(
+    tmp_path, monkeypatch,
+):
+    """All 4 attempts fail with 503 → graceful None so the audit
+    falls through to the no-EDHREC heuristic path."""
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.time.sleep", lambda s: None,
+    )
+
+    def always_503(url):
+        raise _make_http_error(503)
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", always_503,
+    )
+
+    page = fetch_commander_page("Sephiroth")
+    assert page is None
+
+
+# --- Retry-After header handling + retry logging ---------------------------
+
+def _make_http_error_with_headers(code: int, headers: dict):
+    """HTTPError with a real headers dict (email.message-like .get()).
+
+    Same BytesIO-as-fp trick as ``_make_http_error`` — avoids
+    HTTPError's auto-allocated tempfile and the resulting
+    ResourceWarning at GC.
+    """
+    import io
+    import urllib.error
+    from email.message import Message
+    msg = Message()
+    for k, v in headers.items():
+        msg[k] = v
+    return urllib.error.HTTPError(
+        url="https://edhrec.com/x", code=code, msg="boom",
+        hdrs=msg, fp=io.BytesIO(b""),
+    )
+
+
+def test_retry_respects_retry_after_seconds(monkeypatch):
+    """429 with `Retry-After: 5` → sleep 5s, not the exp-backoff 1s."""
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def rate_limited(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error_with_headers(429, {"Retry-After": "5"})
+        return "<html>ok</html>"
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", rate_limited)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    body = _http_get_text_with_retry(
+        "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+    )
+    assert body == "<html>ok</html>"
+    # First (and only) backoff respected the server's hint.
+    assert sleeps == [5.0]
+
+
+def test_retry_caps_retry_after(monkeypatch):
+    """A server saying `Retry-After: 999` should not block the user
+    for 16 minutes — clamp to the module-level cap."""
+    import commander_builder.edhrec_client as ec
+    from commander_builder.edhrec_client import MAX_RETRY_AFTER_SEC
+
+    def always_429(url):
+        raise _make_http_error_with_headers(429, {"Retry-After": "999"})
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", always_429)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError):
+        _http_get_text_with_retry(
+            "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+        )
+    # All three retries were clamped to the cap.
+    assert all(s <= MAX_RETRY_AFTER_SEC for s in sleeps)
+    assert sleeps == [MAX_RETRY_AFTER_SEC] * 3
+
+
+def test_retry_after_http_date_format(monkeypatch):
+    """Retry-After can be an HTTP-date — should be parsed as 'wait until
+    that timestamp', not as seconds."""
+    import commander_builder.edhrec_client as ec
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from email.utils import format_datetime
+
+    # 3 seconds from "now".
+    target = _dt.now(_tz.utc) + _td(seconds=3)
+    date_str = format_datetime(target, usegmt=True)
+    calls = {"n": 0}
+
+    def rate_limited(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error_with_headers(503, {"Retry-After": date_str})
+        return "<html>ok</html>"
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", rate_limited)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    body = _http_get_text_with_retry(
+        "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+    )
+    assert body == "<html>ok</html>"
+    # Should be ~3s (the Retry-After target). Lower bound deliberately
+    # above the 1.0s exp-backoff default so a no-op implementation
+    # cannot pass this test by coincidence.
+    assert 2.0 <= sleeps[0] <= 4.0
+
+
+def test_retry_after_malformed_falls_back_to_exp_backoff(monkeypatch):
+    """Garbage Retry-After header → ignore it, use exp backoff."""
+    import commander_builder.edhrec_client as ec
+
+    def always_503(url):
+        raise _make_http_error_with_headers(503, {"Retry-After": "not a number"})
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ec, "_http_get_text", always_503)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: sleeps.append(s))
+
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError):
+        _http_get_text_with_retry(
+            "https://edhrec.com/x", max_retries=3, base_delay=1.0,
+        )
+    # Falls back to 1s, 2s, 4s.
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_retry_logs_each_attempt(monkeypatch, capsys):
+    """Every retry should emit a single-line log so the operator sees
+    'EDHREC was 503, retried' rather than silent slowdowns."""
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _make_http_error(503)
+        return "<html>ok</html>"
+
+    monkeypatch.setattr(ec, "_http_get_text", flaky)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+
+    out = capsys.readouterr().out
+    # Two retries fired (attempts 1 and 2 failed, attempt 3 succeeded).
+    assert out.count("[edhrec] retry") == 2
+    # Each log line names the status that triggered the retry.
+    assert "503" in out
+
+
+def test_no_log_when_first_attempt_succeeds(monkeypatch, capsys):
+    """Happy path stays quiet — log only fires on actual retries."""
+    import commander_builder.edhrec_client as ec
+    monkeypatch.setattr(ec, "_http_get_text", lambda url: "<html>ok</html>")
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    _http_get_text_with_retry("https://edhrec.com/x")
+    assert "[edhrec] retry" not in capsys.readouterr().out

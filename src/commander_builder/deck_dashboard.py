@@ -55,9 +55,16 @@ from typing import Optional
 from .archetype import classify as _classify_archetype_path
 from .scryfall_client import lookup_card, _parse_commander_names_from_dck
 from .staples import (
-    BASIC_LANDS_LC,
     UNIVERSAL_STAPLES_LC,
-    classify_role as _classify_role_text,
+    # ``classify_role_extended`` and its underlying pattern lists are
+    # the canonical role classifier — imported here so the dashboard
+    # Categories panel and the advisor's role-tagger share one entry
+    # point. Re-exported below for backward compat with tests that
+    # imported these names directly from ``deck_dashboard``.
+    classify_role_extended,
+    _LAND_PAYOFF_PATTERNS,
+    _WIN_CONDITION_PATTERNS,
+    detect_tribal_type,
 )
 
 
@@ -67,44 +74,16 @@ DISPLAY_CATEGORIES = (
 )
 
 
-# --- Expanded role taxonomy (additions to staples.classify_role) -------
-
-_LAND_PAYOFF_PATTERNS = [
-    re.compile(r"whenever a land enters", re.IGNORECASE),
-    re.compile(r"whenever .*land .* enters", re.IGNORECASE),
-    re.compile(r"landfall", re.IGNORECASE),
-    re.compile(r"for each land you control", re.IGNORECASE),
-    re.compile(r"whenever you play a land", re.IGNORECASE),
+# Re-exports so ``from commander_builder.deck_dashboard import
+# classify_role_extended`` (the original location before the
+# 2026-05-13 consolidation) keeps working. The canonical home is
+# now ``commander_builder.staples``.
+__all__ = [
+    "classify_role_extended",
+    "_LAND_PAYOFF_PATTERNS",
+    "_WIN_CONDITION_PATTERNS",
+    "DISPLAY_CATEGORIES",
 ]
-
-_WIN_CONDITION_PATTERNS = [
-    re.compile(r"target opponent loses the game", re.IGNORECASE),
-    re.compile(r"each opponent loses \d+ life", re.IGNORECASE),
-    re.compile(r"deals damage equal to .* to each opponent", re.IGNORECASE),
-    re.compile(r"each opponent's life total becomes", re.IGNORECASE),
-    re.compile(r"infect", re.IGNORECASE),
-    re.compile(r"poison counter", re.IGNORECASE),
-    # Big-trample finishers
-    re.compile(r"creatures you control get \+\d+/\+\d+ and gain trample",
-               re.IGNORECASE),
-    re.compile(r"craterhoof", re.IGNORECASE),
-]
-
-
-def classify_role_extended(oracle_text: str, type_line: str = "") -> str:
-    """Expanded role taxonomy. Tries the new (UI-relevant) categories
-    first; falls back to the base ``staples.classify_role`` taxonomy.
-
-    Returns one of: ``land_payoff``, ``win_condition``, or whatever
-    ``staples.classify_role`` returns (ramp / draw / removal / wipe /
-    protection / tutor / finisher / threat / land / other).
-    """
-    text = (oracle_text or "").lower()
-    if any(p.search(text) for p in _LAND_PAYOFF_PATTERNS):
-        return "land_payoff"
-    if any(p.search(text) for p in _WIN_CONDITION_PATTERNS):
-        return "win_condition"
-    return _classify_role_text(oracle_text, type_line)
 
 
 # --- Price extraction --------------------------------------------------
@@ -132,60 +111,102 @@ def _extract_price_usd(card_data: dict | None) -> Optional[float]:
 # Game Changers from commander_builder.game_changers (rough proxy for
 # strong cards). When present in the deck, push the power level up.
 def _count_game_changers(card_names: list[str]) -> int:
+    """Count how many of ``card_names`` appear on Wizards' Game
+    Changers list.
+
+    Earlier versions of this function tried to import a
+    ``GAME_CHANGERS`` constant that doesn't exist on the module —
+    the public API is ``load_game_changers()``, which returns a
+    set. The old import-error path silently returned 0 for every
+    deck, breaking the bracket heuristic + the dashboard tile.
+
+    Also filters out universal staples (Sol Ring, Arcane Signet,
+    Command Tower) which are GC-listed but appear in essentially
+    every deck. Counting them produces noisy "3 game changers"
+    readings on otherwise vanilla bracket-3 decks and breaks the
+    bracket-1/2/3 "expects 0 GCs" warning's signal-to-noise ratio.
+    """
     try:
-        from .game_changers import GAME_CHANGERS
+        from .game_changers import load_game_changers
+        gc_set = load_game_changers()
     except Exception:
         return 0
+    # Strip universal staples from the GC set used for counting —
+    # they're on Wizards' list but represent baseline ramp/fixing,
+    # not "this deck is powered up." UNIVERSAL_STAPLES_LC is the
+    # canonical set already shared with improvement_advisor + meta_test.
+    try:
+        from .staples import UNIVERSAL_STAPLES_LC
+        lc_filter = set(UNIVERSAL_STAPLES_LC)
+    except Exception:
+        lc_filter = set()
+    counted = {gc for gc in gc_set if gc.lower() not in lc_filter}
     lower = {n.lower() for n in card_names}
-    return sum(1 for gc in GAME_CHANGERS if gc.lower() in lower)
+    return sum(1 for gc in counted if gc.lower() in lower)
 
 
-def _power_level(
+# Wizards' official Commander Bracket system (replaced the old 1-10
+# power level scale). Reference:
+# https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta
+BRACKET_NAMES = {
+    1: "Exhibition",
+    2: "Core",
+    3: "Upgraded",
+    4: "Optimized",
+    5: "cEDH",
+}
+
+
+def _power_bracket(
     avg_cmc: float,
     n_game_changers: int,
     bracket: Optional[int],
     archetype: Optional[str] = None,
 ) -> int:
-    """Heuristic 1..10 power level.
+    """Heuristic Commander Bracket (1..5).
 
     Inputs:
-    - avg_cmc — lower curves run faster, push power up.
-    - n_game_changers — more proxy-strong cards push power up.
-    - bracket — when known, anchors the result around that bracket.
-    - archetype — combo / control / aggro tendencies nudge the score.
+    - avg_cmc — lower curves push toward higher brackets.
+    - n_game_changers — count of cards on the official Game Changers
+      list. Brackets 1-3 expect 0; bracket 4 allows 3+; bracket 5 is
+      uncapped.
+    - bracket — when explicitly set by the user, anchors the result.
+    - archetype — combo / stax tendencies nudge the score.
 
-    Returns an int in [1, 10]. Heuristic-only; not a substitute for
-    the user's own assessment, but good enough to populate a "Power
-    level" stat tile."""
-    score = 5.0  # casual midrange baseline
+    Returns an int in [1, 5]. Heuristic-only — Wizards' system has
+    a hard "Game Changers" check the user is responsible for; we
+    surface a best-guess so the dashboard tile is informative.
+    """
+    # Game-changer count is the dominant signal under the Wizards rules.
+    # 0 GCs and reasonable curve → bracket 2-3.
+    # 1-2 GCs → bracket 3 (Upgraded).
+    # 3+ GCs → bracket 4 (Optimized).
+    # cEDH-class fast-mana suite → bracket 5 (manual override only).
+    if n_game_changers >= 3:
+        guess = 4
+    elif n_game_changers >= 1:
+        guess = 3
+    elif avg_cmc <= 2.6:
+        guess = 3  # tight curve, no GCs → upper Core / lower Upgraded
+    elif avg_cmc <= 3.4:
+        guess = 2  # standard Core deck
+    else:
+        guess = 1  # high-curve casual / Exhibition
 
-    # CMC contribution: 2.5 → +1, 4.0 → -1.
-    if avg_cmc <= 2.5:
-        score += 1.5
-    elif avg_cmc <= 3.0:
-        score += 0.5
-    elif avg_cmc >= 4.0:
-        score -= 1.0
-
-    # Game changers: each adds ~0.5 up to a cap of +2.5 (5 changers).
-    score += min(n_game_changers * 0.5, 2.5)
-
-    # Bracket anchor — if specified, pull score toward bracket value.
-    # Bracket 1=casual, 5=cEDH; reasonable mapping bracket→target power:
-    bracket_targets = {1: 3, 2: 5, 3: 6, 4: 8, 5: 10}
-    if bracket and bracket in bracket_targets:
-        target = bracket_targets[bracket]
-        score = (score + target) / 2.0  # midpoint pull
-
-    # Archetype nudges.
+    # Archetype nudges — only push UP, never down (combo decks are
+    # almost always at least bracket 3 even without GCs in our list).
     if archetype:
-        if "combo" in archetype.lower():
-            score += 0.5
-        elif "stax" in archetype.lower():
-            score += 0.3
+        if "combo" in archetype.lower() and guess < 4:
+            guess += 1
+        elif "stax" in archetype.lower() and guess < 3:
+            guess = 3
 
-    # Clamp.
-    return max(1, min(10, round(score)))
+    # User-supplied bracket trumps the heuristic — this is the
+    # bracket the deck declares it's playing at.
+    if bracket and 1 <= bracket <= 5:
+        return bracket
+
+    return max(1, min(5, guess))
 
 
 # --- Match% scoring for suggestions ------------------------------------
@@ -252,6 +273,14 @@ class DashboardData:
     categories: dict[str, int] = field(default_factory=dict)
     theme_tags: list[str] = field(default_factory=list)
     suggested_adds: list[dict] = field(default_factory=list)
+    # Per-deck legality + brackets-fit banner data. Lets the UI
+    # surface "All cards legal in Commander" / "X illegal cards" /
+    # "Y game changers (bracket 4+)" without an extra API call.
+    legality: dict = field(default_factory=dict)
+    # Moxfield URL parsed from the deck's `Moxfield=<publicId>`
+    # metadata line. None when the deck wasn't imported from
+    # Moxfield (manually pasted, etc).
+    moxfield_url: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -288,6 +317,14 @@ def build_dashboard(
     cards_with_price = 0
     role_counts: dict[str, int] = {}
     curve_buckets: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+    # Per-deck creature-subtype frequency. We piggyback on the main
+    # iteration so the tribal detection doesn't cost an extra
+    # Scryfall round-trip. Each card's type_line contributes its
+    # subtypes (Creature — Dragon Wizard → +1 to Dragon, +1 to
+    # Wizard) so a deck with 20 Dragons surfaces "Dragon" even when
+    # the commander itself isn't explicitly tribal (e.g. a 5-color
+    # goodstuff commander running a Dragon package).
+    subtype_counts: dict[str, int] = {}
     for name, qty in main_with_qty:
         try:
             data = lookup_card(name)
@@ -320,6 +357,21 @@ def build_dashboard(
             role = classify_role_extended(oracle_text, type_line)
             if role in DISPLAY_CATEGORIES:
                 role_counts[role] = role_counts.get(role, 0) + qty
+        # Tribal-subtype counting: extract creature subtypes from
+        # the type_line. Scryfall renders these as "Creature —
+        # Dragon Wizard"; everything after the em-dash is a list
+        # of subtypes separated by spaces. We only count creatures
+        # (and tribal-instant/sorcery cards) because their subtype
+        # IS the tribe we care about. Non-creature types
+        # (Artifact — Equipment, Enchantment — Aura) don't carry
+        # tribal signal.
+        if "creature" in (type_line or "").lower() and "—" in type_line:
+            try:
+                subtypes_raw = type_line.split("—", 1)[1].strip()
+                for sub in subtypes_raw.split():
+                    subtype_counts[sub] = subtype_counts.get(sub, 0) + qty
+            except (IndexError, AttributeError):
+                pass
 
     avg_cmc = round(sum(cmcs) / len(cmcs), 2) if cmcs else 0.0
     n_game_changers = _count_game_changers(deck_card_names)
@@ -328,10 +380,50 @@ def build_dashboard(
     except Exception:
         archetype = "unknown"
 
-    # Theme tags — current archetype + any "*-tribal" subtypes if dominant.
+    # Theme tags — archetype + dominant tribal type (if any).
     theme_tags: list[str] = []
     if archetype and archetype != "unknown":
         theme_tags.append(archetype.title())
+    # Tribal detection: prefer the commander's oracle-text signal
+    # (Lathliss, The Ur-Dragon, Edgar Markov explicitly name their
+    # tribe) and fall back to deck creature-subtype frequency for
+    # generic commanders running tribal packages. The fallback
+    # threshold (≥6 of the same subtype) is conservative — random
+    # creature decks won't get spuriously tagged, but a real tribal
+    # deck (typically 15-25 of one tribe) easily clears it.
+    #
+    # The 2026-05-13 chrome audit caught the Ur-Dragon deck showing
+    # only "Aggro" in its theme pills, no "Dragon" — the dashboard's
+    # theme aggregator only used the archetype classifier and
+    # ignored the (already-implemented) ``detect_tribal_type``
+    # helper. This wires it in.
+    tribe: Optional[str] = None
+    if commander_data:
+        tribe = detect_tribal_type(
+            commander_data.get("oracle_text", "") or "",
+            commander_data.get("type_line", "") or "",
+        )
+    if not tribe and subtype_counts:
+        # Pick the canonical tribe with the most deck-creature
+        # representation. Canonical-list filtering rules out
+        # non-tribal subtype noise ("Bear", "Soldier" technically
+        # match but rarely indicate intentional tribal builds).
+        from .staples import _CANONICAL_TRIBAL_TYPES
+        best_tribe = None
+        best_count = 0
+        for canonical in _CANONICAL_TRIBAL_TYPES:
+            count = subtype_counts.get(canonical, 0)
+            if count > best_count:
+                best_count = count
+                best_tribe = canonical
+        if best_count >= 6:
+            tribe = best_tribe
+    if tribe:
+        # Append as "<Tribe> tribal" so it's distinct from archetype
+        # tags (Aggro / Combo / Control / Midrange). The UI styling
+        # for tribal pills can branch on the trailing word if it
+        # wants to highlight tribal decks specifically.
+        theme_tags.append(f"{tribe} tribal")
 
     # Categories panel — guarantee every UI slot is present (zeros OK).
     categories = {cat: role_counts.get(cat, 0) for cat in DISPLAY_CATEGORIES}
@@ -359,6 +451,91 @@ def build_dashboard(
 
     mana_curve = sorted(curve_buckets.items())
 
+    # --- Legality banner data + Moxfield URL ----------------------------
+    # Pull the (Moxfield publicId) metadata line if present.
+    moxfield_url: Optional[str] = None
+    try:
+        text = deck_path.read_text(encoding="utf-8")
+        m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
+        if m:
+            mox_id = m.group(1).strip()
+            moxfield_url = f"https://moxfield.com/decks/{mox_id}"
+    except OSError:
+        pass
+
+    # Cross-reference deck names against the Game Changers list AND
+    # the doctor module's banned-in-Commander set if it exposes one.
+    in_deck_gcs: list[str] = []
+    illegal: list[str] = []
+    try:
+        from .game_changers import load_game_changers
+        from .staples import UNIVERSAL_STAPLES_LC
+        gc_set = load_game_changers()
+        # Match the bracket-tile filter so the banner pill and the
+        # bracket sub-line agree on the count.
+        in_deck_gcs = sorted({
+            n for n in deck_card_names
+            if n in gc_set and n.lower() not in UNIVERSAL_STAPLES_LC
+        })
+    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on legality probes
+        # WotC game-changers CDN is occasionally flaky; logging
+        # surfaces the cause when in_deck_gcs comes back empty
+        # without forcing a dashboard 500.
+        print(
+            f"[dashboard] game-changers lookup failed "
+            f"({type(exc).__name__}: {exc}); skipping",
+            flush=True,
+        )
+    try:
+        from . import doctor as _doctor
+        banned = getattr(_doctor, "BANNED_IN_COMMANDER", None)
+        if banned:
+            illegal = sorted(set(deck_card_names) & set(banned))
+    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on legality probes
+        print(
+            f"[dashboard] banned-list probe failed "
+            f"({type(exc).__name__}: {exc}); skipping",
+            flush=True,
+        )
+    # Salt-list cross-reference. EDHREC's /top/salt page ranks the
+    # cards opponents most dislike seeing across the table (Smothering
+    # Tithe, Rhystic Study, Stasis, …). A B1-B3 deck running many
+    # top-salt picks is the kind of mismatch a quick glance should
+    # catch — UI shows it as a pill below the categories grid.
+    salt_in_deck: list[dict] = []
+    try:
+        from .edhrec_client import fetch_salt_list
+        salt_map = fetch_salt_list()
+        if salt_map:
+            for n in deck_card_names:
+                score = salt_map.get(n.lower())
+                if score is not None:
+                    salt_in_deck.append({"name": n, "score": score})
+            salt_in_deck.sort(key=lambda r: r["score"], reverse=True)
+    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on salt probe
+        print(
+            f"[dashboard] salt-list probe failed "
+            f"({type(exc).__name__}: {exc}); skipping",
+            flush=True,
+        )
+    # Total cards = main + commander section. Commander legality
+    # requires exactly 100. Surface deficits in the banner so the
+    # user sees "deck is short by N" before running an audit /
+    # propose-swap that would otherwise produce illegal A/B inputs.
+    deck_total = total_main + len(commander_names)
+    legality = {
+        "in_deck_game_changers": in_deck_gcs,
+        "n_game_changers": len(in_deck_gcs),
+        "illegal_cards": illegal,
+        "n_illegal": len(illegal),
+        "all_legal": len(illegal) == 0,
+        "deck_total": deck_total,
+        "deck_target": 100,
+        "deck_size_ok": deck_total == 100,
+        "salt_cards_count": len(salt_in_deck),
+        "salt_cards": salt_in_deck[:10],
+    }
+
     return DashboardData(
         commander={
             "name": primary_commander,
@@ -372,9 +549,30 @@ def build_dashboard(
         stat_tiles={
             "avg_cmc": avg_cmc,
             "lands": lands,
-            "power_level": _power_level(
+            # Wizards' official Commander Bracket (1..5). Replaces the
+            # old 1..10 power-level scale. Both keys are emitted for
+            # backwards-compat with any client still reading
+            # `power_level` — both contain the same bracket integer.
+            "bracket": _power_bracket(
                 avg_cmc, n_game_changers, bracket, archetype,
             ),
+            "bracket_name": BRACKET_NAMES.get(
+                _power_bracket(avg_cmc, n_game_changers, bracket, archetype),
+                "Unknown",
+            ),
+            "power_level": _power_bracket(
+                avg_cmc, n_game_changers, bracket, archetype,
+            ),
+            # Heuristic guess in isolation — what the deck *looks like*
+            # without the user's declared override. UI can compare to
+            # `bracket` and warn if they diverge (e.g. user declared
+            # B3 but the deck has 5 game-changers and goldfishes like
+            # B4). Stable shape: always set, even when bracket is also
+            # the heuristic's value.
+            "inferred_bracket": _power_bracket(
+                avg_cmc, n_game_changers, None, archetype,
+            ),
+            "n_game_changers": n_game_changers,
             "est_price_usd": round(total_price, 2),
             "n_priced_cards": cards_with_price,
         },
@@ -382,4 +580,6 @@ def build_dashboard(
         categories=categories,
         theme_tags=theme_tags,
         suggested_adds=sug,
+        legality=legality,
+        moxfield_url=moxfield_url,
     )

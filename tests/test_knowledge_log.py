@@ -9,10 +9,13 @@ from commander_builder.knowledge_log import (
     get_iteration,
     init_db,
     iterations_for_deck,
+    pricing_series_for_deck,
     recent_iterations,
     record_iteration,
     stats_summary,
+    update_iteration_sim,
     update_verdict,
+    verdict_breakdown_for_deck,
 )
 
 
@@ -29,6 +32,79 @@ def test_init_db_creates_schema(db):
     init_db(db)
     summary = stats_summary(db_path=db)
     assert summary["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# update_iteration_sim -- folds A/B-sim outcome into a pending row
+# ---------------------------------------------------------------------------
+
+def test_update_iteration_sim_writes_verdict_and_sim_report(db):
+    """One atomic UPDATE writes verdict + sim_report + win rates +
+    margin together. The pending row becomes a finalized row after a
+    successful A/B sim."""
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        audit_manifest={"added": [], "removed": []},
+        verdict="pending",
+    )
+    new_id = record_iteration(it, db_path=db)
+
+    update_iteration_sim(
+        iteration_id=new_id,
+        verdict="kept",
+        sim_report={"wins_a": 1, "wins_b": 3, "games": 4},
+        win_rate_old=0.25, win_rate_new=0.75, margin=2,
+        notes="A/B sim: new won 3-1",
+        db_path=db,
+    )
+
+    refreshed = get_iteration(new_id, db_path=db)
+    assert refreshed.verdict == "kept"
+    assert refreshed.win_rate_old == 0.25
+    assert refreshed.win_rate_new == 0.75
+    assert refreshed.margin == 2
+    assert refreshed.sim_report["wins_b"] == 3
+    assert refreshed.verdict_notes == "A/B sim: new won 3-1"
+
+
+def test_update_iteration_sim_preserves_unset_columns(db):
+    """When the sim only produces a verdict (e.g. status=skipped),
+    ``sim_report`` / win_rate / margin args are None and the update
+    leaves those columns at their pre-existing values rather than
+    nulling them out."""
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        win_rate_old=0.4, win_rate_new=0.6, margin=2,
+        verdict="pending",
+    )
+    new_id = record_iteration(it, db_path=db)
+
+    update_iteration_sim(
+        iteration_id=new_id,
+        verdict="pending",
+        notes="sim skipped: no fillers",
+        db_path=db,
+        # sim_report / win_rate / margin omitted
+    )
+    refreshed = get_iteration(new_id, db_path=db)
+    assert refreshed.verdict == "pending"
+    # Original values preserved -- not overwritten with NULL.
+    assert refreshed.win_rate_old == 0.4
+    assert refreshed.win_rate_new == 0.6
+    assert refreshed.margin == 2
+
+
+def test_update_iteration_sim_rejects_invalid_verdict(db):
+    """Same whitelist as update_verdict -- prevents arbitrary strings
+    from polluting the column."""
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3, verdict="pending",
+    )
+    new_id = record_iteration(it, db_path=db)
+    with pytest.raises(ValueError, match="verdict must be"):
+        update_iteration_sim(
+            iteration_id=new_id, verdict="BANANA", db_path=db,
+        )
 
 
 def test_record_and_get_iteration(db):
@@ -251,3 +327,198 @@ def test_migrate_leaves_already_migrated_rows_alone(db):
     result = migrate_legacy_deck_ids(db_path=db)
     assert result["updated"] == 0
     assert result["details"] == []
+
+
+# ---------------------------------------------------------------------------
+# verdict_breakdown_for_deck — per-audit-version verdict ratios
+# ---------------------------------------------------------------------------
+# Backlog item #6: when the user has ≥5 iterations for a deck, the UI
+# should show "kept verdict in 4/5 v3 swaps, kept in 2/3 v4 swaps."
+# Group iterations by audit_version, count each verdict per group.
+
+
+def test_verdict_breakdown_empty_deck_returns_empty(db):
+    """No iterations → empty dict, not an error."""
+    out = verdict_breakdown_for_deck("never-saved", db_path=db)
+    assert out == {}
+
+
+def test_verdict_breakdown_groups_by_audit_version(db):
+    """Two audit versions, mixed verdicts. Each group reports its own
+    {kept, reverted, neutral, pending, total}."""
+    for _ in range(4):
+        record_iteration(
+            Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                      audit_version="v3", verdict="kept"),
+            db_path=db,
+        )
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="reverted"),
+        db_path=db,
+    )
+    for _ in range(2):
+        record_iteration(
+            Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                      audit_version="v4", verdict="kept"),
+            db_path=db,
+        )
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v4", verdict="reverted"),
+        db_path=db,
+    )
+
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert out["v3"]["kept"] == 4
+    assert out["v3"]["reverted"] == 1
+    assert out["v3"]["total"] == 5
+    assert out["v4"]["kept"] == 2
+    assert out["v4"]["reverted"] == 1
+    assert out["v4"]["total"] == 3
+
+
+def test_verdict_breakdown_unknown_audit_version_bucketed_as_unknown(db):
+    """A row with NULL audit_version (legacy import, missing manifest)
+    gets bucketed as 'unknown' instead of crashing the report."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version=None, verdict="kept"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert "unknown" in out
+    assert out["unknown"]["kept"] == 1
+
+
+def test_verdict_breakdown_scoped_to_one_deck(db):
+    """Iterations under a different deck_id don't leak into the report."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept"),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(deck_id="d2", deck_name="d2", bracket=3,
+                  audit_version="v3", verdict="reverted"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert out["v3"]["kept"] == 1
+    assert out["v3"]["reverted"] == 0  # d2's row excluded
+
+
+def test_pricing_series_returns_empty_for_no_iterations(db):
+    """No iterations → empty list. Caller renders 'no data' state."""
+    assert pricing_series_for_deck("no-such-deck", db_path=db) == []
+
+
+def test_pricing_series_extracts_from_audit_manifest_pricing(db):
+    """Each iteration with audit_manifest.pricing.total_price_usd
+    contributes a point ordered by iteration id (chronological)."""
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_version="v3", verdict="pending",
+            audit_manifest={"pricing": {
+                "total_price_usd": 142.37,
+                "captured_at": "2026-05-13T20:04:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_version="v3", verdict="kept",
+            audit_manifest={"pricing": {
+                "total_price_usd": 95.00,
+                "captured_at": "2026-05-14T20:04:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    series = pricing_series_for_deck("d1", db_path=db)
+    assert len(series) == 2
+    assert series[0]["total_price_usd"] == 142.37
+    assert series[0]["captured_at"] == "2026-05-13T20:04:00+00:00"
+    assert series[1]["total_price_usd"] == 95.00
+    # Each point also carries iteration_id so the UI can link back to
+    # the row for inspection.
+    assert isinstance(series[0]["iteration_id"], int)
+
+
+def test_pricing_series_skips_iterations_without_pricing(db):
+    """An iteration with no audit_manifest or no pricing block doesn't
+    contribute a point — the chart only shows data points we actually
+    captured."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_manifest=None),  # no manifest
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_manifest={"added": [], "removed": []},  # no pricing key
+        ),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_manifest={"pricing": {
+                "total_price_usd": 50.0,
+                "captured_at": "2026-05-15T00:00:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    series = pricing_series_for_deck("d1", db_path=db)
+    assert len(series) == 1
+    assert series[0]["total_price_usd"] == 50.0
+
+
+def test_pricing_series_scoped_to_one_deck(db):
+    """Other decks' pricing data must not leak into this deck's series."""
+    record_iteration(
+        Iteration(
+            deck_id="d1", deck_name="d1", bracket=3,
+            audit_manifest={"pricing": {
+                "total_price_usd": 100.0,
+                "captured_at": "2026-05-13T00:00:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    record_iteration(
+        Iteration(
+            deck_id="d2", deck_name="d2", bracket=3,
+            audit_manifest={"pricing": {
+                "total_price_usd": 999.0,
+                "captured_at": "2026-05-13T00:00:00+00:00",
+            }},
+        ),
+        db_path=db,
+    )
+    series = pricing_series_for_deck("d1", db_path=db)
+    assert len(series) == 1
+    assert series[0]["total_price_usd"] == 100.0
+
+
+def test_verdict_breakdown_includes_all_verdicts_zeroed(db):
+    """Every group reports counts for all four verdicts (zero-padded)
+    so the UI doesn't have to guard against KeyError when displaying
+    'kept / reverted / neutral / pending'."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    bucket = out["v3"]
+    assert bucket["kept"] == 1
+    assert bucket["reverted"] == 0
+    assert bucket["neutral"] == 0
+    assert bucket["pending"] == 0
+    assert bucket["total"] == 1

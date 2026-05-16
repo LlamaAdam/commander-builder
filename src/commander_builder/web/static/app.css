@@ -1,0 +1,536 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a22;
+  --panel-2: #1c2230;
+  --border: #2a3142;
+  --text: #e9edf2;
+  --muted: #8a93a6;
+  --accent: #6aa9ff;
+  --good: #5fd197;
+  --warn: #f5c66f;
+  --bad: #f07a7a;
+  --radius: 10px;
+  --space: 14px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  padding: 10px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.topbar h1 { margin: 0; font-size: 18px; letter-spacing: 0.02em; }
+.topbar-spacer { flex: 1; }
+.topbar-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.topbar-btn:hover { background: var(--border); }
+.topbar-btn.primary {
+  background: var(--accent);
+  color: #0b1b33;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.topbar-btn.primary:hover { filter: brightness(1.1); }
+.muted { color: var(--muted); font-size: 13px; }
+
+/* Tabbed modal (used by the Add-a-deck modal). */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tab-panel[hidden] { display: none; }
+.tab-panel label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.tab-panel input,
+.tab-panel select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.tab-panel select { cursor: pointer; }
+.tab-panel textarea {
+  min-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+/* Legality + source banner — at-a-glance status under the commander. */
+.legality-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+.legality-banner .pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.legality-banner button.pill { font-weight: 500; }
+
+/* Hero action row — small inline buttons next to "Propose changes". */
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.hero-actions button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.hero-actions button:hover { background: var(--border); }
+.hero-actions button.primary {
+  background: var(--accent);
+  color: #0b1b33;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.hero-actions button.danger:hover {
+  background: #4a0a04;
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+/* Bracket override pill */
+.bracket-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.bracket-control select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* Alert modal body — used by Game Changers + Illegal Cards. */
+.alert-body { font-size: 14px; }
+.alert-body ul { padding-left: 20px; }
+.alert-body li { margin-bottom: 4px; }
+.alert-body .pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  margin-right: 6px;
+}
+.alert-body .pill.bad { background: var(--bad); color: #380808; }
+.alert-body .pill.warn { background: var(--warn); color: #4a3308; }
+.alert-body .pill.good { background: var(--good); color: #08361d; }
+
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: calc(100vh - 53px);
+  overflow: hidden;
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  padding: 18px;
+  background: var(--panel);
+  overflow-y: auto;
+  /* overscroll-behavior: contain stops sidebar wheel events from
+     bubbling up and scrolling the page once you hit the top/bottom
+     of the deck list. Otherwise scrolling through a long list while
+     hovering a deck row drags the whole page. */
+  overscroll-behavior: contain;
+  height: 100%;
+}
+
+.dashboard {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  height: 100%;
+  padding: 24px;
+}
+.sidebar h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.deck-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.deck-list li {
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text);
+}
+.deck-list li:hover { background: var(--panel-2); }
+.deck-list li.active {
+  background: var(--accent);
+  color: #0b1b33;
+  font-weight: 600;
+}
+
+.empty-state { color: var(--muted); }
+
+.commander-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.commander-hero .name { font-size: 22px; font-weight: 600; }
+.commander-hero .type-line { color: var(--muted); font-size: 13px; }
+.color-pips { display: flex; gap: 4px; margin-top: 4px; }
+.color-pip {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+}
+.cp-W { background: #f6f1c7; color: #5a4a00; }
+.cp-U { background: #82b6e8; color: #0f2c4d; }
+.cp-B { background: #555;    color: #e9edf2; }
+.cp-R { background: #f08c83; color: #4a0a04; }
+.cp-G { background: #8fc986; color: #0e3a14; }
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--space);
+  margin-bottom: 24px;
+}
+.tile {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.tile .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+.tile .value { font-size: 24px; font-weight: 600; }
+.tile .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: var(--space);
+}
+.panel h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.curve-bars {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  align-items: end;
+  height: 110px;
+}
+.curve-bar {
+  background: var(--accent);
+  border-radius: 4px 4px 0 0;
+  position: relative;
+  min-height: 4px;
+}
+.curve-bar .bar-count {
+  position: absolute;
+  top: -16px;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+.curve-labels {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.category-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.category {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.category .count { font-weight: 600; }
+
+.tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+}
+
+.advise-btn {
+  background: var(--accent);
+  color: #0b1b33;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.advise-btn:hover { filter: brightness(1.1); }
+.advise-btn:active { filter: brightness(0.9); }
+
+/* --- Propose-swap modal -------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+  padding: 24px;
+}
+.modal-backdrop[hidden] { display: none; }
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: min(720px, 100%);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 22px;
+  gap: 12px;
+  /* Content can be tall once an A/B sim result + Save-iteration block
+     render below the textarea; let the modal body scroll instead of
+     hiding overflow (which trapped the close button off-screen). */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.modal header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 0 8px;
+  /* Pin the close button to the top of the scrollable modal so the
+     user can always dismiss the dialog regardless of scroll depth. */
+  position: sticky;
+  top: -20px;             /* cancel the modal's top padding */
+  margin-top: -20px;
+  margin-bottom: -4px;
+  padding-top: 20px;
+  background: var(--panel);
+  z-index: 2;
+}
+.modal header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.modal-close {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-close:hover { color: var(--text); }
+
+.modal textarea {
+  /* Fixed height + internal scroll so the deck text can be long
+     without pushing the Run button / result panel below the fold.
+     Use `flex: 0 0 auto` to opt out of the flex stretch behavior
+     that previously consumed the modal's full vertical space. */
+  flex: 0 0 auto;
+  height: 240px;
+  min-height: 160px;
+  max-height: 50vh;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.propose-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.games-radio {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+.games-radio legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.games-radio label {
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.propose-result {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.propose-result .row {
+  display: flex;
+  justify-content: space-between;
+}
+.propose-winner {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-transform: capitalize;
+}
+.propose-winner.new { color: var(--good); }
+.propose-winner.old { color: var(--bad); }
+.propose-winner.tie { color: var(--warn); }
+
+.advise-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.iteration-list { list-style: none; padding: 0; margin: 0; }
+.iteration {
+  display: grid;
+  grid-template-columns: 60px 1fr auto;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  align-items: baseline;
+}
+.iteration:hover { background: var(--panel-2); }
+.iteration .verdict {
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-align: center;
+}
+.verdict.kept     { background: var(--good); color: #08361d; }
+.verdict.reverted { background: var(--bad);  color: #380808; }
+.verdict.neutral  { background: var(--warn); color: #4a3308; }
+.verdict.pending  { background: var(--panel-2); color: var(--muted); }
+.iteration .name { font-size: 14px; }
+.iteration .delta { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }

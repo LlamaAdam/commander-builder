@@ -36,7 +36,10 @@ CLI:
 
     commander-advise --user "[USER] Hakbal of the Surging Soul [B3].dck" --bracket 3
     commander-advise --user "..." --bracket 3 --output advice.json
-    commander-advise --user "..." --bracket 3 --use-claude
+    commander-advise --user "..." --bracket 3 --source bracket_peers
+    commander-advise --user "..." --bracket 3 --source claude
+    commander-advise --user "..." --bracket 3 --source claude --claude-model claude-haiku-4-5
+    commander-advise --user "..." --bracket 3 --budget          # skip ABU duals + fetches
 """
 
 from __future__ import annotations
@@ -50,14 +53,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .edhrec_client import CardEntry, CommanderPage, fetch_commander_page
+from .edhrec_client import (
+    AverageDeck,
+    CardEntry,
+    CommanderPage,
+    fetch_average_deck,
+    fetch_commander_page,
+    fetch_tag_page,
+    tribe_tag_slug,
+)
 from .forge_runner import VENDOR_FORGE
-from .knowledge_log import DEFAULT_DB_PATH, iterations_for_deck
+from .moxfield_import import find_top_liked_decks_for_commander
 from .scryfall_client import _parse_commander_names_from_dck, lookup_card
-from .staples import (
+from .staples import (  # noqa: F401
+    ROLE_SATURATION_THRESHOLDS,
     classify_role,
+    count_deck_roles,
+    detect_themes,
+    detect_tribal_type,
+    essential_manabase_for_colors,
     is_basic_land,
+    is_land,
+    is_role_saturated,
     is_universal_staple,
+    render_frequency_label,
+    tribal_essential_lands,
 )
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
@@ -76,70 +96,17 @@ MIN_INCLUSION_PCT_FOR_ADD = 30.0
 MIN_SYNERGY_PCT = 25.0
 
 
-@dataclass
-class DeckDiagnosis:
-    """What we know about how this deck has been performing."""
-    win_rate: Optional[float] = None
-    games_played: int = 0
-    draws: int = 0
-    draw_rate: float = 0.0
-    avg_ending_life: Optional[float] = None
-    avg_damage_taken: Optional[float] = None
-    fastest_loss_turn: Optional[int] = None
-    pattern_summary: str = ""        # human-readable diagnosis
-    weakness_signals: list[str] = field(default_factory=list)
-    # Roles ranked in descending priority based on weakness signals.
-    # Used by the heuristic recommender to re-rank role-tagged adds so
-    # the diagnosis steers which bucket surfaces first.
-    priority_roles: list[str] = field(default_factory=list)
-
-
-@dataclass
-class SwapRecommendation:
-    """One concrete swap suggestion. Multiple SwapRecommendations form the
-    full proposal."""
-    card: str
-    action: str                       # "add" | "cut"
-    reason: str
-    evidence: dict = field(default_factory=dict)  # inclusion%, synergy%, etc.
-
-
-@dataclass
-class AdviceReport:
-    deck_filename: str
-    deck_id: Optional[str]
-    bracket: int
-    commander_names: list[str] = field(default_factory=list)
-    diagnosis: DeckDiagnosis = field(default_factory=DeckDiagnosis)
-    recommendations: list[SwapRecommendation] = field(default_factory=list)
-    source: str = "heuristic"         # "heuristic" | "claude" | "ollama"
-    timestamp: str = ""
-
-    def to_manifest(self) -> dict:
-        """Render as an audit_manifest.json-compatible dict so this feeds
-        directly into iteration_loop."""
-        added = [r.card for r in self.recommendations if r.action == "add"]
-        removed = [r.card for r in self.recommendations if r.action == "cut"]
-        rationale_lines = [self.diagnosis.pattern_summary] if self.diagnosis.pattern_summary else []
-        if self.diagnosis.weakness_signals:
-            rationale_lines.append("Weakness signals: " + "; ".join(self.diagnosis.weakness_signals))
-        return {
-            "deck_id": self.deck_id,
-            "bracket": self.bracket,
-            "audit_version": f"advisor-{self.source}",
-            "audit_timestamp": self.timestamp or datetime.now(timezone.utc).isoformat(),
-            "added": added,
-            "removed": removed,
-            "rationale": " ".join(rationale_lines),
-            "details": {
-                "commanders": self.commander_names,
-                "diagnosis": asdict(self.diagnosis),
-                "recommendations": [asdict(r) for r in self.recommendations],
-            },
-        }
-
-    def to_dict(self) -> dict:
-        return asdict(self)
+# Dataclasses live in _advisor_models so the per-source recommender
+# modules can share them without circular imports through this
+# orchestrator. Re-exported here so external imports
+# (`from commander_builder.improvement_advisor import AdviceReport`)
+# stay valid.
+from ._advisor_models import (
+    AdviceReport,
+    AdvicePhase,
+    DeckDiagnosis,
+    SwapRecommendation,
+)
 
 
 # --- Diagnosis (read past performance from local data) --------------------
@@ -263,258 +230,159 @@ def _read_main_cards(deck_path: Path) -> list[str]:
     return out
 
 
-# Map diagnosis weakness keywords to the role buckets that address them.
-# Order in each tuple matters — leftmost role is the strongest match for
-# that weakness, used to break ties in priority ranking.
-_SIGNAL_TO_ROLES: list[tuple[str, tuple[str, ...]]] = [
-    # "no closer / finisher" → bring in finishers, then wipes
-    ("closer", ("finisher", "wipe")),
-    ("finisher", ("finisher", "wipe")),
-    # "low win rate" → assume offense problem; finishers + draw to dig for them
-    ("low win rate", ("finisher", "draw", "tutor")),
-    # "offense, not defense" → finisher + draw (deck survives, just doesn't close)
-    ("offense, not defense", ("finisher", "tutor", "draw")),
-    # "defense / sustain is weak" → wipe (clear board) + protection
-    ("defense", ("wipe", "protection", "removal")),
-    # "early aggression / no T1-T3 interaction" → cheap removal + ramp + protection
-    ("early aggression", ("removal", "ramp", "protection")),
-    ("T1-T3", ("removal", "ramp", "protection")),
-    # "high draw rate" (signal text) → finisher / closer
-    ("high draw rate", ("finisher", "wipe", "tutor")),
-]
+# Signal-to-roles map + _signals_to_priority_roles + heuristic
+# recommender all live in _advisor_heuristic. Re-exported here so
+# external imports (and the legacy in-file `_aggregate_match_history`
+# that calls `_signals_to_priority_roles`) still resolve.
+from ._advisor_heuristic import (  # noqa: E402
+    MIN_INCLUSION_PCT_FOR_ADD,
+    MIN_SYNERGY_PCT,
+    _heuristic_swap_recommendations,
+    _signals_to_priority_roles,
+)
 
 
-def _signals_to_priority_roles(signals: list[str]) -> list[str]:
-    """Translate weakness-signal phrases into a deduplicated, priority-ordered
-    role list. The earliest match in each signal contributes the strongest
-    role, with later signals adding progressively lower-priority roles.
+# Kept here only to avoid touching the constant during the chunked
+# refactor — the orchestrator's _aggregate_match_history uses
+# _signals_to_priority_roles which now lives in _advisor_heuristic.
 
-    Returns at most 4 unique roles. Empty signals → empty list (no
-    re-ranking, fall back to default ordering)."""
-    out: list[str] = []
-    for signal in signals:
-        lc = signal.lower()
-        for keyword, roles in _SIGNAL_TO_ROLES:
-            if keyword in lc:
-                for r in roles:
-                    if r not in out:
-                        out.append(r)
-                break
-    return out[:4]
+
+# Post-recommendation filters extracted to _advisor_filters. Plus the
+# manabase recommender. All re-exported here so external callers
+# don't see the move.
+from ._advisor_filters import (  # noqa: E402,F401
+    _filter_for_saturation,
+    _validate_card_names,
+)
+from ._advisor_manabase import _missing_manabase_recommendations  # noqa: E402,F401
 
 
 def _role_for_card(card_name: str) -> str:
-    """Look up ``card_name`` via Scryfall (cached) and classify its role.
+    """Wrapper preserved for backward-compatible public imports.
 
-    Returns ``"unknown"`` on Scryfall miss or offline. The role tag is
-    advisory — it groups recommendations on the advice surface but doesn't
-    drive program logic, so a soft failure is fine."""
-    try:
-        card = lookup_card(card_name)
-    except Exception:
-        return "unknown"
-    if not card:
-        return "unknown"
-    return classify_role(card.get("oracle_text", ""), card.get("type_line", ""))
+    The actual implementation lives in ``_advisor_role_helpers``
+    so per-source recommender modules can import from there
+    without circular references through this orchestrator.
+    """
+    from ._advisor_role_helpers import _role_for_card as _impl
+    return _impl(card_name)
 
 
-def _heuristic_swap_recommendations(
-    deck_cards: set[str],
-    edhrec_page: CommanderPage,
-    add_limit: int = DEFAULT_ADD_LIMIT,
-    cut_limit: int = DEFAULT_CUT_LIMIT,
-    diagnosis: Optional[DeckDiagnosis] = None,
-) -> list[SwapRecommendation]:
-    """Pure-data swap proposals from EDHREC inclusion-% deltas.
+def _category_from_type_line(type_line: str) -> Optional[str]:
+    """Map a Scryfall ``type_line`` to an EDHREC-style section header.
 
-    Adds: cards EDHREC ranks high (top_cards or high_synergy) that are NOT
-    already in the deck. Cuts: cards in the deck that AREN'T in EDHREC's
-    top-cards list (likely off-archetype). No LLM, no card-text reasoning —
-    just statistical co-inclusion."""
-    recs: list[SwapRecommendation] = []
-    deck_cards_lc = {c.lower() for c in deck_cards}
+    Used as a fallback when the EDHREC commander page's
+    ``category_lists`` doesn't cover an average-deck entry — without
+    this, ~21% of preview cards land in the UI's catch-all 'Other'
+    bucket. Section names mirror EDHREC's headers so grouping stays
+    consistent with EDHREC-categorized cards.
 
-    # Adds — pull from high-synergy first (commander-specific signal), then
-    # top cards (color staples).
-    candidates_for_add: list[CardEntry] = []
-    seen: set[str] = set()
-    for c in edhrec_page.high_synergy_cards:
-        if c.synergy_pct >= MIN_SYNERGY_PCT and c.name.lower() not in seen:
-            candidates_for_add.append(c)
-            seen.add(c.name.lower())
-    for c in edhrec_page.top_cards:
-        if c.inclusion_pct >= MIN_INCLUSION_PCT_FOR_ADD and c.name.lower() not in seen:
-            candidates_for_add.append(c)
-            seen.add(c.name.lower())
+    Priority order matters for compound types:
+    - ``Artifact Creature`` → ``Creatures`` (matches EDHREC's bucketing)
+    - ``Legendary Planeswalker`` → ``Planeswalkers``
+    - ``Basic Land — Forest`` → ``Lands``
 
-    # Build the full add-recommendation list first, then re-rank.
-    add_recs: list[SwapRecommendation] = []
-    for c in candidates_for_add:
-        if c.name.lower() in deck_cards_lc:
+    Returns ``None`` for empty / unrecognized type lines (e.g. ``Tribal``,
+    ``Phenomenon``) so the UI's null-category 'Other' fallback still
+    kicks in rather than the helper inventing a label.
+    """
+    if not type_line:
+        return None
+    tl = type_line.lower()
+    if "creature" in tl:
+        return "Creatures"
+    if "planeswalker" in tl:
+        return "Planeswalkers"
+    if "battle" in tl:
+        return "Battles"
+    if "land" in tl:
+        return "Lands"
+    if "instant" in tl:
+        return "Instants"
+    if "sorcery" in tl:
+        return "Sorceries"
+    if "enchantment" in tl:
+        return "Enchantments"
+    if "artifact" in tl:
+        return "Artifacts"
+    return None
+
+
+def _enrich_edhrec_categories_from_scryfall(
+    edhrec_categories: dict,
+    average_deck,
+    lookup_fn=None,
+) -> dict:
+    """Mutate-and-return ``edhrec_categories`` with Scryfall-derived
+    fallback entries for any ``average_deck`` card missing from the
+    EDHREC commander-page map.
+
+    Cards Scryfall can't resolve (custom cards, typos, transient
+    outage) or whose ``type_line`` doesn't map to a known section
+    stay absent from the dict — the UI surfaces those as 'Other'.
+
+    ``lookup_fn`` is the Scryfall lookup callable; defaults to the
+    shared ``scryfall_client.lookup_card`` (disk-cached). Injected
+    for testability. Per-card exceptions are swallowed so a network
+    blip on one card doesn't poison the whole enrichment pass.
+    """
+    if average_deck is None:
+        return edhrec_categories
+    cards = getattr(average_deck, "cards", None) or []
+    if not cards:
+        return edhrec_categories
+    if lookup_fn is None:
+        lookup_fn = lookup_card
+    for entry in cards:
+        name = getattr(entry, "name", None) or ""
+        key = name.lower()
+        if not key or key in edhrec_categories:
             continue
-        # Skip universal staples — they're noise in the must-add list. Every
-        # deck already has Sol Ring; if it doesn't, that's an intentional choice.
-        if is_universal_staple(c.name):
+        try:
+            card = lookup_fn(name)
+        except Exception:
+            card = None
+        if card is None:
             continue
-        bucket = "high_synergy" if c.synergy_pct >= MIN_SYNERGY_PCT else "top_cards"
-        # Categorize the recommendation by role so the advice surface can
-        # group adds by ramp/draw/removal/finisher rather than show a flat list.
-        role = _role_for_card(c.name)
-        add_recs.append(SwapRecommendation(
-            card=c.name,
-            action="add",
-            reason=(
-                f"EDHREC {bucket}: in {c.inclusion_pct:.0f}% of decks"
-                + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
-            ),
-            evidence={
-                "inclusion_pct": c.inclusion_pct,
-                "synergy_pct": c.synergy_pct,
-                "source": f"edhrec.{bucket}",
-                "role": role,
-            },
-        ))
+        type_line = card.get("type_line") or ""
+        if not type_line:
+            faces = card.get("card_faces") or []
+            if faces:
+                type_line = (faces[0] or {}).get("type_line") or ""
+        fallback = _category_from_type_line(type_line)
+        if fallback:
+            edhrec_categories[key] = fallback
+    return edhrec_categories
 
-    # Re-rank by diagnosis priority roles, when present. Adds in the
-    # priority-role list float to the top in their listed order; everything
-    # else keeps its original (synergy-then-top) ordering. Stable sort
-    # preserves intra-bucket order.
-    if diagnosis and diagnosis.priority_roles:
-        priority_index = {r: i for i, r in enumerate(diagnosis.priority_roles)}
-        def _rank(r: SwapRecommendation) -> int:
-            role = r.evidence.get("role", "unknown")
-            return priority_index.get(role, len(priority_index) + 1)
-        add_recs.sort(key=_rank)
 
-    # Apply the add_limit after re-ranking so the surfaced top-N reflects
-    # the re-ordered list, not the pre-ranked one.
-    recs.extend(add_recs[:add_limit])
 
-    # Cuts — cards in deck not in EDHREC's top-cards or high-synergy lists.
-    # Inverse of the adds path: if the rest of the meta isn't running this,
-    # it's probably off-archetype. Conservative — top cards by EDHREC are
-    # color staples that not all decks need.
-    edhrec_known = {c.name.lower() for c in edhrec_page.top_cards} \
-                 | {c.name.lower() for c in edhrec_page.high_synergy_cards}
 
-    for card in deck_cards:
-        # Don't recommend cutting basic lands or universal staples.
-        if is_basic_land(card) or is_universal_staple(card):
-            continue
-        if card.lower() not in edhrec_known:
-            recs.append(SwapRecommendation(
-                card=card,
-                action="cut",
-                reason="not in EDHREC's top-cards or high-synergy lists for this commander",
-                evidence={"source": "edhrec.absence"},
-            ))
-            if sum(1 for r in recs if r.action == "cut") >= cut_limit:
-                break
+# --- Bracket-peers recommender (sources from other tuned builds) ----------
+#
+# The bracket-peers source + Claude-prompt peer summary live in
+# _advisor_bracket_peers. Re-exported here so existing
+# `from commander_builder.improvement_advisor import _peer_card_frequency`
+# style imports keep working.
+from ._advisor_bracket_peers import (  # noqa: E402
+    DEFAULT_BRACKET_PEERS_N,
+    _bracket_peers_recommendations,
+    _collect_bracket_peer_summary_for_prompt,
+    _default_min_refs,
+    _extract_main_cards_from_moxfield_json,
+    _peer_card_frequency,
+)
 
-    return recs
 
 
 # --- LLM-aided variant (Claude) -------------------------------------------
-
-_CLAUDE_ADVISOR_SYSTEM = """You are a deck-tuning advisor for Magic: the Gathering Commander. \
-Given:
-  - The deck's commander(s)
-  - The current decklist
-  - Performance signals from prior simulations (win rate, draw rate, fastest loss, etc.)
-  - EDHREC inclusion% / synergy% data for this commander
-
-Recommend a structured set of swaps that addresses the weakness signals. \
-Return JSON ONLY (no prose, no markdown):
-
-{
-  "rationale": "one paragraph diagnosing the weakness and explaining the swap strategy",
-  "added": ["Card A", "Card B", ...],
-  "removed": ["Card X", "Card Y", ...]
-}
-
-Constraints:
-- Recommend 4-8 adds and 4-8 removes (the deck must stay at 99 cards in the [Main]).
-- Each `added` card SHOULD appear in EDHREC's data unless you have strong synergy reason.
-- Each `removed` card MUST be in the current decklist.
-- Don't recommend cutting basic lands, Sol Ring, Arcane Signet, or Command Tower.
-- Match adds and removes 1-for-1 by count.
-- Focus the rationale on the weakness signals, not generic deck-building advice.
-"""
-
-
-def _claude_swap_recommendations(
-    deck_filename: str,
-    bracket: int,
-    deck_cards: set[str],
-    diagnosis: DeckDiagnosis,
-    edhrec_page: CommanderPage,
-) -> tuple[list[SwapRecommendation], str]:
-    """LLM-aided variant. Falls back via NotImplementedError when no API key
-    or SDK — caller catches and degrades to heuristic."""
-    if "ANTHROPIC_API_KEY" not in os.environ:
-        raise NotImplementedError("claude advisor requires ANTHROPIC_API_KEY")
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:
-        raise NotImplementedError("claude advisor requires `pip install anthropic`") from exc
-
-    # Compact the EDHREC payload — full pages are too large.
-    edhrec_compact = {
-        "commander": edhrec_page.commander_name,
-        "deck_count": edhrec_page.deck_count,
-        "top_cards": [
-            {"name": c.name, "inclusion_pct": c.inclusion_pct, "synergy_pct": c.synergy_pct}
-            for c in edhrec_page.top_cards[:50]
-        ],
-        "high_synergy_cards": [
-            {"name": c.name, "inclusion_pct": c.inclusion_pct, "synergy_pct": c.synergy_pct}
-            for c in edhrec_page.high_synergy_cards[:30]
-        ],
-    }
-    user_message = json.dumps({
-        "deck_filename": deck_filename,
-        "bracket": bracket,
-        "current_decklist": sorted(deck_cards),
-        "performance": asdict(diagnosis),
-        "edhrec_signals": edhrec_compact,
-    }, indent=2)
-
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2048,
-        system=_CLAUDE_ADVISOR_SYSTEM,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    text = ""
-    for block in response.content:
-        if hasattr(block, "text"):
-            text += block.text
-    if not text.strip():
-        raise RuntimeError("claude advisor: empty response")
-
-    # Tolerate code-fence wrapping despite the instruction.
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```", 2)[1] if "```" in cleaned else cleaned
-        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
-        cleaned = cleaned.rsplit("```", 1)[0].strip()
-
-    parsed = json.loads(cleaned)
-    rationale = str(parsed.get("rationale", ""))
-    recs: list[SwapRecommendation] = []
-    for name in parsed.get("added", []) or []:
-        recs.append(SwapRecommendation(
-            card=str(name), action="add",
-            reason="recommended by Claude advisor", evidence={"source": "claude"},
-        ))
-    for name in parsed.get("removed", []) or []:
-        recs.append(SwapRecommendation(
-            card=str(name), action="cut",
-            reason="recommended by Claude advisor", evidence={"source": "claude"},
-        ))
-    return recs, rationale
-
+#
+# System prompt + _claude_swap_recommendations live in _advisor_claude
+# so the per-source modules each have ~one file. Re-exported here.
+from ._advisor_claude import (  # noqa: E402
+    DEFAULT_CLAUDE_MODEL,
+    _CLAUDE_ADVISOR_SYSTEM,
+    _claude_swap_recommendations,
+)
 
 # --- Public entry ----------------------------------------------------------
 
@@ -522,51 +390,385 @@ def advise(
     deck_path: Path,
     bracket: int,
     use_claude: bool = False,
+    source: Optional[str] = None,
     deck_dir: Path = DECK_DIR,
     match_dir: Path = MATCH_DIR,
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
+    budget: bool = False,
 ) -> AdviceReport:
-    """Generate swap recommendations for one deck. Default uses heuristic
-    over EDHREC data; pass `use_claude=True` to escalate to LLM-aided
-    synthesis (falls back to heuristic if API unavailable)."""
+    """Generate swap recommendations for one deck.
+
+    ``source`` selects the recommendation backend:
+
+    - ``"heuristic"`` (default when neither ``use_claude`` nor
+      ``source`` is set) — EDHREC inclusion% / synergy% over the
+      commander's aggregate page. Fast, deterministic, no LLM token
+      cost. Worst on tuned high-bracket decks because EDHREC averages
+      across all brackets.
+    - ``"bracket_peers"`` — top-N highest-liked Moxfield decks for
+      this commander **at this bracket**, frequency-ranked. Stays
+      archetype-appropriate because the source decks are by definition
+      tuned for the same goal. Falls back to heuristic when no
+      references can be fetched.
+    - ``"claude"`` (or legacy ``use_claude=True``) — LLM-aided
+      synthesis. Most expressive; requires ``ANTHROPIC_API_KEY``.
+
+    ``claude_model`` selects the Anthropic tier when source is
+    ``"claude"``; defaults to Sonnet. Pass ``"claude-haiku-4-5"`` to
+    cut cost ~3-5x on routine audits.
+
+    ``use_claude=True`` is preserved as a legacy alias for
+    ``source="claude"`` so existing callers don't break.
+
+    Implementation note: this synchronous entry point collects all
+    phases from ``_advise_steps()`` and assembles the final report.
+    Callers that want to render partial progress (e.g. the streaming
+    ``/api/audit/stream`` endpoint) should drive ``_advise_steps()``
+    directly and consume each ``AdvicePhase`` as it arrives.
+    """
+    final_report: Optional[AdviceReport] = None
+    for phase in _advise_steps(
+        deck_path, bracket,
+        use_claude=use_claude, source=source,
+        deck_dir=deck_dir, match_dir=match_dir,
+        claude_model=claude_model, budget=budget,
+    ):
+        if phase.phase == "complete":
+            final_report = phase.data.get("report")
+        elif phase.phase == "error":
+            # Re-raise to preserve the legacy exception contract — the
+            # synchronous entry point has always thrown for missing
+            # deck files / no commanders. The streaming endpoint
+            # catches this same condition at the generator level and
+            # emits an ``error`` phase instead.
+            err_type = phase.data.get("type", "RuntimeError")
+            err_msg = phase.data.get("reason", "unknown error")
+            if err_type == "FileNotFoundError":
+                raise FileNotFoundError(err_msg)
+            if err_type == "ValueError":
+                raise ValueError(err_msg)
+            raise RuntimeError(err_msg)
+    if final_report is None:
+        raise RuntimeError(
+            "advise() pipeline ended without emitting a 'complete' phase",
+        )
+    return final_report
+
+
+def _advise_steps(
+    deck_path: Path,
+    bracket: int,
+    use_claude: bool = False,
+    source: Optional[str] = None,
+    deck_dir: Path = DECK_DIR,
+    match_dir: Path = MATCH_DIR,
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
+    budget: bool = False,
+):
+    """Generator version of :func:`advise` — yields ``AdvicePhase``
+    events as each stage of the pipeline completes.
+
+    Event sequence (happy path):
+
+    1. ``diagnosis`` — deck context resolved (~10ms): commanders,
+       parsed deck cards, prior-match diagnosis.
+    2. ``manabase`` — curated manabase essentials computed (~50ms):
+       ABU duals / fetches / shocks / bond / tribal lands the deck
+       is missing for its color identity.
+    3. ``primary`` — source-specific recommendations (~100ms to 8s
+       depending on source): the heuristic / bracket_peers / claude
+       output. Includes ``effective_source`` which may differ from
+       the requested source on fallback.
+    4. ``complete`` — saturation filter + Scryfall hallucination
+       validator have run; the final ``AdviceReport`` is assembled
+       and ready to send.
+
+    Failure modes:
+
+    - File-not-found / no-commanders / bad-source-value: yields a
+      single ``error`` phase with ``type`` set to the original
+      exception class name. The synchronous ``advise()`` re-raises
+      to preserve the legacy exception contract.
+    - Mid-pipeline source failures (Claude API down, network blip
+      on Moxfield, EDHREC slug mismatch) are NOT errors — they fall
+      back to the heuristic and emit a normal ``primary`` event
+      with a populated ``fallback_reason``.
+
+    Test guidance: tests that need to inspect a single phase can
+    iterate this directly and break early. The synchronous wrapper
+    is the legacy contract; this generator is the source of truth.
+    """
+    # --- Validate inputs early so the error phase fires before any
+    # work runs (saves a Scryfall round-trip on bad input).
+    if source is None:
+        source = "claude" if use_claude else "heuristic"
+    if source not in ("heuristic", "claude", "bracket_peers"):
+        yield AdvicePhase("error", {
+            "type": "ValueError",
+            "reason": (
+                f"source must be one of heuristic/claude/bracket_peers, "
+                f"got {source!r}"
+            ),
+            "where": "input_validation",
+        })
+        return
+
     if not deck_path.is_absolute():
         deck_path = deck_dir / deck_path
     if not deck_path.exists():
-        raise FileNotFoundError(f"deck not found: {deck_path}")
+        yield AdvicePhase("error", {
+            "type": "FileNotFoundError",
+            "reason": f"deck not found: {deck_path}",
+            "where": "input_validation",
+        })
+        return
 
-    # Resolve commander names + EDHREC page.
     commanders = _parse_commander_names_from_dck(deck_path)
     if not commanders:
-        raise ValueError(f"no commanders found in {deck_path.name}")
-    edhrec_page = fetch_commander_page(commanders[0])
+        yield AdvicePhase("error", {
+            "type": "ValueError",
+            "reason": f"no commanders found in {deck_path.name}",
+            "where": "commander_parse",
+        })
+        return
+    primary_commander = commanders[0]
 
-    # Build diagnosis from prior matches.
     diagnosis = _aggregate_match_history(deck_path.name, match_dir=match_dir)
-
-    # Pull current cards.
     main_cards = set(_read_main_cards(deck_path))
 
-    # Pick backend.
-    source = "heuristic"
+    # --- Phase 1: diagnosis. Streamed immediately so the UI can
+    # render weakness pills + "scanning for X" placeholders while
+    # the slow source-specific call is still in flight.
+    yield AdvicePhase("diagnosis", {
+        "deck_filename": deck_path.name,
+        "bracket": bracket,
+        "commander_names": commanders,
+        "diagnosis": asdict(diagnosis),
+    })
+
+    # --- Phase 2: manabase essentials. Cheap (one Scryfall lookup
+    # for commander + a catalog walk), so we run this before the
+    # slow source-specific recommender even though it's prepended
+    # later. Streaming it now means manabase shock/fetch suggestions
+    # appear in the UI in well under a second.
+    manabase_recs: list[SwapRecommendation] = []
+    tribe: Optional[str] = None
+    try:
+        commander_card = lookup_card(primary_commander)
+        if commander_card:
+            ci = commander_card.get("color_identity") or []
+            ci_set = {c.upper() for c in ci if isinstance(c, str)}
+            tribe = detect_tribal_type(
+                commander_card.get("oracle_text", "") or "",
+                commander_card.get("type_line", "") or "",
+            )
+            manabase_recs = list(_missing_manabase_recommendations(
+                main_cards, ci_set, tribe=tribe, budget=budget,
+            ))
+    except Exception:  # noqa: BLE001
+        # Commander lookup failure shouldn't break the audit — emit
+        # an empty manabase event so the UI doesn't hang waiting.
+        pass
+    yield AdvicePhase("manabase", {
+        "recommendations": [asdict(r) for r in manabase_recs],
+        "tribe": tribe,
+    })
+
+    # --- Phase 3: source-specific recommendations. The slow phase
+    # — claude can take 6-8s for the LLM round trip. We yield as
+    # soon as the call returns.
     rationale_override: Optional[str] = None
+    fallback_reason: Optional[str] = None
+    edhrec_page: Optional[CommanderPage] = None
+    average_deck: Optional[AverageDeck] = None
+    tag_pages: Optional[list[CommanderPage]] = None
+    bracket_peer_ref_count: int = 0
     recs: list[SwapRecommendation]
-    if use_claude:
+    effective_source = source  # mutate on fallback
+
+    def _fetch_edhrec_lazy() -> Optional[CommanderPage]:
+        nonlocal edhrec_page
+        if edhrec_page is None:
+            edhrec_page = fetch_commander_page(primary_commander)
+        return edhrec_page
+
+    def _fetch_tag_pages_lazy() -> list[CommanderPage]:
+        """Pull EDHREC ``/tags/<slug>`` pages for both the detected
+        tribe AND any themes detected from the deck's oracle text.
+
+        Tribal slug comes from ``tribe_tag_slug(tribe)``; theme
+        slugs come from ``detect_themes(deck_oracles)`` which scans
+        for Tokens / Spellslinger / Aristocrats / +1+1 counters /
+        Landfall / Lifegain / Reanimator / Equipment / Artifacts /
+        Enchantress signals (each gated by a per-theme min-count
+        threshold so goodstuff decks don't trip every theme).
+
+        Returns the list of successfully-fetched tag pages (may be
+        empty for non-tribal, non-themed decks). Capped at 4 pages
+        total to bound the cumulative HTTP cost.
+
+        All pages have the same shape as a commander page so the
+        heuristic can iterate them uniformly.
+        """
+        nonlocal tag_pages
+        if tag_pages is not None:
+            return tag_pages
+        slugs: list[str] = []
+        seen_slugs: set[str] = set()
+        # Tribe first (highest signal — tribal decks have the
+        # tightest archetype identity).
+        if tribe:
+            s = tribe_tag_slug(tribe)
+            if s and s not in seen_slugs:
+                slugs.append(s)
+                seen_slugs.add(s)
+        # Detected themes second. Scan the deck's oracle texts via
+        # the cached scryfall lookups (no extra network — just
+        # ``lookup_card`` per card, all already warm from the
+        # role-classifier pass earlier in this audit).
+        try:
+            deck_oracles: list[tuple[str, str]] = []
+            for name in main_cards:
+                try:
+                    card = lookup_card(name)
+                except Exception:  # noqa: BLE001
+                    continue
+                if card:
+                    deck_oracles.append(
+                        (name, card.get("oracle_text", "") or ""),
+                    )
+            for s in detect_themes(deck_oracles):
+                if s and s not in seen_slugs:
+                    slugs.append(s)
+                    seen_slugs.add(s)
+        except Exception:  # noqa: BLE001
+            pass
+        # Cap at 4 pages — each is a ~1-2s HTTP round-trip on a
+        # cold cache, and beyond ~3 the signal diminishes quickly
+        # (themes overlap heavily on staples).
+        slugs = slugs[:4]
+        out: list[CommanderPage] = []
+        for s in slugs:
+            try:
+                p = fetch_tag_page(s)
+            except Exception:  # noqa: BLE001
+                p = None
+            if p is not None:
+                out.append(p)
+        tag_pages = out
+        return tag_pages
+
+    def _fetch_avg_deck_lazy() -> Optional[AverageDeck]:
+        """Pull EDHREC's bracket-specific "average deck" — a curated
+        ~73-98 card reference deck (vs. the 200+ uncategorized
+        cards on the commander page itself).
+
+        Adds ~1-2s per audit but the signal is uniquely strong:
+        the average deck is a coherent SAMPLE BUILD, not a flat
+        ranking. For cuts it acts as a high-confidence "yes this
+        card belongs in this archetype" signal; for adds it
+        surfaces cards that the typical tuned deck runs but the
+        user's deck doesn't.
+
+        Best-effort: returns None when EDHREC doesn't publish an
+        average deck for this commander/bracket combo (newly-
+        released or very obscure commanders). The heuristic
+        gracefully degrades to the commander-page data only.
+        """
+        nonlocal average_deck
+        if average_deck is None:
+            try:
+                average_deck = fetch_average_deck(
+                    primary_commander, bracket=bracket,
+                )
+            except Exception:  # noqa: BLE001
+                average_deck = None
+        return average_deck
+
+    if source == "bracket_peers":
+        peer_recs, ref_count = _bracket_peers_recommendations(
+            commander_name=primary_commander,
+            bracket=bracket,
+            deck_cards=main_cards,
+            diagnosis=diagnosis,
+        )
+        if peer_recs:
+            recs = peer_recs
+        else:
+            fallback_reason = (
+                f"no bracket-peer references found for "
+                f"{primary_commander!r} at B{bracket} — "
+                f"falling back to EDHREC heuristic"
+            )
+            print(f"  WARN: {fallback_reason}.", flush=True)
+            page = _fetch_edhrec_lazy()
+            recs = _heuristic_swap_recommendations(
+                main_cards, page, diagnosis=diagnosis,
+                average_deck=_fetch_avg_deck_lazy(),
+                tag_pages=_fetch_tag_pages_lazy(),
+            )
+            effective_source = "heuristic"
+    elif source == "claude":
+        page = _fetch_edhrec_lazy()
+        try:
+            peer_summary = _collect_bracket_peer_summary_for_prompt(
+                primary_commander, bracket=bracket,
+                n=DEFAULT_BRACKET_PEERS_N,
+            )
+        except Exception:  # noqa: BLE001
+            peer_summary = None
         try:
             recs, rationale_override = _claude_swap_recommendations(
-                deck_path.name, bracket, main_cards, diagnosis, edhrec_page,
+                deck_path.name, bracket, main_cards, diagnosis, page,
+                model=claude_model,
+                bracket_peers_summary=peer_summary,
             )
-            source = "claude"
+            if peer_summary:
+                bracket_peer_ref_count = int(
+                    peer_summary.get("ref_count", 0) or 0,
+                )
         except NotImplementedError as exc:
-            print(f"  WARN: claude advisor unavailable ({exc}); falling back to heuristic.",
+            fallback_reason = f"claude advisor unavailable: {exc}"
+            print(f"  WARN: {fallback_reason}; falling back to heuristic.",
                   flush=True)
-            recs = _heuristic_swap_recommendations(main_cards, edhrec_page, diagnosis=diagnosis)
+            recs = _heuristic_swap_recommendations(
+                main_cards, page, diagnosis=diagnosis,
+                average_deck=_fetch_avg_deck_lazy(),
+                tag_pages=_fetch_tag_pages_lazy(),
+            )
+            effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
-            print(f"  WARN: claude advisor failed ({type(exc).__name__}); "
-                  f"falling back to heuristic.", flush=True)
-            recs = _heuristic_swap_recommendations(main_cards, edhrec_page, diagnosis=diagnosis)
+            fallback_reason = (
+                f"claude advisor failed ({type(exc).__name__}: {exc})"
+            )
+            print(f"  WARN: {fallback_reason}; falling back to heuristic.",
+                  flush=True)
+            recs = _heuristic_swap_recommendations(
+                main_cards, page, diagnosis=diagnosis,
+                average_deck=_fetch_avg_deck_lazy(),
+                tag_pages=_fetch_tag_pages_lazy(),
+            )
+            effective_source = "heuristic"
     else:
-        recs = _heuristic_swap_recommendations(main_cards, edhrec_page)
+        page = _fetch_edhrec_lazy()
+        recs = _heuristic_swap_recommendations(
+            main_cards, page,
+            average_deck=_fetch_avg_deck_lazy(),
+            tag_pages=_fetch_tag_pages_lazy(),
+        )
 
-    # Resolve deck_id from the .dck Moxfield= line if present.
+    yield AdvicePhase("primary", {
+        "recommendations": [asdict(r) for r in recs],
+        "requested_source": source,
+        "effective_source": effective_source,
+        "fallback_reason": fallback_reason,
+        "rationale_override": rationale_override,
+        "bracket_peer_ref_count": bracket_peer_ref_count,
+    })
+
+    # --- Phase 4: finalize. Prepend manabase, apply saturation
+    # filter, validate names. The UI can show "finalizing..." here
+    # since this is the post-processing step.
     deck_id: Optional[str] = None
     try:
         text = deck_path.read_text(encoding="utf-8")
@@ -577,6 +779,104 @@ def advise(
     except OSError:
         pass
 
+    # Prepend manabase so curated essentials surface at the top,
+    # then deduplicate so the same card never appears in both the
+    # manabase + primary slices.
+    #
+    # Real failure mode caught in the 2026-05-13 live-browser audit:
+    # manabase prepends shock lands (Steam Vents, Blood Crypt, etc.)
+    # for a 5-color deck missing them, AND bracket_peers ALSO
+    # recommends those shock lands because they appear in 4/5 peer
+    # references and aren't in the user's deck. Without dedup, the
+    # combined ``recs`` list contains "Steam Vents" twice; the audit
+    # response renders it twice; the proposed .dck has ``1 Steam
+    # Vents`` listed twice (illegal in singleton Commander) and Forge
+    # rejects the deck.
+    #
+    # Manabase wins on collision because (a) it's prepended (first
+    # to appear), and (b) its source tag (``manabase_essentials``)
+    # is more specific than a generic peer reference for the UI's
+    # source-badge rendering.
+    seen_lc: set[str] = set()
+    deduped: list[SwapRecommendation] = []
+    for rec in list(manabase_recs) + list(recs):
+        # Only de-dup add candidates — cuts are user-deck cards
+        # already present and naturally singleton.
+        if rec.action == "add":
+            key = rec.card.lower()
+            if key in seen_lc:
+                continue
+            seen_lc.add(key)
+        deduped.append(rec)
+    recs = deduped
+
+    role_counts = count_deck_roles(main_cards)
+    recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
+
+    # Color-identity post-filter: strip add recs whose color identity
+    # isn't a subset of the commander's. Mirrors the auto-curator's
+    # enforce_color_identity defensive filter — EDHREC heuristic,
+    # bracket-peers, and Claude advisor can all surface off-color
+    # picks (e.g. multi-color tribal Goblin support on a mono-red
+    # Krenko deck) that would produce an illegal proposed deck.
+    # Cut recs are pass-through (always cards the user already runs).
+    # None CI = unresolvable commander; the filter skips so we don't
+    # nuke every add against a phantom colorless deck.
+    try:
+        from .scryfall_client import color_identity_for_commander
+        from ._proposer_filters import enforce_color_identity
+        deck_ci = color_identity_for_commander(deck_path)
+    except Exception:  # noqa: BLE001 -- defensive; better to skip filter
+        deck_ci = None  # than crash the audit on a Scryfall blip.
+    if deck_ci is not None:
+        add_names = [r.card for r in recs if r.action == "add"]
+        kept_adds, _dropped_ci = enforce_color_identity(add_names, deck_ci)
+        kept_set = {n.lower() for n in kept_adds}
+        recs = [
+            r for r in recs
+            if r.action != "add" or r.card.lower() in kept_set
+        ]
+
+    _validate_card_names(recs)
+
+    # Structured per-recommendation logging (opt-in via the
+    # ``COMMANDER_BUILDER_LOG_DECISIONS`` env var). One line per
+    # rec lands in ``_audit_decisions.log`` next to the existing
+    # ``_js_errors.log`` and ``_forge_py_correlation.csv``. Pattern
+    # drift (e.g. another Cyclonic-Rift-shaped misclassification)
+    # then surfaces via grep instead of via Chrome screenshot.
+    from ._advisor_logging import log_decisions as _log_decisions
+    _log_decisions(
+        deck_path=deck_path,
+        commander_names=commanders,
+        effective_source=effective_source,
+        recommendations=recs,
+        fallback_reason=fallback_reason,
+    )
+
+    # Build the lowercase-name → EDHREC-section-header map so the
+    # audit route can categorize the average-deck preview without
+    # holding onto the heavy ``CommanderPage`` object. Cards present
+    # in multiple sections take the first header seen — EDHREC's
+    # category_lists rarely overlap, so the collision rate is
+    # negligible. Empty dict on the no-page path (fallback returns
+    # a valid AdviceReport with zero recommendations).
+    edhrec_categories: dict[str, str] = {}
+    if edhrec_page is not None:
+        for category, entries in (edhrec_page.category_lists or {}).items():
+            for entry in entries:
+                key = entry.name.lower()
+                edhrec_categories.setdefault(key, category)
+
+    # Back-fill from Scryfall type_line for average-deck cards that
+    # weren't covered by EDHREC's category_lists. Without this, ~21%
+    # of preview cards landed under the UI's catch-all "Other" bucket.
+    # Lookups go through the shared Scryfall disk cache — warm cache
+    # is ~0ms; cold cache is one HTTP call per unmapped card.
+    _enrich_edhrec_categories_from_scryfall(
+        edhrec_categories, average_deck,
+    )
+
     report = AdviceReport(
         deck_filename=deck_path.name,
         deck_id=deck_id,
@@ -584,12 +884,18 @@ def advise(
         commander_names=commanders,
         diagnosis=diagnosis,
         recommendations=recs,
-        source=source,
+        source=effective_source,
         timestamp=datetime.now(timezone.utc).isoformat(),
+        fallback_reason=fallback_reason,
+        skipped_for_saturation=skipped_for_saturation,
+        bracket_peer_ref_count=bracket_peer_ref_count,
+        average_deck=average_deck,
+        edhrec_categories=edhrec_categories,
     )
     if rationale_override:
         report.diagnosis.pattern_summary = rationale_override
-    return report
+
+    yield AdvicePhase("complete", {"report": report})
 
 
 # --- CLI -------------------------------------------------------------------
@@ -648,12 +954,54 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument("--user", required=True, help="Filename of the user deck (under commander/).")
     p.add_argument("--bracket", type=int, required=True)
-    p.add_argument("--use-claude", action="store_true",
-                   help="Synthesize via Claude API rather than heuristic.")
+    p.add_argument(
+        "--source",
+        choices=("heuristic", "bracket_peers", "claude"),
+        default=None,
+        help=(
+            "Recommendation backend. 'heuristic' (default): EDHREC "
+            "aggregate. 'bracket_peers': top-5 Moxfield decks at this "
+            "bracket. 'claude': LLM-aided synthesis (needs "
+            "ANTHROPIC_API_KEY)."
+        ),
+    )
+    p.add_argument(
+        "--use-claude", action="store_true",
+        help="Legacy alias for --source claude.",
+    )
+    p.add_argument(
+        "--claude-model", default=None,
+        help=(
+            "When --source claude, pick the Anthropic tier. Default "
+            "is Sonnet 4.5; use 'claude-haiku-4-5' for ~3-5x cheaper "
+            "routine audits."
+        ),
+    )
+    p.add_argument(
+        "--budget", action="store_true",
+        help=(
+            "Skip $200+ ABU duals + $25-60 fetch lands from manabase "
+            "recommendations. Shocks, bond lands, and utility fixers "
+            "still surface. For users explicitly opting out of the "
+            "most expensive cards."
+        ),
+    )
     p.add_argument("--output", help="Write JSON manifest here (audit_manifest schema).")
     args = p.parse_args(argv)
 
-    report = advise(Path(args.user), args.bracket, use_claude=args.use_claude)
+    # If both --source and --use-claude are passed, --source wins
+    # (it can name backends --use-claude can't). Otherwise the legacy
+    # flag falls through to source=claude.
+    effective_source = args.source
+    if effective_source is None and args.use_claude:
+        effective_source = "claude"
+
+    advise_kwargs = {"source": effective_source}
+    if args.claude_model:
+        advise_kwargs["claude_model"] = args.claude_model
+    if args.budget:
+        advise_kwargs["budget"] = True
+    report = advise(Path(args.user), args.bracket, **advise_kwargs)
     text = _format_report_text(report)
     try:
         print(text)
