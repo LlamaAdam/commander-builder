@@ -1268,6 +1268,148 @@ def test_apply_swaps_preserves_edition_codes_on_partial_cut():
     assert removed == ["Forest"]
 
 
+# ---------------------------------------------------------------------------
+# Quantity-aware adds (TIER-1.1 fix) -- previously, an add for a card
+# already in the deck appended a brand-new ``1 <Name>`` line instead of
+# incrementing the existing ``<qty> <Name>|EDITION`` line. Two adds of
+# the same card produced two separate ``1 <Name>`` lines instead of one
+# ``2 <Name>`` line. Forge tolerates duplicates but the resulting .dck
+# is harder to read and confuses downstream tooling that groups by line.
+# ---------------------------------------------------------------------------
+
+def test_apply_swaps_add_merges_into_existing_line(monkeypatch):
+    """Add for a card already in [Main] bumps that line's quantity
+    (preserving the edition tail) instead of appending a duplicate."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: None,
+    )
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Sol Ring|CLB|871\n1 Cultivate\n"
+    recs = [
+        SimpleNamespace(card="Cultivate", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Sol Ring", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    assert "2 Sol Ring|CLB|871" in new_text
+    sol_ring_lines = [
+        line for line in new_text.splitlines()
+        if "Sol Ring" in line
+    ]
+    assert len(sol_ring_lines) == 1
+    assert added == ["Sol Ring"]
+    assert removed == ["Cultivate"]
+    # ``kept`` counts surviving originals (post-cut, pre-add). Sol Ring
+    # was the lone survivor; the merge bump is tallied via len(added).
+    assert kept == 1
+
+
+def test_apply_swaps_duplicate_adds_collapse_to_one_line(monkeypatch):
+    """Two adds of the same card produce one merged line, not two
+    separate ``1 <Name>`` lines."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: None,
+    )
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Cultivate\n1 Brainstorm\n"
+    recs = [
+        SimpleNamespace(card="Cultivate", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Brainstorm", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="add",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    mountain_lines = [
+        line for line in new_text.splitlines()
+        if "Mountain" in line
+    ]
+    assert mountain_lines == ["2 Mountain"]
+    # ``added`` still reports both instances for caller bookkeeping.
+    assert added == ["Mountain", "Mountain"]
+    # Both originals were cut; flushed adds aren't counted in ``kept``.
+    assert kept == 0
+
+
+def test_apply_swaps_add_merges_after_partial_cut_same_card(monkeypatch):
+    """Cut decrements + add for the same name net out on the existing
+    line (keeping the edition tail) rather than producing a stale
+    decremented line plus a fresh ``1 <Name>`` line."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: None,
+    )
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n5 Mountain|EXP|123\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Mountain", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Sol Ring", action="add",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    # 5 - 2 + 1 = 4; edition tail kept verbatim.
+    assert "4 Mountain|EXP|123" in new_text
+    mountain_lines = [
+        line for line in new_text.splitlines()
+        if "Mountain" in line
+    ]
+    assert len(mountain_lines) == 1
+    # Sol Ring also bumped on its own line (1 + 1 = 2).
+    assert "2 Sol Ring" in new_text
+    sol_ring_lines = [
+        line for line in new_text.splitlines()
+        if "Sol Ring" in line
+    ]
+    assert len(sol_ring_lines) == 1
+    # Post-cut survivors: 3 Mountain + 1 Sol Ring = 4. The merge bumps
+    # (1 Mountain + 1 Sol Ring) are tallied via len(added) downstream.
+    assert kept == 4
+
+
+def test_apply_swaps_add_hits_first_matching_line_when_multiple_printings(monkeypatch):
+    """Same card on two printing lines: an add bumps the FIRST matching
+    line in deck order (consistent with the cut-decrement contract)."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **kw: None,
+    )
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = (
+        "[Main]\n"
+        "1 Mountain|CLB|871\n"
+        "1 Mountain|EXP|123\n"
+        "1 Sol Ring\n"
+    )
+    recs = [
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, _added, _removed, _kept = _apply_swaps_to_dck(original, recs)
+    assert "2 Mountain|CLB|871" in new_text
+    assert "1 Mountain|EXP|123" in new_text
+
+
+# ---------------------------------------------------------------------------
+# _format_added_line tests (Scryfall lookup formatting)
+# ---------------------------------------------------------------------------
+
 def test_format_added_line_resolves_set_and_cn(monkeypatch):
     """Appended cards should write '1 <name>|<SET>|<CN>' so Forge's
     deck loader doesn't trip on ambiguous name-only resolution."""

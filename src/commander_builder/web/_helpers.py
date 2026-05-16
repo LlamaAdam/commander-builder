@@ -240,20 +240,24 @@ def _to_constructed_format(text: str) -> str:
     return new_text
 
 
-def _format_added_line(name: str) -> str:
-    """Render a `1 <Name>|<SET>|<CN>` line for an added card.
+def _format_added_line(name: str, qty: int = 1) -> str:
+    """Render a `<qty> <Name>|<SET>|<CN>` line for an added card.
 
     Forge's deck loader can be strict about ambiguous name-only
     lookups (alternate art, reprints across many sets, special
     characters like //). We resolve each appended card to its
     current Scryfall printing so the proposed deck loads cleanly.
 
+    ``qty`` defaults to 1 for back-compat with single-add callers.
+    ``_apply_swaps_to_dck`` passes qty>1 when collapsing duplicate
+    add entries for the same card name.
+
     The shared ``oracle_snapshots`` cache stores forge_py-projected
     snapshots that don't carry ``set`` / ``collector_number`` fields
     (those are stripped to keep payload size small). When the cached
     snapshot lacks them we fall through to a cache-bypassed Scryfall
     fetch, which returns the full payload and re-caches it. Plain
-    ``1 <name>`` is the final fallback when Scryfall is unreachable.
+    ``<qty> <name>`` is the final fallback when Scryfall is unreachable.
     """
     try:
         from ..scryfall_client import lookup_card
@@ -266,10 +270,10 @@ def _format_added_line(name: str) -> str:
             set_code = (data.get("set") or "").upper()
             cn = data.get("collector_number") or ""
     except Exception:
-        return f"1 {name}"
+        return f"{qty} {name}"
     if set_code and cn:
-        return f"1 {name}|{set_code}|{cn}"
-    return f"1 {name}"
+        return f"{qty} {name}|{set_code}|{cn}"
+    return f"{qty} {name}"
 
 
 _BASIC_LANDS = ("Forest", "Island", "Plains", "Swamp", "Mountain", "Wastes")
@@ -375,8 +379,14 @@ def _apply_swaps_to_dck(
       on a deck containing ``27 Mountain|EXP|123``, the line becomes
       ``25 Mountain|EXP|123`` — not gone entirely. A cut that drives
       the quantity to zero drops the whole line.
-    - Adds always create new quantity-1 lines (no merging into an
-      existing line of the same name; Forge handles duplicates).
+    - Adds are quantity-aware (matches the cut semantics): an add for
+      a card already in [Main] increments that line's quantity (and
+      preserves its |SET|CN edition tail). Duplicate add entries for
+      the same name collapse to one line with the summed quantity.
+      Multi-printing lines: an add bumps the FIRST matching line in
+      deck order (consistent with the cut-decrement contract). Cards
+      with no existing line get appended at the end of [Main] via
+      ``_format_added_line`` (Scryfall-resolved |SET|CN).
     - Other sections (sideboard, considering, metadata) are preserved.
 
     **Adds and cuts are balanced** -- Commander needs exactly 99 main +
@@ -421,12 +431,31 @@ def _apply_swaps_to_dck(
     cut_canonical: dict[str, str] = {}
     for c in cuts:
         cut_canonical.setdefault(c.lower(), c)
+    # Quantity-aware add budget — duplicate add entries collapse, and
+    # adds for cards already in [Main] increment the existing line
+    # rather than appending a stale ``1 <Name>`` duplicate.
+    adds_remaining: _Counter = _Counter(a.lower() for a in add_names)
+    add_canonical: dict[str, str] = {}
+    for a in add_names:
+        add_canonical.setdefault(a.lower(), a)
 
     out_lines: list[str] = []
     in_main = False
     main_kept = 0
     removed: list[str] = []
     line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+
+    def _flush_remaining_adds(target: list[str]) -> None:
+        """Append one merged line per still-pending add. Order follows
+        the original ``add_names`` insertion order (Counter preserves
+        insertion order on Python 3.7+). Doesn't touch ``main_kept`` —
+        the caller estimates post-swap size as ``kept + len(added)``,
+        so flushed adds are counted via ``len(added)`` at the call
+        site, not here."""
+        for nlower, count in adds_remaining.items():
+            if count > 0:
+                target.append(_format_added_line(add_canonical[nlower], count))
+        adds_remaining.clear()
 
     for raw in original_text.splitlines():
         stripped = raw.strip()
@@ -435,11 +464,10 @@ def _apply_swaps_to_dck(
             continue
         # Section header tracking.
         if stripped.startswith("[") and stripped.endswith("]"):
-            # If we're leaving [Main], this is where we append the new
-            # cards (so they're inside the section, not after it).
+            # If we're leaving [Main], flush any pending adds that
+            # didn't merge into an existing line.
             if in_main:
-                for name in add_names:
-                    out_lines.append(_format_added_line(name))
+                _flush_remaining_adds(out_lines)
             in_main = stripped.lower() == "[main]"
             out_lines.append(raw)
             continue
@@ -464,37 +492,47 @@ def _apply_swaps_to_dck(
         edition_tail = m.group(3) or ""
         name_lower = raw_name.lower()
 
+        # Apply cuts first.
         requested = cuts_remaining.get(name_lower, 0)
-        if requested <= 0:
-            # Not a cut target -- preserve line as-is.
-            main_kept += qty
-            out_lines.append(raw)
-            continue
-
-        # Decrement this line's quantity by the smaller of (requested,
-        # available). Spillover decrements stay in cuts_remaining so a
-        # next line of the same name (rare but legal -- e.g. two
-        # different printings of the same card) gets the rest.
         to_remove = min(requested, qty)
-        cuts_remaining[name_lower] = requested - to_remove
-        if cuts_remaining[name_lower] == 0:
-            del cuts_remaining[name_lower]
-        canonical = cut_canonical.get(name_lower, raw_name)
-        for _ in range(to_remove):
-            removed.append(canonical)
+        if to_remove > 0:
+            cuts_remaining[name_lower] = requested - to_remove
+            if cuts_remaining[name_lower] == 0:
+                del cuts_remaining[name_lower]
+            canonical = cut_canonical.get(name_lower, raw_name)
+            for _ in range(to_remove):
+                removed.append(canonical)
 
-        new_qty = qty - to_remove
+        post_cut_qty = qty - to_remove
+        # ``main_kept`` only counts surviving original cards. Add
+        # merges that bump this line are tallied via ``len(added)``
+        # at the call site so the caller's
+        # ``post_swap_main = kept + len(added)`` math stays correct.
+        if post_cut_qty > 0:
+            main_kept += post_cut_qty
+
+        # Apply add merge: if there's a queued add for this name, fold
+        # it into the (possibly cut-decremented) line. Preserves the
+        # edition tail and avoids duplicate name-only lines.
+        merged_add = adds_remaining.get(name_lower, 0)
+        new_qty = post_cut_qty + merged_add
+        if merged_add > 0:
+            adds_remaining[name_lower] = 0
+
         if new_qty <= 0:
-            # Line fully cut -- drop it.
+            # Line fully cut and no merging add -- drop it.
             continue
-        # Partial cut -- rewrite the line preserving casing + edition.
-        out_lines.append(f"{new_qty} {raw_name}{edition_tail}")
-        main_kept += new_qty
+        if new_qty == qty and to_remove == 0:
+            # Untouched line -- preserve raw verbatim.
+            out_lines.append(raw)
+        else:
+            # Rewrite preserving casing + edition.
+            out_lines.append(f"{new_qty} {raw_name}{edition_tail}")
 
-    # If [Main] was the last section, append-on-exit didn't fire above.
+    # If [Main] was the last section, the section-header flush above
+    # didn't fire — emit any still-pending adds at end-of-file.
     if in_main:
-        for name in add_names:
-            out_lines.append(_format_added_line(name))
+        _flush_remaining_adds(out_lines)
 
     new_text = "\n".join(out_lines)
     if not new_text.endswith("\n"):
