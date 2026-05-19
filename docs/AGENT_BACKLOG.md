@@ -39,6 +39,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
 | [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | done | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
 | [#017](#017-fp-001-card-script-parser-read-only-ast) | LOW | done | ~3h | FP-001 slice 1: read-only Forge card-script parser |
+| [#018](#018-fp-001-deck-library-static-analysis-cli) | LOW | done | ~2-4h | FP-001 slice 2: deck-library static-analysis CLI |
 
 ---
 
@@ -728,6 +729,98 @@ follow-ups (each their own bounded slice):
 - **Future-future** — The actual rules engine. Still 4-9 months.
   Don't pick without explicit human direction (FP-001 macro
   blocker per #015).
+
+---
+
+## #018 — FP-001 deck-library static-analysis CLI
+
+- **status**: `done` (commit `<this commit>` —
+  `src/commander_builder/forge_cards_loader.py`,
+  `src/commander_builder/deck_library_analyzer.py`,
+  `scripts/analyze_deck_library.py`; 31 new tests across two
+  test files)
+- **priority**: LOW (concrete first user of the #017 parser; the
+  user said on 2026-05-19 "I feel #2 could help looking over
+  decks and working them out as well" — this is that)
+- **scope**: ~2-4h (actual: ~60 min — the parser groundwork from
+  #017 made the analyzer fall out cleanly; biggest surprise was
+  the Forge corpus shipping as a single zip blob, not a directory
+  tree, which prompted the dual-mode loader)
+- **prerequisites**: [#017](#017-fp-001-card-script-parser-read-only-ast)
+  for the parser; a working Forge install with
+  ``vendor/forge/res/cardsfolder/`` (zip or unzipped both supported).
+- **context**: the user's 7,244-card deck library across 345 decks
+  is the proving ground for everything in the curator pipeline.
+  This CLI turns it into measurable signal — "which DSL primitives
+  dominate? which archetypes cluster via DeckHints? which cards
+  does Forge not ship a script for?" — so future engine work + the
+  archetype detector + the errata-drift audit can all be grounded
+  in real data instead of guesses.
+- **components**:
+  - **`forge_cards_loader.py`** — dual-mode loader for Forge's
+    card-script corpus. Auto-detects whether the install has the
+    unzipped letter-tree (dev layout) or the canonical
+    ``cardsfolder.zip``. ``slug_for(name)`` mirrors Forge's
+    filesystem convention (lowercase, non-alnum → underscore,
+    DFC names use the front face). ``load_one(name)`` resolves
+    a card-name to its script blob; ``iter_all()`` for bulk
+    passes. Context-manager support closes the zip handle
+    cleanly.
+  - **`deck_library_analyzer.py`** — `analyze_library(deck_dir,
+    loader)` walks `.dck` files, parses each card's script, and
+    folds into a `LibraryReport` (effect-kind histogram,
+    ability-category histogram, keyword histogram, SVar reference
+    counts, DeckHints frequency, DeckHas frequency, plus
+    unresolved-cards list). `include_per_deck=True` adds per-deck
+    card counts for drill-down. DFC cards count both faces.
+    `to_dict()` projects to JSON for the CLI wrapper.
+  - **`scripts/analyze_deck_library.py`** — human-readable + `--json`
+    output, `--max-decks N` for smoke runs, `--top N` for
+    histogram caps, `--per-deck` for breakdown.
+- **smoke run on real data** (50 decks of 345):
+  ```
+  Decks scanned:    50
+  Distinct cards:   2183
+  Resolved:         1932 (88%)
+  Unresolved:       251 (12%; mostly Commander-only printings
+                          Forge hasn't bundled yet)
+  Top effects:      Mana (455), ChangesZone (421), Continuous (311),
+                    ChangeZone (181), Moved (147), Phase (119),
+                    SpellCast (110), Draw (90)
+  Top keywords:     Flying (110), Flash (53), Vigilance (32),
+                    Trample (31), Haste (29)
+  Top DeckHints:    Ability$Counters (21), Type$Instant|Sorcery (18),
+                    Ability$Graveyard (14), Type$Merfolk (13)
+  ```
+  → confirms Mana / ChangesZone / Continuous are the FIRST
+    primitives a Python engine would need; archetype clustering
+    via DeckHints surfaces obvious bins for the curator.
+- **acceptance_criteria**:
+  - [x] Loader handles zip + directory layouts behind the same API.
+  - [x] Analyzer resolves cards via slug, counts effects /
+    keywords / SVars / DeckHints, lists unresolved cards.
+  - [x] DFC card scripts contribute both faces' effects.
+  - [x] CLI wrapper at `scripts/analyze_deck_library.py` with
+    `--json` / `--max-decks` / `--top` / `--per-deck` / `--deck-dir`
+    / `--forge-dir` flags.
+  - [x] 31 unit tests (21 loader + 10 analyzer) all green; runs
+    on the real 50-deck library smoke without errors.
+  - [x] Full suite green at 1293 passed.
+
+## new_during_work
+
+- **#019 still open** (oracle-text vs DSL diff for errata drift) —
+  unchanged from #017's `new_during_work`. The analyzer infrastructure
+  built here makes #019 cheap: bulk-iterate via `CardsLoader.iter_all`,
+  cross-reference parsed `CardScript.oracle` against Scryfall's
+  `oracle_text` from the existing cache. Probably ~1-2h.
+- **Unresolved-card investigation worth a one-off pass.** 12% of
+  cards in the 50-deck smoke don't have Forge scripts — likely
+  Commander-only printings (CMM, CMR, CLB, etc.) or PLST reprints.
+  A quick "which sets dominate the unresolved list?" report would
+  pinpoint whether we need a corpus update or whether the slug
+  rules need extending for an edge case I missed. Half-hour
+  follow-up.
 
 ---
 
