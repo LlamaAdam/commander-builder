@@ -32,11 +32,12 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#008](#008-app-js-extract-deck-health-tiles--salt-banner) | MEDIUM | open | ~1h | app.js: extract deck-health tiles + salt-warning banner |
 | [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | open | ~1h | app.js: extract average-deck preview renderer |
 | [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | open | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
-| [#011](#011-batch-mode-for-commander-auto-curate) | MEDIUM | open | ~3h | Auto-curate batch mode for overnight library runs |
+| [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
 | [#012](#012-knowledge-log-milestone-tag) | LOW | open | ~2h | knowledge_log: `milestone` column + `commander-history --milestone` flag |
 | [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
 | [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | open | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
-| [#015](#015-fp-001--fp-002--fp-003--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-003 / FP-004 / FP-011 (see STATUS.md) |
+| [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
+| [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | open | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
 
 ---
 
@@ -387,9 +388,13 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #011 — Batch mode for `commander-auto-curate`
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — see
+  `tests/test_proposer_auto.py::test_auto_curate_main_batch_*` for
+  the 7 cases that pin the contract).
 - **priority**: MEDIUM
-- **scope**: ~3h
+- **scope**: ~3h (actual: ~45 min including a glob-escape fix
+  for the `[USER]`/`[B<N>]` literal-bracket pattern that's
+  pervasive in this project's deck filenames)
 - **do_not_pick_without_human**: false (but flag any Anthropic
   spend implications when proposing)
 - **files**:
@@ -411,10 +416,37 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
   - Resume support: skip decks that already have a v2 from a prior
     batch run unless `--force`.
 - **acceptance_criteria**:
-  - [ ] Batch run over a 5-deck dir produces 5 JSON records.
-  - [ ] `--force` re-curates already-versioned decks; without it,
-    they're skipped with a "v2 already exists" note.
-  - [ ] Test using `pytest --run-slow` — auto-marked slow.
+  - [x] Batch run produces one JSON record per deck plus a final
+    `batch_summary` aggregate (NDJSON stream).
+  - [x] `--force` re-curates already-versioned decks; without it,
+    they're skipped with a "v2 already exists" note via the new
+    `_already_versioned` helper (uses `_bump_version_filename` so
+    the version-detection convention stays in one place).
+  - [x] Test using `pytest --run-slow` — auto-marked slow via
+    `test_auto_curate_main_batch_*` name prefix in `conftest.py`.
+  - [x] Mixed-outcome batches (some succeeded, some failed) return
+    rc=0 with the per-deck failure recorded in the summary;
+    everything-failed returns rc=2 so a batch driver can alert.
+  - [x] Glob with `[USER]*` matches files literally (not as a
+    glob character class).
+
+### Implementation notes (post-hoc)
+
+- `commander-auto-curate-batch` console_script entry was NOT added.
+  `--batch <glob>` to the existing `commander-auto-curate` was
+  enough; reduces the CLI surface area and lets users mix batch +
+  any of the existing per-deck flags (`--bracket`, `--mode`,
+  `--source`, `--run-sim`, etc.) without duplication.
+- `pyproject.toml` did NOT need editing for the same reason.
+- Resume-skip uses `_bump_version_filename` from `proposer.py` so
+  the convention is reused, not re-derived.
+- Per-deck calls go through `auto_curate_main(per_deck_argv)`
+  recursively; stdout is captured via `contextlib.redirect_stdout`
+  so the per-deck JSON record can be parsed back and re-emitted
+  as part of the batch's NDJSON stream.
+- Batch-only flags (`--batch`, `--force`) are stripped from the
+  per-deck argv via `_build_per_deck_argv` so the recursive
+  invocation sees a clean single-deck arg list.
 
 ---
 
@@ -490,19 +522,81 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ---
 
-## #015 — Parked (FP-001 / 002 / 003 / 004 / 011)
+## #015 — Parked (FP-001 / 002 / 004 / 011)
 
 - **status**: `parked`
 - **rationale**: see [STATUS.md § Parked plans](../STATUS.md#parked-plans-big-bets-blocked-or-strategic-forks)
   for each. Do not implement without explicit human direction:
   - FP-001 — 6-12 month engineering project (Python-native Forge).
   - FP-002 — data-gated; needs 200+ logged iterations (currently ~5).
-  - FP-003 — cheap to attempt but not a current bottleneck.
   - FP-004 — upstream Forge constraint (no `--seed` flag).
   - FP-011 — promote when sharing with anyone beyond the original dev.
 
 Also parked: Pearson r analysis in `forge_py_correlation.py:219` —
 needs ≥30 correlation rows (currently <10).
+
+**Promoted out of #015 on 2026-05-19**: FP-003 (concurrent Forge
+sims) — see [#016](#016-concurrent-forge-sims-fp-003). The "not a
+bottleneck" rationale flips the moment auto-curate batch mode
+(#011) lands, since each batch deck currently takes 5-15 min of
+sequential Forge wall time.
+
+---
+
+## #016 — Concurrent Forge sims (FP-003)
+
+- **status**: `open`
+- **priority**: MEDIUM
+- **scope**: ~3-4h (includes ~30 min feasibility spike up front)
+- **prerequisites**: [#011](#011--batch-mode-for-commander-auto-curate)
+  must ship first — concurrent sims are only useful when there's
+  more than one sim to run.
+- **do_not_pick_without_human**: true (needs the feasibility-spike
+  result before committing to the larger implementation; cwd-isolated
+  JVM profiles must avoid Forge's res/ directory file locks)
+- **files**:
+  - `src/commander_builder/forge_runner.py` (current single-JVM
+    spawn site; needs a parallel dispatcher)
+  - `src/commander_builder/_proposer_sim.py` (caller — would queue
+    sims per batch deck instead of running them one at a time)
+  - `tests/test_forge_runner.py` (new tests for the parallel path,
+    auto-marked slow)
+- **context**: each `--run-sim` invocation today takes ~5-15 min
+  of Forge wall time (4-player pod × 5 games). On a 10-deck batch
+  run that's 50-150 min sequential. Two JVMs in parallel halves
+  that. Original blocker per STATUS.md: "Needs a 30-min feasibility
+  spike (do separate cwd-isolated profiles avoid file-locking
+  races?)." That spike is item zero of this work.
+- **implementation_notes**:
+  - **Spike first** (~30 min): manually launch two Forge JVMs from
+    Python with different `cwd` values pointing at copies of
+    `vendor/forge/`. Verify they don't deadlock on `res/cards.zip`
+    or any other shared file lock. Document findings inline in
+    `_proposer_sim.py` regardless of outcome.
+  - If spike succeeds: implement a `concurrent.futures.ThreadPoolExecutor`
+    (max_workers=2 by default; `--sim-parallelism` flag to tune)
+    in the batch-mode driver. Each worker spawns its own Forge JVM
+    with its own cwd-isolated profile directory.
+  - If spike fails (file locks held cross-process): document the
+    failure mode, mark #016 as `blocked` with the specific lock
+    that blew up, and revisit when forge updates or we switch to
+    forge_py.
+  - Spawn overhead per sim is ~3-5s (JVM warmup). With 2 parallel
+    workers and 10 decks, total: 5×t (instead of 10×t) where t is
+    the per-deck wall time. Linear win.
+- **acceptance_criteria**:
+  - [ ] Feasibility spike documented (success or specific
+    blocking lock).
+  - [ ] If success: batch mode's per-deck sim runs through the
+    parallel dispatcher when `--sim-parallelism > 1`.
+  - [ ] `--sim-parallelism=1` falls back to the existing sequential
+    path bit-for-bit identical (regression-safety for users who
+    want the old behavior).
+  - [ ] Test using `pytest --run-slow` — auto-marked slow.
+  - [ ] A two-deck batch with parallelism=2 takes meaningfully less
+    wall time than the same batch with parallelism=1 (acceptance
+    is "<= 65% of sequential time"; allows for spawn overhead +
+    scheduler jitter).
 
 ---
 

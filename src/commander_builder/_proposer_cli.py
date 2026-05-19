@@ -4,10 +4,20 @@ End-to-end unattended pipeline: advisor -> Claude curator -> apply ->
 optional Forge A/B sim -> knowledge_log row. Split out of proposer
 on 2026-05-16 (Tier-3 refactor); re-exported from proposer for
 back-compat.
+
+Batch mode (added 2026-05-19, AGENT_BACKLOG #011): passing ``--batch
+<glob>`` resolves the glob to multiple .dck files and runs the
+single-deck pipeline over each in sequence. JSON output is forced
+on per deck and the run aggregates everything into one NDJSON stream
+(one JSON object per line). Already-versioned decks are skipped
+unless ``--force`` is passed so a re-run picks up where the previous
+batch left off without redoing API spend.
 """
 from __future__ import annotations
 
+import glob
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -46,9 +56,30 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             "Designed for unattended overnight batch refinement."
         ),
     )
-    p.add_argument("deck_path", type=Path, help="Path to the .dck file to audit.")
+    # ``deck_path`` is optional so ``--batch <glob>`` can substitute
+    # for a single positional path. Exactly one of the two MUST be
+    # supplied; validated below after argparse.
+    p.add_argument("deck_path", type=Path, nargs="?", default=None,
+                   help="Path to the .dck file to audit. Omit when "
+                        "using --batch.")
     p.add_argument("--bracket", type=int, required=True,
                    help="Target bracket (1-5). Drives game-changer enforcement.")
+    p.add_argument("--batch", default=None, metavar="GLOB",
+                   help="Run the pipeline over every .dck file matching "
+                        "the glob (e.g. 'vendor/forge/userdata/decks/"
+                        "commander/[USER]*[B4].dck'). Forces --json on; "
+                        "emits one JSON object per line on stdout, plus "
+                        "a final summary record under key 'batch_summary'. "
+                        "Already-versioned decks (those whose 'v<N+1>' "
+                        "sibling exists) are skipped unless --force is "
+                        "passed -- safe to re-run an interrupted batch "
+                        "without redoing API spend. Per-deck failures "
+                        "are caught and recorded; one bad deck doesn't "
+                        "abort the rest.")
+    p.add_argument("--force", action="store_true",
+                   help="In --batch mode, re-curate decks that already "
+                        "have a versioned sibling. Default: skip them "
+                        "so an interrupted batch resumes cleanly.")
     p.add_argument(
         "--mode", choices=["polish", "overhaul", "free"], default="polish",
         help=(
@@ -122,6 +153,18 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "margin = neutral. Default 1.")
     args = p.parse_args(argv)
 
+    # Exactly one of {deck_path, --batch} must be provided. Reject
+    # both-set and neither-set up front so the user gets a clean
+    # error instead of a confused single-deck attempt with batch
+    # flags hanging around (or vice versa).
+    if (args.deck_path is None) == (args.batch is None):
+        print(
+            "ERROR: pass either a deck_path positional OR --batch <glob>, "
+            "not both / neither.",
+            flush=True,
+        )
+        return 2
+
     # Load the external credentials file (~/.commander-builder/credentials
     # or $COMMANDER_BUILDER_CREDENTIALS) BEFORE any code reads
     # os.environ["ANTHROPIC_API_KEY"]. Shell env wins if both are set,
@@ -130,6 +173,17 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     # surfaces to stderr only if they later hit a "key missing" error.
     from ._secrets import load_credentials
     load_credentials(quiet=True)
+
+    # Bracket validation applies to both modes (single + batch).
+    if not (1 <= args.bracket <= 5):
+        print(f"ERROR: bracket must be 1-5, got {args.bracket}", flush=True)
+        return 2
+
+    # Batch mode short-circuits here: dispatch to the loop and exit.
+    # The loop calls back into auto_curate_main for each resolved deck
+    # so the per-deck pipeline is unchanged.
+    if args.batch is not None:
+        return _run_batch(args, p, argv or sys.argv[1:])
 
     # Resolve to absolute path BEFORE handing to the advisor. The
     # advisor treats relative paths as deck_dir-relative and prepends
@@ -140,9 +194,6 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     args.deck_path = args.deck_path.resolve()
     if not args.deck_path.exists():
         print(f"ERROR: deck not found: {args.deck_path}", flush=True)
-        return 2
-    if not (1 <= args.bracket <= 5):
-        print(f"ERROR: bracket must be 1-5, got {args.bracket}", flush=True)
         return 2
 
     # Resolve effective caps from the mode preset + any explicit
@@ -396,6 +447,198 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                     print(f"  avg-turns-to-win: old={avg_a}, new={avg_b}")
                 if sim_verdict:
                     print(f"  verdict: {sim_verdict}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Batch mode (AGENT_BACKLOG #011) -- iterate over a glob of decks
+# ---------------------------------------------------------------------------
+
+def _already_versioned(deck_path: Path) -> bool:
+    """Return True when ``<deck_path>``'s next-version sibling already
+    exists on disk (e.g. ``v2 [B4].dck`` exists alongside ``[B4].dck``).
+
+    Used by batch mode to skip decks that a prior run already curated,
+    so a re-invocation of the same ``--batch`` command resumes cleanly
+    instead of redoing API spend on already-done decks. The user can
+    force re-curation with ``--force``.
+    """
+    from .proposer import _bump_version_filename
+    next_name = _bump_version_filename(deck_path.name)
+    return (deck_path.parent / next_name).exists()
+
+
+def _resolve_batch_glob(pattern: str) -> list[Path]:
+    """Expand a batch glob into a sorted list of .dck paths.
+
+    Uses ``glob.glob`` with ``recursive=True`` so users can pass
+    ``**/*.dck``-style patterns. Filters to .dck files only (the
+    pipeline can't audit anything else) and resolves to absolute
+    paths up front so the per-deck argv is unambiguous.
+
+    **Bracket-literal handling**: this project's deck filenames use
+    ``[USER]`` and ``[B<N>]`` markers liberally, which collide with
+    glob's character-class syntax (``[USER]`` would match a single
+    char from {U,S,E,R}, not the literal string). We split the
+    pattern on ``*``/``?`` wildcards, escape literal segments via
+    ``glob.escape`` so brackets become ``[[]USER[]]`` (glob's
+    documented literal-bracket form), then rejoin. The wildcards
+    are preserved because they're isolated in odd-indexed split
+    pieces.
+    """
+    import re as _re
+    parts = _re.split(r"([*?])", pattern)
+    escaped = "".join(
+        glob.escape(part) if i % 2 == 0 else part
+        for i, part in enumerate(parts)
+    )
+    matched = [
+        Path(p).resolve() for p in glob.glob(escaped, recursive=True)
+        if p.lower().endswith(".dck")
+    ]
+    matched.sort()
+    return matched
+
+
+def _build_per_deck_argv(deck_path: Path, batch_argv: list[str]) -> list[str]:
+    """Construct the argv for a single-deck recursive call by stripping
+    batch-only flags from the batch invocation and substituting the
+    resolved deck path.
+
+    Strips: ``--batch <glob>`` (and its value), ``--force``. Leaves
+    every other flag intact (--bracket, --mode, --run-sim, --max-adds,
+    --max-cuts, --source, --model, --dry-run, --no-log, --db-path,
+    --protect*, --sim-*).
+    """
+    out: list[str] = []
+    i = 0
+    saw_positional = False
+    while i < len(batch_argv):
+        tok = batch_argv[i]
+        if tok == "--batch":
+            i += 2  # skip the flag + its value
+            continue
+        if tok.startswith("--batch="):
+            i += 1
+            continue
+        if tok == "--force":
+            i += 1
+            continue
+        # Existing positional? In batch mode the user shouldn't have
+        # passed one (we validated above), but defensively skip it.
+        if not tok.startswith("-") and not saw_positional and tok.lower().endswith(".dck"):
+            saw_positional = True
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    # Prepend the resolved per-deck path as the positional.
+    return [str(deck_path), *out]
+
+
+def _run_batch(args, parser, batch_argv: list[str]) -> int:
+    """Iterate ``args.batch`` glob, run auto_curate_main per deck.
+
+    JSON output is forced on so the run produces an NDJSON stream
+    (one JSON object per line) plus a final ``batch_summary`` record.
+    Per-deck failures are caught and recorded; one bad deck doesn't
+    abort the rest.
+
+    Returns 0 when every deck succeeded (or was skipped); 2 when at
+    least one failed AND no successes; otherwise 0 with the failures
+    captured in the summary.
+    """
+    paths = _resolve_batch_glob(args.batch)
+    if not paths:
+        print(json.dumps({
+            "batch_summary": {
+                "glob": args.batch,
+                "matched": 0,
+                "error": "no .dck files matched",
+            },
+        }))
+        return 2
+
+    results: list[dict] = []
+    n_skipped = 0
+    n_failed = 0
+    n_succeeded = 0
+    # Force --json on for the per-deck calls so we capture structured
+    # output. If the user already passed --json, this is a no-op.
+    if "--json" not in batch_argv:
+        batch_argv = [*batch_argv, "--json"]
+
+    for deck_path in paths:
+        if not args.force and _already_versioned(deck_path):
+            record = {
+                "deck": str(deck_path),
+                "status": "skipped",
+                "reason": "already-versioned (use --force to re-curate)",
+            }
+            results.append(record)
+            print(json.dumps(record), flush=True)
+            n_skipped += 1
+            continue
+
+        per_deck_argv = _build_per_deck_argv(deck_path, batch_argv)
+        # Capture stdout from the recursive call so we can echo the
+        # per-deck JSON object directly into the NDJSON stream while
+        # also recording it in the summary list.
+        import io as _io
+        import contextlib as _ctx
+        buf = _io.StringIO()
+        try:
+            with _ctx.redirect_stdout(buf):
+                rc = auto_curate_main(per_deck_argv)
+        except Exception as exc:  # noqa: BLE001 -- per-deck isolation
+            record = {
+                "deck": str(deck_path),
+                "status": "error",
+                "rc": None,
+                "exception": f"{type(exc).__name__}: {exc}",
+            }
+            results.append(record)
+            print(json.dumps(record), flush=True)
+            n_failed += 1
+            continue
+
+        # The single-deck path emits one JSON object on success.
+        # Parse it back so we can re-emit cleanly into the stream
+        # (and attach our own status fields).
+        raw = buf.getvalue().strip()
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {"raw_stdout": raw}
+        record = {
+            "deck": str(deck_path),
+            "status": "ok" if rc == 0 else "failed",
+            "rc": rc,
+            "result": payload,
+        }
+        results.append(record)
+        print(json.dumps(record), flush=True)
+        if rc == 0:
+            n_succeeded += 1
+        else:
+            n_failed += 1
+
+    summary = {
+        "batch_summary": {
+            "glob": args.batch,
+            "matched": len(paths),
+            "succeeded": n_succeeded,
+            "skipped": n_skipped,
+            "failed": n_failed,
+        },
+    }
+    print(json.dumps(summary), flush=True)
+
+    # Non-zero exit iff EVERYTHING failed (with no successes); a
+    # mixed batch returns 0 since the per-deck records carry the
+    # individual failure info.
+    if n_failed > 0 and n_succeeded == 0:
+        return 2
     return 0
 
 
