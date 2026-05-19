@@ -140,6 +140,7 @@ def test_claude_propose_unimplemented_without_sdk(tmp_path, monkeypatch):
         claude_propose(input_, ProposerConfig())
 
 
+@pytest.mark.slow
 def test_ollama_propose_is_unimplemented(tmp_path):
     input_ = _make_input(tmp_path)
     with pytest.raises(NotImplementedError):
@@ -169,6 +170,7 @@ def test_propose_falls_back_to_manual_when_claude_unwired(tmp_path, monkeypatch)
     assert out.source == "manual"
 
 
+@pytest.mark.slow
 def test_propose_falls_back_when_both_llm_backends_unwired(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     input_ = _make_input(tmp_path)

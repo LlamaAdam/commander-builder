@@ -64,6 +64,9 @@ include = ["commander_builder*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+markers = [
+    "slow: integration tests that exercise the full advisor or auto-curate pipeline (skipped by default; pass --run-slow to include). See tests/conftest.py for the fast/slow lane policy.",
+]
 # pytest auto-discovers tests/conftest.py which puts src/ on sys.path even
 # without a `pip install -e .`, so the suite runs both ways.
 filterwarnings = [

@@ -7,6 +7,21 @@ passing ``--db-path`` ends up writing rows into the production
 ``vendor/knowledge_log.sqlite``. The autouse fixture below redirects
 ``knowledge_log.DEFAULT_DB_PATH`` to a per-test temp file so a
 careless test can't leak into production state again.
+
+## Fast/slow lane split (Tier-3, 2026-05-19)
+
+Tests tagged ``@pytest.mark.slow`` are skipped by default so the
+inner-loop ``pytest`` run takes ~30s instead of ~3min. Run the full
+suite via ``pytest --run-slow`` (or ``pytest -m "slow or not slow"``
+if you prefer pure marker syntax). CI runs everything implicitly via
+``--run-slow``.
+
+Tag a test ``slow`` when it:
+- exercises the full ``advise()`` pipeline (EDHREC fixtures, multi-
+  source dispatch, role classification) — each costs ~3-15s.
+- shells out to the auto-curate CLI through argparse + Anthropic
+  stubs — each costs ~2-4s.
+- otherwise dominates the ``--durations=20`` list with >1s runtime.
 """
 import sys
 from pathlib import Path
@@ -17,6 +32,66 @@ REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+def pytest_addoption(parser):
+    """Add ``--run-slow`` so devs can opt into the long-running
+    integration tests without having to remember the marker syntax."""
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help=(
+            "Run tests marked @pytest.mark.slow (advisor + auto-curate "
+            "integration). Off by default; the fast lane keeps inner-"
+            "loop iteration under ~30s. CI runs with this flag set."
+        ),
+    )
+
+
+_AUTO_SLOW_NAME_PREFIXES = (
+    # Every test_auto_curate_main_* test exercises argparse + the full
+    # curator pipeline (~1-4s each); ~27 tests collectively cost
+    # 30-60s of the ~3min suite. Auto-mark them rather than decorating
+    # individually so adding a new CLI test inherits the slow tag.
+    "test_auto_curate_main_",
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Auto-tag known-slow test families, then skip ``slow`` tests
+    unless ``--run-slow`` was passed.
+
+    Auto-tagging runs before the skip pass so a name-prefixed test
+    picks up the marker regardless of whether the author remembered
+    to add ``@pytest.mark.slow``.
+
+    Skipping is implemented as a collection modifier (not a ``-m``
+    default) so the skip reason is visible in the report and so
+    users can still override with their own ``-m`` expression when
+    debugging a specific slow test (e.g.
+    ``pytest -m slow tests/test_proposer.py``).
+    """
+    # Pass 1: auto-mark by name prefix.
+    slow_marker = pytest.mark.slow
+    for item in items:
+        for prefix in _AUTO_SLOW_NAME_PREFIXES:
+            if item.name.startswith(prefix):
+                item.add_marker(slow_marker)
+                break
+
+    # Pass 2: skip slow unless opted in.
+    if config.getoption("--run-slow"):
+        return
+    marker_expr = config.getoption("-m") or ""
+    if "slow" in marker_expr:
+        return
+    skip_slow = pytest.mark.skip(
+        reason="slow test skipped by default; pass --run-slow to include",
+    )
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
 
 
 @pytest.fixture(autouse=True)

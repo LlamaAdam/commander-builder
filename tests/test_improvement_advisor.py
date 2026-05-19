@@ -1,8 +1,17 @@
-"""improvement_advisor tests — heuristic, LLM-mocked, and full flow."""
+"""improvement_advisor tests — heuristic, LLM-mocked, and full flow.
+
+Marked module-level ``slow`` because the bulk of these tests exercise
+the full ``advise()`` pipeline with fake EDHREC pages and stubbed
+Claude / bracket-peers backends. Each run costs 0.3-15s; together
+they dominate the suite's ~3min wall time. Skipped by default;
+include via ``pytest --run-slow``. See tests/conftest.py.
+"""
 import json
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.slow
 
 from commander_builder.edhrec_client import CardEntry, CommanderPage
 from commander_builder.improvement_advisor import (

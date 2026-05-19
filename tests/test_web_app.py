@@ -3874,6 +3874,7 @@ def test_audit_payload_bracket_peer_ref_count_defaults_zero(client, monkeypatch)
     assert resp.get_json()["bracket_peer_ref_count"] == 0
 
 
+@pytest.mark.slow
 def test_audit_endpoint_threads_budget_param_to_advise(client, monkeypatch):
     """?budget=1 should reach advise() as budget=True so the manabase
     safety net switches to the cheaper land set."""
