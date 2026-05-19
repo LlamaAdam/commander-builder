@@ -2680,3 +2680,399 @@ def test_proposal_to_dict_is_json_safe():
     assert parsed["rationale"] == "r"
     assert parsed["source"] == "claude-auto"
     assert parsed["dropped_for_bracket"] == ["X"]
+
+
+# ---------------------------------------------------------------------------
+# Batch mode (AGENT_BACKLOG #011) — auto-curate-main --batch <glob>
+# ---------------------------------------------------------------------------
+#
+# Per-deck pipeline behavior is exercised exhaustively by the
+# test_auto_curate_main_* family above. These tests focus on the
+# batch dispatcher specifically:
+#   - glob resolution to .dck files only
+#   - JSON-only output stream (NDJSON) plus a final batch_summary record
+#   - resume-skip when a versioned sibling already exists, unless --force
+#   - per-deck failure isolation (one bad deck shouldn't kill the batch)
+#   - argparse validation: deck_path XOR --batch (not both, not neither)
+#
+# Auto-marked slow by the test_auto_curate_main_ name prefix in
+# conftest.py — these go through argparse + the full curator path.
+
+
+def _setup_batch_env(tmp_path, monkeypatch, *, anthropic_payload=None):
+    """Standard scaffolding for batch tests: fake Anthropic key + SDK,
+    no-op game-changers loader, stubbed advisor. Returns nothing —
+    callers create their own decks afterwards."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(
+        monkeypatch,
+        anthropic_payload or json.dumps({
+            "adds": ["NewCard"],
+            "cuts": ["OldCard"],
+            "rationale": "trim",
+        }),
+    )
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+
+def _write_minimal_deck(path: Path, name: str = "Foo") -> None:
+    """Write the smallest deck shape the auto_curate pipeline accepts."""
+    path.write_text(
+        f"[metadata]\nName={name}\n[Commander]\n1 Test\n"
+        f"[Main]\n1 OldCard\n",
+        encoding="utf-8",
+    )
+
+
+def test_auto_curate_main_batch_runs_pipeline_per_deck(
+    tmp_path, monkeypatch, capsys,
+):
+    """Happy path: --batch <glob> resolves to two .dck files, runs the
+    pipeline over each, and emits one JSON record per deck plus a
+    final batch_summary."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    a = tmp_path / "[USER] A [B3].dck"
+    b = tmp_path / "[USER] B [B3].dck"
+    _write_minimal_deck(a, "A")
+    _write_minimal_deck(b, "B")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+    ])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    # Two deck records + one batch_summary.
+    assert len(lines) == 3
+    records = [json.loads(ln) for ln in lines]
+    deck_records = [r for r in records if "deck" in r]
+    assert len(deck_records) == 2
+    assert all(r["status"] == "ok" for r in deck_records)
+    summary = records[-1]["batch_summary"]
+    assert summary["matched"] == 2
+    assert summary["succeeded"] == 2
+    assert summary["skipped"] == 0
+    assert summary["failed"] == 0
+
+
+def test_auto_curate_main_batch_skips_already_versioned(
+    tmp_path, monkeypatch, capsys,
+):
+    """Resume-skip: when ``<name> v2 [B3].dck`` exists next to the
+    input, the deck is skipped without invoking the pipeline (no
+    Anthropic spend on already-curated decks). --force overrides."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    a = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(a, "A")
+    # Pre-existing v2 marks this deck as already curated.
+    (tmp_path / "[USER] A v2 [B3].dck").write_text(
+        "[Commander]\n1 Test\n[Main]\n1 X\n", encoding="utf-8",
+    )
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    # The pre-existing v2 file also matches the glob, but the original
+    # is detected as already-versioned and skipped. The v2 deck itself
+    # is NOT already-versioned (no v3 exists) so it runs through the
+    # pipeline.
+    summary = records[-1]["batch_summary"]
+    assert summary["matched"] == 2
+    assert summary["skipped"] == 1
+    deck_records = [r for r in records if "deck" in r]
+    skipped = [r for r in deck_records if r["status"] == "skipped"]
+    assert len(skipped) == 1
+    assert "already-versioned" in skipped[0]["reason"]
+
+
+def test_auto_curate_main_batch_force_re_curates_versioned(
+    tmp_path, monkeypatch, capsys,
+):
+    """--force bypasses the resume-skip so a deck whose v2 sibling
+    already exists gets re-curated. Useful when the prior batch's
+    curator output was rejected and the user wants a fresh take."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    a = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(a, "A")
+    (tmp_path / "[USER] A v2 [B3].dck").write_text(
+        "[Commander]\n1 Test\n[Main]\n1 X\n", encoding="utf-8",
+    )
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER] A [B3].dck"),
+        "--bracket", "3", "--dry-run", "--no-log", "--force",
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    summary = records[-1]["batch_summary"]
+    assert summary["skipped"] == 0
+    assert summary["succeeded"] == 1
+
+
+def test_auto_curate_main_batch_isolates_per_deck_failures(
+    tmp_path, monkeypatch, capsys,
+):
+    """One bad deck must not abort the rest of the batch. We force a
+    failure on the second deck by passing an out-of-range bracket
+    only when the pipeline runs against that specific deck — easier:
+    write one good deck + one non-existent path the glob will resolve.
+
+    Actually simpler: make the second deck unreadable by writing an
+    empty file (no [Commander] section). The pipeline rejects empty
+    decks; we want the batch to record the failure and continue.
+    """
+    _setup_batch_env(tmp_path, monkeypatch)
+    good = tmp_path / "[USER] Good [B3].dck"
+    _write_minimal_deck(good, "Good")
+    bad = tmp_path / "[USER] Bad [B3].dck"
+    bad.write_text("", encoding="utf-8")  # empty → pipeline rejects
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+    ])
+    # Mixed outcome (at least one succeeded) returns 0 with the
+    # failure captured in the summary.
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    summary = records[-1]["batch_summary"]
+    assert summary["matched"] == 2
+    assert summary["succeeded"] + summary["failed"] == 2
+    assert summary["succeeded"] >= 1  # at least Good went through
+
+
+def test_auto_curate_main_batch_returns_2_when_glob_matches_nothing(
+    tmp_path, monkeypatch, capsys,
+):
+    """An empty glob is almost certainly a user typo (wrong dir, wrong
+    pattern). Return 2 so a batch driver script's `if cmd; then` knows
+    to alert."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "nonexistent*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+    ])
+    assert rc == 2
+    out = capsys.readouterr().out
+    summary = json.loads(out)["batch_summary"]
+    assert summary["matched"] == 0
+    assert "no .dck files matched" in summary["error"]
+
+
+def test_auto_curate_main_batch_rejects_both_positional_and_batch(
+    tmp_path, capsys,
+):
+    """deck_path and --batch are mutually exclusive. Passing both
+    should fail fast with a clear error rather than silently using
+    one or the other."""
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    _write_minimal_deck(deck, "Foo")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck),
+        "--batch", str(tmp_path / "*.dck"),
+        "--bracket", "3", "--dry-run",
+    ])
+    assert rc == 2
+    err = capsys.readouterr().out
+    assert "deck_path positional OR --batch" in err
+
+
+def test_auto_curate_main_batch_rejects_neither_positional_nor_batch(
+    tmp_path, capsys,
+):
+    """Without either, the user almost certainly meant to pass
+    something. Don't silently exit 0."""
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main(["--bracket", "3", "--dry-run"])
+    assert rc == 2
+    err = capsys.readouterr().out
+    assert "deck_path positional OR --batch" in err
+
+
+# ---------------------------------------------------------------------------
+# --parallelism N (AGENT_BACKLOG #016 / FP-003) — concurrent Forge sims
+# ---------------------------------------------------------------------------
+#
+# The 2026-05-19 feasibility spike (scripts/_spike_concurrent_forge.py)
+# confirmed two Forge JVMs co-exist in the same install cwd with no
+# lock contention. These tests cover the dispatch layer over that
+# substrate:
+#   - parallelism > 1 produces the same set of records as sequential
+#     (just possibly reordered by completion time)
+#   - emission order is "as completed" under parallelism, vs "glob
+#     order" under sequential — both produce a valid NDJSON stream
+#   - parallelism=1 path is bit-for-bit identical to the pre-#016
+#     sequential code path (regression safety for users who don't
+#     opt in)
+#   - the batch_summary record carries the parallelism setting so
+#     downstream tooling can sanity-check what was actually used
+#
+# These tests exercise --dry-run (no Forge subprocesses) — the spike
+# script handles the live-JVM validation separately. Keeping the
+# functional tests fast keeps them in the auto-marked-slow batch
+# without ballooning the suite runtime.
+
+
+def test_auto_curate_main_batch_parallelism_processes_all_decks(
+    tmp_path, monkeypatch, capsys,
+):
+    """parallelism=2 over a 4-deck batch produces 4 deck records +
+    1 summary, same total as sequential. Order may differ (records
+    emit as workers complete) but the multiset of decks must match."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    names = ["A", "B", "C", "D"]
+    for n in names:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--parallelism", "2",
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    deck_records = [r for r in records if "deck" in r]
+    assert len(deck_records) == 4
+    assert all(r["status"] == "ok" for r in deck_records)
+    seen_decks = sorted(Path(r["deck"]).stem for r in deck_records)
+    expected = sorted(f"[USER] {n} [B3]" for n in names)
+    assert seen_decks == expected
+    summary = records[-1]["batch_summary"]
+    assert summary["succeeded"] == 4
+    assert summary["parallelism"] == 2
+
+
+def test_auto_curate_main_batch_parallelism_caps_at_deck_count(
+    tmp_path, monkeypatch, capsys,
+):
+    """--parallelism=10 on a 2-deck batch shouldn't spin up 10 idle
+    workers. Internal cap is ``min(parallelism, len(paths))``;
+    behaviorally we just confirm the batch still completes correctly."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    for n in ["X", "Y"]:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--parallelism", "10",
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    summary = records[-1]["batch_summary"]
+    assert summary["succeeded"] == 2
+    # The summary still records the REQUESTED parallelism (10) even
+    # though the executor was capped at 2 internally. That's the
+    # user's flag echo, not the worker count.
+    assert summary["parallelism"] == 10
+
+
+def test_auto_curate_main_batch_parallelism_one_is_sequential_path(
+    tmp_path, monkeypatch, capsys,
+):
+    """--parallelism=1 (the default) MUST take the pre-#016
+    sequential path so users who haven't opted into concurrency
+    get bit-for-bit identical behavior. Pin via the
+    'glob-order emission' invariant — sequential emits in sorted
+    glob order; parallel emits as-completed."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    # Names chosen so sorted-glob-order is unambiguous: A, B, C.
+    for n in ["A", "B", "C"]:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        # parallelism default = 1; verify omitting the flag works
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    deck_records = [r for r in records if "deck" in r]
+    seen_stems = [Path(r["deck"]).stem for r in deck_records]
+    # Sequential path preserves glob order.
+    assert seen_stems == [f"[USER] {n} [B3]" for n in ["A", "B", "C"]]
+
+
+def test_auto_curate_main_batch_parallelism_isolates_per_deck_failures(
+    tmp_path, monkeypatch, capsys,
+):
+    """Per-deck failure isolation must hold under parallel dispatch
+    too — a bad deck on one worker can't poison the others. Mix one
+    empty deck (pipeline rejects it) with good ones and verify the
+    good ones still succeed."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    _write_minimal_deck(tmp_path / "[USER] Good1 [B3].dck", "Good1")
+    _write_minimal_deck(tmp_path / "[USER] Good2 [B3].dck", "Good2")
+    (tmp_path / "[USER] Bad [B3].dck").write_text("", encoding="utf-8")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--parallelism", "3",
+    ])
+    assert rc == 0  # mixed outcome with successes
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    summary = records[-1]["batch_summary"]
+    assert summary["succeeded"] >= 2
+    assert summary["failed"] + summary["succeeded"] == 3
+
+
+def test_auto_curate_main_batch_parallelism_zero_and_negative_treated_as_one(
+    tmp_path, monkeypatch, capsys,
+):
+    """Defensive: ``--parallelism 0`` / negative shouldn't spawn
+    zero workers (deadlock) or raise. Treat as 1."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    _write_minimal_deck(tmp_path / "[USER] A [B3].dck", "A")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--parallelism", "0",
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    assert records[-1]["batch_summary"]["succeeded"] == 1
