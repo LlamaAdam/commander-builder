@@ -696,24 +696,30 @@ function openCardImageOverlay(cardName) {
   document.body.appendChild(scrim);
 }
 
-// Build a Scryfall image URL for a card name. The
-// ``/cards/named?exact=<name>&format=image&version=<size>`` endpoint
-// is a server-side redirect to the actual image asset — no API key
-// or pre-fetch needed; the browser follows the redirect when the
-// <img> tag loads. ``version=small`` is 146×204px (~15KB); use it
-// for inline thumbnails. The ``loading="lazy"`` attr on the <img>
-// element defers fetching until the row scrolls into view, so a
-// 30-card audit panel doesn't fire 30 simultaneous redirects.
+// Build a card-image URL that goes through the local server-side
+// disk cache instead of hammering Scryfall on every render.
+//
+// Pre-2026-05-19, this returned the raw Scryfall
+// ``/cards/named?format=image`` redirect URL. Each <img> tag in a
+// 30-40 card advisor output then fired a Scryfall round-trip + a
+// follow-redirect to the CDN. The cascade stalled Chrome for 30-60s
+// during live smoke testing on 2026-05-16 — even with
+// ``loading="lazy"`` deferring the fetch until the row scrolled into
+// view, the burst-when-scrolling kept locking the renderer.
+//
+// Now the browser only ever talks to ``/api/card_image/<size>/<name>``
+// on this server. The route caches Scryfall fetches to disk under
+// ``<mtg_cards>/images/<size>/<slug>`` so the second view of any deck
+// reuses bytes from local disk with no Scryfall traffic at all.
+// The response carries
+// ``Cache-Control: public, max-age=604800, immutable`` so the browser
+// caches aggressively too; printings are immutable per Scryfall.
 //
 // FP-008 substrate from STATUS.md — card images alongside oracle
 // text in the suggestions panel.
 function cardImageUrl(name, size) {
   size = size || "small";
-  return (
-    "https://api.scryfall.com/cards/named"
-    + `?exact=${encodeURIComponent(name)}`
-    + `&format=image&version=${size}`
-  );
+  return `/api/card_image/${encodeURIComponent(size)}/${encodeURIComponent(name)}`;
 }
 
 // Per-card source badge for the "Cards to add" rows. The audit

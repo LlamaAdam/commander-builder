@@ -23,7 +23,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, Response, jsonify, render_template, request
+
+from ._image_cache import ALLOWED_SIZES, serve_image
 
 
 def make_meta_blueprint(
@@ -104,6 +106,55 @@ def make_meta_blueprint(
             ).strip().lower() in ("1", "true", "yes"),
         )
         return jsonify(stats)
+
+    @bp.route("/api/card_image/<size>/<path:name>")
+    def card_image(size: str, name: str):
+        """Serve a cached Scryfall card image, fetching on cache miss.
+
+        Before this route existed, every <img> in the audit panel hit
+        Scryfall's ``cards/named?format=image`` redirect endpoint
+        directly. A 40-card advisor output cascaded into 40 round-trips
+        + 40 follow-redirects, stalling Chrome for 30-60s. Now the
+        browser only ever talks to this route; we hit Scryfall once
+        per ``(name, size)`` pair and serve every subsequent request
+        from disk.
+
+        ``size`` must be one of Scryfall's published version strings
+        (small / normal / large / png / art_crop / border_crop);
+        anything else returns 400. Name is URL-path-encoded so
+        ``//`` separators in double-faced card names round-trip
+        cleanly.
+
+        ``Cache-Control: public, max-age=604800, immutable`` so the
+        browser caches aggressively too — Scryfall image art for a
+        given printing doesn't change after release.
+        """
+        if size not in ALLOWED_SIZES:
+            return jsonify({
+                "error": "unsupported size",
+                "detail": f"size must be one of {sorted(ALLOWED_SIZES)}",
+            }), 400
+        try:
+            data, content_type = serve_image(name, size)
+        except Exception as exc:  # noqa: BLE001
+            # Scryfall 404 (unknown card) vs. transient failure
+            # (timeout, 5xx) — both surface as fetch errors. urllib's
+            # HTTPError exposes .code; everything else is a 502 from
+            # our perspective.
+            code = getattr(exc, "code", None)
+            if code == 404:
+                return jsonify({
+                    "error": "card image not found",
+                    "name": name,
+                    "size": size,
+                }), 404
+            return jsonify({
+                "error": "scryfall image fetch failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }), 502
+        resp = Response(data, mimetype=content_type)
+        resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+        return resp
 
     @bp.route("/api/log_error", methods=["POST"])
     def log_error():
