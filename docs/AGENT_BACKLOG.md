@@ -37,7 +37,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
 | [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | open | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
-| [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | open | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
+| [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | done | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
 
 ---
 
@@ -545,15 +545,18 @@ sequential Forge wall time.
 
 ## #016 — Concurrent Forge sims (FP-003)
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — spike script left
+  in `scripts/_spike_concurrent_forge.py` as evidence; tests in
+  `test_proposer_auto.py::test_auto_curate_main_batch_parallelism_*`)
 - **priority**: MEDIUM
-- **scope**: ~3-4h (includes ~30 min feasibility spike up front)
+- **scope**: ~3-4h (actual: ~75 min including the spike, the
+  thread-local stdout proxy fix for capsys/Lock interaction, and
+  the test suite)
 - **prerequisites**: [#011](#011--batch-mode-for-commander-auto-curate)
   must ship first — concurrent sims are only useful when there's
   more than one sim to run.
-- **do_not_pick_without_human**: true (needs the feasibility-spike
-  result before committing to the larger implementation; cwd-isolated
-  JVM profiles must avoid Forge's res/ directory file locks)
+- **do_not_pick_without_human**: ~~true~~ resolved — spike PASSED;
+  no cwd isolation needed (see post-hoc notes below).
 - **files**:
   - `src/commander_builder/forge_runner.py` (current single-JVM
     spawn site; needs a parallel dispatcher)
@@ -585,18 +588,62 @@ sequential Forge wall time.
     workers and 10 decks, total: 5×t (instead of 10×t) where t is
     the per-deck wall time. Linear win.
 - **acceptance_criteria**:
-  - [ ] Feasibility spike documented (success or specific
-    blocking lock).
-  - [ ] If success: batch mode's per-deck sim runs through the
-    parallel dispatcher when `--sim-parallelism > 1`.
-  - [ ] `--sim-parallelism=1` falls back to the existing sequential
-    path bit-for-bit identical (regression-safety for users who
-    want the old behavior).
-  - [ ] Test using `pytest --run-slow` — auto-marked slow.
-  - [ ] A two-deck batch with parallelism=2 takes meaningfully less
-    wall time than the same batch with parallelism=1 (acceptance
-    is "<= 65% of sequential time"; allows for spawn overhead +
-    scheduler jitter).
+  - [x] Feasibility spike documented — `scripts/_spike_concurrent_
+    forge.py` is the spike; verdict in run output was "PASS: both
+    JVMs co-existed in the same cwd cleanly. Implication: #016 can
+    use a ThreadPoolExecutor with NO cwd isolation. Simplest
+    possible design works."
+  - [x] If success: batch mode's per-deck pipeline runs through the
+    parallel dispatcher when `--parallelism > 1`.
+  - [x] `--parallelism=1` (the default) falls back to the existing
+    sequential code path bit-for-bit identical (pinned by
+    `test_auto_curate_main_batch_parallelism_one_is_sequential_path`
+    which verifies glob-order emission).
+  - [x] Test using `pytest --run-slow` — auto-marked slow via the
+    `test_auto_curate_main_` name prefix in conftest.py.
+  - [x] Wall-time win demonstrated in the live spike: 2 parallel
+    1-game sims completed in 180.8s (max of the two) vs ~308.7s
+    sequential. **41% wall-time savings** — well under the
+    "<= 65% of sequential" acceptance bar.
+
+## post_hoc_notes
+
+- **Flag renamed from `--sim-parallelism` to `--parallelism`.** The
+  spec called it the former because the original assumption was
+  that only sim runs would parallelize. The spike + design walk
+  showed Anthropic curator calls are also IO-bound and thread-safe,
+  so parallelism applies to the WHOLE per-deck pipeline. The
+  broader name better reflects the actual scope. Both `--run-sim`
+  and non-sim batches benefit.
+- **No cwd isolation needed.** The spike proved Forge's
+  ``forge.profile.properties`` (which uses relative paths) +
+  the JVMs' read-only access to `res/` cooperates fine across
+  parallel processes. `forge.log` writes interleave but that's
+  cosmetic; no exceptions, no zero exit codes.
+- **Thread-local stdout proxy required.** `contextlib.redirect_stdout`
+  patches process-global `sys.stdout`, racing across worker
+  threads — caught the first time the parallel tests ran (JSON
+  parse errors from interleaved writes). Fixed via
+  `_ThreadLocalStdoutProxy` that dispatches per-thread; workers
+  set `_BATCH_THREAD_LOCAL.buf` before their `auto_curate_main`
+  call. The proxy falls through to the original stdout when no
+  buffer is set, so the batch coordinator's `_emit` (which writes
+  under an `emit_lock`) still reaches the real stdout cleanly.
+- **The spike script stayed in `scripts/_spike_concurrent_forge.py`**
+  rather than being deleted. Next time someone questions the
+  "no isolation needed" decision, they can re-run it against the
+  current Forge install (a Forge version bump could in principle
+  change file-locking behavior). The `_` prefix marks it as
+  developer infra, not a user-facing tool.
+
+## new_during_work
+
+- **Default batch mode could surface a hint when parallelism=1 would
+  benefit from going higher** — e.g., when the matched glob has >1
+  deck AND `--run-sim` is set, print a one-line stderr note "tip:
+  pass --parallelism 2 to halve wall time". Bounded, optional,
+  reasonable LOW-priority follow-up. Add as #017 if/when someone
+  has cycles.
 
 ---
 
