@@ -13,6 +13,38 @@ import pytest
 
 pytestmark = pytest.mark.slow
 
+
+@pytest.fixture(autouse=True)
+def _isolate_supplemental_edhrec_fetchers(monkeypatch):
+    """Stub fetch_tag_page + fetch_average_deck for every test in this
+    module by default. Both are EDHREC HTTP calls invoked by the
+    advisor's lazy supplemental fetchers; if a test forgets to stub
+    them, CI (which has live internet) reaches the real endpoints and
+    pulls in archetype-specific staples that pollute the
+    deterministic adds/cuts under assertion.
+
+    Caught on 2026-05-19 by PR #3's CI run:
+    - test_advise_strips_off_color_adds got real Krenko Goblin
+      staples (Abrade / Arena of Glory / Ashnod's Altar) before its
+      individual stubs were added.
+    - test_advise_heuristic_drops_redundant_ramp_adds got an empty
+      adds set because real tag-pages didn't recommend Cyclonic
+      Rift for that test's synthetic deck.
+    - test_advise_saturation_filter_preserves_when_threshold_not_hit
+      had the same shape with Cultivate.
+
+    A test that genuinely needs supplemental fetcher data can
+    override locally with another ``monkeypatch.setattr`` — fixtures
+    compose; the autouse one runs first."""
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_tag_page",
+        lambda slug, **kw: None,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_average_deck",
+        lambda *a, **kw: None,
+    )
+
 from commander_builder.edhrec_client import CardEntry, CommanderPage
 from commander_builder.improvement_advisor import (
     AdviceReport,

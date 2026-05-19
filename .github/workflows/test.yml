@@ -20,13 +20,17 @@ on:
     branches:
       - master
       - main
-      - "feature/**"
-      - "claude/**"
   pull_request:
     branches:
       - master
       - main
   workflow_dispatch:
+# Push-trigger is intentionally master/main only. Feature branches
+# (feature/** / claude/**) get CI via the pull_request trigger when
+# they're attached to an open PR — which is the only time the run
+# really matters. Previously triggering on every feature-branch push
+# AND on the PR fired two parallel matrix runs per push (caught on
+# PR #3, 2026-05-19) — wasted CI minutes for zero added signal.
 
 # Cancel any in-flight runs for the same ref when a new push lands —
 # saves CI minutes on rapid-fire pushes.
