@@ -38,6 +38,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | open | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
 | [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | done | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
+| [#017](#017-fp-001-card-script-parser-read-only-ast) | LOW | done | ~3h | FP-001 slice 1: read-only Forge card-script parser |
 
 ---
 
@@ -644,6 +645,89 @@ sequential Forge wall time.
   pass --parallelism 2 to halve wall time". Bounded, optional,
   reasonable LOW-priority follow-up. Add as #017 if/when someone
   has cycles.
+
+---
+
+## #017 — FP-001 card-script parser (read-only AST)
+
+- **status**: `done` (commit `<this commit>` — module at
+  `src/commander_builder/forge_script_parser.py`; tests at
+  `tests/test_forge_script_parser.py`; verbatim Forge fixtures at
+  `tests/fixtures/forge_scripts/`)
+- **priority**: LOW (was offered as option 2 in the
+  2026-05-19 FP-001 scope discussion — picked over the full
+  4-9-month engine commit because it's bounded, useful by itself,
+  and a real first slice of FP-001 if we ever do the engine)
+- **scope**: ~3h (actual: ~50 min — the bounded read-only scope
+  paid off, no rules-engine yak-shaving)
+- **prerequisites**: none
+- **context**: Forge's `.txt` card scripts are a line-oriented DSL
+  with 129 distinct `AB$` effect kinds across 32,626 cards in the
+  current Forge install. This parser turns one card script into a
+  structured AST (`CardScript` dataclass with `name`, `mana_cost`,
+  `types`, `pt`, `loyalty`, `keywords`, `abilities`, `svars`,
+  `oracle`, plus DFC support via `faces`). It does NOT interpret
+  abilities — interpretation needs a game state, which is a much
+  bigger project (the full FP-001 engine).
+- **what unlocks**:
+  - Static analysis ("how many of our 7,244 distinct deck-library
+    cards use `AB$ Token`?", "which cards have an SVar named X
+    that references `Count$Valid Goblin.YouCtrl`?")
+  - Better audit tools (compare Scryfall oracle text against
+    Forge's `Oracle:` line to catch errata drift)
+  - Foundation for any future Python-native engine — the parser
+    is the cheapest thing to write first because everything else
+    depends on having an AST to interpret
+- **implementation_notes** (post-hoc):
+  - `parse_card_script(text)` for in-memory parsing;
+    `parse_card_script_file(path)` for the file-mediated convenience.
+  - Each `A:` / `T:` / `R:` / `S:` line becomes one `Ability`
+    with `kind` (the prefix), `category` (the first Key$ pair's
+    key — AB / SP / Mode / Event), `effect` (the first pair's
+    value — Mana / Token / ChangesZone), and `params` (all Key$
+    Value pairs as strings).
+  - SVar values stay symbolic — `Count$Valid Goblin.YouCtrl`
+    rides as-is in `svars["X"]`. Interpretation is the engine's
+    job, not the parser's.
+  - DFC support: `AlternateMode:DoubleFaced` triggers face split;
+    the parent face holds the front, `faces[0]` holds the back.
+  - `raw_unparsed_lines` is the DSL-drift early-warning system.
+    Every fixture test asserts it's empty, so when Forge adds a
+    new top-level key (e.g. `Energy:`), the test breaks loudly
+    and we know to extend the parser.
+- **acceptance_criteria**:
+  - [x] Parse 8 byte-exact Forge fixtures spanning the DSL surface:
+    vanilla creature, land with two mana abilities, sorcery with
+    chained sub-abilities, keyword-only creature, static-effect
+    enchantment, activated-with-SVar creature, replacement +
+    trigger land, channel-ability legendary land.
+  - [x] Handle DFC via `AlternateMode:DoubleFaced` → `faces` list.
+  - [x] Handle variable PT (`*`, `1+*`) as symbolic strings.
+  - [x] Handle planeswalker `Loyalty:` and battle `Defense:`.
+  - [x] Don't crash on malformed input — bad lines land in
+    `raw_unparsed_lines` for audit.
+  - [x] UTF-8 with replacement so encoding quirks don't break
+    parse (Forge's older set scripts have had stray Latin-1).
+  - [x] 17 tests covering the above; full suite green at 1262.
+
+## new_during_work
+
+This slice intentionally stopped at the parser. The natural
+follow-ups (each their own bounded slice):
+
+- **#018 (LOW, ~2-4h, future)** — Bulk parse our 7,244-card deck
+  library through the parser, build a static-analysis report
+  (effect-kind histogram, SVar reference graph). Concrete first
+  user of the parser. Uses the existing `_card_list_refresh`
+  pattern.
+- **#019 (LOW, ~4-6h, future)** — Oracle-text vs DSL diff tool.
+  Cross-reference Forge's `Oracle:` field against Scryfall's
+  `oracle_text` for every card in our library; flag mismatches
+  for manual review. Catches errata drift that today only
+  surfaces when a sim produces a wrong verdict.
+- **Future-future** — The actual rules engine. Still 4-9 months.
+  Don't pick without explicit human direction (FP-001 macro
+  blocker per #015).
 
 ---
 
