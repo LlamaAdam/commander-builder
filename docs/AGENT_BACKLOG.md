@@ -40,6 +40,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | done | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
 | [#017](#017-fp-001-card-script-parser-read-only-ast) | LOW | done | ~3h | FP-001 slice 1: read-only Forge card-script parser |
 | [#018](#018-fp-001-deck-library-static-analysis-cli) | LOW | done | ~2-4h | FP-001 slice 2: deck-library static-analysis CLI |
+| [#019](#019-fp-001-oracle-text-vs-dsl-drift-detector) | LOW | done | ~1-2h | FP-001 slice 3: oracle-text vs Forge DSL drift detector |
 
 ---
 
@@ -821,6 +822,109 @@ follow-ups (each their own bounded slice):
   pinpoint whether we need a corpus update or whether the slug
   rules need extending for an edge case I missed. Half-hour
   follow-up.
+
+---
+
+## #019 — FP-001 oracle-text vs DSL drift detector
+
+- **status**: `done` (commit `<this commit>` —
+  ``src/commander_builder/oracle_diff.py``,
+  ``scripts/oracle_diff_report.py``, 18 tests in
+  ``tests/test_oracle_diff.py``)
+- **priority**: LOW (FP-001 slice 3; cheap because the parser
+  (#017) and loader (#018) already exist — this is the third
+  layer that combines them with Scryfall data)
+- **scope**: ~1-2h (actual: ~75 min including the #018 DFC
+  slug-bug fix that this exposed and the iterative normalization
+  tuning to cut false positives)
+- **prerequisites**: #017 (parser) and #018 (loader/analyzer)
+  both must ship first.
+- **context**: WotC ships errata roughly quarterly. Scryfall
+  updates within days; the bundled Forge corpus lags by a
+  release cycle or two. Sims running against stale Forge text
+  produce wrong verdicts long before anyone notices. This module
+  diffs Forge's ``Oracle:`` field against Scryfall's
+  ``oracle_text`` per card and surfaces mismatches for human
+  review. NO auto-correction — the maintainer decides whether
+  to refresh the Forge corpus, accept the drift, or whitelist
+  a deliberate variant.
+- **components**:
+  - **``oracle_diff.py``**:
+    - ``normalize_oracle(text, card_name)``: replaces Forge's
+      literal ``\\n`` with actual newlines, substitutes
+      ``CARDNAME``/``NICKNAME`` placeholders, collapses whitespace
+      runs, normalizes Unicode minus ``−`` → ASCII ``-``, strips
+      Forge's ``[-N]`` planeswalker loyalty-cost brackets.
+    - ``compare_card_oracle(name, forge_card, scryfall_data)``:
+      returns ``OracleDiffResult`` with ``match`` + ``status``
+      (``match``/``differ``/``missing_forge``/
+      ``missing_scryfall``/``missing_both``) + the unified
+      ``diff_lines`` for human review.
+    - DFC support: concatenates per-face oracle text with a
+      ``//`` sentinel on both sides so multi-face cards compare
+      symmetrically.
+  - **``scripts/oracle_diff_report.py``**: CLI wrapper with
+    ``--max-decks`` / ``--only-mismatches`` / ``--diff`` /
+    ``--json`` / ``--by-pattern`` flags. ``--by-pattern``
+    buckets diffs into known errata patterns (``this-land``,
+    ``this-creature``, etc.) so a 263-row report becomes
+    7 readable categories.
+- **smoke run on 10 real decks**:
+  ```
+  match:            368
+  differ:           260
+    [this-land errata]       82 cards
+    [this-creature errata]   64 cards
+    [this-artifact errata]   31 cards
+    [this-enchantment]       12 cards
+    [other]                  60 cards   ← real interesting cases
+  missing_forge:    61 (Commander-only printings Forge hasn't bundled)
+  missing_scryfall: 19
+  missing_both:     1
+  ```
+  → confirms WotC did a massive ``X`` → ``this <type>`` errata
+  sweep that Forge is uniformly stale on; ~200 cards in just
+  10 decks lean on the stale text. Refreshing the Forge corpus
+  is now a concrete action item with measurable scope.
+- **acceptance_criteria**:
+  - [x] Normalize Forge's literal ``\\n`` and CARDNAME/NICKNAME
+    placeholders so cosmetic differences don't drown out errata
+    signal.
+  - [x] Detect the Underground River-style errata (live test
+    case at ``tests/test_oracle_diff.py::test_compare_detects_real_underground_river_errata``).
+  - [x] DFC support: per-face concatenation on both sources.
+  - [x] CLI with ``--by-pattern`` triage view.
+  - [x] 18 new oracle-diff tests + 2 new DFC-loader tests
+    (the latter discovered while writing this slice). Full suite
+    green at 1313 passed (was 1293 before this commit).
+
+## also caught: #018 DFC slug bug
+
+While writing #019 I discovered #018's loader couldn't resolve
+DFC cards like ``Bala Ged Recovery`` because Forge stores them
+under the FULL DFC name (``bala_ged_recovery_bala_ged_sanctuary.txt``)
+not the front-face-only slug my loader was looking for. Fixed:
+``CardsLoader.load_one`` now builds a lazy DFC index on first
+miss that maps front-face slug → full DFC slug, so .dck files'
+front-face-only references still resolve. Two new tests
+(``test_loader_zip_resolves_dfc_from_front_face_only_name``,
+``test_loader_dfc_index_does_not_shadow_regular_cards``) pin
+the contract. Confirmed working against the real Forge install
+(Bala Ged Recovery now loads cleanly).
+
+## new_during_work
+
+- **Forge corpus refresh** is now the obvious follow-up action.
+  We have evidence ~200 cards in 10 decks are running stale
+  text; the user can either update the bundled Forge install
+  (probably ships with a fresh corpus) or pull
+  ``cardsfolder.zip`` from Card-Forge/forge HEAD as a one-off.
+  Not a code task — flagged for human action.
+- **#020 (LOW, ~1h, future)** — Extend ``--by-pattern`` to a
+  general regex-based bucketing system loaded from a YAML/JSON
+  file. The current buckets are hardcoded; surfacing them as
+  data lets a maintainer add new patterns (next errata sweep)
+  without code changes.
 
 ---
 

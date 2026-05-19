@@ -33,8 +33,12 @@ from commander_builder.forge_cards_loader import (
     ("Avatar of Slaughter", "avatar_of_slaughter"),
     # Apostrophes collapse into the surrounding underscore run.
     ("Yawgmoth's Will",     "yawgmoth_s_will"),
-    # DFC: front face only.
-    ("Bala Ged Recovery // Bala Ged Sanctuary", "bala_ged_recovery"),
+    # DFC: ``//`` collapses to the full ``front_back`` slug —
+    # matches Forge's actual filesystem convention (corrected
+    # 2026-05-19; was incorrectly front-face-only in #018's
+    # initial slug rules).
+    ("Bala Ged Recovery // Bala Ged Sanctuary",
+     "bala_ged_recovery_bala_ged_sanctuary"),
     # Defensive: empty / whitespace-only.
     ("",                    "unknown"),
     ("   ",                 "unknown"),
@@ -148,18 +152,67 @@ def test_loader_zip_iter_all_skips_directory_entries(tmp_path):
     assert slugs == ["krenko_mob_boss", "sol_ring"]
 
 
-def test_loader_zip_handles_dfc_via_front_face_slug(tmp_path):
-    """Bala Ged Recovery // Bala Ged Sanctuary lives under
-    `b/bala_ged_recovery.txt` — slug_for collapses to the front
-    face, so the loader finds it without needing the full DFC name."""
+def test_loader_zip_resolves_dfc_via_full_slug(tmp_path):
+    """Forge stores DFCs at ``<front>_<back>.txt`` — the full DFC
+    name. A caller passing the full ``Front // Back`` name slugs
+    to that filename directly."""
     zip_path = tmp_path / "cardsfolder.zip"
     _build_fixture_zip(zip_path, {
-        "bala_ged_recovery": "Name:Bala Ged Recovery\nAlternateMode:DoubleFaced\nName:Bala Ged Sanctuary\n",
+        "bala_ged_recovery_bala_ged_sanctuary": (
+            "Name:Bala Ged Recovery\n"
+            "AlternateMode:DoubleFaced\n"
+            "Name:Bala Ged Sanctuary\n"
+        ),
     })
     loader = CardsLoader(zip_path=zip_path)
     raw = loader.load_one("Bala Ged Recovery // Bala Ged Sanctuary")
     assert raw is not None
     assert "Bala Ged Recovery" in raw
+
+
+def test_loader_zip_resolves_dfc_from_front_face_only_name(tmp_path):
+    """.dck files reference cards by front-face name only. The DFC
+    fallback index maps the front-face slug to the full DFC slug so
+    the lookup still succeeds without the caller knowing the back
+    face's name."""
+    zip_path = tmp_path / "cardsfolder.zip"
+    _build_fixture_zip(zip_path, {
+        "bala_ged_recovery_bala_ged_sanctuary": (
+            "Name:Bala Ged Recovery\n"
+            "ManaCost:2 G\n"
+            "Types:Sorcery\n"
+            "AlternateMode:DoubleFaced\n"
+            "Name:Bala Ged Sanctuary\n"
+            "Types:Land\n"
+        ),
+    })
+    loader = CardsLoader(zip_path=zip_path)
+    # Passing front-face-only name (the .dck-file convention).
+    raw = loader.load_one("Bala Ged Recovery")
+    assert raw is not None
+    assert "Bala Ged Recovery" in raw
+    assert "Bala Ged Sanctuary" in raw
+
+
+def test_loader_dfc_index_does_not_shadow_regular_cards(tmp_path):
+    """Single-face cards must keep their direct slug → file mapping
+    untouched. The DFC index only entries cards with TWO ``Name:``
+    lines, so single-face cards never appear in it."""
+    zip_path = tmp_path / "cardsfolder.zip"
+    _build_fixture_zip(zip_path, {
+        "sol_ring": "Name:Sol Ring\nManaCost:1\nTypes:Artifact\n",
+        "bala_ged_recovery_bala_ged_sanctuary": (
+            "Name:Bala Ged Recovery\nAlternateMode:DoubleFaced\nName:Bala Ged Sanctuary\n"
+        ),
+    })
+    loader = CardsLoader(zip_path=zip_path)
+    # Pre-populate the index so we can inspect it.
+    _ = loader.load_one("Bala Ged Recovery")
+    assert loader._dfc_index == {
+        "bala_ged_recovery": "bala_ged_recovery_bala_ged_sanctuary",
+    }
+    # Sol Ring is a single-face card → not in index, but still loadable.
+    assert "Sol Ring" in (loader.load_one("Sol Ring") or "")
 
 
 def test_loader_context_manager_closes_zip(tmp_path):

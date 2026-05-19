@@ -39,15 +39,23 @@ def slug_for(name: str) -> str:
 
     ``Krenko, Mob Boss`` → ``krenko_mob_boss``.
     ``Avatar of Slaughter`` → ``avatar_of_slaughter``.
-    Double-faced names with ``//`` collapse to the front face's slug
-    (Forge's convention is to store the whole DFC under the front-
-    face filename).
+
+    DFC NAMING (corrected 2026-05-19): Forge actually stores DFCs
+    under the FULL ``front_back`` slug — e.g. Bala Ged Recovery //
+    Bala Ged Sanctuary lives at ``b/bala_ged_recovery_bala_ged_
+    sanctuary.txt``, NOT under the front-face-only slug. Slugifying
+    a ``Foo // Bar`` name therefore collapses the ``//`` into the
+    same non-alnum-run handling as everything else, producing
+    ``foo_bar``.
+
+    Deck files (.dck) typically reference cards by front-face name
+    only ("Bala Ged Recovery"). For those, ``slug_for`` returns the
+    front-face slug — the loader then falls back to a DFC index
+    that maps front-face → full-DFC filename when a direct lookup
+    misses.
     """
     if not name:
         return "unknown"
-    # DFC: front face only (substring before the //).
-    if "//" in name:
-        name = name.split("//", 1)[0]
     slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
     return slug or "unknown"
 
@@ -93,6 +101,14 @@ class CardsLoader:
         self._zip_path = zip_path
         self._directory = directory
         self._zip_handle: Optional[zipfile.ZipFile] = None
+        # DFC fallback index. Lazily built on first lookup miss so
+        # the loader pays no cost when callers only look up regular
+        # cards. Maps ``front_face_slug`` → ``full_dfc_slug``
+        # (e.g. ``bala_ged_recovery`` → ``bala_ged_recovery_bala_
+        # ged_sanctuary``). Forge's filenames embed the full DFC
+        # name but .dck files reference cards by front face only,
+        # so this index bridges the two conventions.
+        self._dfc_index: Optional[dict[str, str]] = None
 
     @classmethod
     def locate(cls, forge_dir: Path) -> "CardsLoader":
@@ -132,22 +148,76 @@ class CardsLoader:
 
     def load_one(self, name: str) -> Optional[str]:
         """Return the raw script text for ``name``, or None when not
-        present. Lookup is by Forge slug; DFC names round-trip via
-        the front-face slug.
+        present.
+
+        Lookup strategy:
+          1. Try the direct slug (works for regular cards + DFCs
+             that were passed by full ``Front // Back`` name).
+          2. On miss, consult the DFC fallback index — Forge stores
+             DFCs under their full slug, so a .dck file's front-
+             face-only reference needs a second lookup.
+
+        Returns None when neither attempt finds a script.
         """
         slug = slug_for(name)
+        text = self._read_slug(slug)
+        if text is not None:
+            return text
+        # Fallback: maybe ``name`` is a front-face reference to a
+        # DFC stored under ``front_back`` slug.
+        index = self._get_dfc_index()
+        full_slug = index.get(slug)
+        if full_slug:
+            return self._read_slug(full_slug)
+        return None
+
+    def _read_slug(self, slug: str) -> Optional[str]:
+        """Read a script blob by exact slug (no DFC fallback). Returns
+        None if the slug isn't present in the corpus."""
         if self._directory is not None:
             path = self._directory / slug[0] / f"{slug}.txt"
             if not path.is_file():
                 return None
             return path.read_text(encoding="utf-8", errors="replace")
-        # Zip path.
         member = _zip_member_for(slug)
         zf = self._ensure_zip()
         try:
             return zf.read(member).decode("utf-8", errors="replace")
         except KeyError:
             return None
+
+    def _get_dfc_index(self) -> dict[str, str]:
+        """Build (lazily, once) a map from front-face slug → full
+        DFC slug for every two-face card in the corpus.
+
+        Detected by parsing each script's ``Name:`` lines: a single-
+        face card has exactly one ``Name:`` line, a DFC has two.
+        We only read the first two ``Name:`` lines per file so the
+        scan is cheap (no full parse). Production corpus is ~32k
+        files; total scan is ~1-2s on a warm zip / SSD.
+
+        Result lives on the instance — subsequent lookups are O(1).
+        """
+        if self._dfc_index is not None:
+            return self._dfc_index
+        index: dict[str, str] = {}
+        for full_slug, raw in self.iter_all():
+            # Cheap scan for two ``Name:`` lines.
+            first_name: Optional[str] = None
+            for line in raw.splitlines():
+                if line.startswith("Name:"):
+                    name_value = line[5:].strip()
+                    if first_name is None:
+                        first_name = name_value
+                    else:
+                        # Second Name: → this is a DFC. Index the
+                        # front face slug → full slug.
+                        front_slug = slug_for(first_name)
+                        if front_slug != full_slug:
+                            index[front_slug] = full_slug
+                        break
+        self._dfc_index = index
+        return index
 
     def iter_all(self) -> Iterator[tuple[str, str]]:
         """Yield ``(slug, raw_text)`` for every card script. Order is
