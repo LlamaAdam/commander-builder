@@ -990,6 +990,19 @@ def test_advise_strips_off_color_adds_via_color_identity_filter(tmp_path, monkey
         "commander_builder.improvement_advisor.fetch_commander_page",
         lambda name, **kw: fake_page,
     )
+    # Stub the supplemental EDHREC fetchers too. Without these, CI
+    # (which has working internet) hits the real EDHREC tag-page +
+    # average-deck endpoints and pulls in real Krenko Goblin staples
+    # like Abrade / Arena of Glory / Ashnod's Altar — those swamp
+    # the assertion and broke the 2026-05-16 master CI run.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_tag_page",
+        lambda slug, **kw: None,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_average_deck",
+        lambda *a, **kw: None,
+    )
 
     # Stub Scryfall lookups: commander resolves to mono-red Krenko;
     # each candidate gets a synthetic color_identity that drives the
@@ -1056,6 +1069,18 @@ def test_advise_skips_ci_filter_when_commander_unresolvable(tmp_path, monkeypatc
     monkeypatch.setattr(
         "commander_builder.improvement_advisor.fetch_commander_page",
         lambda name, **kw: fake_page,
+    )
+    # Same defensive stubbing as the off-color test: keep EDHREC's
+    # supplemental endpoints out of the test path so CI can't drag
+    # in real cards that would mask the "Goblin King survives"
+    # assertion.
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_tag_page",
+        lambda slug, **kw: None,
+    )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_average_deck",
+        lambda *a, **kw: None,
     )
     # Scryfall returns None for everything → CI unresolvable → skip filter.
     monkeypatch.setattr(
