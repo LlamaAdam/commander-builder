@@ -61,6 +61,15 @@ FEATURE_NAMES: list[str] = [
     "swap_size",                # added + removed
     # Audit context
     "audit_version_v3",         # 1 if this version, 0 otherwise (scales as we add v4, v5)
+    # Pre-sim deck-composition signals (computed from deck_snapshot via
+    # deck_health.compute_deck_health). These describe the deck the swap is
+    # applied to -- the honest predictive substrate (no sim outcome leaks in).
+    "dh_spell_density",         # non-permanent ratio
+    "dh_mana_sinks",
+    "dh_wincon_protection",
+    "dh_self_mill",
+    "dh_mdfc",
+    "dh_basic_lands",           # count of basic lands (mana-flood proxy)
 ]
 
 
@@ -147,6 +156,33 @@ def extract_features(it: Iteration) -> Optional[FeatureRow]:
         "swap_size": float(cards_added + cards_removed),
         "audit_version_v3": 1.0 if it.audit_version == "v3" else 0.0,
     }
+
+    # Pre-sim deck-composition features from the snapshot (best-effort: card
+    # lookups can fail offline, so default to 0 on any error).
+    dh = {"dh_spell_density": 0.0, "dh_mana_sinks": 0.0,
+          "dh_wincon_protection": 0.0, "dh_self_mill": 0.0,
+          "dh_mdfc": 0.0, "dh_basic_lands": 0.0}
+    if it.deck_snapshot:
+        # Basic-land count is a pure-regex computation (no card DB lookups), so
+        # do it independently of compute_deck_health, which can fail offline.
+        import re as _re
+        dh["dh_basic_lands"] = float(sum(
+            int(m.group(1)) for m in _re.finditer(
+                r"^(\d+)\s+(?:Snow-Covered\s+)?(?:Forest|Island|Swamp|Mountain|Plains|Wastes)\b",
+                it.deck_snapshot, _re.MULTILINE)
+        ))
+        try:
+            from .deck_health import compute_deck_health
+            h = compute_deck_health(it.deck_snapshot)
+            dh["dh_spell_density"] = float(h.get("spell_density", {}).get("ratio", 0.0) or 0.0)
+            dh["dh_mana_sinks"] = float(h.get("mana_sinks", {}).get("count", 0) or 0)
+            dh["dh_wincon_protection"] = float(h.get("wincon_protection", {}).get("count", 0) or 0)
+            dh["dh_self_mill"] = float(h.get("self_mill", {}).get("count", 0) or 0)
+            dh["dh_mdfc"] = float(h.get("mdfc", {}).get("count", 0) or 0)
+        except Exception:
+            pass
+    features.update(dh)
+
     return FeatureRow(
         iteration_id=it.id,
         deck_id=it.deck_id,
