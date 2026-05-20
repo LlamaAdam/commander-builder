@@ -690,6 +690,25 @@ def _run_batch(args, parser, batch_argv: list[str]) -> int:
 
     parallelism = max(1, int(getattr(args, "parallelism", 1) or 1))
 
+    # UX hint: when --batch resolves to >1 deck AND --run-sim is on AND
+    # parallelism is the default 1, suggest bumping. Sequential Forge
+    # sims dominate wall time on multi-deck overnight runs; the spike
+    # showed 2-way parallelism cuts ~41% wall time with no contention.
+    # One-line stderr note; no behavior change.
+    if (
+        len(paths) > 1
+        and getattr(args, "run_sim", False)
+        and parallelism == 1
+    ):
+        print(
+            f"[batch] tip: {len(paths)} decks queued with --run-sim and "
+            f"--parallelism 1. Pass --parallelism 2 (or higher) to halve "
+            f"wall time — Forge JVMs co-exist safely (verified via "
+            f"2026-05-19 feasibility spike).",
+            file=sys.stderr,
+            flush=True,
+        )
+
     n_skipped = 0
     n_failed = 0
     n_succeeded = 0

@@ -710,11 +710,14 @@ sequential Forge wall time.
 ## new_during_work
 
 - **Default batch mode could surface a hint when parallelism=1 would
-  benefit from going higher** — e.g., when the matched glob has >1
-  deck AND `--run-sim` is set, print a one-line stderr note "tip:
-  pass --parallelism 2 to halve wall time". Bounded, optional,
-  reasonable LOW-priority follow-up. Add as #017 if/when someone
-  has cycles.
+  benefit from going higher** — DONE in commit `<this commit>`.
+  `_run_batch` now emits a one-line stderr tip when the matched glob
+  has >1 deck AND `--run-sim` is set AND `--parallelism` is the
+  default 1: "tip: N decks queued with --run-sim and --parallelism 1.
+  Pass --parallelism 2 (or higher) to halve wall time…". 4 new tests
+  pin: (a) fires when conditions met, (b) silent when user already
+  passed parallelism > 1, (c) silent when --run-sim is off (Anthropic-
+  only batches benefit much less), (d) silent on single-deck batches.
 
 ---
 
