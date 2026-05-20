@@ -174,6 +174,12 @@ def claude_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     Falls back to NotImplementedError without ANTHROPIC_API_KEY or without
     the `anthropic` SDK installed; the router catches and degrades to manual.
     """
+    # NOTE: claude_propose deliberately stays SDK-only and degrades to the
+    # manual proposer when no API key is present (this is the propose() router
+    # contract -- ClaudeProposer is opt-in/interactive). The UNATTENDED curator
+    # path (auto_propose) is the one wired to the subscription `claude` CLI,
+    # because it must run without a key. Keep these two paths' semantics
+    # distinct on purpose.
     if "ANTHROPIC_API_KEY" not in os.environ:
         raise NotImplementedError(
             "claude_propose requires ANTHROPIC_API_KEY to be set."
