@@ -1,6 +1,19 @@
 """Compare Forge's ``Oracle:`` text against Scryfall's
 ``oracle_text`` to surface errata drift.
 
+Pattern bucketing is data-driven (#020): the default rule set
+lives at ``src/commander_builder/data/oracle_diff_buckets.json``
+and the CLI accepts ``--bucket-rules <path>`` to override. Each
+rule is a dict with ``label`` plus any combination of:
+  - ``scryfall_contains``     (substring required in Scryfall side)
+  - ``scryfall_not_contains`` (substring forbidden in Scryfall side)
+  - ``forge_contains``        (required in Forge side)
+  - ``forge_not_contains``    (forbidden in Forge side)
+All keys are AND'd; the bucket walker assigns the first matching
+label and otherwise returns ``other``. Match is case-insensitive
+substring; regex would be a follow-up if simple substring proves
+insufficient.
+
 The problem this catches: WotC ships errata updates roughly
 quarterly (oracle-text refinements that change how a card resolves
 under tournament rules). Scryfall updates its API within days.
@@ -25,12 +38,19 @@ downstream tooling (or a future audit dashboard) can compose it.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from difflib import unified_diff
+from pathlib import Path
 from typing import Optional
 
 from .forge_script_parser import CardScript
+
+
+DEFAULT_BUCKET_RULES_PATH = (
+    Path(__file__).parent / "data" / "oracle_diff_buckets.json"
+)
 
 
 # Forge's Oracle text uses LITERAL ``\n`` (two characters,
@@ -243,3 +263,92 @@ def compare_card_oracle(
         normalized_forge=nforge, normalized_scryfall=nscryfall,
         diff_lines=diff_lines,
     )
+
+
+# ---------------------------------------------------------------------------
+# Pattern bucketing (AGENT_BACKLOG #020)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DiffBucket:
+    """One entry from the bucket-rules JSON. ``matches(result)``
+    returns True iff every configured ``*_contains`` substring is
+    present and every ``*_not_contains`` substring is absent."""
+    label: str
+    scryfall_contains: Optional[str] = None
+    scryfall_not_contains: Optional[str] = None
+    forge_contains: Optional[str] = None
+    forge_not_contains: Optional[str] = None
+
+    def matches(self, result: "OracleDiffResult") -> bool:
+        scryfall = result.normalized_scryfall.lower()
+        forge = result.normalized_forge.lower()
+        if self.scryfall_contains and self.scryfall_contains.lower() not in scryfall:
+            return False
+        if self.scryfall_not_contains and self.scryfall_not_contains.lower() in scryfall:
+            return False
+        if self.forge_contains and self.forge_contains.lower() not in forge:
+            return False
+        if self.forge_not_contains and self.forge_not_contains.lower() in forge:
+            return False
+        # At least one constraint must be set, else every diff matches
+        # and bucketing collapses. Guard so a typo'd rule (all None)
+        # doesn't silently swallow everything.
+        if not any((
+            self.scryfall_contains, self.scryfall_not_contains,
+            self.forge_contains, self.forge_not_contains,
+        )):
+            return False
+        return True
+
+
+def load_diff_buckets(path: Optional[Path] = None) -> list[DiffBucket]:
+    """Read the bucket-rules JSON file (default: shipped data file).
+
+    Returns the ordered list of ``DiffBucket`` rules. Schema is:
+
+      {
+        "$schema_version": 1,
+        "buckets": [
+          {"label": "...", "scryfall_contains": "...", ...},
+          ...
+        ]
+      }
+
+    Unknown fields per bucket are ignored so a future schema
+    extension doesn't break older code. A missing ``label`` is a
+    fatal config error (no sensible default).
+    """
+    if path is None:
+        path = DEFAULT_BUCKET_RULES_PATH
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_buckets = payload.get("buckets") or []
+    out: list[DiffBucket] = []
+    for entry in raw_buckets:
+        label = entry.get("label")
+        if not label:
+            raise ValueError(
+                f"bucket rule missing 'label' in {path}: {entry!r}"
+            )
+        out.append(DiffBucket(
+            label=label,
+            scryfall_contains=entry.get("scryfall_contains"),
+            scryfall_not_contains=entry.get("scryfall_not_contains"),
+            forge_contains=entry.get("forge_contains"),
+            forge_not_contains=entry.get("forge_not_contains"),
+        ))
+    return out
+
+
+def categorize_diff(
+    result: OracleDiffResult, buckets: list[DiffBucket],
+) -> str:
+    """Walk ``buckets`` in order, return the first matching bucket's
+    label. Returns ``other`` when nothing matches — the genuinely
+    interesting "real edge case" diffs that aren't one of the known
+    sweep patterns.
+    """
+    for bucket in buckets:
+        if bucket.matches(result):
+            return bucket.label
+    return "other"

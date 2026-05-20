@@ -279,6 +279,140 @@ def test_compare_detects_dfc_back_face_drift():
 # Result serialization
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Data-driven bucketing (#020)
+# ---------------------------------------------------------------------------
+
+def test_load_diff_buckets_reads_shipped_default():
+    """The shipped JSON file loads cleanly and contains the
+    canonical ``this-X errata`` rule set."""
+    from commander_builder.oracle_diff import (
+        DEFAULT_BUCKET_RULES_PATH, load_diff_buckets,
+    )
+    buckets = load_diff_buckets()
+    labels = [b.label for b in buckets]
+    # Sanity check: at least the four big errata categories from
+    # the 2026-05-19 smoke run are present.
+    for expected in (
+        "this-land errata", "this-creature errata",
+        "this-artifact errata", "this-enchantment errata",
+    ):
+        assert expected in labels
+    assert DEFAULT_BUCKET_RULES_PATH.exists()
+
+
+def test_load_diff_buckets_accepts_custom_path(tmp_path):
+    """Operators can ship their own rules file via ``--bucket-rules``;
+    the loader takes the path arg."""
+    from commander_builder.oracle_diff import load_diff_buckets
+    p = tmp_path / "custom.json"
+    p.write_text(
+        '{"buckets": [{"label": "custom-rule", '
+        '"scryfall_contains": "foo"}]}',
+        encoding="utf-8",
+    )
+    buckets = load_diff_buckets(p)
+    assert len(buckets) == 1
+    assert buckets[0].label == "custom-rule"
+    assert buckets[0].scryfall_contains == "foo"
+
+
+def test_load_diff_buckets_rejects_missing_label(tmp_path):
+    """Misconfigured rule (no label) is a fatal error — no
+    sensible default label could match the rule's intent."""
+    from commander_builder.oracle_diff import load_diff_buckets
+    import pytest as _pytest
+    p = tmp_path / "bad.json"
+    p.write_text(
+        '{"buckets": [{"scryfall_contains": "foo"}]}',
+        encoding="utf-8",
+    )
+    with _pytest.raises(ValueError, match="missing 'label'"):
+        load_diff_buckets(p)
+
+
+def test_diff_bucket_matches_substring_logic():
+    """Substring match: both ``scryfall_contains`` and
+    ``forge_not_contains`` must hold."""
+    from commander_builder.oracle_diff import DiffBucket, OracleDiffResult
+    rule = DiffBucket(
+        label="t",
+        scryfall_contains="this land",
+        forge_not_contains="this land",
+    )
+    matching = OracleDiffResult(
+        card_name="X", match=False, status="differ",
+        normalized_scryfall="...this land deals 1 damage...",
+        normalized_forge="...Underground River deals 1 damage...",
+    )
+    assert rule.matches(matching) is True
+    # Forge ALSO mentions "this land" → not a drift; rule misses.
+    both = OracleDiffResult(
+        card_name="X", match=False, status="differ",
+        normalized_scryfall="this land foo",
+        normalized_forge="this land bar",
+    )
+    assert rule.matches(both) is False
+
+
+def test_diff_bucket_case_insensitive():
+    """Match should fold case so a maintainer doesn't have to
+    spell out every capitalization variant."""
+    from commander_builder.oracle_diff import DiffBucket, OracleDiffResult
+    rule = DiffBucket(label="t", scryfall_contains="THIS LAND")
+    result = OracleDiffResult(
+        card_name="X", match=False, status="differ",
+        normalized_scryfall="this land xyz", normalized_forge="",
+    )
+    assert rule.matches(result) is True
+
+
+def test_diff_bucket_empty_rule_does_not_match_everything():
+    """Guard: a rule with NO constraints would otherwise match
+    every diff and silently swallow the bucketing. matches()
+    returns False for an all-None rule so a typo'd config can't
+    collapse the buckets."""
+    from commander_builder.oracle_diff import DiffBucket, OracleDiffResult
+    rule = DiffBucket(label="empty")
+    result = OracleDiffResult(
+        card_name="X", match=False, status="differ",
+        normalized_scryfall="anything", normalized_forge="anything",
+    )
+    assert rule.matches(result) is False
+
+
+def test_categorize_diff_returns_first_matching_label():
+    """Order matters: ``categorize_diff`` walks the list and
+    returns the FIRST matching label so overlapping rules can be
+    prioritized (the more-specific rule should be listed before
+    the more-general one)."""
+    from commander_builder.oracle_diff import (
+        DiffBucket, OracleDiffResult, categorize_diff,
+    )
+    rules = [
+        DiffBucket(label="specific", scryfall_contains="this red land"),
+        DiffBucket(label="general", scryfall_contains="this land"),
+    ]
+    result = OracleDiffResult(
+        card_name="X", match=False, status="differ",
+        normalized_scryfall="this red land taps", normalized_forge="",
+    )
+    assert categorize_diff(result, rules) == "specific"
+
+
+def test_categorize_diff_returns_other_when_no_match():
+    from commander_builder.oracle_diff import (
+        DiffBucket, OracleDiffResult, categorize_diff,
+    )
+    rules = [DiffBucket(label="x", scryfall_contains="this land")]
+    result = OracleDiffResult(
+        card_name="X", match=False, status="differ",
+        normalized_scryfall="just some other text",
+        normalized_forge="and forge text",
+    )
+    assert categorize_diff(result, rules) == "other"
+
+
 def test_oracle_diff_result_to_dict_json_safe():
     """``to_dict`` shape is fully primitive — usable directly with
     ``json.dumps`` from the CLI wrapper."""

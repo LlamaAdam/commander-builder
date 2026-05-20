@@ -53,36 +53,16 @@ from commander_builder.deck_library_analyzer import (  # noqa: E402
 )
 from commander_builder.forge_cards_loader import CardsLoader  # noqa: E402
 from commander_builder.forge_script_parser import parse_card_script  # noqa: E402
-from commander_builder.oracle_diff import compare_card_oracle  # noqa: E402
+from commander_builder.oracle_diff import (  # noqa: E402
+    DEFAULT_BUCKET_RULES_PATH,
+    categorize_diff,
+    compare_card_oracle,
+    load_diff_buckets,
+)
 from commander_builder.scryfall_client import lookup_card  # noqa: E402
 
 DEFAULT_DECK_DIR = REPO_ROOT / "vendor" / "forge" / "userdata" / "decks" / "commander"
 DEFAULT_FORGE_DIR = REPO_ROOT / "vendor" / "forge"
-
-
-# Pattern buckets help the maintainer triage 100s of diffs into
-# 5 categories instead of scanning each one. Each bucket has a
-# predicate that takes (normalized_forge, normalized_scryfall)
-# → bool. A diff that matches no bucket is "other" — the genuinely
-# interesting cases.
-_DIFF_BUCKETS = [
-    ("this-land errata", lambda f, s: "this land" in s.lower() and "this land" not in f.lower()),
-    ("this-creature errata", lambda f, s: "this creature" in s.lower() and "this creature" not in f.lower()),
-    ("this-artifact errata", lambda f, s: "this artifact" in s.lower() and "this artifact" not in f.lower()),
-    ("this-enchantment errata", lambda f, s: "this enchantment" in s.lower() and "this enchantment" not in f.lower()),
-    ("this-card errata", lambda f, s: "this card" in s.lower() and "this card" not in f.lower()),
-    ("this-token errata", lambda f, s: "this token" in s.lower() and "this token" not in f.lower()),
-    ("this-permanent errata", lambda f, s: "this permanent" in s.lower() and "this permanent" not in f.lower()),
-]
-
-
-def _categorize_diff(result) -> str:
-    """Bucket a ``differ`` result into a coarse category. Returns
-    ``other`` when no known pattern matches."""
-    for label, predicate in _DIFF_BUCKETS:
-        if predicate(result.normalized_forge, result.normalized_scryfall):
-            return label
-    return "other"
 
 
 def _iter_distinct_cards(deck_dir: Path, max_decks: int | None):
@@ -126,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
                         "(this-land errata, this-creature errata, etc.) "
                         "in the human-readable output. Without this, "
                         "every diff prints individually.")
+    p.add_argument("--bucket-rules", type=Path, default=DEFAULT_BUCKET_RULES_PATH,
+                   help="Path to the bucket-rules JSON used by "
+                        "--by-pattern. Default ships under "
+                        f"{DEFAULT_BUCKET_RULES_PATH.relative_to(REPO_ROOT)}.")
     args = p.parse_args(argv)
 
     if not args.deck_dir.is_dir():
@@ -175,14 +159,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.by_pattern:
-        # Bucket view: 5-line summary instead of 200-line dump.
+        # Bucket view: ~7-line summary instead of 200-line dump.
+        # Rules come from the data file so a maintainer can add
+        # the next errata pattern without touching code (#020).
         from collections import defaultdict
-        buckets: dict[str, list] = defaultdict(list)
+        try:
+            rules = load_diff_buckets(args.bucket_rules)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: bucket-rules load failed: {exc}", file=sys.stderr)
+            return 2
+        bucketed: dict[str, list] = defaultdict(list)
         for r in differs:
-            buckets[_categorize_diff(r)].append(r)
+            bucketed[categorize_diff(r, rules)].append(r)
         print(f"\n=== {len(differs)} cards with text drift, by pattern ===")
-        for label in sorted(buckets, key=lambda k: -len(buckets[k])):
-            entries = buckets[label]
+        for label in sorted(bucketed, key=lambda k: -len(bucketed[k])):
+            entries = bucketed[label]
             print(f"\n  [{label}] {len(entries)} cards")
             for r in entries[:5]:
                 print(f"    - {r.card_name}")

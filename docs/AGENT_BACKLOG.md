@@ -41,6 +41,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#017](#017-fp-001-card-script-parser-read-only-ast) | LOW | done | ~3h | FP-001 slice 1: read-only Forge card-script parser |
 | [#018](#018-fp-001-deck-library-static-analysis-cli) | LOW | done | ~2-4h | FP-001 slice 2: deck-library static-analysis CLI |
 | [#019](#019-fp-001-oracle-text-vs-dsl-drift-detector) | LOW | done | ~1-2h | FP-001 slice 3: oracle-text vs Forge DSL drift detector |
+| [#020](#020-data-driven-bucketing-for-oracle_diff) | LOW | done | ~1h | Data-driven bucketing for oracle_diff (JSON rules) |
 
 ---
 
@@ -937,6 +938,35 @@ the contract. Confirmed working against the real Forge install
   file. The current buckets are hardcoded; surfacing them as
   data lets a maintainer add new patterns (next errata sweep)
   without code changes.
+
+---
+
+## #020 — Data-driven bucketing for oracle_diff
+
+- **status**: `done` (commit `<this commit>` — bucket rules moved
+  from hardcoded lambdas in the CLI script to JSON at
+  ``src/commander_builder/data/oracle_diff_buckets.json``; module
+  helpers ``load_diff_buckets`` + ``categorize_diff`` +
+  ``DiffBucket`` dataclass live in ``oracle_diff.py``; CLI gains
+  ``--bucket-rules`` override.)
+- **priority**: LOW (logged as ``new_during_work`` under #019)
+- **scope**: ~1h (actual: ~30 min)
+- **why**: maintainers can add new errata-pattern buckets without
+  touching code. Next WotC errata sweep just gets a new row in
+  the JSON file.
+- **rule schema** (per bucket):
+  - ``label`` (required) — what the bucket is called in reports
+  - ``scryfall_contains`` — substring required in Scryfall text
+  - ``scryfall_not_contains`` — substring forbidden in Scryfall text
+  - ``forge_contains`` — substring required in Forge text
+  - ``forge_not_contains`` — substring forbidden in Forge text
+  - All keys are AND'd; match is case-insensitive substring.
+- **safety**: a rule with NO constraints returns False (would
+  otherwise silently swallow every diff); the loader rejects a
+  rule with no ``label``.
+- **acceptance**: ``load_diff_buckets()`` reads the shipped JSON;
+  the CLI's ``--by-pattern`` uses the loaded rules; 8 new tests
+  cover loader + matcher + ordering + safety. Suite green at 1341.
 
 ---
 
