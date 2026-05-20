@@ -27,7 +27,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#003](#003-image-cache-retry-on-transient-failure) | LOW | done | ~30 min | Image cache: one retry on transient Scryfall failures |
 | [#004](#004-status-md-stale-overnight-session-block) | LOW | done | ~15 min | STATUS.md: prune stale "2026-05-14/15 overnight session" block |
 | [#005](#005-add-github-actions-ci-workflow) | HIGH | done | ~1.5h | Add `.github/workflows/test.yml` running `pytest --run-slow` |
-| [#006](#006-pre-commit-secret-scan-hook) | MEDIUM | open | ~1h | Pre-commit hook scanning diff for secrets |
+| [#006](#006-pre-commit-secret-scan-hook) | MEDIUM | done | ~1h | Pre-commit hook scanning diff for secrets |
 | [#007](#007-app-js-extract-audit-streaming-module) | MEDIUM | done | ~1h | app.js: extract audit-streaming SSE cluster (lines ~997-1223) |
 | [#008](#008-app-js-extract-deck-health-tiles--salt-banner) | MEDIUM | done | ~1h | app.js: extract deck-health tiles + salt-warning banner |
 | [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | done | ~1h | app.js: extract average-deck preview renderer |
@@ -264,29 +264,74 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #006 — Pre-commit secret scan hook
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — pure-stdlib scanner at
+  ``scripts/pre_commit_secret_scan.py``, two install paths
+  (``scripts/install_git_hooks.py`` shim OR ``pre-commit`` framework
+  via ``.pre-commit-config.yaml``), 25 unit tests, end-to-end smoke
+  verified by staging a fake ``sk-ant-…`` and observing the hook
+  abort the commit with exit 1)
 - **priority**: MEDIUM
-- **scope**: ~1h
+- **scope**: ~1h (actual: ~50 min including the Python 3.14
+  ``@dataclass`` import quirk fix in the test fixture)
 - **files**:
-  - `.pre-commit-config.yaml` (NEW)
-  - `docs/SECRETS.md` (append a "Pre-commit hook" section)
+  - `scripts/pre_commit_secret_scan.py` (NEW — the scanner)
+  - `scripts/install_git_hooks.py` (NEW — no-framework installer)
+  - `.pre-commit-config.yaml` (NEW — framework integration)
+  - `.secrets-baseline` (NEW — empty starter baseline with docs)
+  - `tests/test_pre_commit_secret_scan.py` (NEW — 25 tests)
+  - `docs/SECRETS.md` (appended a "Pre-commit hook" section)
 - **context**: this is a public repo and `ANTHROPIC_API_KEY` lives
   outside it by convention. Today the only guard against leaking
   secrets is the dev manually grepping the diff before each commit
   ("Pre-commit secret scan clean across all commits" appears in
   multiple recent commit messages — that's a human ritual, not an
   enforced check). One slip and a key is in git history forever.
-- **implementation_notes**:
-  - Use `detect-secrets` or `gitleaks` via `pre-commit`.
-  - Initial baseline: scan the whole repo once, generate a
-    `.secrets.baseline` listing known false positives.
-  - Hook should run on `git commit` and abort if new secrets land.
+- **implementation_notes** (post-hoc):
+  - Chose **pure stdlib** over ``detect-secrets`` / ``gitleaks``.
+    Rationale: zero install friction for new contributors (the hook
+    works the moment they ``python scripts/install_git_hooks.py``);
+    the repo's secret surface is small and well-understood; regex
+    patterns sized for the actual rotation horror stories
+    (``KEY=value`` shapes), not generic high-entropy chasing.
+  - Patterns cover Anthropic / OpenAI / GitHub PAT / AWS / Bearer
+    (>=40 char value) / PEM private-key armor headers.
+  - Two install paths so the user can pick:
+    - ``scripts/install_git_hooks.py`` writes a ``.git/hooks/pre-commit``
+      shim — zero deps.
+    - ``.pre-commit-config.yaml`` wires the same scanner via a
+      ``local`` hook entry for users who already run ``pre-commit``.
+  - Three opt-out layers (defense-in-depth on false positives):
+    1. Built-in placeholder filter (``...``, ``YOUR_``, ``<token>``,
+       etc. on the same line → skip)
+    2. Inline ``# pragma: secret-scan-allow`` for one-off fixtures
+    3. ``.secrets-baseline`` for repeating false positives via
+       ``<path>:<line>:<pattern>`` fingerprints
 - **acceptance_criteria**:
-  - [ ] `pre-commit install` adds the hook.
-  - [ ] A commit attempting to add `ANTHROPIC_API_KEY=sk-...` to
-    a tracked file is blocked.
-  - [ ] The baseline doesn't include any actual live secrets
-    (false positives only).
+  - [x] ``pre-commit install`` adds the hook (via the shipped
+    ``.pre-commit-config.yaml``); equivalent ``python
+    scripts/install_git_hooks.py`` install also supplied for users
+    without the framework.
+  - [x] A commit attempting to add ``ANTHROPIC_API_KEY=sk-ant-api03-…``
+    to a tracked file is blocked (end-to-end smoke run logged the
+    hook firing with exit 1 on a 95-char fake key).
+  - [x] The baseline ships empty; ``git ls-files | xargs python
+    scripts/pre_commit_secret_scan.py`` is clean across all 153
+    committed files in the repo today.
+  - [x] 25 unit tests cover pattern catches, placeholder ignores,
+    allowlist suppression, inline opt-out, binary skip, missing
+    file tolerance, and the regression-flavor case that
+    ``docs/SECRETS.md`` itself doesn't trip the scanner.
+
+## new_during_work
+
+- **Python 3.14 + ``@dataclass`` interaction caveat**: when a test
+  uses ``importlib.util.spec_from_file_location`` to import a script
+  by path, the resulting module must be registered in ``sys.modules``
+  *before* ``exec_module`` runs — otherwise ``@dataclass`` decoration
+  raises ``AttributeError: 'NoneType' object has no attribute
+  '__dict__'`` (the decorator does a ``sys.modules.get(cls.__module__)``
+  to enumerate type aliases). Fixed in the test fixture; worth
+  noting as a pattern for future tests that load scripts the same way.
 
 ---
 

@@ -1,0 +1,28 @@
+# Pre-commit framework configuration.
+#
+# Usage:
+#   pip install pre-commit
+#   pre-commit install
+#
+# After install, every `git commit` runs the hooks below on staged files.
+#
+# We use a `local` hook (instead of a third-party `detect-secrets` /
+# `gitleaks` repo) so the scanner ships with this repo, has zero external
+# dependencies, and runs identically whether or not pre-commit is the
+# orchestrator (see `scripts/install_git_hooks.py` for the no-framework
+# install path).
+#
+# Pattern updates land in `scripts/pre_commit_secret_scan.py`.
+
+repos:
+  - repo: local
+    hooks:
+      - id: commander-secret-scan
+        name: Scan staged files for secrets
+        entry: python scripts/pre_commit_secret_scan.py
+        language: system
+        # Skip generated / binary files. Mirror the in-script skip list
+        # so devs can override here without editing the script.
+        exclude: '\.(zip|gz|tar|whl|pyc|so|dll|exe|jar|class|png|jpg|jpeg|gif|webp|ico|pdf|lock|min\.js|min\.css|woff2?|ttf)$'
+        # The hook receives staged file paths; pre-commit handles staging.
+        pass_filenames: true
