@@ -99,15 +99,23 @@ def extract_features(it: Iteration) -> Optional[FeatureRow]:
     new = sim.get("new_stats", {})
     manifest = it.audit_manifest or {}
 
-    total = sim.get("total_games", 0)
-    draws = sim.get("draws", 0)
+    # The A/B sim writer (forge_runner.ABResult.to_dict) uses wins_a/wins_b/
+    # games. An earlier schema used old_stats/new_stats/total_games/draws.
+    # Read the real schema first, fall back to the legacy keys, so feature
+    # rows aren't silently zeroed (which they were before this fix).
+    total = int(sim.get("total_games", sim.get("games", 0)) or 0)
+    old_wins = int(sim.get("wins_a", old.get("wins", 0)) or 0)
+    new_wins = int(sim.get("wins_b", new.get("wins", 0)) or 0)
+    draws = int(sim.get("draws", max(0, total - old_wins - new_wins)) or 0)
     decisive = max(0, total - draws)
     draw_rate = draws / total if total else 0.0
 
-    old_wins = old.get("wins", 0)
-    new_wins = new.get("wins", 0)
-    win_rate_old = old_wins / decisive if decisive else 0.0
-    win_rate_new = new_wins / decisive if decisive else 0.0
+    # Prefer the per-iteration authoritative columns (the analyst computed and
+    # persisted these next to the verdict) when present; else derive.
+    win_rate_old = (it.win_rate_old if it.win_rate_old is not None
+                    else (old_wins / decisive if decisive else 0.0))
+    win_rate_new = (it.win_rate_new if it.win_rate_new is not None
+                    else (new_wins / decisive if decisive else 0.0))
 
     cards_added = len(manifest.get("added", []))
     cards_removed = len(manifest.get("removed", []))
