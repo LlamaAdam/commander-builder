@@ -32,6 +32,7 @@ from ..knowledge_log import (
     iterations_for_deck,
     pricing_series_for_deck,
     recent_iterations,
+    set_milestone,
     update_verdict,
     verdict_breakdown_for_deck,
 )
@@ -281,6 +282,50 @@ def make_dashboard_blueprint(
             "ok": True,
             "iteration_id": iteration_id,
             "verdict": verdict,
+        })
+
+    @bp.route("/api/iterations/<int:iteration_id>/milestone", methods=["PATCH"])
+    def update_iteration_milestone(iteration_id: int):
+        """Tag (or clear) an iteration with a milestone label
+        (AGENT_BACKLOG #012). Mirrors the verdict PATCH endpoint
+        shape so the frontend's PATCH handlers can share code.
+
+        Body: JSON with ``milestone`` (string or null/empty to
+        clear). Max 64 chars; longer values truncate silently.
+
+        Returns ``{ok: true, iteration_id, milestone}`` on success
+        (with ``milestone`` echoing the normalized stored value —
+        useful for the UI to display the clipped form when the
+        user pasted too much).
+
+        Errors:
+          400  milestone wrong type (must be string or null)
+          500  sqlite update failed (rare; surfaced for debugging)
+
+        Idempotent. Unknown iteration_id returns 200 silently —
+        same fail-quiet contract as ``update_verdict``.
+        """
+        body = request.get_json(silent=True) or {}
+        if "milestone" not in body:
+            return jsonify({"error": "milestone field required"}), 400
+        label = body.get("milestone")
+        if label is not None and not isinstance(label, str):
+            return jsonify({
+                "error": "milestone must be a string or null",
+            }), 400
+        try:
+            set_milestone(iteration_id, label, db_path=knowledge_db)
+        except Exception as exc:  # pragma: no cover - sqlite errors
+            return jsonify({"error": str(exc)}), 500
+        # Echo the normalized stored value (truncated, stripped).
+        if label is None or not label.strip():
+            stored = None
+        else:
+            stored = label.strip()[:64]
+        return jsonify({
+            "ok": True,
+            "iteration_id": iteration_id,
+            "milestone": stored,
         })
 
     @bp.route("/api/verdict_breakdown")

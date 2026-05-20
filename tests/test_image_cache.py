@@ -285,6 +285,258 @@ def test_card_image_route_returns_502_on_transient_failure(
     assert resp.status_code == 502
 
 
+# ---------------------------------------------------------------------------
+# Retry behavior on transient failures (AGENT_BACKLOG #003)
+# ---------------------------------------------------------------------------
+
+def test_default_http_get_retries_once_on_5xx_then_succeeds(monkeypatch):
+    """A single 503 followed by a 200 returns the bytes. The retry
+    pass-through means an interactive ``<img>`` request masks
+    momentary Scryfall flakiness instead of bubbling up as a 502."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+    calls = [0]
+
+    def _fake_once(url, timeout=20.0):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise urllib.error.HTTPError(
+                url, 503, "Service Unavailable", hdrs=None, fp=None,
+            )
+        return b"recovered-bytes"
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    data = _image_cache._default_http_get("https://scryfall.example/x")
+    assert data == b"recovered-bytes"
+    assert calls[0] == 2
+
+
+def test_default_http_get_does_not_retry_on_404(monkeypatch):
+    """404 means the card legitimately doesn't exist. Retrying would
+    waste a round-trip and the second attempt would 404 too. Surface
+    the 404 immediately."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+    calls = [0]
+
+    def _fake_once(url, timeout=20.0):
+        calls[0] += 1
+        raise urllib.error.HTTPError(
+            url, 404, "Not Found", hdrs=None, fp=None,
+        )
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _image_cache._default_http_get("https://scryfall.example/x")
+    assert excinfo.value.code == 404
+    assert calls[0] == 1  # NO retry
+
+
+def test_default_http_get_retries_once_on_url_error_then_succeeds(monkeypatch):
+    """URLError (DNS / connection reset / socket timeout) is transient.
+    One retry, then propagate if the second attempt also fails."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+    calls = [0]
+
+    def _fake_once(url, timeout=20.0):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise urllib.error.URLError("connection reset")
+        return b"second-attempt"
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    assert _image_cache._default_http_get("https://x") == b"second-attempt"
+    assert calls[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# Disk-quota eviction (AGENT_BACKLOG #002)
+# ---------------------------------------------------------------------------
+
+def test_enforce_quota_no_op_when_under_quota(tmp_path):
+    """If the cache total is below quota, no files get deleted —
+    eviction is a hot-path call from ``fetch_and_cache`` and must
+    be O(stat-and-bail) in the common case."""
+    from commander_builder.web._image_cache import _enforce_quota
+    images = tmp_path / "images" / "small"
+    images.mkdir(parents=True)
+    (images / "a.jpg").write_bytes(b"x" * 100)
+    (images / "b.jpg").write_bytes(b"y" * 100)
+    # Quota 1000 bytes; current 200. No eviction.
+    deleted = _enforce_quota(root=tmp_path, quota_bytes=1000)
+    assert deleted == 0
+    assert (images / "a.jpg").exists()
+    assert (images / "b.jpg").exists()
+
+
+def test_enforce_quota_evicts_oldest_files_first(tmp_path):
+    """Over-quota → delete oldest-mtime files until under quota.
+    The eviction is LRU-by-mtime: oldest goes first."""
+    import os
+    import time as _time
+    from commander_builder.web._image_cache import _enforce_quota
+    images = tmp_path / "images" / "small"
+    images.mkdir(parents=True)
+    # Three 400-byte files; quota 500 → must delete 2.
+    paths = []
+    for i, name in enumerate(["old.jpg", "mid.jpg", "new.jpg"]):
+        p = images / name
+        p.write_bytes(b"x" * 400)
+        # Force mtime ordering: old < mid < new.
+        os.utime(p, (1_000_000 + i, 1_000_000 + i))
+        paths.append(p)
+    deleted = _enforce_quota(root=tmp_path, quota_bytes=500)
+    assert deleted == 2
+    # Newest survives.
+    assert (images / "new.jpg").exists()
+    assert not (images / "old.jpg").exists()
+    assert not (images / "mid.jpg").exists()
+
+
+def test_enforce_quota_skips_tmp_files(tmp_path):
+    """In-flight ``.tmp`` partial writes (from a concurrent
+    fetch_and_cache) must not be deleted. They rename atomically
+    when done; deleting one mid-write would corrupt the final read."""
+    from commander_builder.web._image_cache import _enforce_quota
+    images = tmp_path / "images" / "small"
+    images.mkdir(parents=True)
+    (images / "real.jpg").write_bytes(b"x" * 1000)
+    (images / "inflight.jpg.tmp").write_bytes(b"y" * 1000)
+    # Over quota; only the real file is eligible.
+    deleted = _enforce_quota(root=tmp_path, quota_bytes=500)
+    assert deleted == 1
+    assert not (images / "real.jpg").exists()
+    assert (images / "inflight.jpg.tmp").exists()
+
+
+def test_enforce_quota_walks_recursively_across_size_subdirs(tmp_path):
+    """Cache layout puts files under ``images/<size>/<slug>``;
+    eviction must walk all size subdirs, not just one."""
+    import os
+    from commander_builder.web._image_cache import _enforce_quota
+    small = tmp_path / "images" / "small"
+    large = tmp_path / "images" / "large"
+    small.mkdir(parents=True)
+    large.mkdir(parents=True)
+    (small / "a.jpg").write_bytes(b"x" * 500)
+    (large / "b.jpg").write_bytes(b"y" * 500)
+    os.utime(small / "a.jpg", (1_000_000, 1_000_000))   # older
+    os.utime(large / "b.jpg", (2_000_000, 2_000_000))   # newer
+    # Quota 600 → delete one (the older small one).
+    deleted = _enforce_quota(root=tmp_path, quota_bytes=600)
+    assert deleted == 1
+    assert not (small / "a.jpg").exists()
+    assert (large / "b.jpg").exists()
+
+
+def test_enforce_quota_no_op_when_images_dir_missing(tmp_path):
+    """First-time cache use — no ``images/`` directory exists yet.
+    Eviction is a clean no-op, not a crash."""
+    from commander_builder.web._image_cache import _enforce_quota
+    deleted = _enforce_quota(root=tmp_path, quota_bytes=100)
+    assert deleted == 0
+
+
+def test_fetch_and_cache_runs_eviction_after_write(tmp_path):
+    """The default fetch path enforces quota so the cache stays
+    bounded without any explicit eviction call from the caller."""
+    from commander_builder.web._image_cache import fetch_and_cache
+    # Pre-fill cache near quota.
+    images = tmp_path / "images" / "small"
+    images.mkdir(parents=True)
+    import os
+    (images / "old.jpg").write_bytes(b"x" * 800)
+    os.utime(images / "old.jpg", (1_000_000, 1_000_000))
+    # Stub the env var to a small quota.
+    monkey_env = {"MTG_IMAGE_CACHE_QUOTA_BYTES": "1000"}
+    with _MonkeyEnv(monkey_env):
+        fetch_and_cache(
+            "New Card", "small",
+            root=tmp_path,
+            http_get=lambda url: b"y" * 500,  # pushes total to 1300
+        )
+    # Old file was evicted (1300 > 1000, oldest first).
+    assert not (images / "old.jpg").exists()
+    # New file landed.
+    assert (images / "new_card.jpg").exists()
+
+
+def test_fetch_and_cache_enforce_quota_false_skips_eviction(tmp_path):
+    """Tests / batch loaders that want raw write behavior pass
+    ``enforce_quota=False``."""
+    from commander_builder.web._image_cache import fetch_and_cache
+    images = tmp_path / "images" / "small"
+    images.mkdir(parents=True)
+    (images / "old.jpg").write_bytes(b"x" * 800)
+    with _MonkeyEnv({"MTG_IMAGE_CACHE_QUOTA_BYTES": "100"}):
+        fetch_and_cache(
+            "New Card", "small",
+            root=tmp_path,
+            http_get=lambda url: b"y" * 500,
+            enforce_quota=False,
+        )
+    # Both files still present despite tiny quota — eviction skipped.
+    assert (images / "old.jpg").exists()
+    assert (images / "new_card.jpg").exists()
+
+
+def test_quota_bytes_env_override(monkeypatch):
+    """``MTG_IMAGE_CACHE_QUOTA_BYTES`` env var overrides the
+    default constant. Malformed values fall back gracefully."""
+    from commander_builder.web import _image_cache
+    monkeypatch.setenv("MTG_IMAGE_CACHE_QUOTA_BYTES", "12345")
+    assert _image_cache._quota_bytes() == 12345
+    monkeypatch.setenv("MTG_IMAGE_CACHE_QUOTA_BYTES", "not-an-int")
+    assert _image_cache._quota_bytes() == _image_cache._DEFAULT_QUOTA_BYTES
+    monkeypatch.delenv("MTG_IMAGE_CACHE_QUOTA_BYTES")
+    assert _image_cache._quota_bytes() == _image_cache._DEFAULT_QUOTA_BYTES
+
+
+class _MonkeyEnv:
+    """Minimal env-var context-manager for the eviction tests that
+    can't use the pytest ``monkeypatch`` fixture (no-fixture pytest
+    helpers)."""
+
+    def __init__(self, env: dict[str, str]) -> None:
+        self._env = env
+        self._original: dict[str, str | None] = {}
+
+    def __enter__(self):
+        import os
+        for k, v in self._env.items():
+            self._original[k] = os.environ.get(k)
+            os.environ[k] = v
+        return self
+
+    def __exit__(self, *_exc):
+        import os
+        for k, original in self._original.items():
+            if original is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = original
+
+
+def test_default_http_get_propagates_after_retry_exhausted(monkeypatch):
+    """Two consecutive transients surface as the final exception
+    (the Flask route then maps to 502). One retry is the cap; we
+    don't compound backoffs and stall the user."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+
+    def _fake_once(url, timeout=20.0):
+        raise urllib.error.URLError("persistent fault")
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    with pytest.raises(urllib.error.URLError):
+        _image_cache._default_http_get("https://x")
+
+
 def test_card_image_route_handles_double_faced_card_name(
     client_with_image_cache, monkeypatch,
 ):

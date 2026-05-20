@@ -813,6 +813,19 @@ def _advise_steps(
     role_counts = count_deck_roles(main_cards)
     recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
 
+    def _safe_ci_lookup(card_name: str) -> bool:
+        """Return True iff Scryfall resolves ``card_name`` to a real
+        card (dict has a ``color_identity`` key, signaling it came
+        from real Scryfall data rather than a test stub that omitted
+        the field). Network errors are caught — better to skip the
+        CI filter than crash the audit on a Scryfall blip."""
+        try:
+            from .scryfall_client import lookup_card as _lookup
+            card = _lookup(card_name)
+        except Exception:  # noqa: BLE001
+            return False
+        return isinstance(card, dict) and "color_identity" in card
+
     # Color-identity post-filter: strip add recs whose color identity
     # isn't a subset of the commander's. Mirrors the auto-curator's
     # enforce_color_identity defensive filter — EDHREC heuristic,
@@ -820,12 +833,31 @@ def _advise_steps(
     # picks (e.g. multi-color tribal Goblin support on a mono-red
     # Krenko deck) that would produce an illegal proposed deck.
     # Cut recs are pass-through (always cards the user already runs).
-    # None CI = unresolvable commander; the filter skips so we don't
-    # nuke every add against a phantom colorless deck.
+    #
+    # Disambiguate "deck is colorless" from "couldn't resolve
+    # commander": ``color_identity_for_commander`` returns "" for
+    # both cases. We need to distinguish so a test-fixture commander
+    # like "Test Commander" (not in Scryfall) doesn't reject every
+    # add against a phantom colorless CI. Same disambiguation
+    # pattern as ``proposer.auto_propose`` (commit 962776a). Caught
+    # on the 2026-05-19 master CI run where my autouse fixture
+    # exposed this latent bug — without the autouse, the production
+    # heuristic was hitting real EDHREC and accidentally masking
+    # the issue because real cards have populated color_identity
+    # fields. The test fixtures explicitly don't.
     try:
         from .scryfall_client import color_identity_for_commander
         from ._proposer_filters import enforce_color_identity
-        deck_ci = color_identity_for_commander(deck_path)
+        # ``_parse_commander_names_from_dck`` is imported at module
+        # top (line 67); reuse it rather than shadowing.
+        commander_names = _parse_commander_names_from_dck(deck_path)
+        commander_resolved = bool(commander_names) and any(
+            _safe_ci_lookup(name) for name in commander_names
+        )
+        deck_ci = (
+            color_identity_for_commander(deck_path)
+            if commander_resolved else None
+        )
     except Exception:  # noqa: BLE001 -- defensive; better to skip filter
         deck_ci = None  # than crash the audit on a Scryfall blip.
     if deck_ci is not None:

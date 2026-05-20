@@ -1,0 +1,41 @@
+{
+  "$comment": "Bucket rules for the oracle-text drift detector (AGENT_BACKLOG #019 / #020). Each entry classifies a 'differ' result by substring presence/absence in the normalized Forge/Scryfall texts. The detector walks the list in order and assigns the first matching label; an unmatched diff falls into 'other'.",
+  "$schema_version": 1,
+  "buckets": [
+    {
+      "label": "this-land errata",
+      "scryfall_contains": "this land",
+      "forge_not_contains": "this land"
+    },
+    {
+      "label": "this-creature errata",
+      "scryfall_contains": "this creature",
+      "forge_not_contains": "this creature"
+    },
+    {
+      "label": "this-artifact errata",
+      "scryfall_contains": "this artifact",
+      "forge_not_contains": "this artifact"
+    },
+    {
+      "label": "this-enchantment errata",
+      "scryfall_contains": "this enchantment",
+      "forge_not_contains": "this enchantment"
+    },
+    {
+      "label": "this-card errata",
+      "scryfall_contains": "this card",
+      "forge_not_contains": "this card"
+    },
+    {
+      "label": "this-token errata",
+      "scryfall_contains": "this token",
+      "forge_not_contains": "this token"
+    },
+    {
+      "label": "this-permanent errata",
+      "scryfall_contains": "this permanent",
+      "forge_not_contains": "this permanent"
+    }
+  ]
+}

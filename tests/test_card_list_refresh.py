@@ -17,7 +17,9 @@ import pytest
 from commander_builder._card_list_refresh import (
     diff_card_lists,
     fetch_mdfc_lands,
+    fetch_self_mill_candidates,
     parse_mdfc_lands_from_response,
+    parse_self_mill_from_response,
 )
 
 
@@ -286,3 +288,137 @@ def test_fetch_mdfc_lands_stops_on_missing_next_page():
     # First call returns has_more=True without next_page → second
     # iteration sees ``url=None`` from .get() and exits.
     assert calls[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# parse_self_mill_from_response (AGENT_BACKLOG #010)
+# ---------------------------------------------------------------------------
+
+def _card(name: str, oracle: str, faces: list[dict] | None = None) -> dict:
+    out = {"name": name, "oracle_text": oracle}
+    if faces is not None:
+        out["card_faces"] = faces
+        out["oracle_text"] = ""
+    return out
+
+
+def test_parse_self_mill_finds_motion_pattern():
+    """Hermit Druid / Satyr Wayfinder style: "reveal cards from your
+    library ... put rest into your graveyard". Catches the canonical
+    self-mill enabler shape."""
+    payload = {"data": [_card(
+        "Satyr Wayfinder",
+        "When Satyr Wayfinder enters, reveal the top four cards of "
+        "your library. You may put a land card from among them into "
+        "your hand. Put the rest into your graveyard.",
+    )]}
+    assert parse_self_mill_from_response(payload) == {"satyr wayfinder"}
+
+
+def test_parse_self_mill_finds_explicit_mill_with_you():
+    """Stitcher's Supplier shape: "mill three cards" attached to a
+    self trigger (no opponent targeting)."""
+    payload = {"data": [_card(
+        "Stitcher's Supplier",
+        "When Stitcher's Supplier enters or dies, mill three cards.",
+    )]}
+    assert parse_self_mill_from_response(payload) == {"stitcher's supplier"}
+
+
+def test_parse_self_mill_excludes_opponent_targeted_mill():
+    """Mind Funeral / Glimpse the Unthinkable target opponents.
+    Must not appear as self-mill candidates even though the oracle
+    has ``mill`` and ``library`` in it."""
+    payload = {"data": [_card(
+        "Mind Funeral",
+        "Target opponent mills cards from the top of their library "
+        "until four lands are milled this way.",
+    )]}
+    assert parse_self_mill_from_response(payload) == set()
+
+
+def test_parse_self_mill_excludes_target_player_phrasing():
+    """``target player`` is also opponent-targeting (the target
+    chooses)."""
+    payload = {"data": [_card(
+        "Some Mill Spell",
+        "Target player mills 10 cards from their library.",
+    )]}
+    assert parse_self_mill_from_response(payload) == set()
+
+
+def test_parse_self_mill_excludes_each_opponent_mill():
+    """``each opponent`` mass-targets all opponents (Maddening Cacophony,
+    similar). Not a self-mill enabler."""
+    payload = {"data": [_card(
+        "Maddening Cacophony",
+        "Each opponent mills half their library, rounded up.",
+    )]}
+    assert parse_self_mill_from_response(payload) == set()
+
+
+def test_parse_self_mill_excludes_each_player_symmetric_mill():
+    """Symmetrical mill (everyone mills, like Mesmeric Trance-ish
+    effects). Not a SELF-mill enabler — designed as a sideways
+    attack."""
+    payload = {"data": [_card(
+        "Symmetrical Mill Card",
+        "At the beginning of your upkeep, each player mills 2 cards.",
+    )]}
+    assert parse_self_mill_from_response(payload) == set()
+
+
+def test_parse_self_mill_skips_cards_without_mill_motion():
+    """Random card with ``your library`` (e.g. tutor) but no mill
+    motion shouldn't show up."""
+    payload = {"data": [_card(
+        "Demonic Tutor",
+        "Search your library for a card, put that card into your "
+        "hand, then shuffle.",
+    )]}
+    assert parse_self_mill_from_response(payload) == set()
+
+
+def test_parse_self_mill_handles_dfc_faces():
+    """DFCs have empty top-level oracle_text; walks face oracles."""
+    payload = {"data": [_card(
+        "Some DFC // Other Face",
+        "",
+        faces=[
+            {"oracle_text": (
+                "Reveal cards from the top of your library until "
+                "a creature card is revealed. Put it into your hand "
+                "and the rest into your graveyard."
+            )},
+            {"oracle_text": "{T}: Add {G}."},
+        ],
+    )]}
+    assert parse_self_mill_from_response(payload) == {"some dfc"}
+
+
+def test_parse_self_mill_strips_dfc_back_face_from_name():
+    """Front-face-only naming convention same as parse_mdfc_lands."""
+    payload = {"data": [_card(
+        "Foo // Bar",
+        "Reveal cards from your library and put the rest into your "
+        "graveyard.",
+    )]}
+    assert parse_self_mill_from_response(payload) == {"foo"}
+
+
+def test_fetch_self_mill_candidates_paginates(monkeypatch):
+    """Follows ``has_more`` + ``next_page`` like ``fetch_mdfc_lands``."""
+    responses = iter([
+        {"data": [_card("Stitcher's Supplier", "mill three cards. You mill.")],
+         "has_more": True, "next_page": "page2"},
+        {"data": [_card("Hermit Druid",
+                        "Reveal cards from your library and put the rest into your graveyard.")],
+         "has_more": False},
+    ])
+
+    def _http(url):
+        return next(responses)
+
+    out = fetch_self_mill_candidates(http_get=_http)
+    assert "stitcher's supplier" in out
+    assert "hermit druid" in out

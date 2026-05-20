@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from commander_builder._card_list_refresh import (  # noqa: E402
     diff_card_lists,
     fetch_mdfc_lands,
+    fetch_self_mill_candidates,
 )
 from commander_builder.deck_health import (  # noqa: E402
     _MDFC_LANDS,
@@ -88,11 +89,22 @@ def _refresh_mdfc(as_json: bool) -> dict:
     return diff
 
 
+def _refresh_self_mill(as_json: bool) -> dict:
+    """Scryfall query for self-mill candidates + post-filter to
+    exclude opponent-mill. The filter is conservative: a noisy
+    candidate list (maintainer reviews) beats missing genuine
+    self-mill cards. AGENT_BACKLOG #010."""
+    fresh = fetch_self_mill_candidates()
+    diff = diff_card_lists(current=_SELF_MILL_ENABLERS, fresh=fresh)
+    if not as_json:
+        _print_diff("_SELF_MILL_ENABLERS", diff)
+    return diff
+
+
 def _manual_only(label: str, current: frozenset[str], as_json: bool) -> dict:
     """Categories that can't be cleanly automated — wincon protection
-    and self-mill enablers have curation nuance (combo-turn intent,
-    opponent vs self mill semantics) that's easier to express via
-    human review of the existing list than via regex."""
+    has curation nuance (combo-turn intent) that's easier to express
+    via human review of the existing list than via regex."""
     diff = {
         "stale": [],
         "candidates": [],
@@ -133,9 +145,7 @@ def main(argv: list[str] | None = None) -> int:
                 "_WINCON_PROTECTION", _WINCON_PROTECTION, args.json,
             )
         elif cat == "self-mill":
-            reports["self-mill"] = _manual_only(
-                "_SELF_MILL_ENABLERS", _SELF_MILL_ENABLERS, args.json,
-            )
+            reports["self-mill"] = _refresh_self_mill(args.json)
 
     if args.json:
         print(json.dumps(reports, indent=2, sort_keys=True))

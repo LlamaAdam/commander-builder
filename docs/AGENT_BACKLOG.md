@@ -23,22 +23,25 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | ID | Priority | Status | Scope | Title |
 |---|---|---|---|---|
 | [#001](#001-fix-snapsfoundry-typo-in-handoff-doc) | LOW | done | ~5 min | Fix `snapsfoundry` typo in HANDOFF_2026-05-19.md |
-| [#002](#002-image-cache-eviction-policy) | MEDIUM | open | ~2h | Image cache: disk-quota eviction policy |
-| [#003](#003-image-cache-retry-on-transient-failure) | LOW | open | ~30 min | Image cache: one retry on transient Scryfall failures |
-| [#004](#004-status-md-stale-overnight-session-block) | LOW | open | ~15 min | STATUS.md: prune stale "2026-05-14/15 overnight session" block |
+| [#002](#002-image-cache-eviction-policy) | MEDIUM | done | ~2h | Image cache: disk-quota eviction policy |
+| [#003](#003-image-cache-retry-on-transient-failure) | LOW | done | ~30 min | Image cache: one retry on transient Scryfall failures |
+| [#004](#004-status-md-stale-overnight-session-block) | LOW | done | ~15 min | STATUS.md: prune stale "2026-05-14/15 overnight session" block |
 | [#005](#005-add-github-actions-ci-workflow) | HIGH | done | ~1.5h | Add `.github/workflows/test.yml` running `pytest --run-slow` |
-| [#006](#006-pre-commit-secret-scan-hook) | MEDIUM | open | ~1h | Pre-commit hook scanning diff for secrets |
-| [#007](#007-app-js-extract-audit-streaming-module) | MEDIUM | open | ~1h | app.js: extract audit-streaming SSE cluster (lines ~997-1223) |
-| [#008](#008-app-js-extract-deck-health-tiles--salt-banner) | MEDIUM | open | ~1h | app.js: extract deck-health tiles + salt-warning banner |
-| [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | open | ~1h | app.js: extract average-deck preview renderer |
-| [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | open | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
+| [#006](#006-pre-commit-secret-scan-hook) | MEDIUM | done | ~1h | Pre-commit hook scanning diff for secrets |
+| [#007](#007-app-js-extract-audit-streaming-module) | MEDIUM | done | ~1h | app.js: extract audit-streaming SSE cluster (lines ~997-1223) |
+| [#008](#008-app-js-extract-deck-health-tiles--salt-banner) | MEDIUM | done | ~1h | app.js: extract deck-health tiles + salt-warning banner |
+| [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | done | ~1h | app.js: extract average-deck preview renderer |
+| [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | done | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
 | [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
-| [#012](#012-knowledge-log-milestone-tag) | LOW | open | ~2h | knowledge_log: `milestone` column + `commander-history --milestone` flag |
+| [#012](#012-knowledge-log-milestone-tag) | LOW | done | ~2h | knowledge_log: `milestone` column + PATCH endpoint (backend only; UI flag deferred) |
 | [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
 | [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | open | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
 | [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | done | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
 | [#017](#017-fp-001-card-script-parser-read-only-ast) | LOW | done | ~3h | FP-001 slice 1: read-only Forge card-script parser |
+| [#018](#018-fp-001-deck-library-static-analysis-cli) | LOW | done | ~2-4h | FP-001 slice 2: deck-library static-analysis CLI |
+| [#019](#019-fp-001-oracle-text-vs-dsl-drift-detector) | LOW | done | ~1-2h | FP-001 slice 3: oracle-text vs Forge DSL drift detector |
+| [#020](#020-data-driven-bucketing-for-oracle_diff) | LOW | done | ~1h | Data-driven bucketing for oracle_diff (JSON rules) |
 
 ---
 
@@ -96,9 +99,15 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 
 ## #002 — Image cache eviction policy
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — ``_enforce_quota``
+  LRU-by-mtime evicts oldest files when ``fetch_and_cache`` would
+  push the cache over ``MTG_IMAGE_CACHE_QUOTA_BYTES`` (default
+  500 MB). Hot-path-safe: stat-and-bail when under quota.)
 - **priority**: MEDIUM
-- **scope**: ~2h
+- **scope**: ~2h (actual: ~25 min — simpler than the spec's
+  "sample mod 16 to skip the walk" because the typical cache stays
+  well under quota and the bail-early path makes per-fetch
+  overhead negligible)
 - **files**:
   - `src/commander_builder/web/_image_cache.py` (add `enforce_quota`
     helper + wire into `fetch_and_cache`)
@@ -131,9 +140,12 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 
 ## #003 — Image cache retry on transient failure
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` —
+  ``_default_http_get`` wraps ``_http_get_once`` with one retry on
+  URLError + 5xx, 500ms backoff. 404 skips the retry to avoid
+  wasted round-trips.)
 - **priority**: LOW
-- **scope**: ~30 min
+- **scope**: ~30 min (actual: ~15 min)
 - **files**:
   - `src/commander_builder/web/_image_cache.py` (wrap
     `_default_http_get` with one retry on `URLError` / 5xx)
@@ -160,9 +172,12 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 
 ## #004 — STATUS.md stale "2026-05-14/15 overnight session" block
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — STATUS.md 411 → 390
+  lines; replaced the verbose 7-phase commit listing with a one-
+  paragraph pointer to CHANGELOG.md; same treatment for the
+  2026-05-13/14 chrome-audit block)
 - **priority**: LOW
-- **scope**: ~15 min
+- **scope**: ~15 min (actual: ~3 min)
 - **files**: `STATUS.md` (lines roughly 52-72)
 - **context**: STATUS.md still carries a verbose "2026-05-14/15
   overnight session (7 phases)" section listing commit SHAs from
@@ -249,29 +264,74 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #006 — Pre-commit secret scan hook
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — pure-stdlib scanner at
+  ``scripts/pre_commit_secret_scan.py``, two install paths
+  (``scripts/install_git_hooks.py`` shim OR ``pre-commit`` framework
+  via ``.pre-commit-config.yaml``), 25 unit tests, end-to-end smoke
+  verified by staging a fake ``sk-ant-…`` and observing the hook
+  abort the commit with exit 1)
 - **priority**: MEDIUM
-- **scope**: ~1h
+- **scope**: ~1h (actual: ~50 min including the Python 3.14
+  ``@dataclass`` import quirk fix in the test fixture)
 - **files**:
-  - `.pre-commit-config.yaml` (NEW)
-  - `docs/SECRETS.md` (append a "Pre-commit hook" section)
+  - `scripts/pre_commit_secret_scan.py` (NEW — the scanner)
+  - `scripts/install_git_hooks.py` (NEW — no-framework installer)
+  - `.pre-commit-config.yaml` (NEW — framework integration)
+  - `.secrets-baseline` (NEW — empty starter baseline with docs)
+  - `tests/test_pre_commit_secret_scan.py` (NEW — 25 tests)
+  - `docs/SECRETS.md` (appended a "Pre-commit hook" section)
 - **context**: this is a public repo and `ANTHROPIC_API_KEY` lives
   outside it by convention. Today the only guard against leaking
   secrets is the dev manually grepping the diff before each commit
   ("Pre-commit secret scan clean across all commits" appears in
   multiple recent commit messages — that's a human ritual, not an
   enforced check). One slip and a key is in git history forever.
-- **implementation_notes**:
-  - Use `detect-secrets` or `gitleaks` via `pre-commit`.
-  - Initial baseline: scan the whole repo once, generate a
-    `.secrets.baseline` listing known false positives.
-  - Hook should run on `git commit` and abort if new secrets land.
+- **implementation_notes** (post-hoc):
+  - Chose **pure stdlib** over ``detect-secrets`` / ``gitleaks``.
+    Rationale: zero install friction for new contributors (the hook
+    works the moment they ``python scripts/install_git_hooks.py``);
+    the repo's secret surface is small and well-understood; regex
+    patterns sized for the actual rotation horror stories
+    (``KEY=value`` shapes), not generic high-entropy chasing.
+  - Patterns cover Anthropic / OpenAI / GitHub PAT / AWS / Bearer
+    (>=40 char value) / PEM private-key armor headers.
+  - Two install paths so the user can pick:
+    - ``scripts/install_git_hooks.py`` writes a ``.git/hooks/pre-commit``
+      shim — zero deps.
+    - ``.pre-commit-config.yaml`` wires the same scanner via a
+      ``local`` hook entry for users who already run ``pre-commit``.
+  - Three opt-out layers (defense-in-depth on false positives):
+    1. Built-in placeholder filter (``...``, ``YOUR_``, ``<token>``,
+       etc. on the same line → skip)
+    2. Inline ``# pragma: secret-scan-allow`` for one-off fixtures
+    3. ``.secrets-baseline`` for repeating false positives via
+       ``<path>:<line>:<pattern>`` fingerprints
 - **acceptance_criteria**:
-  - [ ] `pre-commit install` adds the hook.
-  - [ ] A commit attempting to add `ANTHROPIC_API_KEY=sk-...` to
-    a tracked file is blocked.
-  - [ ] The baseline doesn't include any actual live secrets
-    (false positives only).
+  - [x] ``pre-commit install`` adds the hook (via the shipped
+    ``.pre-commit-config.yaml``); equivalent ``python
+    scripts/install_git_hooks.py`` install also supplied for users
+    without the framework.
+  - [x] A commit attempting to add ``ANTHROPIC_API_KEY=sk-ant-api03-…``
+    to a tracked file is blocked (end-to-end smoke run logged the
+    hook firing with exit 1 on a 95-char fake key).
+  - [x] The baseline ships empty; ``git ls-files | xargs python
+    scripts/pre_commit_secret_scan.py`` is clean across all 153
+    committed files in the repo today.
+  - [x] 25 unit tests cover pattern catches, placeholder ignores,
+    allowlist suppression, inline opt-out, binary skip, missing
+    file tolerance, and the regression-flavor case that
+    ``docs/SECRETS.md`` itself doesn't trip the scanner.
+
+## new_during_work
+
+- **Python 3.14 + ``@dataclass`` interaction caveat**: when a test
+  uses ``importlib.util.spec_from_file_location`` to import a script
+  by path, the resulting module must be registered in ``sys.modules``
+  *before* ``exec_module`` runs — otherwise ``@dataclass`` decoration
+  raises ``AttributeError: 'NoneType' object has no attribute
+  '__dict__'`` (the decorator does a ``sys.modules.get(cls.__module__)``
+  to enumerate type aliases). Fixed in the test fixture; worth
+  noting as a pattern for future tests that load scripts the same way.
 
 ---
 
@@ -358,9 +418,13 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #010 — refresh_card_lists.py: auto-suggest self-mill
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` —
+  ``parse_self_mill_from_response`` + ``fetch_self_mill_candidates``
+  in ``_card_list_refresh.py``; CLI ``--only self-mill`` now hits
+  Scryfall instead of printing the manual-only stub)
 - **priority**: MEDIUM
-- **scope**: ~2h
+- **scope**: ~2h (actual: ~35 min — the MDFC infrastructure made
+  the second category fall out cleanly)
 - **files**:
   - `src/commander_builder/_card_list_refresh.py` (new
     `parse_self_mill_from_response` + `fetch_self_mill_candidates`)
@@ -453,9 +517,15 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #012 — knowledge_log: `milestone` column
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — backend only:
+  schema v1 → v2 migration, dataclass field, ``set_milestone``,
+  ``PATCH /api/iterations/<id>/milestone``, milestone in the
+  ``_iteration_to_dict`` projection. **UI flag glyph in the
+  iteration-graph node deferred** — needs a browser smoke test
+  to validate the rendering, and the autonomous run can't
+  reliably validate UI visually.)
 - **priority**: LOW
-- **scope**: ~2h
+- **scope**: ~2h (actual: ~50 min for the backend slice)
 - **files**:
   - `src/commander_builder/knowledge_log.py` (schema migration +
     `set_milestone(iteration_id, label)`)
@@ -640,11 +710,14 @@ sequential Forge wall time.
 ## new_during_work
 
 - **Default batch mode could surface a hint when parallelism=1 would
-  benefit from going higher** — e.g., when the matched glob has >1
-  deck AND `--run-sim` is set, print a one-line stderr note "tip:
-  pass --parallelism 2 to halve wall time". Bounded, optional,
-  reasonable LOW-priority follow-up. Add as #017 if/when someone
-  has cycles.
+  benefit from going higher** — DONE in commit `<this commit>`.
+  `_run_batch` now emits a one-line stderr tip when the matched glob
+  has >1 deck AND `--run-sim` is set AND `--parallelism` is the
+  default 1: "tip: N decks queued with --run-sim and --parallelism 1.
+  Pass --parallelism 2 (or higher) to halve wall time…". 4 new tests
+  pin: (a) fires when conditions met, (b) silent when user already
+  passed parallelism > 1, (c) silent when --run-sim is off (Anthropic-
+  only batches benefit much less), (d) silent on single-deck batches.
 
 ---
 
@@ -728,6 +801,230 @@ follow-ups (each their own bounded slice):
 - **Future-future** — The actual rules engine. Still 4-9 months.
   Don't pick without explicit human direction (FP-001 macro
   blocker per #015).
+
+---
+
+## #018 — FP-001 deck-library static-analysis CLI
+
+- **status**: `done` (commit `<this commit>` —
+  `src/commander_builder/forge_cards_loader.py`,
+  `src/commander_builder/deck_library_analyzer.py`,
+  `scripts/analyze_deck_library.py`; 31 new tests across two
+  test files)
+- **priority**: LOW (concrete first user of the #017 parser; the
+  user said on 2026-05-19 "I feel #2 could help looking over
+  decks and working them out as well" — this is that)
+- **scope**: ~2-4h (actual: ~60 min — the parser groundwork from
+  #017 made the analyzer fall out cleanly; biggest surprise was
+  the Forge corpus shipping as a single zip blob, not a directory
+  tree, which prompted the dual-mode loader)
+- **prerequisites**: [#017](#017-fp-001-card-script-parser-read-only-ast)
+  for the parser; a working Forge install with
+  ``vendor/forge/res/cardsfolder/`` (zip or unzipped both supported).
+- **context**: the user's 7,244-card deck library across 345 decks
+  is the proving ground for everything in the curator pipeline.
+  This CLI turns it into measurable signal — "which DSL primitives
+  dominate? which archetypes cluster via DeckHints? which cards
+  does Forge not ship a script for?" — so future engine work + the
+  archetype detector + the errata-drift audit can all be grounded
+  in real data instead of guesses.
+- **components**:
+  - **`forge_cards_loader.py`** — dual-mode loader for Forge's
+    card-script corpus. Auto-detects whether the install has the
+    unzipped letter-tree (dev layout) or the canonical
+    ``cardsfolder.zip``. ``slug_for(name)`` mirrors Forge's
+    filesystem convention (lowercase, non-alnum → underscore,
+    DFC names use the front face). ``load_one(name)`` resolves
+    a card-name to its script blob; ``iter_all()`` for bulk
+    passes. Context-manager support closes the zip handle
+    cleanly.
+  - **`deck_library_analyzer.py`** — `analyze_library(deck_dir,
+    loader)` walks `.dck` files, parses each card's script, and
+    folds into a `LibraryReport` (effect-kind histogram,
+    ability-category histogram, keyword histogram, SVar reference
+    counts, DeckHints frequency, DeckHas frequency, plus
+    unresolved-cards list). `include_per_deck=True` adds per-deck
+    card counts for drill-down. DFC cards count both faces.
+    `to_dict()` projects to JSON for the CLI wrapper.
+  - **`scripts/analyze_deck_library.py`** — human-readable + `--json`
+    output, `--max-decks N` for smoke runs, `--top N` for
+    histogram caps, `--per-deck` for breakdown.
+- **smoke run on real data** (50 decks of 345):
+  ```
+  Decks scanned:    50
+  Distinct cards:   2183
+  Resolved:         1932 (88%)
+  Unresolved:       251 (12%; mostly Commander-only printings
+                          Forge hasn't bundled yet)
+  Top effects:      Mana (455), ChangesZone (421), Continuous (311),
+                    ChangeZone (181), Moved (147), Phase (119),
+                    SpellCast (110), Draw (90)
+  Top keywords:     Flying (110), Flash (53), Vigilance (32),
+                    Trample (31), Haste (29)
+  Top DeckHints:    Ability$Counters (21), Type$Instant|Sorcery (18),
+                    Ability$Graveyard (14), Type$Merfolk (13)
+  ```
+  → confirms Mana / ChangesZone / Continuous are the FIRST
+    primitives a Python engine would need; archetype clustering
+    via DeckHints surfaces obvious bins for the curator.
+- **acceptance_criteria**:
+  - [x] Loader handles zip + directory layouts behind the same API.
+  - [x] Analyzer resolves cards via slug, counts effects /
+    keywords / SVars / DeckHints, lists unresolved cards.
+  - [x] DFC card scripts contribute both faces' effects.
+  - [x] CLI wrapper at `scripts/analyze_deck_library.py` with
+    `--json` / `--max-decks` / `--top` / `--per-deck` / `--deck-dir`
+    / `--forge-dir` flags.
+  - [x] 31 unit tests (21 loader + 10 analyzer) all green; runs
+    on the real 50-deck library smoke without errors.
+  - [x] Full suite green at 1293 passed.
+
+## new_during_work
+
+- **#019 still open** (oracle-text vs DSL diff for errata drift) —
+  unchanged from #017's `new_during_work`. The analyzer infrastructure
+  built here makes #019 cheap: bulk-iterate via `CardsLoader.iter_all`,
+  cross-reference parsed `CardScript.oracle` against Scryfall's
+  `oracle_text` from the existing cache. Probably ~1-2h.
+- **Unresolved-card investigation worth a one-off pass.** 12% of
+  cards in the 50-deck smoke don't have Forge scripts — likely
+  Commander-only printings (CMM, CMR, CLB, etc.) or PLST reprints.
+  A quick "which sets dominate the unresolved list?" report would
+  pinpoint whether we need a corpus update or whether the slug
+  rules need extending for an edge case I missed. Half-hour
+  follow-up.
+
+---
+
+## #019 — FP-001 oracle-text vs DSL drift detector
+
+- **status**: `done` (commit `<this commit>` —
+  ``src/commander_builder/oracle_diff.py``,
+  ``scripts/oracle_diff_report.py``, 18 tests in
+  ``tests/test_oracle_diff.py``)
+- **priority**: LOW (FP-001 slice 3; cheap because the parser
+  (#017) and loader (#018) already exist — this is the third
+  layer that combines them with Scryfall data)
+- **scope**: ~1-2h (actual: ~75 min including the #018 DFC
+  slug-bug fix that this exposed and the iterative normalization
+  tuning to cut false positives)
+- **prerequisites**: #017 (parser) and #018 (loader/analyzer)
+  both must ship first.
+- **context**: WotC ships errata roughly quarterly. Scryfall
+  updates within days; the bundled Forge corpus lags by a
+  release cycle or two. Sims running against stale Forge text
+  produce wrong verdicts long before anyone notices. This module
+  diffs Forge's ``Oracle:`` field against Scryfall's
+  ``oracle_text`` per card and surfaces mismatches for human
+  review. NO auto-correction — the maintainer decides whether
+  to refresh the Forge corpus, accept the drift, or whitelist
+  a deliberate variant.
+- **components**:
+  - **``oracle_diff.py``**:
+    - ``normalize_oracle(text, card_name)``: replaces Forge's
+      literal ``\\n`` with actual newlines, substitutes
+      ``CARDNAME``/``NICKNAME`` placeholders, collapses whitespace
+      runs, normalizes Unicode minus ``−`` → ASCII ``-``, strips
+      Forge's ``[-N]`` planeswalker loyalty-cost brackets.
+    - ``compare_card_oracle(name, forge_card, scryfall_data)``:
+      returns ``OracleDiffResult`` with ``match`` + ``status``
+      (``match``/``differ``/``missing_forge``/
+      ``missing_scryfall``/``missing_both``) + the unified
+      ``diff_lines`` for human review.
+    - DFC support: concatenates per-face oracle text with a
+      ``//`` sentinel on both sides so multi-face cards compare
+      symmetrically.
+  - **``scripts/oracle_diff_report.py``**: CLI wrapper with
+    ``--max-decks`` / ``--only-mismatches`` / ``--diff`` /
+    ``--json`` / ``--by-pattern`` flags. ``--by-pattern``
+    buckets diffs into known errata patterns (``this-land``,
+    ``this-creature``, etc.) so a 263-row report becomes
+    7 readable categories.
+- **smoke run on 10 real decks**:
+  ```
+  match:            368
+  differ:           260
+    [this-land errata]       82 cards
+    [this-creature errata]   64 cards
+    [this-artifact errata]   31 cards
+    [this-enchantment]       12 cards
+    [other]                  60 cards   ← real interesting cases
+  missing_forge:    61 (Commander-only printings Forge hasn't bundled)
+  missing_scryfall: 19
+  missing_both:     1
+  ```
+  → confirms WotC did a massive ``X`` → ``this <type>`` errata
+  sweep that Forge is uniformly stale on; ~200 cards in just
+  10 decks lean on the stale text. Refreshing the Forge corpus
+  is now a concrete action item with measurable scope.
+- **acceptance_criteria**:
+  - [x] Normalize Forge's literal ``\\n`` and CARDNAME/NICKNAME
+    placeholders so cosmetic differences don't drown out errata
+    signal.
+  - [x] Detect the Underground River-style errata (live test
+    case at ``tests/test_oracle_diff.py::test_compare_detects_real_underground_river_errata``).
+  - [x] DFC support: per-face concatenation on both sources.
+  - [x] CLI with ``--by-pattern`` triage view.
+  - [x] 18 new oracle-diff tests + 2 new DFC-loader tests
+    (the latter discovered while writing this slice). Full suite
+    green at 1313 passed (was 1293 before this commit).
+
+## also caught: #018 DFC slug bug
+
+While writing #019 I discovered #018's loader couldn't resolve
+DFC cards like ``Bala Ged Recovery`` because Forge stores them
+under the FULL DFC name (``bala_ged_recovery_bala_ged_sanctuary.txt``)
+not the front-face-only slug my loader was looking for. Fixed:
+``CardsLoader.load_one`` now builds a lazy DFC index on first
+miss that maps front-face slug → full DFC slug, so .dck files'
+front-face-only references still resolve. Two new tests
+(``test_loader_zip_resolves_dfc_from_front_face_only_name``,
+``test_loader_dfc_index_does_not_shadow_regular_cards``) pin
+the contract. Confirmed working against the real Forge install
+(Bala Ged Recovery now loads cleanly).
+
+## new_during_work
+
+- **Forge corpus refresh** is now the obvious follow-up action.
+  We have evidence ~200 cards in 10 decks are running stale
+  text; the user can either update the bundled Forge install
+  (probably ships with a fresh corpus) or pull
+  ``cardsfolder.zip`` from Card-Forge/forge HEAD as a one-off.
+  Not a code task — flagged for human action.
+- **#020 (LOW, ~1h, future)** — Extend ``--by-pattern`` to a
+  general regex-based bucketing system loaded from a YAML/JSON
+  file. The current buckets are hardcoded; surfacing them as
+  data lets a maintainer add new patterns (next errata sweep)
+  without code changes.
+
+---
+
+## #020 — Data-driven bucketing for oracle_diff
+
+- **status**: `done` (commit `<this commit>` — bucket rules moved
+  from hardcoded lambdas in the CLI script to JSON at
+  ``src/commander_builder/data/oracle_diff_buckets.json``; module
+  helpers ``load_diff_buckets`` + ``categorize_diff`` +
+  ``DiffBucket`` dataclass live in ``oracle_diff.py``; CLI gains
+  ``--bucket-rules`` override.)
+- **priority**: LOW (logged as ``new_during_work`` under #019)
+- **scope**: ~1h (actual: ~30 min)
+- **why**: maintainers can add new errata-pattern buckets without
+  touching code. Next WotC errata sweep just gets a new row in
+  the JSON file.
+- **rule schema** (per bucket):
+  - ``label`` (required) — what the bucket is called in reports
+  - ``scryfall_contains`` — substring required in Scryfall text
+  - ``scryfall_not_contains`` — substring forbidden in Scryfall text
+  - ``forge_contains`` — substring required in Forge text
+  - ``forge_not_contains`` — substring forbidden in Forge text
+  - All keys are AND'd; match is case-insensitive substring.
+- **safety**: a rule with NO constraints returns False (would
+  otherwise silently swallow every diff); the loader rejects a
+  rule with no ``label``.
+- **acceptance**: ``load_diff_buckets()`` reads the shipped JSON;
+  the CLI's ``--by-pattern`` uses the loaded rules; 8 new tests
+  cover loader + matcher + ordering + safety. Suite green at 1341.
 
 ---
 

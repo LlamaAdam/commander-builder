@@ -60,6 +60,7 @@ include = ["commander_builder*"]
 
 [tool.setuptools.package-data]
 "commander_builder.web" = ["templates/*.html", "static/*.css", "static/*.js"]
+"commander_builder.data" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

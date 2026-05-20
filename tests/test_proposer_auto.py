@@ -3076,3 +3076,100 @@ def test_auto_curate_main_batch_parallelism_zero_and_negative_treated_as_one(
         if ln.strip()
     ]
     assert records[-1]["batch_summary"]["succeeded"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Parallelism UX hint (#016 new_during_work follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_auto_curate_main_batch_hints_parallelism_when_run_sim_default_one(
+    tmp_path, monkeypatch, capsys,
+):
+    """Multi-deck batch + --run-sim + default --parallelism=1 should
+    emit a one-line stderr tip suggesting ``--parallelism 2`` so users
+    don't accidentally pay the full sequential wall-time tax.
+
+    The stub `_setup_batch_env` makes --run-sim a no-op at the deck
+    level (no actual Forge JVM spawn) but the CLI's hint is wired to
+    the *argv* presence of --run-sim, not the sim's runtime behavior.
+    """
+    _setup_batch_env(tmp_path, monkeypatch)
+    for n in ["A", "B"]:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--run-sim",
+        # --parallelism omitted; default = 1
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "tip:" in err
+    assert "--parallelism" in err
+    # The tip must include the actual deck count so the user knows
+    # the suggestion is sized for their batch.
+    assert "2 decks" in err
+
+
+def test_auto_curate_main_batch_no_hint_when_parallelism_already_set(
+    tmp_path, monkeypatch, capsys,
+):
+    """User who already passed --parallelism > 1 doesn't need the
+    hint. Avoids stderr noise on the well-tuned overnight workflow."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    for n in ["A", "B"]:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--run-sim", "--parallelism", "2",
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "tip:" not in err
+
+
+def test_auto_curate_main_batch_no_hint_when_run_sim_off(
+    tmp_path, monkeypatch, capsys,
+):
+    """No --run-sim means Forge wall time doesn't dominate; the
+    Anthropic-curator-only path benefits much less from parallelism
+    (~3-5s per call vs 5-15 min per Forge sim). Skip the hint to
+    avoid steering the user toward a marginal win."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    for n in ["A", "B"]:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        # no --run-sim, default parallelism = 1
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "tip:" not in err
+
+
+def test_auto_curate_main_batch_no_hint_when_single_deck(
+    tmp_path, monkeypatch, capsys,
+):
+    """Single-deck batch can't benefit from parallelism (nothing to
+    parallelize against). Skip the hint."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    _write_minimal_deck(tmp_path / "[USER] Solo [B3].dck", "Solo")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--run-sim",
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "tip:" not in err
