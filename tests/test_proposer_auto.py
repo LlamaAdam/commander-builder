@@ -264,10 +264,20 @@ def test_auto_propose_respects_max_changes(tmp_path, monkeypatch):
     assert proposal.cuts == ["Cut 1", "Cut 2"]
 
 
-def test_auto_propose_fails_fast_without_api_key(tmp_path, monkeypatch):
-    """Live mode demands ``ANTHROPIC_API_KEY`` — the user should get a
-    clear error before any work, not a silent fallback that runs no LLM."""
+def test_auto_propose_fails_fast_without_api_key_or_cli(tmp_path, monkeypatch):
+    """With NEITHER ``ANTHROPIC_API_KEY`` nor the subscription ``claude`` CLI
+    available, the user should get a clear error before any work -- not a
+    silent fallback that runs no LLM.
+
+    Note: when the ``claude`` CLI IS on PATH, auto_propose now routes the
+    curator through it under the Max subscription (no API key required); see
+    ``_curator_complete_via_cli``. This test pins the no-auth-at-all path.
+    """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # Make the subscription CLI unavailable too, so neither auth path exists.
+    monkeypatch.setattr(
+        "commander_builder.proposer._claude_cli_available", lambda: False,
+    )
     deck = tmp_path / "[USER] Test [B3].dck"
     deck.write_text(
         "[metadata]\nName=Test\n[Commander]\n1 Test\n[Main]\n1 Sol Ring\n",

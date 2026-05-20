@@ -533,6 +533,87 @@ def _extract_curator_json(text: str) -> Optional[dict]:
     return None
 
 
+def _claude_cli_available() -> bool:
+    import shutil
+    return shutil.which("claude") is not None
+
+
+def _curator_complete_via_cli(system: str, user_msg: str, *,
+                              model: Optional[str] = None,
+                              timeout: int = 240) -> str:
+    """Run the curator turn through the subscription `claude` CLI instead of
+    the Anthropic SDK.
+
+    Why: this project commonly runs under a Claude Max *subscription* (auth via
+    the `claude` CLI's on-disk credentials) with NO ANTHROPIC_API_KEY. The SDK
+    path hard-requires an API key (= separate per-token billing). Routing the
+    curator through the CLI keeps curation free under the subscription.
+
+    Implementation notes:
+      - system + user are concatenated and sent on STDIN (not as argv), so we
+        never hit Windows' ~8KB command-line limit on the (large) deck prompt.
+      - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are scrubbed from the child
+        env so the CLI always uses subscription auth, never flips to API
+        billing, even if a key is present for other tooling.
+      - No --model is forced; the CLI's configured default (a capable
+        subscription model) is used. `model` is accepted for parity/logging.
+    """
+    import shutil
+    import subprocess
+
+    claude = shutil.which("claude")
+    if not claude:
+        raise RuntimeError("`claude` CLI not found on PATH (needed for "
+                           "subscription-mode curation without an API key).")
+
+    import time as _time
+
+    prompt = f"{system}\n\n---\n\n{user_msg}"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    cmd = [claude, "-p", "--output-format", "json"]
+
+    # One retry: the subscription CLI occasionally returns a transient error
+    # (rate-limit blip, empty result) under sustained batch use. A single
+    # retry reclaims most of those without masking a real, persistent failure.
+    last_err = ""
+    for attempt in range(2):
+        try:
+            proc = subprocess.run(
+                cmd, input=prompt, env=env, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"claude CLI timed out after {timeout}s") from exc
+
+        if proc.returncode != 0:
+            last_err = (f"claude CLI failed rc={proc.returncode}: "
+                        f"{(proc.stderr or proc.stdout or '')[-300:]}")
+        else:
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                # Some CLI versions emit bare text; accept that as the result.
+                text = proc.stdout.strip()
+                if text:
+                    return text
+                last_err = "claude CLI returned empty non-JSON output"
+                data = None
+            if isinstance(data, dict):
+                if data.get("is_error"):
+                    last_err = f"claude CLI reported error: {data.get('result')}"
+                else:
+                    result = str(data.get("result") or "")
+                    if result.strip():
+                        return result
+                    last_err = "claude CLI returned empty result"
+
+        if attempt == 0:
+            _time.sleep(3)  # brief backoff before the single retry
+
+    raise RuntimeError(f"curator CLI failed after retry: {last_err}")
+
+
 def auto_propose(
     deck_path: Path,
     bracket: int,
@@ -579,18 +660,26 @@ def auto_propose(
         the message to the user (the curator path is unattended; a
         silent fallback would mask a real problem).
     """
-    if "ANTHROPIC_API_KEY" not in os.environ:
+    # Auth strategy: prefer the SDK when ANTHROPIC_API_KEY is set to a NON-EMPTY
+    # value (per-token billing, explicit opt-in). Otherwise fall back to the
+    # subscription `claude` CLI so curation works under a Claude Max plan.
+    # NOTE: a present-but-empty ANTHROPIC_API_KEY ('') is treated as "no key"
+    # -- this environment deliberately sets it empty to prevent the SDK from
+    # ever billing, so membership-in-os.environ is the wrong test; use truthiness.
+    _use_cli = not os.environ.get("ANTHROPIC_API_KEY")
+    if _use_cli and not _claude_cli_available():
         raise RuntimeError(
-            "auto_propose requires ANTHROPIC_API_KEY in the environment. "
-            "Set it before invoking commander-iterate --auto-propose."
+            "auto_propose needs either ANTHROPIC_API_KEY (SDK path) or the "
+            "`claude` CLI on PATH (subscription path). Neither is available."
         )
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:  # pragma: no cover -- covered via stub
-        raise RuntimeError(
-            "auto_propose requires `pip install anthropic` "
-            "(in the [claude] extras)."
-        ) from exc
+    if not _use_cli:
+        try:
+            from anthropic import Anthropic
+        except ImportError as exc:  # pragma: no cover -- covered via stub
+            raise RuntimeError(
+                "auto_propose requires `pip install anthropic` "
+                "(in the [claude] extras)."
+            ) from exc
 
     deck_text = deck_path.read_text(encoding="utf-8")
     candidates_added = list(advice_report.get("added", []) or [])
@@ -661,17 +750,22 @@ def auto_propose(
         f"Return ONLY the JSON object."
     )
 
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=_AUTO_PROPOSE_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    text = ""
-    for block in response.content:
-        if hasattr(block, "text"):
-            text += block.text
+    if _use_cli:
+        text = _curator_complete_via_cli(
+            system=_AUTO_PROPOSE_SYSTEM_PROMPT, user_msg=user_msg, model=model,
+        )
+    else:
+        client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=_AUTO_PROPOSE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        text = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                text += block.text
     if not text.strip():
         raise RuntimeError("auto_propose: empty response from Claude")
 
