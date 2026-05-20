@@ -29,8 +29,8 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#005](#005-add-github-actions-ci-workflow) | HIGH | done | ~1.5h | Add `.github/workflows/test.yml` running `pytest --run-slow` |
 | [#006](#006-pre-commit-secret-scan-hook) | MEDIUM | open | ~1h | Pre-commit hook scanning diff for secrets |
 | [#007](#007-app-js-extract-audit-streaming-module) | MEDIUM | done | ~1h | app.js: extract audit-streaming SSE cluster (lines ~997-1223) |
-| [#008](#008-app-js-extract-deck-health-tiles--salt-banner) | MEDIUM | open | ~1h | app.js: extract deck-health tiles + salt-warning banner |
-| [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | open | ~1h | app.js: extract average-deck preview renderer |
+| [#008](#008-app-js-extract-deck-health-tiles--salt-banner) | MEDIUM | done | ~1h | app.js: extract deck-health tiles + salt-warning banner |
+| [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | done | ~1h | app.js: extract average-deck preview renderer |
 | [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | done | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
 | [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
 | [#012](#012-knowledge-log-milestone-tag) | LOW | open | ~2h | knowledge_log: `milestone` column + `commander-history --milestone` flag |
