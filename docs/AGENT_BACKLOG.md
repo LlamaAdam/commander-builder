@@ -23,7 +23,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | ID | Priority | Status | Scope | Title |
 |---|---|---|---|---|
 | [#001](#001-fix-snapsfoundry-typo-in-handoff-doc) | LOW | done | ~5 min | Fix `snapsfoundry` typo in HANDOFF_2026-05-19.md |
-| [#002](#002-image-cache-eviction-policy) | MEDIUM | open | ~2h | Image cache: disk-quota eviction policy |
+| [#002](#002-image-cache-eviction-policy) | MEDIUM | done | ~2h | Image cache: disk-quota eviction policy |
 | [#003](#003-image-cache-retry-on-transient-failure) | LOW | done | ~30 min | Image cache: one retry on transient Scryfall failures |
 | [#004](#004-status-md-stale-overnight-session-block) | LOW | done | ~15 min | STATUS.md: prune stale "2026-05-14/15 overnight session" block |
 | [#005](#005-add-github-actions-ci-workflow) | HIGH | done | ~1.5h | Add `.github/workflows/test.yml` running `pytest --run-slow` |
@@ -98,9 +98,15 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 
 ## #002 — Image cache eviction policy
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — ``_enforce_quota``
+  LRU-by-mtime evicts oldest files when ``fetch_and_cache`` would
+  push the cache over ``MTG_IMAGE_CACHE_QUOTA_BYTES`` (default
+  500 MB). Hot-path-safe: stat-and-bail when under quota.)
 - **priority**: MEDIUM
-- **scope**: ~2h
+- **scope**: ~2h (actual: ~25 min — simpler than the spec's
+  "sample mod 16 to skip the walk" because the typical cache stays
+  well under quota and the bail-early path makes per-fetch
+  overhead negligible)
 - **files**:
   - `src/commander_builder/web/_image_cache.py` (add `enforce_quota`
     helper + wire into `fetch_and_cache`)

@@ -35,6 +35,7 @@ optional injected HTTP fetcher):
 """
 from __future__ import annotations
 
+import os
 import re
 import urllib.parse
 from pathlib import Path
@@ -47,6 +48,31 @@ from typing import Callable, Optional
 ALLOWED_SIZES = frozenset({
     "small", "normal", "large", "png", "art_crop", "border_crop",
 })
+
+# Cache quota (default 500 MB). When ``fetch_and_cache`` would push
+# the total disk footprint above this, the oldest files (by mtime)
+# get evicted until the cache is back under quota. Set via env var
+# ``MTG_IMAGE_CACHE_QUOTA_BYTES`` if a deployment needs more headroom.
+#
+# Rationale: ``normal`` size is ~150 KB, ``large`` ~600 KB, ``png``
+# ~1-2 MB. 1000 distinct cards in normal alone is ~150 MB; an
+# uncapped cache would grow without bound on a heavy-use machine.
+# 500 MB ≈ 3000 unique-card ``normal`` images, plenty for typical
+# library sizes (~7k distinct cards across 345 decks per the #018
+# smoke run).
+_DEFAULT_QUOTA_BYTES = 500 * 1024 * 1024  # 500 MB
+
+
+def _quota_bytes() -> int:
+    """Resolve the cache-quota threshold. Env var override wins so
+    operators can tune without code changes."""
+    env = os.environ.get("MTG_IMAGE_CACHE_QUOTA_BYTES")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass  # Malformed env → fall back to default; no crash.
+    return _DEFAULT_QUOTA_BYTES
 
 
 def _slug(name: str) -> str:
@@ -147,11 +173,76 @@ def _default_http_get(url: str, timeout: float = 20.0) -> bytes:
     return _http_get_once(url, timeout=timeout)
 
 
+def _images_root(root: Optional[Path] = None) -> Path:
+    """Resolve the ``<cards-root>/images`` directory. Used by the
+    eviction helper to walk all cached image files regardless of
+    which size sub-directory they live in."""
+    base = root if root is not None else _cards_root()
+    return base / "images"
+
+
+def _enforce_quota(root: Optional[Path] = None,
+                   quota_bytes: Optional[int] = None) -> int:
+    """Evict oldest-mtime files until the cache is under quota.
+
+    Returns the count of files deleted. No-op if the cache is
+    already under quota. Walks ``<root>/images`` recursively;
+    ignores ``.tmp`` partial-write files (those are owned by an
+    in-flight ``fetch_and_cache`` and rename atomically when done).
+
+    Eviction is LRU-by-mtime: oldest files go first. Reads don't
+    update mtime (we don't ``os.utime`` per-serve because that's a
+    syscall per image request — too expensive for interactive
+    traffic; mtime stays at last-write which approximates LRU
+    well enough for a cache this size).
+
+    Safe to call from a fetch hot-path; bails early if the cache
+    isn't over quota.
+    """
+    images_dir = _images_root(root)
+    if not images_dir.exists():
+        return 0
+    quota = quota_bytes if quota_bytes is not None else _quota_bytes()
+
+    # Stat-and-collect pass. Skip .tmp files (in-flight writes).
+    entries: list[tuple[float, int, Path]] = []
+    total = 0
+    for path in images_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix == ".tmp":
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((stat.st_mtime, stat.st_size, path))
+        total += stat.st_size
+
+    if total <= quota:
+        return 0
+
+    # Sort oldest-first; delete until we're under quota.
+    entries.sort(key=lambda t: t[0])
+    deleted = 0
+    for mtime, size, path in entries:
+        if total <= quota:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        total -= size
+        deleted += 1
+    return deleted
+
+
 def fetch_and_cache(
     name: str,
     size: str,
     root: Optional[Path] = None,
     http_get: Optional[Callable[[str], bytes]] = None,
+    enforce_quota: bool = True,
 ) -> bytes:
     """Fetch from Scryfall, write to the disk cache, return the bytes.
 
@@ -159,6 +250,11 @@ def fetch_and_cache(
     ``serve_image``. Atomic-ish write (tempfile + rename) so a
     half-written file doesn't poison subsequent reads if the process
     is killed mid-fetch.
+
+    ``enforce_quota=True`` (default) runs the LRU eviction pass after
+    the write so the disk footprint stays bounded. Set False to
+    skip — useful in tests that want to assert on raw write behavior
+    without the eviction interfering.
     """
     if size not in ALLOWED_SIZES:
         raise ValueError(f"unsupported size {size!r}; expected one of {sorted(ALLOWED_SIZES)}")
@@ -169,6 +265,8 @@ def fetch_and_cache(
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(data)
     tmp.replace(path)
+    if enforce_quota:
+        _enforce_quota(root=root)
     return data
 
 
