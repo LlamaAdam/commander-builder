@@ -675,6 +675,90 @@ def test_patch_verdict_unknown_id_succeeds_silently(seeded_client):
 
 
 # ---------------------------------------------------------------------------
+# PATCH /api/iterations/<id>/milestone — AGENT_BACKLOG #012
+# ---------------------------------------------------------------------------
+
+def test_patch_milestone_tags_iteration(seeded_client):
+    """Happy path: PATCH with a string milestone returns 200 +
+    echoes the stored value. Subsequent GET reflects the tag."""
+    iteration_id = _first_iteration_id(seeded_client)
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/milestone",
+        json={"milestone": "baseline"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {
+        "ok": True, "iteration_id": iteration_id, "milestone": "baseline",
+    }
+    # Verify via listing.
+    listing = seeded_client.get("/api/iterations?deck=omnath").get_json()
+    matched = [r for r in listing["iterations"] if r["id"] == iteration_id]
+    assert matched and matched[0]["milestone"] == "baseline"
+
+
+def test_patch_milestone_null_clears_tag(seeded_client):
+    """Pass null (or empty string) to clear the milestone — the
+    UI's "untag" action."""
+    iteration_id = _first_iteration_id(seeded_client)
+    seeded_client.patch(
+        f"/api/iterations/{iteration_id}/milestone",
+        json={"milestone": "baseline"},
+    )
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/milestone",
+        json={"milestone": None},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["milestone"] is None
+
+
+def test_patch_milestone_truncates_long_values(seeded_client):
+    """Echoed value is the normalized stored form (clipped to 64)."""
+    iteration_id = _first_iteration_id(seeded_client)
+    long_label = "X" * 200
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/milestone",
+        json={"milestone": long_label},
+    )
+    assert resp.status_code == 200
+    echoed = resp.get_json()["milestone"]
+    assert echoed is not None
+    assert len(echoed) == 64
+
+
+def test_patch_milestone_rejects_non_string(seeded_client):
+    """Numeric / dict / list values don't make sense as labels."""
+    iteration_id = _first_iteration_id(seeded_client)
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/milestone",
+        json={"milestone": 42},
+    )
+    assert resp.status_code == 400
+    assert "string or null" in resp.get_json()["error"]
+
+
+def test_patch_milestone_rejects_missing_field(seeded_client):
+    """Body must contain the ``milestone`` key (even if null) so a
+    typo in the JSON doesn't silently no-op."""
+    iteration_id = _first_iteration_id(seeded_client)
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/milestone",
+        json={"oops": "not-the-key"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_milestone_unknown_id_succeeds_silently(seeded_client):
+    """Same fail-quiet contract as the verdict endpoint."""
+    resp = seeded_client.patch(
+        "/api/iterations/9999999/milestone",
+        json={"milestone": "foo"},
+    )
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # /api/dashboard?advise=1 + /api/advise
 # ---------------------------------------------------------------------------
 

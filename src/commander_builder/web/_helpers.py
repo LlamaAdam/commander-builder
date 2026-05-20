@@ -655,6 +655,10 @@ def _iteration_to_dict(it) -> dict:
         "win_rate_new": it.win_rate_new,
         "margin": it.margin,
         "created_at": it.created_at,
+        # Milestone (schema v2 / #012) — None when unset. Powers the
+        # iteration-graph flag glyph + "reference baseline" filter
+        # on /api/iterations.
+        "milestone": getattr(it, "milestone", None),
     }
 
 

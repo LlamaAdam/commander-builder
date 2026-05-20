@@ -12,6 +12,7 @@ from commander_builder.knowledge_log import (
     pricing_series_for_deck,
     recent_iterations,
     record_iteration,
+    set_milestone,
     stats_summary,
     update_iteration_sim,
     update_verdict,
@@ -522,3 +523,137 @@ def test_verdict_breakdown_includes_all_verdicts_zeroed(db):
     assert bucket["neutral"] == 0
     assert bucket["pending"] == 0
     assert bucket["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# milestone column (schema v2 / AGENT_BACKLOG #012)
+# ---------------------------------------------------------------------------
+
+def _add_row(db, deck_id="d"):
+    """Insert a minimal iteration row and return its id."""
+    it = Iteration(
+        deck_id=deck_id, deck_name=deck_id, bracket=3,
+        verdict="pending",
+    )
+    return record_iteration(it, db_path=db)
+
+
+def test_set_milestone_writes_label(db):
+    """Happy path: set_milestone tags an existing iteration with
+    the given label, readable on the next get_iteration."""
+    it_id = _add_row(db)
+    set_milestone(it_id, "baseline", db_path=db)
+    row = get_iteration(it_id, db_path=db)
+    assert row.milestone == "baseline"
+
+
+def test_set_milestone_truncates_long_labels(db):
+    """Labels longer than 64 chars truncate silently — guards
+    against accidental novella-length pastes from the UI."""
+    it_id = _add_row(db)
+    set_milestone(it_id, "x" * 200, db_path=db)
+    row = get_iteration(it_id, db_path=db)
+    assert row.milestone is not None
+    assert len(row.milestone) == 64
+
+
+def test_set_milestone_strips_whitespace(db):
+    it_id = _add_row(db)
+    set_milestone(it_id, "   spaced   ", db_path=db)
+    row = get_iteration(it_id, db_path=db)
+    assert row.milestone == "spaced"
+
+
+def test_set_milestone_none_clears_label(db):
+    """Passing None clears the milestone — the UI's "untag" action."""
+    it_id = _add_row(db)
+    set_milestone(it_id, "baseline", db_path=db)
+    set_milestone(it_id, None, db_path=db)
+    row = get_iteration(it_id, db_path=db)
+    assert row.milestone is None
+
+
+def test_set_milestone_empty_string_clears_label(db):
+    """Whitespace-only labels also clear — same as passing None."""
+    it_id = _add_row(db)
+    set_milestone(it_id, "baseline", db_path=db)
+    set_milestone(it_id, "   ", db_path=db)
+    row = get_iteration(it_id, db_path=db)
+    assert row.milestone is None
+
+
+def test_set_milestone_unknown_id_is_silent(db):
+    """Following the ``update_verdict`` fail-quiet pattern: an
+    UPDATE against a missing id is a no-op, not an exception.
+    The web layer relies on this for optimistic UI updates."""
+    set_milestone(9_999_999, "anything", db_path=db)  # must not raise
+
+
+def test_record_iteration_persists_milestone_via_dataclass(db):
+    """If a caller constructs an Iteration with milestone preset,
+    record_iteration persists it through the INSERT path."""
+    it = Iteration(
+        deck_id="x", deck_name="x", bracket=3,
+        milestone="initial-snapshot",
+    )
+    new_id = record_iteration(it, db_path=db)
+    row = get_iteration(new_id, db_path=db)
+    assert row.milestone == "initial-snapshot"
+
+
+def test_init_db_migrates_v1_to_v2_adds_milestone_column(tmp_path):
+    """Pre-migration: create a v1-shaped database by hand (old
+    schema without the milestone column + schema_version=1).
+    Running init_db must add the column non-destructively and bump
+    the recorded version."""
+    import sqlite3
+    p = tmp_path / "legacy_v1.sqlite"
+    # Hand-build a v1 database.
+    conn = sqlite3.connect(p)
+    conn.executescript("""
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        CREATE TABLE iterations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deck_id TEXT NOT NULL, deck_name TEXT NOT NULL,
+            bracket INTEGER NOT NULL, parent_id INTEGER,
+            audit_version TEXT, audit_manifest TEXT, sim_report TEXT,
+            verdict TEXT NOT NULL DEFAULT 'pending', verdict_notes TEXT,
+            win_rate_old REAL, win_rate_new REAL, margin INTEGER,
+            created_at TEXT NOT NULL, deck_snapshot TEXT
+        );
+        INSERT INTO schema_version (version) VALUES (1);
+        INSERT INTO iterations (deck_id, deck_name, bracket, created_at, verdict)
+        VALUES ('legacy', 'legacy', 3, '2026-01-01', 'kept');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Run the migration via init_db.
+    init_db(p)
+
+    # Confirm: column added, existing row preserved, version bumped.
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute("PRAGMA table_info(iterations)")
+    cols = {r["name"] for r in cur.fetchall()}
+    assert "milestone" in cols
+    cur = conn.execute("SELECT * FROM iterations WHERE deck_id = 'legacy'")
+    row = cur.fetchone()
+    assert row["verdict"] == "kept"   # legacy row intact
+    assert row["milestone"] is None   # new column NULL by default
+    cur = conn.execute("SELECT version FROM schema_version")
+    assert cur.fetchone()["version"] == 2
+    conn.close()
+
+
+def test_init_db_migration_is_idempotent(tmp_path):
+    """Running init_db twice on a freshly-migrated v2 database is
+    a no-op — the migration's column-add is guarded by a pragma
+    check, and the version update is a single-row update."""
+    p = tmp_path / "idempotent.sqlite"
+    init_db(p)
+    init_db(p)  # second call should not raise
+    it_id = _add_row(p)
+    set_milestone(it_id, "still-works", db_path=p)
+    row = get_iteration(it_id, db_path=p)
+    assert row.milestone == "still-works"

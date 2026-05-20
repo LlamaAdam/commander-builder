@@ -33,7 +33,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | done | ~1h | app.js: extract average-deck preview renderer |
 | [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | done | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
 | [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
-| [#012](#012-knowledge-log-milestone-tag) | LOW | open | ~2h | knowledge_log: `milestone` column + `commander-history --milestone` flag |
+| [#012](#012-knowledge-log-milestone-tag) | LOW | done | ~2h | knowledge_log: `milestone` column + PATCH endpoint (backend only; UI flag deferred) |
 | [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
 | [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | open | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
@@ -472,9 +472,15 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #012 — knowledge_log: `milestone` column
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — backend only:
+  schema v1 → v2 migration, dataclass field, ``set_milestone``,
+  ``PATCH /api/iterations/<id>/milestone``, milestone in the
+  ``_iteration_to_dict`` projection. **UI flag glyph in the
+  iteration-graph node deferred** — needs a browser smoke test
+  to validate the rendering, and the autonomous run can't
+  reliably validate UI visually.)
 - **priority**: LOW
-- **scope**: ~2h
+- **scope**: ~2h (actual: ~50 min for the backend slice)
 - **files**:
   - `src/commander_builder/knowledge_log.py` (schema migration +
     `set_milestone(iteration_id, label)`)

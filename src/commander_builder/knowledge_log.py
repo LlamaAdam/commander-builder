@@ -47,7 +47,7 @@ from .forge_runner import VENDOR_FORGE
 
 DEFAULT_DB_PATH = VENDOR_FORGE.parent.parent / "knowledge_log.sqlite"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS iterations (
     margin          INTEGER,
     created_at      TEXT NOT NULL,
     deck_snapshot   TEXT,            -- .dck file contents
+    milestone       TEXT,            -- v2 (#012): user-chosen tag (e.g. "baseline", "PR-ready")
     FOREIGN KEY (parent_id) REFERENCES iterations(id)
 );
 
@@ -77,6 +78,31 @@ CREATE INDEX IF NOT EXISTS idx_iterations_deck_id ON iterations(deck_id);
 CREATE INDEX IF NOT EXISTS idx_iterations_created_at ON iterations(created_at);
 CREATE INDEX IF NOT EXISTS idx_iterations_verdict ON iterations(verdict);
 """
+# Note: the ``milestone`` partial index lives in ``_migrate_to_v2``
+# so the base schema script stays runnable against a pre-migration
+# v1 table (which doesn't have the column yet). The migration runs
+# unconditionally on every init_db call so both fresh databases
+# and v1 → v2 upgrades pick up the index.
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """v1 → v2 migration: add the ``milestone`` column to existing
+    iterations tables. Idempotent — checks pragma_table_info first
+    so a second call doesn't error on the duplicate ADD COLUMN.
+
+    SQLite doesn't support adding a column with WHERE-indexed
+    constraints in one statement, so the partial index is added
+    separately after the column lands.
+    """
+    cur = conn.execute("PRAGMA table_info(iterations)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "milestone" not in cols:
+        conn.execute("ALTER TABLE iterations ADD COLUMN milestone TEXT")
+    # Partial index — safe to re-run via IF NOT EXISTS.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_iterations_milestone "
+        "ON iterations(milestone) WHERE milestone IS NOT NULL"
+    )
 
 
 @dataclass
@@ -97,6 +123,7 @@ class Iteration:
     parent_id: Optional[int] = None
     created_at: Optional[str] = None
     deck_snapshot: Optional[str] = None
+    milestone: Optional[str] = None  # v2: user-chosen tag (#012)
     id: Optional[int] = None  # Set after insert.
 
     def to_row(self) -> dict:
@@ -127,6 +154,13 @@ class Iteration:
             margin=row["margin"],
             created_at=row["created_at"],
             deck_snapshot=row["deck_snapshot"],
+            # Milestone added in schema v2 (#012). ``row["milestone"]``
+            # raises IndexError on a v1 SQLite Row if the migration
+            # didn't run for some reason — guard with ``in row.keys()``
+            # so legacy databases don't break read paths.
+            milestone=(
+                row["milestone"] if "milestone" in row.keys() else None
+            ),
         )
 
 
@@ -144,13 +178,35 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
-    """Create the schema if missing, mark the version. Idempotent."""
+    """Create the schema if missing, run any pending migrations,
+    mark the version. Idempotent — safe to call from every entry
+    point (CLIs, web routes, tests).
+
+    Migration flow:
+      v0 → v1: initial schema (executed by ``_SCHEMA_SQL`` for new
+               databases; existing tables already match).
+      v1 → v2: add ``milestone`` column + partial index
+               (``_migrate_to_v2``, AGENT_BACKLOG #012).
+    """
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA_SQL)
+        # Run migrations unconditionally — they're each individually
+        # idempotent (check-then-add pattern via pragma_table_info),
+        # so calling them on a fresh DB just adds the v2 column +
+        # index that aren't in the base _SCHEMA_SQL.
+        _migrate_to_v2(conn)
         cur = conn.execute("SELECT version FROM schema_version")
         row = cur.fetchone()
         if row is None:
-            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)",
+                (SCHEMA_VERSION,),
+            )
+        elif row["version"] < SCHEMA_VERSION:
+            conn.execute(
+                "UPDATE schema_version SET version = ?",
+                (SCHEMA_VERSION,),
+            )
 
 
 def record_iteration(it: Iteration, db_path: Path = DEFAULT_DB_PATH) -> int:
@@ -164,6 +220,36 @@ def record_iteration(it: Iteration, db_path: Path = DEFAULT_DB_PATH) -> int:
         cur = conn.execute(sql, [row[c] for c in cols])
         it.id = cur.lastrowid
     return it.id
+
+
+def set_milestone(
+    iteration_id: int,
+    label: Optional[str],
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Tag (or clear) an iteration with a user-chosen milestone label
+    (e.g. ``"baseline"``, ``"PR-ready"``, ``"reference build"``).
+
+    Pass ``label=None`` or empty string to clear the milestone.
+    Labels are free-form strings; max 64 chars (truncated to avoid
+    accidental novella-length pastes). The UI uses milestones to
+    flag reference baselines in the iteration graph; longer-term
+    they're filterable in ``/api/iterations``.
+
+    AGENT_BACKLOG #012. Idempotent; no-op on unknown iteration_id
+    (matches ``update_verdict``'s fail-quiet contract).
+    """
+    init_db(db_path)
+    normalized: Optional[str]
+    if label is None or not label.strip():
+        normalized = None
+    else:
+        normalized = label.strip()[:64]
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE iterations SET milestone = ? WHERE id = ?",
+            (normalized, iteration_id),
+        )
 
 
 def update_verdict(
