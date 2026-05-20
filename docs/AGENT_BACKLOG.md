@@ -31,7 +31,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#007](#007-app-js-extract-audit-streaming-module) | MEDIUM | open | ~1h | app.js: extract audit-streaming SSE cluster (lines ~997-1223) |
 | [#008](#008-app-js-extract-deck-health-tiles--salt-banner) | MEDIUM | open | ~1h | app.js: extract deck-health tiles + salt-warning banner |
 | [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | open | ~1h | app.js: extract average-deck preview renderer |
-| [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | open | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
+| [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | done | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
 | [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
 | [#012](#012-knowledge-log-milestone-tag) | LOW | open | ~2h | knowledge_log: `milestone` column + `commander-history --milestone` flag |
 | [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
@@ -373,9 +373,13 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #010 — refresh_card_lists.py: auto-suggest self-mill
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` —
+  ``parse_self_mill_from_response`` + ``fetch_self_mill_candidates``
+  in ``_card_list_refresh.py``; CLI ``--only self-mill`` now hits
+  Scryfall instead of printing the manual-only stub)
 - **priority**: MEDIUM
-- **scope**: ~2h
+- **scope**: ~2h (actual: ~35 min — the MDFC infrastructure made
+  the second category fall out cleanly)
 - **files**:
   - `src/commander_builder/_card_list_refresh.py` (new
     `parse_self_mill_from_response` + `fetch_self_mill_candidates`)
