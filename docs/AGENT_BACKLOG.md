@@ -25,7 +25,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#001](#001-fix-snapsfoundry-typo-in-handoff-doc) | LOW | done | ~5 min | Fix `snapsfoundry` typo in HANDOFF_2026-05-19.md |
 | [#002](#002-image-cache-eviction-policy) | MEDIUM | open | ~2h | Image cache: disk-quota eviction policy |
 | [#003](#003-image-cache-retry-on-transient-failure) | LOW | open | ~30 min | Image cache: one retry on transient Scryfall failures |
-| [#004](#004-status-md-stale-overnight-session-block) | LOW | open | ~15 min | STATUS.md: prune stale "2026-05-14/15 overnight session" block |
+| [#004](#004-status-md-stale-overnight-session-block) | LOW | done | ~15 min | STATUS.md: prune stale "2026-05-14/15 overnight session" block |
 | [#005](#005-add-github-actions-ci-workflow) | HIGH | done | ~1.5h | Add `.github/workflows/test.yml` running `pytest --run-slow` |
 | [#006](#006-pre-commit-secret-scan-hook) | MEDIUM | open | ~1h | Pre-commit hook scanning diff for secrets |
 | [#007](#007-app-js-extract-audit-streaming-module) | MEDIUM | open | ~1h | app.js: extract audit-streaming SSE cluster (lines ~997-1223) |
@@ -162,9 +162,12 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 
 ## #004 — STATUS.md stale "2026-05-14/15 overnight session" block
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` — STATUS.md 411 → 390
+  lines; replaced the verbose 7-phase commit listing with a one-
+  paragraph pointer to CHANGELOG.md; same treatment for the
+  2026-05-13/14 chrome-audit block)
 - **priority**: LOW
-- **scope**: ~15 min
+- **scope**: ~15 min (actual: ~3 min)
 - **files**: `STATUS.md` (lines roughly 52-72)
 - **context**: STATUS.md still carries a verbose "2026-05-14/15
   overnight session (7 phases)" section listing commit SHAs from
