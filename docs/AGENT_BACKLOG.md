@@ -24,7 +24,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 |---|---|---|---|---|
 | [#001](#001-fix-snapsfoundry-typo-in-handoff-doc) | LOW | done | ~5 min | Fix `snapsfoundry` typo in HANDOFF_2026-05-19.md |
 | [#002](#002-image-cache-eviction-policy) | MEDIUM | open | ~2h | Image cache: disk-quota eviction policy |
-| [#003](#003-image-cache-retry-on-transient-failure) | LOW | open | ~30 min | Image cache: one retry on transient Scryfall failures |
+| [#003](#003-image-cache-retry-on-transient-failure) | LOW | done | ~30 min | Image cache: one retry on transient Scryfall failures |
 | [#004](#004-status-md-stale-overnight-session-block) | LOW | done | ~15 min | STATUS.md: prune stale "2026-05-14/15 overnight session" block |
 | [#005](#005-add-github-actions-ci-workflow) | HIGH | done | ~1.5h | Add `.github/workflows/test.yml` running `pytest --run-slow` |
 | [#006](#006-pre-commit-secret-scan-hook) | MEDIUM | open | ~1h | Pre-commit hook scanning diff for secrets |
@@ -133,9 +133,12 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 
 ## #003 — Image cache retry on transient failure
 
-- **status**: `open`
+- **status**: `done` (commit `<this commit>` —
+  ``_default_http_get`` wraps ``_http_get_once`` with one retry on
+  URLError + 5xx, 500ms backoff. 404 skips the retry to avoid
+  wasted round-trips.)
 - **priority**: LOW
-- **scope**: ~30 min
+- **scope**: ~30 min (actual: ~15 min)
 - **files**:
   - `src/commander_builder/web/_image_cache.py` (wrap
     `_default_http_get` with one retry on `URLError` / 5xx)

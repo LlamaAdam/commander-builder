@@ -285,6 +285,90 @@ def test_card_image_route_returns_502_on_transient_failure(
     assert resp.status_code == 502
 
 
+# ---------------------------------------------------------------------------
+# Retry behavior on transient failures (AGENT_BACKLOG #003)
+# ---------------------------------------------------------------------------
+
+def test_default_http_get_retries_once_on_5xx_then_succeeds(monkeypatch):
+    """A single 503 followed by a 200 returns the bytes. The retry
+    pass-through means an interactive ``<img>`` request masks
+    momentary Scryfall flakiness instead of bubbling up as a 502."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+    calls = [0]
+
+    def _fake_once(url, timeout=20.0):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise urllib.error.HTTPError(
+                url, 503, "Service Unavailable", hdrs=None, fp=None,
+            )
+        return b"recovered-bytes"
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    data = _image_cache._default_http_get("https://scryfall.example/x")
+    assert data == b"recovered-bytes"
+    assert calls[0] == 2
+
+
+def test_default_http_get_does_not_retry_on_404(monkeypatch):
+    """404 means the card legitimately doesn't exist. Retrying would
+    waste a round-trip and the second attempt would 404 too. Surface
+    the 404 immediately."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+    calls = [0]
+
+    def _fake_once(url, timeout=20.0):
+        calls[0] += 1
+        raise urllib.error.HTTPError(
+            url, 404, "Not Found", hdrs=None, fp=None,
+        )
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _image_cache._default_http_get("https://scryfall.example/x")
+    assert excinfo.value.code == 404
+    assert calls[0] == 1  # NO retry
+
+
+def test_default_http_get_retries_once_on_url_error_then_succeeds(monkeypatch):
+    """URLError (DNS / connection reset / socket timeout) is transient.
+    One retry, then propagate if the second attempt also fails."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+    calls = [0]
+
+    def _fake_once(url, timeout=20.0):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise urllib.error.URLError("connection reset")
+        return b"second-attempt"
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    assert _image_cache._default_http_get("https://x") == b"second-attempt"
+    assert calls[0] == 2
+
+
+def test_default_http_get_propagates_after_retry_exhausted(monkeypatch):
+    """Two consecutive transients surface as the final exception
+    (the Flask route then maps to 502). One retry is the cap; we
+    don't compound backoffs and stall the user."""
+    import urllib.error
+    from commander_builder.web import _image_cache
+
+    def _fake_once(url, timeout=20.0):
+        raise urllib.error.URLError("persistent fault")
+
+    monkeypatch.setattr(_image_cache, "_http_get_once", _fake_once)
+    monkeypatch.setattr(_image_cache, "_RETRY_BACKOFF_SEC", 0)
+    with pytest.raises(urllib.error.URLError):
+        _image_cache._default_http_get("https://x")
+
+
 def test_card_image_route_handles_double_faced_card_name(
     client_with_image_cache, monkeypatch,
 ):

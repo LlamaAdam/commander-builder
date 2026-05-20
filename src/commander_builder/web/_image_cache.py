@@ -87,8 +87,8 @@ def _scryfall_image_url(name: str, size: str) -> str:
     return f"https://api.scryfall.com/cards/named?{qs}"
 
 
-def _default_http_get(url: str, timeout: float = 20.0) -> bytes:
-    """Fetch ``url`` and return the response body as bytes.
+def _http_get_once(url: str, timeout: float = 20.0) -> bytes:
+    """Fetch ``url`` once and return the response body as bytes.
 
     Plain ``urllib`` so there's no requests/httpx dependency.
     Follows redirects (Scryfall's ``cards/named?format=image`` is a
@@ -108,6 +108,43 @@ def _default_http_get(url: str, timeout: float = 20.0) -> bytes:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+# Backoff between retry 1 and the original attempt. Short because
+# interactive UI traffic — half a second is the user-perceptible
+# upper bound for "the page is loading". One retry only; we don't
+# want to amplify a real outage into multi-second per-image stalls.
+_RETRY_BACKOFF_SEC = 0.5
+
+
+def _default_http_get(url: str, timeout: float = 20.0) -> bytes:
+    """Fetch ``url`` with one retry on transient failures.
+
+    Catches ``URLError`` (DNS / connection-reset / socket timeout)
+    and HTTP 5xx as transient; sleeps ``_RETRY_BACKOFF_SEC`` then
+    tries once more. 4xx errors propagate immediately (404 means
+    the card legitimately doesn't exist; no point retrying).
+
+    A single transient Scryfall blip on an ``<img>`` tag would
+    otherwise surface as a 502 to the browser, which won't
+    auto-retry 5xx for image elements. One retry masks the vast
+    majority of those transients without amplifying real outages
+    into multi-second stalls. (AGENT_BACKLOG #003 / 2026-05-19.)
+    """
+    import time
+    import urllib.error
+    try:
+        return _http_get_once(url, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        # Non-retryable: 4xx including 404. Surface immediately.
+        if exc.code is None or exc.code < 500:
+            raise
+        # 5xx falls through to retry.
+    except urllib.error.URLError:
+        # Connection reset / DNS / socket timeout — falls through.
+        pass
+    time.sleep(_RETRY_BACKOFF_SEC)
+    return _http_get_once(url, timeout=timeout)
 
 
 def fetch_and_cache(
