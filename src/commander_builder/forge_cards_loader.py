@@ -28,10 +28,16 @@ against ``k/krenko_mob_boss.txt``, ``s/sol_ring.txt``, etc.
 from __future__ import annotations
 
 import re
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
+
+# Apostrophe variants that Forge strips entirely (no underscore
+# substitute). Includes ASCII straight + Unicode curly + grave-
+# accent backtick that occasionally appears in scraped card names.
+_APOSTROPHE_RE = re.compile(r"['‘’‛`]")
 
 
 def slug_for(name: str) -> str:
@@ -39,24 +45,38 @@ def slug_for(name: str) -> str:
 
     ``Krenko, Mob Boss`` → ``krenko_mob_boss``.
     ``Avatar of Slaughter`` → ``avatar_of_slaughter``.
+    ``Aang's Defense`` → ``aangs_defense`` (apostrophes STRIPPED,
+    not converted to underscore — Forge's actual convention).
+    ``Andúril`` → ``anduril`` (diacritics folded to ASCII).
 
-    DFC NAMING (corrected 2026-05-19): Forge actually stores DFCs
-    under the FULL ``front_back`` slug — e.g. Bala Ged Recovery //
+    Forge's filesystem rules, confirmed against the shipped
+    ``cardsfolder.zip`` on 2026-05-19:
+      1. Apostrophes (', ', ', `) are removed entirely.
+      2. Diacritics get NFKD-stripped → plain ASCII.
+      3. Everything else lowercase + non-alnum runs → single
+         underscore.
+
+    DFC NAMING (corrected 2026-05-19): Forge stores DFCs under
+    the FULL ``front_back`` slug — e.g. Bala Ged Recovery //
     Bala Ged Sanctuary lives at ``b/bala_ged_recovery_bala_ged_
-    sanctuary.txt``, NOT under the front-face-only slug. Slugifying
-    a ``Foo // Bar`` name therefore collapses the ``//`` into the
-    same non-alnum-run handling as everything else, producing
-    ``foo_bar``.
+    sanctuary.txt``, NOT under the front-face-only slug.
 
-    Deck files (.dck) typically reference cards by front-face name
-    only ("Bala Ged Recovery"). For those, ``slug_for`` returns the
-    front-face slug — the loader then falls back to a DFC index
-    that maps front-face → full-DFC filename when a direct lookup
-    misses.
+    Deck files (.dck) typically reference cards by front-face
+    name only ("Bala Ged Recovery"). For those, ``slug_for``
+    returns the front-face slug — the loader then falls back to
+    a DFC index that maps front-face → full-DFC filename when a
+    direct lookup misses.
     """
     if not name:
         return "unknown"
-    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    # 1. NFKD normalize + strip combining marks → fold diacritics.
+    folded = unicodedata.normalize("NFKD", name)
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    # 2. Strip apostrophes entirely (Forge's convention; "Aang's"
+    #    becomes "aangs" not "aang_s").
+    folded = _APOSTROPHE_RE.sub("", folded)
+    # 3. Collapse remaining non-alnum runs to underscore.
+    slug = re.sub(r"[^a-z0-9]+", "_", folded.lower()).strip("_")
     return slug or "unknown"
 
 
@@ -173,18 +193,31 @@ class CardsLoader:
 
     def _read_slug(self, slug: str) -> Optional[str]:
         """Read a script blob by exact slug (no DFC fallback). Returns
-        None if the slug isn't present in the corpus."""
+        None if the slug isn't present in the corpus.
+
+        Tries both the standard ``<first-letter>/<slug>.txt`` path
+        AND the ``upcoming/<slug>.txt`` staging directory Forge uses
+        for preview cards from sets that haven't released yet. The
+        upcoming/ tree gets promoted to the lettered tree on set
+        release, so newly-spoiled cards live there transiently.
+        """
+        candidates = (
+            f"{slug[0]}/{slug}.txt",
+            f"upcoming/{slug}.txt",
+        )
         if self._directory is not None:
-            path = self._directory / slug[0] / f"{slug}.txt"
-            if not path.is_file():
-                return None
-            return path.read_text(encoding="utf-8", errors="replace")
-        member = _zip_member_for(slug)
-        zf = self._ensure_zip()
-        try:
-            return zf.read(member).decode("utf-8", errors="replace")
-        except KeyError:
+            for candidate in candidates:
+                path = self._directory / candidate
+                if path.is_file():
+                    return path.read_text(encoding="utf-8", errors="replace")
             return None
+        zf = self._ensure_zip()
+        for candidate in candidates:
+            try:
+                return zf.read(candidate).decode("utf-8", errors="replace")
+            except KeyError:
+                continue
+        return None
 
     def _get_dfc_index(self) -> dict[str, str]:
         """Build (lazily, once) a map from front-face slug → full

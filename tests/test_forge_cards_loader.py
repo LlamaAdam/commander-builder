@@ -31,8 +31,18 @@ from commander_builder.forge_cards_loader import (
     ("Krenko, Mob Boss",   "krenko_mob_boss"),
     ("Sol Ring",            "sol_ring"),
     ("Avatar of Slaughter", "avatar_of_slaughter"),
-    # Apostrophes collapse into the surrounding underscore run.
-    ("Yawgmoth's Will",     "yawgmoth_s_will"),
+    # Apostrophes are STRIPPED, not converted to underscore —
+    # matches Forge's actual filesystem (corrected 2026-05-19;
+    # was wrong in earlier slug rules).
+    ("Yawgmoth's Will",     "yawgmoths_will"),
+    ("Akroma's Memorial",   "akromas_memorial"),
+    ("Ajani's Pridemate",   "ajanis_pridemate"),
+    ("Lim-Dul's Cohort",    "lim_duls_cohort"),
+    # Diacritics fold to ASCII via NFKD.
+    ("Andúril",             "anduril"),
+    ("Andúril, Flame of the West", "anduril_flame_of_the_west"),
+    # Hyphens become underscores.
+    ("Lim-Dul",             "lim_dul"),
     # DFC: ``//`` collapses to the full ``front_back`` slug —
     # matches Forge's actual filesystem convention (corrected
     # 2026-05-19; was incorrectly front-face-only in #018's
@@ -192,6 +202,43 @@ def test_loader_zip_resolves_dfc_from_front_face_only_name(tmp_path):
     assert raw is not None
     assert "Bala Ged Recovery" in raw
     assert "Bala Ged Sanctuary" in raw
+
+
+def test_loader_zip_falls_back_to_upcoming_directory(tmp_path):
+    """Forge stages preview cards under ``upcoming/<slug>.txt`` until
+    the set releases, then migrates them to the lettered tree.
+    Cards in upcoming/ must resolve via the same load_one API so
+    a fresh-spoiled card in a deck doesn't show as unresolved.
+
+    Caught 2026-05-19 during #018 follow-up: 22 cards in our
+    library were unresolved purely because Forge had them in
+    upcoming/, not under their letter directory yet."""
+    zip_path = tmp_path / "cardsfolder.zip"
+    import zipfile
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("upcoming/", "")
+        zf.writestr(
+            "upcoming/blazing_firesinger_seething_song.txt",
+            "Name:Blazing Firesinger\nManaCost:R\nTypes:Creature\n",
+        )
+    loader = CardsLoader(zip_path=zip_path)
+    raw = loader.load_one("Blazing Firesinger // Seething Song")
+    assert raw is not None
+    assert "Blazing Firesinger" in raw
+
+
+def test_loader_directory_falls_back_to_upcoming(tmp_path):
+    """Same upcoming/ fallback works on the unzipped directory layout."""
+    upcoming = tmp_path / "upcoming"
+    upcoming.mkdir()
+    (upcoming / "new_card.txt").write_text(
+        "Name:New Card\nManaCost:1\nTypes:Artifact\n",
+        encoding="utf-8",
+    )
+    loader = CardsLoader(directory=tmp_path)
+    raw = loader.load_one("New Card")
+    assert raw is not None
+    assert "Name:New Card" in raw
 
 
 def test_loader_dfc_index_does_not_shadow_regular_cards(tmp_path):
