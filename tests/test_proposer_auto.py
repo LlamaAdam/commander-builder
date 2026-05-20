@@ -2690,3 +2690,83 @@ def test_proposal_to_dict_is_json_safe():
     assert parsed["rationale"] == "r"
     assert parsed["source"] == "claude-auto"
     assert parsed["dropped_for_bracket"] == ["X"]
+
+
+# --- subscription-CLI curator adapter (_curator_complete_via_cli) ----------
+# These mock subprocess.run + shutil.which -- no real `claude` call is made.
+# They guard the adapter that lets curation run under a Max subscription with
+# no ANTHROPIC_API_KEY (the path that unblocked the FP-002 data generation).
+
+import subprocess as _subprocess
+import shutil as _shutil
+
+from commander_builder.proposer import _curator_complete_via_cli
+
+
+def _fake_completed(returncode, stdout, stderr=""):
+    return type("CP", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr})()
+
+
+def test_curator_cli_sends_prompt_via_stdin_and_scrubs_api_key(monkeypatch):
+    monkeypatch.setattr(_shutil, "which", lambda name: r"C:\fake\claude.CMD")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-scrubbed")
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["input"] = kw.get("input")
+        captured["env"] = kw.get("env")
+        return _fake_completed(0, json.dumps({"is_error": False, "result": '{"adds": []}'}))
+
+    monkeypatch.setattr(_subprocess, "run", fake_run)
+    out = _curator_complete_via_cli(system="SYS", user_msg="USER")
+
+    assert out == '{"adds": []}'
+    # Prompt goes on stdin, NOT as an argv element (Windows cmdline-length fix).
+    assert captured["input"] == "SYS\n\n---\n\nUSER"
+    assert all("USER" not in str(a) for a in captured["cmd"])
+    # API-key env vars are scrubbed so the CLI uses subscription auth.
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
+
+
+def test_curator_cli_retries_once_then_succeeds(monkeypatch):
+    monkeypatch.setattr(_shutil, "which", lambda name: r"C:\fake\claude.CMD")
+    monkeypatch.setattr("time.sleep", lambda *a, **k: None)  # skip the backoff
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _fake_completed(1, "", "transient blip")
+        return _fake_completed(0, json.dumps({"result": "OK-after-retry"}))
+
+    monkeypatch.setattr(_subprocess, "run", fake_run)
+    out = _curator_complete_via_cli(system="S", user_msg="U")
+    assert out == "OK-after-retry"
+    assert calls["n"] == 2
+
+
+def test_curator_cli_raises_after_retry_exhausted(monkeypatch):
+    monkeypatch.setattr(_shutil, "which", lambda name: r"C:\fake\claude.CMD")
+    monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+    monkeypatch.setattr(_subprocess, "run",
+                        lambda cmd, **kw: _fake_completed(1, "", "still failing"))
+    with pytest.raises(RuntimeError, match="after retry"):
+        _curator_complete_via_cli(system="S", user_msg="U")
+
+
+def test_curator_cli_is_error_envelope_raises(monkeypatch):
+    monkeypatch.setattr(_shutil, "which", lambda name: r"C:\fake\claude.CMD")
+    monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+    monkeypatch.setattr(_subprocess, "run",
+                        lambda cmd, **kw: _fake_completed(
+                            0, json.dumps({"is_error": True, "result": "rate limit"})))
+    with pytest.raises(RuntimeError):
+        _curator_complete_via_cli(system="S", user_msg="U")
+
+
+def test_curator_cli_missing_binary_raises(monkeypatch):
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError, match="not found"):
+        _curator_complete_via_cli(system="S", user_msg="U")
