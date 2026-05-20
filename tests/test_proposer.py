@@ -361,3 +361,42 @@ def test_ollama_propose_falls_back_when_daemon_unreachable(tmp_path, monkeypatch
 
     with pytest.raises(NotImplementedError, match="Ollama daemon not reachable"):
         ollama_propose(_make_input(tmp_path), ProposerConfig())
+
+
+# ---------------------------------------------------------------------------
+# `python -m commander_builder.proposer` entry-point regression test
+#
+# Background: running proposer.py directly used to fail with a circular-
+# import (`cannot import name 'auto_curate_main' from partially
+# initialized module 'commander_builder._proposer_cli'`). Caught during
+# the 2026-05-20 web/curator end-to-end smoke test. Fixed by aliasing
+# the `__main__` module under `commander_builder.proposer` before any
+# sibling import fires. This pins the contract.
+# ---------------------------------------------------------------------------
+
+
+def test_python_m_commander_builder_proposer_help_runs():
+    """`python -m commander_builder.proposer --help` must exit 0.
+
+    This is the regression test for the 2026-05-20 circular-import bug
+    where -m invocation crashed because `_proposer_cli` re-loaded
+    proposer.py before its module-scope export of `auto_curate_main`
+    completed.
+    """
+    import subprocess
+    import sys as _sys
+
+    result = subprocess.run(
+        [_sys.executable, "-m", "commander_builder.proposer", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"python -m commander_builder.proposer --help failed:\n"
+        f"stdout: {result.stdout[:500]}\nstderr: {result.stderr[:1500]}"
+    )
+    # Sanity: help text mentions the actual CLI surface so we know we
+    # reached the real entry point (not a stub or early-exit).
+    assert "commander-auto-curate" in result.stdout
+    assert "--mode" in result.stdout
