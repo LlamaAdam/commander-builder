@@ -386,8 +386,9 @@ def test_run_ab_simulation_alternates_seat_order_per_game(tmp_path):
 
 
 def test_run_ab_simulation_records_wins_and_turn_stats(tmp_path):
-    """Wins are attributed by deck identity, not seat. Average
-    turns-when-won is computed only over games each deck won."""
+    """Wins are attributed by seat (which run_ab_simulation controls per
+    game), so they're correct even when A and B share an internal name.
+    Average turns-when-won is computed only over games each deck won."""
     from commander_builder.forge_runner import run_ab_simulation
 
     deck_a = tmp_path / "[USER] DeckA [B3].dck"
@@ -438,6 +439,57 @@ def test_run_ab_simulation_records_wins_and_turn_stats(tmp_path):
     # Avg turns when B won: 8.0
     assert result.avg_turns_a == pytest.approx(12.0, abs=0.5)
     assert result.avg_turns_b == pytest.approx(8.0, abs=0.5)
+
+
+def test_run_ab_simulation_attributes_by_seat_when_names_collide(tmp_path):
+    """Regression: deck A and deck B often share the same internal `Name=`
+    (a curated deck keeps its parent's Name=; a detuned deck keeps the
+    original's). Forge then emits identical "Ai(N)-<Name>" tokens for both,
+    so the OLD name-based attribution matched neither stem-key and recorded
+    0-0 (every verdict forced to neutral) — or funnelled all wins to one
+    side, fabricating kept/reverted. Seat-based attribution must credit the
+    real winner. Here B wins both games despite both decks being "Twin"."""
+    from commander_builder.forge_runner import run_ab_simulation
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    # Both head-to-head seats report the identical Forge name "Twin".
+    canned = [
+        # Game 0: order [DeckA, DeckB, f1, f2] -> B is seat 2; B wins.
+        _ab_canned_stdout(11, 2, "Twin",
+                          seats=["Twin", "Twin", "filler1", "filler2"]),
+        # Game 1: order [DeckB, DeckA, f1, f2] -> B is seat 1; B wins.
+        _ab_canned_stdout(9, 1, "Twin",
+                          seats=["Twin", "Twin", "filler1", "filler2"]),
+    ]
+
+    class _FakeRunner:
+        def __init__(self):
+            self.idx = 0
+
+        def run(self, deck_filenames, num_games, **kwargs):
+            stdout = canned[self.idx]
+            self.idx += 1
+            return SimResult(
+                cmd=["fake"], returncode=0, duration_sec=1.0,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=2,
+        runner=_FakeRunner(),
+        fillers=["filler1.dck", "filler2.dck"],
+    )
+
+    assert result.status == "done"
+    # B won both games; seat attribution must credit B, not silently 0-0.
+    assert result.wins_b == 2
+    assert result.wins_a == 0
+    # Turn stats follow the same seat path.
+    assert result.avg_turns_b == pytest.approx(10.0, abs=0.5)
 
 
 def test_run_ab_simulation_skips_when_forge_not_installed(tmp_path, monkeypatch):

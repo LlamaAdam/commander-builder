@@ -606,9 +606,6 @@ def run_ab_simulation(
         filler_a = fillers[0]
         filler_b = fillers[1]
 
-    name_a = _ab_deck_name_for_match(deck_a_path)
-    name_b = _ab_deck_name_for_match(deck_b_path)
-
     a_turns: list[int] = []
     b_turns: list[int] = []
     started = datetime.now()
@@ -657,24 +654,31 @@ def run_ab_simulation(
         parsed = _parse_sim(sim.stdout)
         match = _analyze_match(sim.stdout)
 
-        # Attribute wins by normalized deck name (seat-agnostic).
+        # Attribute wins by SEAT, not by deck name. Deck A and deck B
+        # frequently share the same internal `Name=` field (e.g. a curated
+        # deck keeps its parent's Name=, and a detuned deck keeps the
+        # original's), so Forge emits identical "Ai(N)-<Name>" tokens for
+        # both. Name-based attribution then funnels ALL of that name's wins
+        # into whichever of name_a/name_b matches first and zeroes the other
+        # — silently fabricating the verdict. Seat is unambiguous: we built
+        # `order`, and Forge seats decks in command-line order (Ai(1)=order[0]).
+        seat_a = order.index(deck_a_path.name) + 1
+        seat_b = order.index(deck_b_path.name) + 1
         for d in parsed.deck_results:
-            if d.normalized_name == name_a:
+            if d.seat == seat_a:
                 result.wins_a += d.wins
-            elif d.normalized_name == name_b:
+            elif d.seat == seat_b:
                 result.wins_b += d.wins
 
-        # Per-game turn stats. game_analyzer attributes a winner per
-        # game; we tally only the games each deck actually won so
-        # avg_turns_a reflects "how fast does A close out games it
-        # wins" rather than "average length of all games A played".
+        # Per-game turn stats — also seat-based for the same reason. Tally
+        # only the games each deck actually won so avg_turns_a reflects "how
+        # fast does A close out games it wins", not the average of all games.
         for g in match.games:
-            if g.end_turn is None:
+            if g.end_turn is None or g.winner_seat is None:
                 continue
-            winner = g.winner_normalized
-            if winner == name_a:
+            if g.winner_seat == seat_a:
                 a_turns.append(g.end_turn)
-            elif winner == name_b:
+            elif g.winner_seat == seat_b:
                 b_turns.append(g.end_turn)
 
         result.games = i + 1
