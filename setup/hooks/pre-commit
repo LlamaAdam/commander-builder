@@ -1,0 +1,4 @@
+#!/bin/sh
+# Pre-commit secret scan (FP-011). Blocks commits that add credential-shaped
+# strings. Install: `git config core.hooksPath setup/hooks`.
+python scripts/scan_secrets.py
