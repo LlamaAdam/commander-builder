@@ -6,9 +6,21 @@ proposal for review — not yet started.
 
 ---
 
-## FP-003 — Concurrent Forge sims  ★ highest leverage right now
+## FP-003 — Concurrent Forge sims  ✅ SHIPPED 2026-05-21
 
-**Why now:** the FP-002 data generation is sim-bound (~12 kept/hour at 4-game
+**Status:** built + verified. `scripts/setup_forge_profile.py` materializes a
+sibling `vendor/forge2` profile (junctions `res/` + `userdata/decks` to the
+source, profile-local `userdata/cache` + `forge.log`). `ForgeRunner.for_profile()`
+targets a profile; `forge_runner.run_ab_batch(jobs, runners)` runs N A/B sims
+concurrently, one per profile, capped at `len(runners)` (a runner is never
+double-booked). `_read_forge_log_tail` fixed to read `userdata/forge.log`
+(Forge writes there, not the program-dir root — the old path captured nothing).
+Verified: 2 concurrent 2-game sims = **2.97× faster** than serial (92s vs 274s),
+both profiles' forge.log written distinctly, no deck-dir contention, both jobs
+`done`. 10 new unit tests (pool order/isolation/overrides + log-tail). To
+recreate the profile on a fresh checkout: `python scripts/setup_forge_profile.py`.
+
+**Why it mattered:** the FP-002 data generation is sim-bound (~12 kept/hour at 4-game
 sims; one Forge JVM at a time). Running 2 sims in parallel ~halves wall-clock
 for both curation batches AND the positives campaign.
 

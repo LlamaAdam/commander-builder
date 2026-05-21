@@ -26,11 +26,13 @@ Usage:
 from __future__ import annotations
 
 import json
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -340,6 +342,20 @@ class ForgeRunner:
             )
         return cls(java_path=java, forge_jar=jar, forge_dir=VENDOR_FORGE)
 
+    @classmethod
+    def for_profile(cls, forge_dir: "Path | str") -> "ForgeRunner":
+        """Build a runner that shares the located java + jar but runs in a
+        different cwd-isolated profile dir (FP-003 concurrent sims).
+
+        The jar/java are resolved by ``locate()`` (absolute paths, shared by
+        every profile); only ``forge_dir`` — the subprocess cwd — differs.
+        Each profile must have its own ``forge.profile.properties`` +
+        ``userdata/`` so the two Forge instances don't collide on the deck
+        dir, cache, or forge.log."""
+        base = cls.locate()
+        return cls(java_path=base.java_path, forge_jar=base.forge_jar,
+                   forge_dir=Path(forge_dir))
+
     def run(
         self,
         deck_filenames: list[str],
@@ -420,13 +436,29 @@ class ForgeRunner:
         )
 
     @staticmethod
+    def _find_forge_log(forge_dir: Path) -> Optional[Path]:
+        """Locate the forge.log for a profile rooted at ``forge_dir``.
+
+        Forge writes its log under ``userDir`` (our profiles set
+        ``userDir=./userdata``), i.e. ``forge_dir/userdata/forge.log`` — NOT
+        the program-dir root, despite the SimResult docstring's old claim.
+        We check ``userdata/forge.log`` first, then fall back to the root for
+        any profile that left userDir at the default. Returns the first that
+        exists, else None."""
+        for candidate in (forge_dir / "userdata" / "forge.log",
+                          forge_dir / "forge.log"):
+            if candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
     def _read_forge_log_tail_impl(forge_dir: Path, max_bytes: int = 64 * 1024) -> str:
         """Read the tail of forge.log. Static helper so the streaming runner
         path doesn't need a ForgeRunner instance to call it."""
-        log_path = forge_dir / "forge.log"
+        log_path = ForgeRunner._find_forge_log(forge_dir)
+        if log_path is None:
+            return ""
         try:
-            if not log_path.exists():
-                return ""
             size = log_path.stat().st_size
             with log_path.open("rb") as f:
                 if size > max_bytes:
@@ -437,23 +469,12 @@ class ForgeRunner:
             return ""
 
     def _read_forge_log_tail(self, max_bytes: int = 64 * 1024) -> str:
-        """Return the last ~64KB of vendor/forge/forge.log if present.
+        """Return the last ~64KB of this profile's forge.log if present.
 
         Forge appends across runs, so the full file is unbounded; the tail is
         what's relevant to the just-finished sim. Best-effort — a missing or
         unreadable log returns empty rather than crashing the run."""
-        log_path = self.forge_dir / "forge.log"
-        try:
-            if not log_path.exists():
-                return ""
-            size = log_path.stat().st_size
-            with log_path.open("rb") as f:
-                if size > max_bytes:
-                    f.seek(size - max_bytes)
-                data = f.read()
-            return data.decode("utf-8", errors="replace")
-        except OSError:
-            return ""
+        return self._read_forge_log_tail_impl(self.forge_dir, max_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +686,82 @@ def run_ab_simulation(
     result.status = _AB_STATUS_DONE
     result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Concurrent A/B sims (FP-003) — run N head-to-heads across a pool of
+# cwd-isolated Forge profiles, capping concurrency at the number of profiles.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ABJob:
+    """One head-to-head to run. ``deck_a``/``deck_b`` are deck file paths;
+    ``fillers`` are the two filler deck *filenames* (commander pods need 4).
+    ``games``/``game_format`` override the batch defaults per-job when set."""
+    deck_a: Path
+    deck_b: Path
+    fillers: Optional[list[str]] = None
+    games: Optional[int] = None
+    game_format: Optional[str] = None
+
+
+def run_ab_batch(
+    jobs: "list[ABJob]",
+    runners: "list[ForgeRunner]",
+    *,
+    games: int = 5,
+    game_format: str = "commander",
+    _sim_fn: "Callable[..., ABResult]" = run_ab_simulation,
+) -> "list[ABResult]":
+    """Run several A/B sims concurrently, one per cwd-isolated profile.
+
+    ``runners`` is a pool of ForgeRunners, each pointing at a DISTINCT
+    profile dir (see ForgeRunner.for_profile + the vendor/forge2 setup).
+    Concurrency is capped at ``len(runners)`` and a runner is never handed
+    to two jobs at once — that's the whole point, since two Forge instances
+    in the same profile would collide on the deck dir, cache, and forge.log.
+
+    Results are returned in the SAME ORDER as ``jobs`` (not completion
+    order). Like ``run_ab_simulation``, individual jobs never raise — a
+    failure lands in that job's ABResult; only a misconfigured pool (no
+    runners) raises.
+
+    ``_sim_fn`` is injectable so the pool logic can be unit-tested without
+    Forge."""
+    if not runners:
+        raise ValueError("run_ab_batch needs at least one runner.")
+    if not jobs:
+        return []
+
+    free: "queue.Queue[ForgeRunner]" = queue.Queue()
+    for r in runners:
+        free.put(r)
+
+    results: "list[Optional[ABResult]]" = [None] * len(jobs)
+
+    def _do(idx: int, job: ABJob):
+        runner = free.get()  # blocks until a profile is free (never, in practice,
+        # since max_workers == len(runners), but keeps the invariant explicit)
+        try:
+            res = _sim_fn(
+                job.deck_a,
+                job.deck_b,
+                games=job.games if job.games is not None else games,
+                runner=runner,
+                fillers=job.fillers,
+                game_format=job.game_format or game_format,
+            )
+            results[idx] = res
+        finally:
+            free.put(runner)
+
+    with ThreadPoolExecutor(max_workers=len(runners)) as ex:
+        futures = [ex.submit(_do, i, job) for i, job in enumerate(jobs)]
+        for f in futures:
+            f.result()  # surface unexpected (non-ABResult) exceptions
+
+    return results  # type: ignore[return-value]
 
 
 if __name__ == "__main__":

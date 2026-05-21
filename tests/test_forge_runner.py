@@ -5,6 +5,7 @@ we mock at the subprocess boundary. The blocking path was already exercised
 by every live integration script in `scripts/`; this file pins the new
 streaming code (GAP-008) so it doesn't drift.
 """
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -535,3 +536,154 @@ def test_ab_result_to_dict_is_json_safe():
     assert parsed["wins_b"] == 2
     assert parsed["games"] == 5
     assert parsed["status"] == "done"
+
+
+# --- run_ab_batch — concurrent A/B sims across a pool of profiles (FP-003) --
+
+
+def _ab_done(deck_a, deck_b, *, games, runner, fillers, game_format):
+    """Stand-in for run_ab_simulation: returns a 'done' ABResult tagged with
+    which runner serviced it, so tests can assert pool assignment."""
+    from commander_builder.forge_runner import ABResult
+    return ABResult(
+        deck_a=Path(deck_a).name, deck_b=Path(deck_b).name,
+        wins_a=games, wins_b=0, games=games, status="done",
+        error=getattr(runner, "tag", None),  # stash runner identity for asserts
+    )
+
+
+def test_run_ab_batch_runs_all_jobs_in_order():
+    """Results come back aligned to the jobs list (not completion order)."""
+    from commander_builder.forge_runner import run_ab_batch, ABJob
+
+    jobs = [
+        ABJob(deck_a=Path(f"d{i}a.dck"), deck_b=Path(f"d{i}b.dck"),
+              fillers=["f1.dck", "f2.dck"], games=i + 1)
+        for i in range(5)
+    ]
+
+    class _R:
+        tag = "r"
+
+    results = run_ab_batch(jobs, [_R(), _R()], _sim_fn=_ab_done)
+    assert len(results) == 5
+    # games echoes the per-job override, in order → proves order preservation.
+    assert [r.games for r in results] == [1, 2, 3, 4, 5]
+    assert all(r.status == "done" for r in results)
+    assert [r.deck_a for r in results] == [f"d{i}a.dck" for i in range(5)]
+
+
+def test_run_ab_batch_never_shares_a_runner_concurrently():
+    """The whole point of the pool: two jobs must never run on the same
+    profile at once (they'd collide on deck dir / cache / forge.log).
+    Caps global concurrency at len(runners)."""
+    import threading
+    import time
+    from commander_builder.forge_runner import run_ab_batch, ABJob, ABResult
+
+    lock = threading.Lock()
+    per_runner_active: dict[int, int] = {}
+    max_global = {"v": 0}
+    active = {"v": 0}
+
+    def _slow_sim(deck_a, deck_b, *, games, runner, fillers, game_format):
+        rid = id(runner)
+        with lock:
+            per_runner_active[rid] = per_runner_active.get(rid, 0) + 1
+            active["v"] += 1
+            # invariants: no runner double-booked; global cap respected.
+            assert per_runner_active[rid] == 1, "runner serviced two jobs at once"
+            max_global["v"] = max(max_global["v"], active["v"])
+        time.sleep(0.05)
+        with lock:
+            per_runner_active[rid] -= 1
+            active["v"] -= 1
+        return ABResult(deck_a=deck_a.name, deck_b=deck_b.name,
+                        games=games, status="done")
+
+    runners = [object(), object()]  # 2 distinct profiles
+    jobs = [ABJob(deck_a=Path(f"{i}.dck"), deck_b=Path(f"{i}b.dck"),
+                  fillers=["f1.dck", "f2.dck"]) for i in range(8)]
+
+    results = run_ab_batch(jobs, runners, _sim_fn=_slow_sim)
+    assert len(results) == 8
+    assert all(r.status == "done" for r in results)
+    # With 2 profiles and 8 quick jobs, both should run together at least once.
+    assert max_global["v"] == 2
+
+
+def test_run_ab_batch_empty_jobs_returns_empty():
+    from commander_builder.forge_runner import run_ab_batch
+    assert run_ab_batch([], [object()], _sim_fn=_ab_done) == []
+
+
+def test_run_ab_batch_requires_a_runner():
+    from commander_builder.forge_runner import run_ab_batch, ABJob
+    with pytest.raises(ValueError):
+        run_ab_batch([ABJob(deck_a=Path("a.dck"), deck_b=Path("b.dck"))],
+                     [], _sim_fn=_ab_done)
+
+
+def test_run_ab_batch_passes_per_job_overrides():
+    """Per-job games/game_format override the batch defaults."""
+    from commander_builder.forge_runner import run_ab_batch, ABJob, ABResult
+
+    seen: list[tuple[int, str]] = []
+
+    def _capture(deck_a, deck_b, *, games, runner, fillers, game_format):
+        seen.append((games, game_format))
+        return ABResult(status="done")
+
+    jobs = [
+        ABJob(deck_a=Path("a.dck"), deck_b=Path("b.dck")),  # uses defaults
+        ABJob(deck_a=Path("c.dck"), deck_b=Path("d.dck"),
+              games=9, game_format="constructed"),          # overrides
+    ]
+    run_ab_batch(jobs, [object()], games=5, game_format="commander",
+                 _sim_fn=_capture)
+    assert (5, "commander") in seen
+    assert (9, "constructed") in seen
+
+
+def test_for_profile_shares_jar_but_distinct_cwd(tmp_path, monkeypatch):
+    """ForgeRunner.for_profile reuses the located java + jar (shared across
+    profiles) but swaps the cwd to the requested profile dir."""
+    from commander_builder.forge_runner import ForgeRunner
+
+    base = ForgeRunner(java_path=Path("/j/java"), forge_jar=Path("/f/forge.jar"),
+                       forge_dir=Path("/f"))
+    monkeypatch.setattr(ForgeRunner, "locate", classmethod(lambda cls: base))
+
+    r2 = ForgeRunner.for_profile(tmp_path / "forge2")
+    assert r2.java_path == base.java_path
+    assert r2.forge_jar == base.forge_jar
+    assert r2.forge_dir == tmp_path / "forge2"
+
+
+def test_read_forge_log_tail_prefers_userdata(tmp_path):
+    """Forge writes its log under userDir (userdata/forge.log); the tail
+    reader must look there, not just the program-dir root."""
+    from commander_builder.forge_runner import ForgeRunner
+    (tmp_path / "userdata").mkdir()
+    (tmp_path / "userdata" / "forge.log").write_text("under userdata\n",
+                                                     encoding="utf-8")
+    runner = ForgeRunner(java_path=Path("j"), forge_jar=Path("f"),
+                         forge_dir=tmp_path)
+    assert "under userdata" in runner._read_forge_log_tail()
+
+
+def test_read_forge_log_tail_falls_back_to_root(tmp_path):
+    """If a profile left userDir at default, forge.log may sit at the root —
+    still found."""
+    from commander_builder.forge_runner import ForgeRunner
+    (tmp_path / "forge.log").write_text("at root\n", encoding="utf-8")
+    runner = ForgeRunner(java_path=Path("j"), forge_jar=Path("f"),
+                         forge_dir=tmp_path)
+    assert "at root" in runner._read_forge_log_tail()
+
+
+def test_read_forge_log_tail_missing_returns_empty(tmp_path):
+    from commander_builder.forge_runner import ForgeRunner
+    runner = ForgeRunner(java_path=Path("j"), forge_jar=Path("f"),
+                         forge_dir=tmp_path)
+    assert runner._read_forge_log_tail() == ""
