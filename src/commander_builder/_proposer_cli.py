@@ -4,10 +4,20 @@ End-to-end unattended pipeline: advisor -> Claude curator -> apply ->
 optional Forge A/B sim -> knowledge_log row. Split out of proposer
 on 2026-05-16 (Tier-3 refactor); re-exported from proposer for
 back-compat.
+
+Batch mode (added 2026-05-19, AGENT_BACKLOG #011): passing ``--batch
+<glob>`` resolves the glob to multiple .dck files and runs the
+single-deck pipeline over each in sequence. JSON output is forced
+on per deck and the run aggregates everything into one NDJSON stream
+(one JSON object per line). Already-versioned decks are skipped
+unless ``--force`` is passed so a re-run picks up where the previous
+batch left off without redoing API spend.
 """
 from __future__ import annotations
 
+import glob
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -46,9 +56,45 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             "Designed for unattended overnight batch refinement."
         ),
     )
-    p.add_argument("deck_path", type=Path, help="Path to the .dck file to audit.")
+    # ``deck_path`` is optional so ``--batch <glob>`` can substitute
+    # for a single positional path. Exactly one of the two MUST be
+    # supplied; validated below after argparse.
+    p.add_argument("deck_path", type=Path, nargs="?", default=None,
+                   help="Path to the .dck file to audit. Omit when "
+                        "using --batch.")
     p.add_argument("--bracket", type=int, required=True,
                    help="Target bracket (1-5). Drives game-changer enforcement.")
+    p.add_argument("--batch", default=None, metavar="GLOB",
+                   help="Run the pipeline over every .dck file matching "
+                        "the glob (e.g. 'vendor/forge/userdata/decks/"
+                        "commander/[USER]*[B4].dck'). Forces --json on; "
+                        "emits one JSON object per line on stdout, plus "
+                        "a final summary record under key 'batch_summary'. "
+                        "Already-versioned decks (those whose 'v<N+1>' "
+                        "sibling exists) are skipped unless --force is "
+                        "passed -- safe to re-run an interrupted batch "
+                        "without redoing API spend. Per-deck failures "
+                        "are caught and recorded; one bad deck doesn't "
+                        "abort the rest.")
+    p.add_argument("--force", action="store_true",
+                   help="In --batch mode, re-curate decks that already "
+                        "have a versioned sibling. Default: skip them "
+                        "so an interrupted batch resumes cleanly.")
+    p.add_argument("--parallelism", type=int, default=1,
+                   help="Batch-mode worker count (default 1 = sequential). "
+                        "When > 1, runs that many decks through the "
+                        "pipeline concurrently via a ThreadPoolExecutor. "
+                        "Each worker spawns its own Forge JVM for "
+                        "--run-sim — verified safe via the 2026-05-19 "
+                        "feasibility spike (see scripts/_spike_concurrent_"
+                        "forge.py): two JVMs co-exist in the same Forge "
+                        "install cwd with no lock contention. A 2-deck "
+                        "batch ran in 41%% less wall time than sequential "
+                        "in the spike. Anthropic curator calls also run "
+                        "in parallel; their rate-limit is high enough "
+                        "that 2-4 workers is comfortable. Per-thread "
+                        "stdout is serialized so the NDJSON stream "
+                        "stays parseable.")
     p.add_argument(
         "--mode", choices=["polish", "overhaul", "free"], default="polish",
         help=(
@@ -122,6 +168,18 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "margin = neutral. Default 1.")
     args = p.parse_args(argv)
 
+    # Exactly one of {deck_path, --batch} must be provided. Reject
+    # both-set and neither-set up front so the user gets a clean
+    # error instead of a confused single-deck attempt with batch
+    # flags hanging around (or vice versa).
+    if (args.deck_path is None) == (args.batch is None):
+        print(
+            "ERROR: pass either a deck_path positional OR --batch <glob>, "
+            "not both / neither.",
+            flush=True,
+        )
+        return 2
+
     # Load the external credentials file (~/.commander-builder/credentials
     # or $COMMANDER_BUILDER_CREDENTIALS) BEFORE any code reads
     # os.environ["ANTHROPIC_API_KEY"]. Shell env wins if both are set,
@@ -130,6 +188,17 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     # surfaces to stderr only if they later hit a "key missing" error.
     from ._secrets import load_credentials
     load_credentials(quiet=True)
+
+    # Bracket validation applies to both modes (single + batch).
+    if not (1 <= args.bracket <= 5):
+        print(f"ERROR: bracket must be 1-5, got {args.bracket}", flush=True)
+        return 2
+
+    # Batch mode short-circuits here: dispatch to the loop and exit.
+    # The loop calls back into auto_curate_main for each resolved deck
+    # so the per-deck pipeline is unchanged.
+    if args.batch is not None:
+        return _run_batch(args, p, argv or sys.argv[1:])
 
     # Resolve to absolute path BEFORE handing to the advisor. The
     # advisor treats relative paths as deck_dir-relative and prepends
@@ -140,9 +209,6 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     args.deck_path = args.deck_path.resolve()
     if not args.deck_path.exists():
         print(f"ERROR: deck not found: {args.deck_path}", flush=True)
-        return 2
-    if not (1 <= args.bracket <= 5):
-        print(f"ERROR: bracket must be 1-5, got {args.bracket}", flush=True)
         return 2
 
     # Resolve effective caps from the mode preset + any explicit
@@ -396,6 +462,338 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                     print(f"  avg-turns-to-win: old={avg_a}, new={avg_b}")
                 if sim_verdict:
                     print(f"  verdict: {sim_verdict}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Batch mode (AGENT_BACKLOG #011) -- iterate over a glob of decks
+# ---------------------------------------------------------------------------
+
+def _already_versioned(deck_path: Path) -> bool:
+    """Return True when ``<deck_path>``'s next-version sibling already
+    exists on disk (e.g. ``v2 [B4].dck`` exists alongside ``[B4].dck``).
+
+    Used by batch mode to skip decks that a prior run already curated,
+    so a re-invocation of the same ``--batch`` command resumes cleanly
+    instead of redoing API spend on already-done decks. The user can
+    force re-curation with ``--force``.
+    """
+    from .proposer import _bump_version_filename
+    next_name = _bump_version_filename(deck_path.name)
+    return (deck_path.parent / next_name).exists()
+
+
+def _resolve_batch_glob(pattern: str) -> list[Path]:
+    """Expand a batch glob into a sorted list of .dck paths.
+
+    Uses ``glob.glob`` with ``recursive=True`` so users can pass
+    ``**/*.dck``-style patterns. Filters to .dck files only (the
+    pipeline can't audit anything else) and resolves to absolute
+    paths up front so the per-deck argv is unambiguous.
+
+    **Bracket-literal handling**: this project's deck filenames use
+    ``[USER]`` and ``[B<N>]`` markers liberally, which collide with
+    glob's character-class syntax (``[USER]`` would match a single
+    char from {U,S,E,R}, not the literal string). We split the
+    pattern on ``*``/``?`` wildcards, escape literal segments via
+    ``glob.escape`` so brackets become ``[[]USER[]]`` (glob's
+    documented literal-bracket form), then rejoin. The wildcards
+    are preserved because they're isolated in odd-indexed split
+    pieces.
+    """
+    import re as _re
+    parts = _re.split(r"([*?])", pattern)
+    escaped = "".join(
+        glob.escape(part) if i % 2 == 0 else part
+        for i, part in enumerate(parts)
+    )
+    matched = [
+        Path(p).resolve() for p in glob.glob(escaped, recursive=True)
+        if p.lower().endswith(".dck")
+    ]
+    matched.sort()
+    return matched
+
+
+def _build_per_deck_argv(deck_path: Path, batch_argv: list[str]) -> list[str]:
+    """Construct the argv for a single-deck recursive call by stripping
+    batch-only flags from the batch invocation and substituting the
+    resolved deck path.
+
+    Strips: ``--batch <glob>`` (and its value), ``--force``. Leaves
+    every other flag intact (--bracket, --mode, --run-sim, --max-adds,
+    --max-cuts, --source, --model, --dry-run, --no-log, --db-path,
+    --protect*, --sim-*).
+    """
+    out: list[str] = []
+    i = 0
+    saw_positional = False
+    while i < len(batch_argv):
+        tok = batch_argv[i]
+        if tok == "--batch":
+            i += 2  # skip the flag + its value
+            continue
+        if tok.startswith("--batch="):
+            i += 1
+            continue
+        if tok == "--force":
+            i += 1
+            continue
+        # Existing positional? In batch mode the user shouldn't have
+        # passed one (we validated above), but defensively skip it.
+        if not tok.startswith("-") and not saw_positional and tok.lower().endswith(".dck"):
+            saw_positional = True
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    # Prepend the resolved per-deck path as the positional.
+    return [str(deck_path), *out]
+
+
+# Thread-local stdout router for batch-mode parallel dispatch.
+# ``contextlib.redirect_stdout`` patches the PROCESS-GLOBAL sys.stdout
+# which races catastrophically across worker threads (workers stomp
+# each other's writes, NDJSON output gets corrupted). We swap sys.stdout
+# once at the top of _run_batch with this proxy that dispatches each
+# ``write`` / ``flush`` to a per-thread buffer if one is set,
+# otherwise to the original stdout. Workers set the buffer just
+# before calling auto_curate_main and clear it after — same shape as
+# redirect_stdout but thread-safe.
+_BATCH_THREAD_LOCAL = __import__("threading").local()
+
+
+class _ThreadLocalStdoutProxy:
+    """sys.stdout proxy that dispatches to a per-thread buffer when set."""
+
+    def __init__(self, default):
+        self._default = default
+
+    def _target(self):
+        return getattr(_BATCH_THREAD_LOCAL, "buf", None) or self._default
+
+    def write(self, s):
+        return self._target().write(s)
+
+    def flush(self):
+        return self._target().flush()
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+
+def _process_one_deck(
+    deck_path: Path, batch_argv: list[str], force: bool,
+) -> dict:
+    """Run the per-deck pipeline once and return the NDJSON record.
+
+    Capture strategy depends on whether a per-thread buffer is in
+    scope (set by the parallel dispatcher) — falls back to in-process
+    ``contextlib.redirect_stdout`` for the sequential path where
+    sys.stdout isn't proxied. Both paths produce the same record
+    shape, so callers don't care which was used.
+
+    Returns one of three record shapes:
+      ``{deck, status: 'skipped', reason}`` — already-versioned and
+        --force not passed.
+      ``{deck, status: 'ok'|'failed', rc, result}`` — pipeline ran;
+        ``result`` is the per-deck JSON payload parsed back from stdout.
+      ``{deck, status: 'error', rc: None, exception}`` — pipeline
+        raised; one bad deck doesn't kill the rest of the batch.
+    """
+    import contextlib as _ctx
+    import io as _io
+    import sys as _sys
+
+    if not force and _already_versioned(deck_path):
+        return {
+            "deck": str(deck_path),
+            "status": "skipped",
+            "reason": "already-versioned (use --force to re-curate)",
+        }
+
+    per_deck_argv = _build_per_deck_argv(deck_path, batch_argv)
+    buf = _io.StringIO()
+    is_thread_local_stdout = isinstance(_sys.stdout, _ThreadLocalStdoutProxy)
+    try:
+        if is_thread_local_stdout:
+            # Parallel path: set this thread's per-thread buffer so
+            # the proxy routes writes here. ``auto_curate_main``'s
+            # print() calls land in ``buf``, isolated from sibling
+            # workers' writes.
+            _BATCH_THREAD_LOCAL.buf = buf
+            try:
+                rc = auto_curate_main(per_deck_argv)
+            finally:
+                _BATCH_THREAD_LOCAL.buf = None
+        else:
+            # Sequential path: redirect_stdout is safe (single thread).
+            with _ctx.redirect_stdout(buf):
+                rc = auto_curate_main(per_deck_argv)
+    except Exception as exc:  # noqa: BLE001 -- per-deck isolation
+        return {
+            "deck": str(deck_path),
+            "status": "error",
+            "rc": None,
+            "exception": f"{type(exc).__name__}: {exc}",
+        }
+
+    raw = buf.getvalue().strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        payload = {"raw_stdout": raw}
+    return {
+        "deck": str(deck_path),
+        "status": "ok" if rc == 0 else "failed",
+        "rc": rc,
+        "result": payload,
+    }
+
+
+def _run_batch(args, parser, batch_argv: list[str]) -> int:
+    """Iterate ``args.batch`` glob, run auto_curate_main per deck.
+
+    JSON output is forced on so the run produces an NDJSON stream
+    (one JSON object per line) plus a final ``batch_summary`` record.
+    Per-deck failures are caught and recorded; one bad deck doesn't
+    abort the rest.
+
+    ``args.parallelism > 1`` dispatches per-deck work to a
+    ThreadPoolExecutor. The 2026-05-19 feasibility spike
+    (scripts/_spike_concurrent_forge.py) confirmed two Forge JVMs
+    co-exist in the same install cwd with zero lock contention, so no
+    cwd isolation is required. Per-thread stdout writes are
+    serialized through a Lock so the NDJSON stream stays parseable
+    even when records complete concurrently. Record order in the
+    output reflects completion order, NOT glob order — downstream
+    consumers should treat the stream as a multiset, not a sequence.
+
+    Returns 0 when at least one deck succeeded (or all skipped);
+    2 only when EVERY processed deck failed.
+    """
+    paths = _resolve_batch_glob(args.batch)
+    if not paths:
+        print(json.dumps({
+            "batch_summary": {
+                "glob": args.batch,
+                "matched": 0,
+                "error": "no .dck files matched",
+            },
+        }))
+        return 2
+
+    # Force --json on for the per-deck calls so we capture structured
+    # output. If the user already passed --json, this is a no-op.
+    if "--json" not in batch_argv:
+        batch_argv = [*batch_argv, "--json"]
+
+    parallelism = max(1, int(getattr(args, "parallelism", 1) or 1))
+
+    # UX hint: when --batch resolves to >1 deck AND --run-sim is on AND
+    # parallelism is the default 1, suggest bumping. Sequential Forge
+    # sims dominate wall time on multi-deck overnight runs; the spike
+    # showed 2-way parallelism cuts ~41% wall time with no contention.
+    # One-line stderr note; no behavior change.
+    if (
+        len(paths) > 1
+        and getattr(args, "run_sim", False)
+        and parallelism == 1
+    ):
+        print(
+            f"[batch] tip: {len(paths)} decks queued with --run-sim and "
+            f"--parallelism 1. Pass --parallelism 2 (or higher) to halve "
+            f"wall time — Forge JVMs co-exist safely (verified via "
+            f"2026-05-19 feasibility spike).",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    n_skipped = 0
+    n_failed = 0
+    n_succeeded = 0
+
+    def _tally(record: dict) -> None:
+        nonlocal n_skipped, n_failed, n_succeeded
+        status = record.get("status")
+        if status == "skipped":
+            n_skipped += 1
+        elif status == "ok":
+            n_succeeded += 1
+        else:  # failed, error
+            n_failed += 1
+
+    if parallelism == 1:
+        # Sequential fast path — preserves the pre-2026-05-19 NDJSON
+        # ordering contract (records emit in glob order) for users
+        # who haven't opted into parallelism.
+        for deck_path in paths:
+            record = _process_one_deck(deck_path, batch_argv, args.force)
+            _tally(record)
+            print(json.dumps(record), flush=True)
+    else:
+        import concurrent.futures as _cf
+        import sys as _sys
+        import threading as _threading
+
+        emit_lock = _threading.Lock()
+        # Capture the REAL stdout (before the proxy swap) so the
+        # batch coordinator can emit NDJSON records that bypass the
+        # per-thread routing. Without this, our own _emit() writes
+        # would land in a worker's thread-local buffer if a worker
+        # accidentally ran on the coordinator thread.
+        real_stdout = _sys.stdout
+
+        def _emit(record: dict) -> None:
+            with emit_lock:
+                real_stdout.write(json.dumps(record) + "\n")
+                real_stdout.flush()
+
+        # Install the thread-local stdout proxy for the duration of
+        # the pool. Workers will set _BATCH_THREAD_LOCAL.buf inside
+        # _process_one_deck so their auto_curate_main writes land in
+        # per-thread buffers instead of corrupting each other.
+        _sys.stdout = _ThreadLocalStdoutProxy(real_stdout)
+        try:
+            # ThreadPoolExecutor over the deck paths. Workers block on
+            # the Forge subprocess (when --run-sim is on) and on the
+            # Anthropic API (when the curator runs); both are IO-bound
+            # so threads are the right tool. max_workers is capped at
+            # len(paths) to avoid spinning up idle workers for tiny
+            # batches.
+            with _cf.ThreadPoolExecutor(
+                max_workers=min(parallelism, len(paths)),
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        _process_one_deck, deck_path, batch_argv, args.force,
+                    )
+                    for deck_path in paths
+                ]
+                for fut in _cf.as_completed(futures):
+                    record = fut.result()
+                    _tally(record)
+                    _emit(record)
+        finally:
+            _sys.stdout = real_stdout
+
+    summary = {
+        "batch_summary": {
+            "glob": args.batch,
+            "matched": len(paths),
+            "succeeded": n_succeeded,
+            "skipped": n_skipped,
+            "failed": n_failed,
+            "parallelism": parallelism,
+        },
+    }
+    print(json.dumps(summary), flush=True)
+
+    # Non-zero exit iff EVERYTHING failed (with no successes); a
+    # mixed batch returns 0 since the per-deck records carry the
+    # individual failure info.
+    if n_failed > 0 and n_succeeded == 0:
+        return 2
     return 0
 
 

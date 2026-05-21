@@ -247,7 +247,92 @@ It happens. Don't panic, but **act immediately**:
    For deeper history rewrites, use [`git filter-repo`](https://github.com/newren/git-filter-repo).
 4. Audit recent commits for any other secrets. Grep for `sk-`, `Bearer`,
    `password=`, `token=`. The architecture doc (`docs/architecture.md`)
-   suggests a pre-commit hook pattern.
+   suggests a pre-commit hook pattern. (See § Pre-commit hook below —
+   the project now ships one.)
+
+## Pre-commit hook
+
+A self-contained secret scanner ships in `scripts/pre_commit_secret_scan.py`.
+It runs against every staged file on `git commit` and aborts the commit
+if it spots an Anthropic / OpenAI / GitHub / AWS / Bearer / private-key
+shape. Pure stdlib — no third-party install required.
+
+### Two ways to install
+
+**Without the `pre-commit` framework** (zero dependencies):
+
+```sh
+python scripts/install_git_hooks.py
+```
+
+That writes a small shim to `.git/hooks/pre-commit` that calls the
+scanner on every commit. To remove it: `python scripts/install_git_hooks.py
+--uninstall`.
+
+**With the `pre-commit` framework** (nicer multi-hook orchestration):
+
+```sh
+pip install pre-commit
+pre-commit install
+```
+
+The repo's `.pre-commit-config.yaml` wires the same scanner via a
+`local` hook entry, so behavior is identical to the shim path.
+
+### What it catches
+
+| Pattern | Example shape |
+|---------|---------------|
+| `anthropic_api_key` | `sk-ant-api03-…` (60+ alphanum) |
+| `openai_api_key`    | `sk-…` or `sk-proj-…` (40+ alphanum) |
+| `github_pat`        | `ghp_…` / `gho_…` / `ghs_…` / `ghr_…` (36+ chars) |
+| `aws_access_key`    | `AKIA[0-9A-Z]{16}` |
+| `bearer_token`      | `Bearer <40+ char value>` |
+| `private_key`       | `-----BEGIN [...]PRIVATE KEY-----` armor headers |
+
+It deliberately favors false negatives over false positives — a scanner
+that screams on every base64 blob teaches devs to ignore it. Real-world
+rotation horror stories almost always come from explicit `KEY=value`
+shapes; that's the surface we hit hardest.
+
+Documentation placeholders (`sk-ant-...`, `YOUR_TOKEN_HERE`,
+`REPLACE_ME`, `<token>`, etc.) are silently ignored.
+
+### Handling deliberate test fixtures
+
+Two escape hatches for cases where the scanner is wrong:
+
+1. **Inline pragma** (one-off):
+
+   ```python
+   ANTHROPIC_API_KEY=sk-ant-api03-...realkeyshape...  # pragma: secret-scan-allow
+   ```
+
+   The marker can appear anywhere on the line. The whole line is then
+   skipped by the scanner.
+
+2. **Baseline file** (`.secrets-baseline` at repo root):
+
+   When the scanner fires, its stderr block includes a copy-pasteable
+   fingerprint per finding:
+
+   ```
+   Fingerprints (for .secrets-baseline):
+     tests/fixtures/fake.env:3:anthropic_api_key
+   ```
+
+   Append the fingerprint to `.secrets-baseline` to silence that exact
+   (file, line, pattern) tuple.
+
+**Never silence a real key.** Rotate first, fingerprint second.
+
+### What about `--no-verify`?
+
+`git commit --no-verify` bypasses the hook (a git built-in). Don't use
+it casually — the hook exists exactly because the human ritual of
+"scan the diff before commit" fails sometimes. If you must bypass for
+a specific reason (e.g. mid-rebase squash), grep the diff manually
+first: `git diff --cached | grep -E 'sk-(ant|proj)|ghp_|AKIA|BEGIN.*PRIVATE'`.
 
 ## Production / CI
 

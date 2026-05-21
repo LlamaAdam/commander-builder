@@ -6,6 +6,155 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-05-19 — post-PR-#3 work: CI fix, image cache, Forge slug fix, app.js splits, knowledge_log milestones, secret-scan hook
+
+14 commits landed on `feature/2026-04-28-session` after PR #3 merged.
+Tests: 1194 → 1256 fast lane (additionally exercised at 1366 with
+`--run-slow`).
+
+#### Fixed — master CI red badge
+
+- **`fix(advisor)`: disambiguate unresolvable vs colorless commander
+  in CI filter.** PR #3 introduced an autouse fixture that masked a
+  latent bug — `_advise_steps` treated test stubs (dicts without a
+  `color_identity` key) as a colorless commander and rejected every
+  colored add. Adds `_safe_ci_lookup` that requires
+  `"color_identity" in card` before considering the commander
+  resolved; mirrors the pattern already in `proposer.auto_propose`.
+  Cleared master's red CI badge. (`0eae7ae`)
+
+#### Added — image cache reliability (FP-008 follow-through)
+
+- **`feat(web)`: image cache retries once on transient Scryfall
+  failure (#003).** Wraps `_default_http_get` with one retry on
+  `URLError` / 5xx; explicitly skips 404 to avoid wasted round-trips.
+  500ms backoff between attempts; single retry only (this is
+  interactive user traffic, not a batch job). (`1f255b2`)
+- **`feat(web)`: disk-quota eviction policy for image cache (#002).**
+  `MTG_IMAGE_CACHE_QUOTA_BYTES` env override (default 500 MB) +
+  LRU-by-mtime eviction triggered after each `fetch_and_cache` write.
+  Stat-and-bail when under quota keeps the hot path cheap. (`7df7510`)
+
+#### Added — Forge corpus integration (FP-001 slices 1-3)
+
+- **`feat(forge)`: read-only Forge card-script parser (#017).** New
+  `forge_script_parser.py` turns one Forge `.txt` card script into a
+  structured `CardScript` AST (`name`, `mana_cost`, `types`, `pt`,
+  `loyalty`, `keywords`, `abilities`, `svars`, `oracle`, plus DFC
+  via `faces`). Parses 129 distinct `AB$` effect kinds across 32,626
+  Forge cards. Read-only by design — interpretation is the future
+  engine's job; the parser is the cheapest first slice of FP-001
+  that's useful by itself. 8 byte-exact fixtures pin the contract;
+  17 tests across vanilla creatures, lands with mana abilities,
+  sorceries with chained sub-abilities, planeswalker loyalty,
+  battle defense, channel-ability legendary lands, DFC handling,
+  malformed input tolerance. (`c99cf59`)
+- **`feat(forge)`: deck-library static-analysis CLI (#018).** Dual-mode
+  `forge_cards_loader.py` (auto-detects unzipped letter-tree vs the
+  canonical `cardsfolder.zip`), plus `deck_library_analyzer.py` that
+  walks `.dck` files, parses each card's script, and folds into a
+  `LibraryReport` (effect-kind histogram, ability-category histogram,
+  keyword histogram, SVar reference counts, DeckHints frequency,
+  unresolved-cards list). CLI at `scripts/analyze_deck_library.py`
+  with `--json` / `--max-decks` / `--top` / `--per-deck` flags. Smoke
+  run on 50 of 345 real decks: confirmed `Mana` / `ChangesZone` /
+  `Continuous` are the first primitives a Python engine would need.
+  (`3dba38b`)
+- **`feat(forge)`: oracle-text drift detector + DFC loader fix (#019).**
+  New `oracle_diff.py` cross-references Forge's `Oracle:` field
+  against Scryfall's `oracle_text` per card and surfaces mismatches
+  for human review. `normalize_oracle` handles Forge's literal `\\n`,
+  `CARDNAME`/`NICKNAME` placeholders, Unicode minus signs, and
+  planeswalker `[-N]` loyalty brackets. DFC support via per-face
+  oracle concatenation. CLI at `scripts/oracle_diff_report.py` with
+  `--by-pattern` triage that buckets diffs into the known errata
+  patterns. Smoke run on 10 decks: WotC did a massive `X` → `this
+  <type>` errata sweep Forge is uniformly stale on; ~200 cards in
+  just 10 decks lean on the stale text. (`9257ae5`)
+- **`feat(oracle_diff)`: data-driven bucket rules (#020).** Bucket
+  rules moved from hardcoded lambdas in the CLI into
+  `data/oracle_diff_buckets.json`. Maintainers can add new
+  errata-pattern buckets without touching code; next WotC errata
+  sweep just gets a new row in the JSON. (`dc219c6`)
+- **`fix(forge)`: slug rule + `upcoming/` fallback — 88% → 99.82%
+  resolve.** Forge stores card scripts by a slug derived from the
+  card name. Two corpus quirks were under-resolving the deck-library
+  analyzer: (1) apostrophes are removed not underscore-converted
+  (Geist's Dominion → `geists_dominion.txt`); (2) diacritics are
+  NFKD-normalized to ASCII (Lim-Dûl's Vault → `lim_duls_vault.txt`);
+  (3) the active Forge install ships preview cards in `upcoming/`
+  that the loader didn't search. All three fixed; deck-library
+  resolve rate jumped from 88% to 99.82% on the real 345-deck
+  library. (`7acf2c4`)
+
+#### Added — Tier-3 app.js refactor (slices 2, 3, 4)
+
+- **`refactor(web)`: extract `audit_streaming.js` out of app.js
+  (#007).** Pulled the SSE streaming cluster (`streamAuditEvents`,
+  `_parseSseFrame`, `updateAuditProgress`, `renderManabasePreview`)
+  into its own 226-line module. (`764b5cd`)
+- **`refactor(web)`: extract `deck_health_ui.js` +
+  `avg_deck_preview.js` (#008 + #009).** Pulled the deck-health tile
+  cluster (`renderDeckHealthTiles`, `renderHealthTile`,
+  `renderSaltWarningBanner`) into a 216-line module and the average
+  deck preview cluster (`renderAverageDeckPreview`,
+  `bracketSlugToInt`, `buildAverageDeckBody`, `renderAverageDeckCard`)
+  into a 142-line module. **Cumulative app.js: 3738 → 2829 lines
+  (-909).** (`c203464`)
+
+#### Added — knowledge_log milestone tagging (#012, backend only)
+
+- **`feat(knowledge_log)`: milestone column + PATCH endpoint.** Schema
+  v1 → v2 migration adds `milestone TEXT` to `iterations` with a
+  partial index; migration runs unconditionally on every `init_db`
+  and is idempotent. New `set_milestone(iteration_id, label,
+  db_path)` truncates to 64 chars and treats empty/None as clear.
+  `PATCH /api/iterations/<id>/milestone` accepts `{"milestone": str
+  | null}`. `Iteration.milestone` dataclass field is defensively
+  read for legacy DBs. UI flag glyph in the iteration-graph node
+  deferred — needs a browser smoke test that the autonomous run
+  can't reliably validate. 16 new tests (9 knowledge_log + 6 web +
+  1 migration test). (`c5ab6bd`)
+
+#### Added — refresh_card_lists self-mill auto-suggest (#010)
+
+- **`feat(scripts)`: auto-suggest self-mill candidates via Scryfall.**
+  `parse_self_mill_from_response` + `fetch_self_mill_candidates` in
+  `_card_list_refresh.py`. CLI `--only self-mill` now hits Scryfall
+  instead of printing the manual-only stub. Filters: requires
+  movement involving "your library" + "your graveyard" OR the bare
+  `\bmill\b` keyword; excludes "target opponent/player" and "each
+  opponent/player mill" so opponent-mill cards (e.g. Glimpse the
+  Unthinkable) don't slip in as self-mill. (`b50142c`)
+
+#### Added — pre-commit secret scan hook (#006)
+
+- **`feat(security)`: pure-stdlib pre-commit secret scanner.** Catches
+  Anthropic / OpenAI / GitHub PAT / AWS / Bearer / PEM private-key
+  shapes in staged files and aborts `git commit` if any fire. Pure
+  stdlib chosen over `detect-secrets` / `gitleaks` so the hook works
+  the moment a contributor runs the installer — zero install friction
+  blocking the first commit. Two install paths:
+  `python scripts/install_git_hooks.py` writes a no-deps
+  `.git/hooks/pre-commit` shim; `pre-commit install` via the shipped
+  `.pre-commit-config.yaml` wires the same scanner as a `local` hook.
+  Three opt-out layers: placeholder filter (`...`, `YOUR_`,
+  `<token>`), inline `# pragma: secret-scan-allow`, and
+  `.secrets-baseline` fingerprints. 25 tests. (`342e1b5`)
+
+#### Process
+
+- **`docs(status)`: prune stale per-commit blocks; point to CHANGELOG
+  (#004).** STATUS.md 411 → 390 lines; replaced verbose 2026-05-14/15
+  + 2026-05-13/14 commit listings with one-paragraph pointers to
+  this CHANGELOG. (`521f1ae`)
+- **`ci`: opt into Node 24 runtime to clear deprecation warnings.**
+  Added `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"` env block to
+  `.github/workflows/test.yml` ahead of the September 2026 Node 20
+  cutoff. (`58ef9b3`)
+
+---
+
 ### 2026-05-15/16 — auto-curate pipeline + audit polish + Tier-3 refactor
 
 29 commits landed on `feature/2026-04-28-session`. Tests: 875 → 1194.

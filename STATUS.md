@@ -49,56 +49,29 @@ breakdown. Highlights:
 - **External credentials file** at `~/.commander-builder/credentials`
   keeps `ANTHROPIC_API_KEY` outside the repo.
 
-### 2026-05-14/15 overnight session (7 phases)
+### Earlier session blocks (now in CHANGELOG)
 
-Each phase was a self-contained commit with live-server verification:
+Detailed per-commit history for prior sessions lives in
+[CHANGELOG.md](CHANGELOG.md):
 
-1. **UI split for applied vs suggested adds** (`b5ab5ea`) — the
-   audit panel now visually separates "drop-in" recs (in
-   proposed_text) from "needs manual cut" recs.
-2. **Proposed-deck pricing** (`ef33f58`) — `$X → $Y (Δ)`
-   headline in the audit panel. Tier-2 backlog item.
-3. **EDHREC `/tags/<tribe>` integration** (`5446e7d`) — tribal
-   decks pull the broader-archetype tag page (~250-400 cards
-   beyond the commander page).
-4. **Theme detection + multi-tag pages** (`756a6c2`) — Tokens
-   / Spellslinger / Aristocrats / Lifegain / Reanimator /
-   Equipment / Artifacts / Enchantress detection. Up to 3
-   tag pages per audit.
-5. **Card thumbnails + click-to-zoom** (`f57151b`) — FP-008
-   substrate. Lazy-loaded 60×84 inline images, full-size
-   overlay on click.
-6. **EDHREC salt-list integration** (`553187e`) — bracket-fit
-   warnings. Cyclonic Rift / Smothering Tithe / Stasis get
-   yellow pills when audit recommends them.
+- **2026-05-14/15** — 7-phase overnight enrichment session: UI split
+  for applied vs suggested adds (`b5ab5ea`), proposed-deck pricing
+  (`ef33f58`), EDHREC tag-pages (`5446e7d`), theme detection (`756a6c2`),
+  card thumbnails (`f57151b`), salt-list integration (`553187e`).
+- **2026-05-13/14** — chrome-audit fixes for nine production-only
+  bugs that synthetic-text tests hid (Cyclonic Rift / Crux of Fate /
+  Coalition Victory / Three Visits / Sylvan Library / Toxic Deluge /
+  Mystical Tutor / Craterhoof Behemoth / etc.) — pinned the rule that
+  classifier tests source oracle text verbatim from Scryfall via
+  `tests/fixtures/real_oracles.py`.
 
 ### Prior 2026-05-13/14 chrome-audit session (preserved for context)
-- **2026-05-13/14 session deltas** (chrome-audit-driven; most-recent
-  first):
 
-  ```
-  085c256 fix(staples): five more pattern misses caught by bulk audit
-  afc57ac fix(advisor): dedupe adds across manabase + primary source
-  b2ff2b9 fix(staples): real-Scryfall text for Cyclonic Rift / Crux / Coalition
-  f190646 docs(architecture): document advisor + web blueprint refactors
-  f548d28 refactor(web): final stage of blueprint split (closes #3.1)
-  e4cd164 refactor(web): extract deck-edit → routes_decks (stage 4)
-  2622ca5 refactor(web): extract sim → routes_sim (stage 3)
-  c7788fc refactor(web): extract audit/advise → routes_audit (stage 2)
-  9a7c12b refactor(web): extract pure helpers → _helpers.py (stage 1)
-  c9ec4d2 fix(advisor): recalibrate saturation thresholds
-  0410680 fix(dashboard): wire detect_tribal_type into theme_tags
-  52f0b78 feat(ui): manabase-preview + abort-in-flight stream cancel
-  e9514cd feat(ui): progressive audit render via SSE
-  021dd3a feat(web): /api/audit/stream SSE endpoint
-  f69ccca refactor(advisor): split advise() into _advise_steps generator
-  54dd71b fix(ui): suppress 0% pill, render source badges
-  c98d3a2 fix(advisor): consolidate role classifier + wipe patterns
-  ```
-
-  Net: closed the entire 2026-05-13 ranked bug list (1.1/1.2/1.3/1.4,
-  2.1, 3.1) plus caught and fixed 9 production-only bugs during live
-  re-verification.
+Full per-commit detail now in [CHANGELOG.md](CHANGELOG.md). Headline:
+chrome-audit closed the 2026-05-13 ranked bug list (1.1/1.2/1.3/1.4,
+2.1, 3.1) and caught 9 production-only bugs that synthetic-text tests
+were hiding — established the verbatim-Scryfall-text discipline
+documented at `tests/fixtures/real_oracles.py`.
 
 - **Modules:** ~30 production, plus the `web/` subpackage now split
   into 6 modules: `app.py` (302-line orchestrator), `_helpers.py`,

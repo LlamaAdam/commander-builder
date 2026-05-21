@@ -25,6 +25,7 @@ hop can be injected.
 """
 from __future__ import annotations
 
+import re
 from typing import Callable, Iterable, Optional
 
 
@@ -85,6 +86,108 @@ def parse_mdfc_lands_from_response(payload: dict) -> set[str]:
         if name:
             out.add(name.lower())
     return out
+
+
+def parse_self_mill_from_response(payload: dict) -> set[str]:
+    """Project one Scryfall ``/cards/search`` response into the set of
+    lowercase card names that qualify as self-mill enablers.
+
+    Qualification (must all hold):
+      - oracle_text mentions both ``your library`` AND ``your graveyard``
+        (the milling motion). Catches "reveal cards from the top of
+        your library ... put the rest into your graveyard" patterns
+        (Hermit Druid, Satyr Wayfinder) plus direct "into your
+        graveyard" milling.
+      - OR the text uses the literal word ``mill`` paired with
+        ``you`` or ``your`` (avoids matching "target opponent
+        mills"). Catches Stitcher's Supplier "mill three cards"
+        and similar concise forms.
+      - NOT a pure opponent-mill card: oracle must not contain
+        ``target opponent`` or ``target player`` or
+        ``each opponent`` as the milling target. Mesmeric Orb's
+        "permanent's controller mills" survives because the
+        targeting isn't a player.
+      - NOT a card that exiles instead of mills (e.g. Bojuka Bog
+        — "exile all cards in target player's graveyard" — wrong
+        zone).
+
+    Card-name normalization mirrors ``parse_mdfc_lands_from_response``:
+    DFC names collapse to the front face's name; lowercase result.
+    """
+    out: set[str] = set()
+    for card in (payload or {}).get("data") or []:
+        oracle = (card.get("oracle_text") or "").lower()
+        if not oracle:
+            # DFC: walk per-face oracle text too.
+            faces = card.get("card_faces") or []
+            oracle = " ".join(
+                ((f or {}).get("oracle_text") or "").lower() for f in faces
+            )
+        if not oracle:
+            continue
+
+        # Negative filters first — short-circuit obvious opponent-mill.
+        if "target opponent" in oracle or "target player" in oracle:
+            continue
+        if "each opponent" in oracle and "mill" in oracle:
+            # Cards like Mind Funeral / Maddening Cacophony.
+            continue
+        if "each player" in oracle and "mill" in oracle:
+            # Symmetrical mill (everyone mills). Not a self-mill
+            # enabler — players USE it sideways but it's an attack
+            # card by intent.
+            continue
+
+        # Positive: any "mill" keyword surviving the negatives, OR
+        # the explicit self-motion pattern (reveal-from-library +
+        # put-into-your-graveyard). Magic's default when "mill N"
+        # has no target is "you mill" — so any unfiltered ``mill``
+        # mention is self-mill by elimination.
+        has_mill = re.search(r"\bmill\b", oracle) is not None
+        motion = "your library" in oracle and "your graveyard" in oracle
+        if not (has_mill or motion):
+            continue
+
+        name = card.get("name") or ""
+        if "//" in name:
+            name = name.split("//", 1)[0].strip()
+        if name:
+            out.add(name.lower())
+    return out
+
+
+def fetch_self_mill_candidates(
+    http_get: Optional[Callable[[str], dict]] = None,
+    initial_url: str = (
+        "https://api.scryfall.com/cards/search?"
+        "q=oracle%3A%22into+your+graveyard%22+oracle%3A%22your+library%22"
+    ),
+) -> set[str]:
+    """Walk Scryfall's paginated search response for self-mill
+    candidates and project via ``parse_self_mill_from_response``.
+
+    Query: ``oracle:"into your graveyard" oracle:"your library"``
+    — broad enough to catch the Hermit-Druid / Satyr-Wayfinder /
+    Buried-Alive shape; per-card post-filter trims the obvious
+    opponent-mill false positives.
+
+    Same pagination + safety-cap pattern as ``fetch_mdfc_lands``.
+    """
+    if http_get is None:
+        from .scryfall_client import _http_get_json
+        http_get = _http_get_json
+
+    seen: set[str] = set()
+    url: Optional[str] = initial_url
+    pages = 0
+    while url and pages < 50:
+        payload = http_get(url)
+        seen |= parse_self_mill_from_response(payload)
+        if not payload or not payload.get("has_more"):
+            break
+        url = payload.get("next_page")
+        pages += 1
+    return seen
 
 
 def fetch_mdfc_lands(

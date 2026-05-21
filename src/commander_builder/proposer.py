@@ -34,6 +34,20 @@ A `ProposerOutput` is what `iteration_loop` actually consumes:
 
 from __future__ import annotations
 
+# When run as ``python -m commander_builder.proposer``, Python only
+# registers this file as ``__main__`` — it does NOT also enter it in
+# ``sys.modules`` as ``commander_builder.proposer``. So when a sibling
+# module (``_proposer_cli``) later does ``from .proposer import …``,
+# Python re-executes proposer.py from scratch as ``commander_builder.
+# proposer``, which then triggers the same import chain and ends in
+# ``ImportError: cannot import name 'auto_curate_main' from partially
+# initialized module``. Aliasing the module object under both names up
+# front breaks the loop: the sibling import finds the already-loaded
+# (partially-initialized) module and pulls already-defined names from it.
+import sys as _sys
+if __name__ == "__main__" and "commander_builder.proposer" not in _sys.modules:
+    _sys.modules["commander_builder.proposer"] = _sys.modules["__main__"]
+
 import json
 import os
 from dataclasses import asdict, dataclass, field
