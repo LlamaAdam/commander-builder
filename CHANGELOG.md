@@ -6,6 +6,65 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-05-21/22 — FP-003 shipped, A/B win-attribution fix, FP-002 concluded, FP-002 data-gen substrate
+
+Commits `33536d7`…`7cef5a7` on `feature/2026-04-28-session`. Two future
+plans moved off "parked": **FP-003 shipped**, **FP-002 concluded NOT
+VIABLE** via this pipeline. A correctness fix to A/B win attribution
+invalidated the prior FP-002 training labels.
+
+#### Fixed — A/B sim win attribution (the bug that mattered)
+
+- **`fix(forge)`: attribute A/B sim wins by SEAT, not deck name.**
+  `run_ab_simulation` credited wins by deck *name*, but deck A and deck B
+  routinely share the same internal `Name=` (a curated deck keeps its
+  parent's; a detuned deck keeps the original's) → Forge emitted identical
+  seat tokens → wins funnelled to one side. Now attributed by seat.
+  **Consequence:** the prior `knowledge_log` FP-002 labels (78 kept / 153
+  reverted) are **measurement artifacts** — train only on post-fix rows
+  with `--min-id 314`. Pre-fix rows are kept in the DB as archive, never
+  deleted. (`e8777b6`)
+
+#### Added — concurrent Forge sims (FP-003 SHIPPED)
+
+- **`feat(forge)`: concurrent A/B sims via cwd-isolated profile pool.**
+  New `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims across
+  cwd-isolated Forge profiles in parallel (≈2× throughput). Second profile
+  lives at `vendor/forge2`, recreatable via
+  `scripts/setup_forge_profile.py`. Resolves the FP-003 feasibility spike:
+  separate `cwd`-isolated profiles do avoid file-locking races. (`0f8f945`)
+- **`feat(curator)`: hint `--parallelism` when batch + `--run-sim` default
+  to 1.** (`33536d7`)
+
+#### Concluded — FP-002 Phase-3 ML predictor: NOT VIABLE via this pipeline
+
+- With correct (post-`e8777b6`) attribution, the curator's swaps almost
+  never make a deck *worse* than its input — verified across detune depths
+  0–10 → **11 kept / 3 neutral / 0 reverted**. The kept-vs-reverted
+  classifier therefore has no negative class to learn. A future FP-002
+  would need a different framing (e.g. regress on improvement margin), not
+  more sim hours.
+- Supporting data-gen substrate that led to the conclusion:
+  - **`feat`: `scripts/detune_deck.py`** positive-example generator +
+    `9a22240` unit tests. (the orchestrator holds the generators +
+    `train_fp002.py`.)
+  - **`ml_dataset`: pre-sim deck-composition features + regression tests**
+    (`114122e`); **fix `extract_features` reading stale sim schema; add
+    detuner** (`6822352`).
+
+#### Added — subscription-CLI curator routing + secret scanner (FP-011 piece)
+
+- **`feat`: route curator through the subscription `claude` CLI when no
+  API key is present** (`12d7f2c`); `1682ada` unit-tests the adapter;
+  `d38bb4c` documents why `claude_propose` stays SDK-only. Never inherit
+  `ANTHROPIC_API_KEY` when invoking `claude`.
+- **`feat(security)`: pre-commit secret scanner** — scans staged diffs for
+  key prefixes (FP-011 piece; web config GET/PUT still TODO). (`803debe`)
+- **`docs`: action plans for actionable future plans** (FP-003/011/001/010)
+  at `docs/future-plans-action.md` (`af83510`); **`HANDOFF.md`** added as
+  orientation + FP snapshot, split from the orchestrator (`8ed4cc1`,
+  `7cef5a7`); `0bb2aa3` unbreaks `python -m commander_builder.proposer`.
+
 ### 2026-05-19 — post-PR-#3 work: CI fix, image cache, Forge slug fix, app.js splits, knowledge_log milestones, secret-scan hook
 
 14 commits landed on `feature/2026-04-28-session` after PR #3 merged.

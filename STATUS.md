@@ -8,21 +8,44 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](docs/architecture.md).
 
-**Last updated:** 2026-05-16 (auto-curate pipeline + Tier-3 refactor)
+**Last updated:** 2026-05-22 (FP-003 shipped, A/B win-attribution fix,
+FP-002 concluded not viable)
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
-apply → Forge A/B sim → knowledge_log verdict) shipped. 110+ commits
-on `feature/2026-04-28-session` ahead of `master`. Phase 3 (ML
-predictor) still data-gated.
+apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
+(concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML predictor)
+concluded NOT VIABLE** via this pipeline (no negative class — see Parked
+plans). 130+ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ---
 
 ## State of the tree
 
-- **Tests:** 1194 passing (+319 from the 2026-05-15 recap), ~167s
+- **Tests:** ~1287 passing fast lane (+slow with `--run-slow`), ~167s
   offline. Zero warnings under `python -W default`.
-- **Branch:** `feature/2026-04-28-session` (110+ commits ahead of
+- **Branch:** `feature/2026-04-28-session` (130+ commits ahead of
   `master`, in sync with `origin`).
+
+### 2026-05-21/22 session — FP-003 shipped, A/B attribution fix, FP-002 concluded
+
+See [CHANGELOG.md](CHANGELOG.md) for the full breakdown. Highlights:
+
+- **FP-003 SHIPPED** — `forge_runner.run_ab_batch(jobs, runners)` runs
+  A/B sims across cwd-isolated Forge profiles in parallel (≈2×
+  throughput); `vendor/forge2` is recreatable via
+  `scripts/setup_forge_profile.py`. (`0f8f945`)
+- **A/B win-attribution bug fixed** (`e8777b6`) — `run_ab_simulation`
+  credited wins by deck *name*, but A and B routinely share the same
+  internal `Name=` → wins funnelled to one side. Now attributed by
+  **seat**. ⚠️ Prior FP-002 labels (78 kept / 153 reverted) are
+  measurement artifacts — train only on post-fix rows (`--min-id 314`).
+- **FP-002 concluded NOT VIABLE** via this pipeline — with correct
+  attribution the curator's swaps almost never make a deck worse
+  (detune depths 0–10 → 11 kept / 3 neutral / 0 reverted), so the
+  kept-vs-reverted classifier has no negative class. Would need
+  reframing (regress on improvement margin), not more sim hours.
+- **Subscription-CLI curator routing** (`12d7f2c`) + **pre-commit
+  secret scanner** (`803debe`, FP-011 piece).
 
 ### 2026-05-15/16 session — auto-curate loop + audit polish + Tier-3 refactor
 
@@ -85,7 +108,7 @@ documented at `tests/fixtures/real_oracles.py`.
 
 ### How to resume from cold
 
-1. `cd C:\dev\commander_builder && python -m pytest tests/ -q` — confirm
+1. `cd C:\dev\commander-builder && python -m pytest tests/ -q` — confirm
    green.
 2. `git log --oneline master..HEAD` — see what's on the feature branch.
 3. Skim *Open backlog* below, pick an item, or jump into the web app
@@ -94,6 +117,37 @@ documented at `tests/fixtures/real_oracles.py`.
 ---
 
 ## Open backlog (ranked)
+
+### Active — promoted from Parked plans (2026-05-22)
+
+These three were unblocked this session (FP-003 concurrent sims shipped,
+curator now programmatic) and promoted out of *Parked plans* so they can
+be worked. Sized for a single session each.
+
+- **A1. Finish FP-011 — web config GET/PUT.** The secret-scan pre-commit
+  hook already exists (`803debe`); the remainder is the per-user config
+  surface. Add `GET /api/config` (returns config with the LLM token
+  **redacted**) and `PUT /api/config` (permissions-restricted write) over
+  `%LOCALAPPDATA%\commander-builder\config.json`. Wire a minimal Settings
+  panel in the web UI. Reuse the secret-scan prefixes for PUT validation.
+  ~3–5 h. Closes the last gap before the app can be shared beyond the
+  original developer.
+
+- **A2. FP-012 first slice — unattended single-deck improve loop.** A
+  bounded step toward the autonomous agent (full ~120 h agent stays
+  parked). Build a loop on top of `commander-auto-curate` +
+  `forge_runner.run_ab_batch`: propose → A/B sim (seat-attributed) →
+  keep/revert by margin → repeat for N rounds on ONE deck, logging each
+  round to knowledge_log. No bandit/Bayesian search yet — fixed N, greedy
+  keep-if-better. Deliverable: `commander-improve --deck <id> --rounds N`.
+  Uses post-fix attribution only (`--min-id 314` semantics). ~6–8 h.
+
+- **A3. FP-001 bounded spike — LLM-piloted Forge AI (time-boxed).** Not
+  the full 2–4 wk build. Time-box: wire Claude/Ollama at a *few* Forge
+  decision points for a single matchup, run ≥30 paired games vs the
+  stock-AI baseline, and report whether win-rate signal correlates
+  (target r ≥ 0.90 per the 2026-04-28 flip-default rule). Output is a
+  go/no-go memo, not production code. ~1–2 days, hard-stop.
 
 ### Tier 1 — Worth doing soon
 
@@ -188,23 +242,27 @@ documented at `tests/fixtures/real_oracles.py`.
     knowledge_log row writer. See [CHANGELOG.md](CHANGELOG.md)
     2026-05-15/16 entry for the full breakdown.
 
-11. **Phase 3 ML training (FP-002).** Predict swap outcomes from deck +
-    swap features. `ml_dataset.py` ready (25 features, deck-level
-    split). Needs 200+ logged iterations before training is honest.
-    Today: a few rows.
+11. ~~**Phase 3 ML training (FP-002).**~~ 🔭 **Concluded NOT VIABLE**
+    (2026-05-22) via this pipeline. After the A/B attribution fix
+    (`e8777b6`), the curator's swaps almost never make a deck worse than
+    its input (detune depths 0–10 → 11 kept / 3 neutral / 0 reverted),
+    so the kept-vs-reverted classifier has no negative class. A future
+    FP-002 needs a different framing (regress on improvement margin),
+    not more sim hours. See Parked plans.
 
-12. **Concurrent Forge sims (FP-003).** Two JVMs in parallel could
-    halve pool-curation wall time. Needs a 30-min feasibility spike
-    (do separate `cwd`-isolated profiles avoid file-locking races?).
-    Cheap to attempt; not yet a bottleneck.
+12. ~~**Concurrent Forge sims (FP-003).**~~ ✅ **Shipped** (2026-05-22,
+    `0f8f945`). `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims
+    across cwd-isolated Forge profiles in parallel (≈2× throughput);
+    second profile at `vendor/forge2`, recreatable via
+    `scripts/setup_forge_profile.py`. The feasibility spike confirmed
+    separate `cwd`-isolated profiles avoid file-locking races.
 
 13. **Forge sim seed (FP-004).** No `--seed` flag in Forge 2.0.12.
     Variance-via-game-count works fine today. Watch upstream releases.
 
-14. **Settings UI + BYO LLM token (FP-011).** Per-user config at
-    `%LOCALAPPDATA%\commander-builder\config.json` with redacted GET +
-    permissions-restricted PUT. Promote when sharing with anyone
-    beyond the original developer.
+14. ~~**Settings UI + BYO LLM token (FP-011).**~~ ⬆️ **Promoted
+    2026-05-22** to *Active → A1* (web config GET/PUT). The secret-scan
+    hook already shipped; only the per-user config surface remains.
 
 ---
 
@@ -223,22 +281,34 @@ supplement. **Forge AI replacement** (Claude/Ollama at decision points,
 keep Forge's rule engine): 2–4 weeks; this is Phase 4 in the original
 spec. Token cost: ~$0.10–$1.00 per game.
 
-**Status: PARKED.** The wrapper we've built IS the streamlined Python
-interface. Highest-leverage move toward "fewer draws / better signal"
-is Claude/Ollama-piloted Forge AI, not a new engine.
+**Status: PARKED (full build); bounded spike PROMOTED 2026-05-22.** The
+wrapper we've built IS the streamlined Python interface. Highest-leverage
+move toward "fewer draws / better signal" is Claude/Ollama-piloted Forge
+AI, not a new engine. A **time-boxed go/no-go spike** of the LLM-piloted
+variant is now in *Active → A3*; the full 2–4 wk build stays parked
+pending that spike's result.
 
 ### FP-002 — Phase 3 ML predictor
 
 `ml_dataset.py` ready (25 features, deck-level train/eval split, no
-leakage). Needs 200+ rows across 5+ unique decks. **Status: PARKED.**
-Triggered automatically when row count crosses threshold —
-`commander-status` reports it.
+leakage). **Status: CONCLUDED NOT VIABLE (2026-05-22) via this
+pipeline.** After the A/B win-attribution fix (`e8777b6`), the curator's
+swaps almost never make a deck *worse* than its input — verified across
+detune depths 0–10 → 11 kept / 3 neutral / **0 reverted**. The
+kept-vs-reverted classifier has no negative class to learn. The prior
+labels (78 kept / 153 reverted) were measurement artifacts of the
+name-attribution bug; post-fix rows start at `--min-id 314` (pre-fix
+rows kept in the DB as archive, never deleted). A future FP-002 would
+need a different framing — e.g. regress on improvement *margin* — not
+more sim hours.
 
 ### FP-003 — Concurrent Forge sims
 
-Two `cwd`-isolated Forge profiles in parallel. **Status: PARKED.**
-Cheap to attempt; ~30-min feasibility spike. Currently nobody runs
-curation enough to feel the pain.
+✅ **SHIPPED (2026-05-22, `0f8f945`).** `forge_runner.run_ab_batch(jobs,
+runners)` runs A/B sims across cwd-isolated Forge profiles in parallel
+(≈2× throughput). Second profile at `vendor/forge2`, recreatable via
+`scripts/setup_forge_profile.py`. The feasibility spike confirmed
+separate `cwd`-isolated profiles avoid file-locking races.
 
 ### FP-004 — Forge sim seed
 
@@ -277,17 +347,22 @@ decks (≥5 audits via the browser without touching a CLI).
 
 Per-user config file with redacted GET / permissions-restricted PUT.
 Pre-commit hook scans staged diffs for `sk-ant-`, `Bearer `, JWT
-prefixes. **Status: PARKED.** Architecture documented; promote when
-shared with anyone beyond the original developer.
+prefixes. **Status: PROMOTED 2026-05-22 → Active → A1.** Secret-scan hook
+shipped (`803debe`); the remaining web config GET/PUT surface is now an
+active backlog item.
 
 ### FP-012 — Autonomous deck improvement agent
 
 The everything-bagel: takes a Moxfield URL, learns the deck's intent,
 converges on a better version unattended. Multi-arm bandit / Bayesian
 opt for swap selection. ~120 h total across 8 components. **Status:
-PARKED.** Promote when knowledge_log has ≥150 rows AND
-iteration_loop's proposer is programmatic AND forge_runner supports
-concurrent JVMs. North star, not next step.
+PARKED (full agent); first slice PROMOTED 2026-05-22 → Active → A2.** All
+three gate conditions are now met — knowledge_log ≥150 rows, the proposer
+is programmatic (`commander-auto-curate`), and `forge_runner` supports
+concurrent JVMs (`run_ab_batch`, FP-003). The bounded first slice (a
+fixed-N greedy single-deck improve loop, no bandit/Bayesian search) is in
+the active backlog; the full multi-arm-bandit agent stays parked as the
+north star.
 
 ### FP-013 — Project-tuned LLM (moonshot)
 
@@ -366,16 +441,17 @@ For older decisions see [docs/architecture.md](docs/architecture.md#key-decision
 
 - **Modules**: ~30 production (advisor split into orchestrator + 7
   sub-modules; web split into orchestrator + 5 blueprints + helpers)
-- **Tests**: 820 / 820 across ~30 test files
-- **Test wall time**: ~37s offline
+- **Tests**: ~1287 passing fast lane (+slow with `--run-slow`)
+- **Test wall time**: ~167s offline
 - **CLI entry points**: 14
 - **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache
   (`MTG_CARDS_DIR` env var override available); ~32k per-card snapshots
   + 180 MB bulk dump.
 - **Imported decks on disk**: B3=99, B4=115, B5=56 (approx, includes
   [USER]-tagged decks).
-- **Knowledge log iterations**: few rows; mix of integration tests +
-  recent real saves.
+- **Knowledge log iterations**: 300+ rows. IDs < 314 are pre-fix
+  measurement artifacts of the A/B name-attribution bug (`e8777b6`),
+  kept as archive; train/analyze post-fix rows only via `--min-id 314`.
 
 ---
 
