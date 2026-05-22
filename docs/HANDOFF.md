@@ -6,10 +6,11 @@
 > knowledge_log. This is the *product*.
 >
 > **The OTHER program is the `commander-orchestrator`** — a separate
-> dev-automation tool (under `…/local-agent-mode-sessions/…/outputs/commander-orchestrator`,
-> see its `HANDOFF.md`) whose only job is to *run and auto-fix this repo's
-> tests*. If you're thinking about tier-1/tier-2 fix loops, qwen routing,
-> `orch fix`, or auto-fix branches → that's the orchestrator, not here.
+> dev-automation tool at `C:\dev\commander-orchestrator` (published:
+> github.com/LlamaAdam/commander-orchestrator; see its `HANDOFF.md`) whose only
+> job is to *run and auto-fix this repo's tests*. If you're thinking about
+> tier-1/tier-2 fix loops, qwen routing, `orch fix`, or auto-fix branches →
+> that's the orchestrator, not here.
 
 ---
 
