@@ -6,7 +6,25 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
-### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011)
+### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
+
+#### Docs — FP-001 LLM-pilot feasibility spike (go/no-go memo)
+
+- **`docs(fp001)`: LLM-piloted Forge AI spike → NO-GO (as scoped) /
+  redirected + gated.** New `docs/fp001-llm-pilot-spike.md` records the
+  A3 spike result: you cannot pilot Forge 2.0.12's AI with an LLM — it's
+  a vendored compiled JAR run as a fire-and-forget `java -jar … sim`
+  subprocess with no decision-injection seam (only `on_line` /
+  `abort_check` = read-stdout / kill-process) and no Forge source to
+  patch. The real seam is `forge_py`'s Python decision points, but that
+  engine is absent here and not yet mature. The ≥30-paired-game,
+  Pearson-r ≥ 0.90 experiment is fully designed and the scaffolding
+  (`analyst.py` LLM client, `run_ab_simulation`/`run_ab_batch`,
+  `forge_py_correlation` log) is ready, but there's no pilotable player
+  to run it against today. FP-001 stays parked with a precise unblock
+  condition. A valuable negative result that avoids a 2–4 wk dead-end.
+  (No code change; one optional follow-up noted: a Pearson-r helper
+  beside `correlation_summary`.)
 
 #### Added — web config GET/PUT + Settings panel (FP-011 finished)
 

@@ -147,12 +147,21 @@ be worked. Sized for a single session each.
   the `[B<n>]` filename suffix. 15 tests (loop logic driven by an
   injected `round_fn`, so no Forge/Anthropic in the suite).
 
-- **A3. FP-001 bounded spike — LLM-piloted Forge AI (time-boxed).** Not
-  the full 2–4 wk build. Time-box: wire Claude/Ollama at a *few* Forge
-  decision points for a single matchup, run ≥30 paired games vs the
-  stock-AI baseline, and report whether win-rate signal correlates
-  (target r ≥ 0.90 per the 2026-04-28 flip-default rule). Output is a
-  go/no-go memo, not production code. ~1–2 days, hard-stop.
+- ~~**A3. FP-001 bounded spike — LLM-piloted Forge AI (time-boxed).**~~
+  ✅ **Memo delivered 2026-05-22 — verdict NO-GO (as scoped) / GO
+  redirected + gated.** See [docs/fp001-llm-pilot-spike.md](docs/fp001-llm-pilot-spike.md).
+  Finding: you **cannot** pilot Forge 2.0.12's AI with an LLM — it's a
+  vendored compiled JAR run as a fire-and-forget subprocess with no
+  decision-injection seam (only read-stdout / kill-process), and there's
+  no Forge source to patch. The real LLM-pilot seam is **`forge_py`**'s
+  Python decision points, but that engine is absent here and not yet
+  mature (turn-by-turn/combat incomplete). The experiment (≥30 paired
+  games, Pearson r ≥ 0.90) is fully designed and the scaffolding
+  (`analyst.py` LLM client, `run_ab_simulation`, correlation log) is
+  ready, but there's no pilotable player to run it against today. Net: a
+  valuable negative result that prevents a 2–4 wk dead-end; FP-001 stays
+  parked with a precise unblock condition (see Parked plans). Optional
+  cheap follow-up: add a Pearson-r helper beside `correlation_summary`.
 
 ### Tier 1 — Worth doing soon
 
@@ -286,12 +295,20 @@ supplement. **Forge AI replacement** (Claude/Ollama at decision points,
 keep Forge's rule engine): 2–4 weeks; this is Phase 4 in the original
 spec. Token cost: ~$0.10–$1.00 per game.
 
-**Status: PARKED (full build); bounded spike PROMOTED 2026-05-22.** The
-wrapper we've built IS the streamlined Python interface. Highest-leverage
-move toward "fewer draws / better signal" is Claude/Ollama-piloted Forge
-AI, not a new engine. A **time-boxed go/no-go spike** of the LLM-piloted
-variant is now in *Active → A3*; the full 2–4 wk build stays parked
-pending that spike's result.
+**Status: PARKED.** The wrapper we've built IS the streamlined Python
+interface. Highest-leverage move toward "fewer draws / better signal" is
+Claude/Ollama-piloted Forge AI, not a new engine. The **bounded go/no-go
+spike ran 2026-05-22** ([docs/fp001-llm-pilot-spike.md](docs/fp001-llm-pilot-spike.md)):
+**verdict NO-GO as scoped** — Forge 2.0.12 is an unpilotable compiled-JAR
+black box (no decision-injection seam; no source), so the LLM-pilot idea
+can't host on Forge at all. It's **redirected to `forge_py`** (Python
+decision points an LLM can stand in for) and **gated** on a precise
+unblock condition: promote only when `forge_py` is present in the
+workspace AND plays a full turn-by-turn + combat game that already
+correlates with Forge (its own P3+P5 milestone). At that point the spike
+is ~1–2 days (add an `LLMAgent` over `analyst.py` + a Pearson-r helper;
+run ≥30 paired games for r ≥ 0.90). Experiment design + reusable
+scaffolding are documented in the memo.
 
 ### FP-002 — Phase 3 ML predictor
 
