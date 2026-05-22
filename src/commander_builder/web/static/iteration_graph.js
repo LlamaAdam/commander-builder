@@ -222,11 +222,24 @@ function renderIterationGraph(data) {
         "font-style": "italic",
       }, n.audit_version));
     }
+    // Milestone flag (#012) — a small ⚑ glyph at the top-center when
+    // this iteration is milestone-tagged, so notable versions stand out
+    // in the flow chart. The label itself lives in the hover tooltip to
+    // keep the node face uncluttered.
+    if (n.milestone) {
+      g.appendChild(svgEl("text", {
+        x: x + _GRAPH_NODE_W / 2, y: y + 18,
+        "text-anchor": "middle",
+        "font-size": 13,
+        fill: "var(--accent)",
+      }, "⚑"));  // ⚑
+    }
     // Hover tooltip — show created_at + verdict (the parts not on
-    // the rect face).
+    // the rect face) + the milestone label when present.
     const title = svgEl("title", {},
       `Iteration ${n.iteration_n}\n`
       + `Verdict: ${n.verdict}\n`
+      + (n.milestone ? `Milestone: ${n.milestone}\n` : "")
       + `Created: ${n.created_at || "?"}`,
     );
     g.appendChild(title);

@@ -8,6 +8,15 @@ applies once we tag a 1.0.
 
 ### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
 
+#### Added — iteration-graph milestone glyph (#012 UI remainder)
+
+- **`feat(web)`: ⚑ milestone flag on iteration-graph nodes.** Finishes
+  the one deferred piece of #012 (milestone backend shipped earlier in
+  `c5ab6bd`). `iteration_graph_for_deck` now includes `milestone` on each
+  node; `iteration_graph.js` renders a ⚑ glyph at the node's top-center
+  when set and adds the label to the hover tooltip. 1 new test
+  (`test_node_carries_milestone_when_set`); JS `node --check` clean.
+
 #### Added — oracle-text card-reference store (FP-009, backlog #014)
 
 - **`feat(oracle_store)`: `commander-oracle-refresh` + errata-drift

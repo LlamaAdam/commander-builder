@@ -33,7 +33,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#009](#009-app-js-extract-avg-deck-preview) | MEDIUM | done | ~1h | app.js: extract average-deck preview renderer |
 | [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | done | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
 | [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
-| [#012](#012-knowledge-log-milestone-tag) | LOW | done | ~2h | knowledge_log: `milestone` column + PATCH endpoint (backend only; UI flag deferred) |
+| [#012](#012-knowledge-log-milestone-tag) | LOW | done | ~2h | knowledge_log: `milestone` column + PATCH endpoint + ⚑ graph glyph (UI flag landed 2026-05-22) |
 | [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
 | [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | done | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |

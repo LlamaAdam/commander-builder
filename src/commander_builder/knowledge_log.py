@@ -647,6 +647,7 @@ def iteration_graph_for_deck(
             "audit_version": it.audit_version,
             "card_count": _count_main_cards(it.deck_snapshot),
             "price_usd": _node_price_from_manifest(it.audit_manifest),
+            "milestone": getattr(it, "milestone", None),
         }
         nodes.append(node)
         nodes_by_id[it.id] = node
