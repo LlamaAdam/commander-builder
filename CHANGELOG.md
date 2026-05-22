@@ -8,6 +8,21 @@ applies once we tag a 1.0.
 
 ### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
 
+#### Added — oracle-text card-reference store (FP-009, backlog #014)
+
+- **`feat(oracle_store)`: `commander-oracle-refresh` + errata-drift
+  detection.** New `oracle_store.py` is a thin surface over the existing
+  `scryfall_client` snapshot cache (`mtg_cards/oracle_snapshots/`) — no
+  second datastore (the #014 architectural call). Adds the three pieces
+  FP-009 was missing: `card_reference()` (stable presentation alias for
+  `format_card_for_display`), `check_errata(name)` (compares the cached
+  snapshot's oracle text against a fresh, non-caching Scryfall fetch to
+  detect WotC re-wordings), and `bulk_refresh()` driving the
+  `commander-oracle-refresh` CLI (`--deck` / `--name` / `--all`,
+  `--stale-days`, `--write`, `--json`). Read-only by default; only
+  `--write` rewrites drifted snapshots. New console entry point. 17 tests
+  (network stubbed via `CACHE_DIR` redirect + monkeypatched client).
+
 #### Added — Pearson r for the forge_py correlation harness
 
 - **`feat(correlation)`: `pearson_r()` + `correlation_summary` reports

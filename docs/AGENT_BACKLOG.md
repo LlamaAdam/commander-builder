@@ -35,7 +35,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
 | [#012](#012-knowledge-log-milestone-tag) | LOW | done | ~2h | knowledge_log: `milestone` column + PATCH endpoint (backend only; UI flag deferred) |
 | [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
-| [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | open | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
+| [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | done | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
 | [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | done | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
 | [#017](#017-fp-001-card-script-parser-read-only-ast) | LOW | done | ~3h | FP-001 slice 1: read-only Forge card-script parser |
@@ -579,10 +579,17 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #014 — Tier 2.9: oracle-text-first card-reference store (FP-009)
 
-- **status**: `open`
+- **status**: `done` (2026-05-22) — built as `oracle_store.py`, thin
+  layers over the existing `scryfall_client` snapshot cache (the
+  architectural call: lean on Scryfall client, do NOT add a second
+  datastore). `card_reference()` presentation alias + `check_errata()`
+  drift detector + `bulk_refresh()`/`commander-oracle-refresh` CLI. 17
+  tests. `format_card_for_display` + `oracle_diff` already covered the
+  rest of the surface.
 - **priority**: LOW
 - **scope**: ~4h
-- **do_not_pick_without_human**: true (architectural call)
+- **do_not_pick_without_human**: true (architectural call) — resolved by
+  building over the existing client rather than a parallel store.
 - **files**: TBD; substrate exists in
   `mtg_cards/oracle_snapshots/` (per STATUS.md). Needs presentation
   helper, errata diff tooling, and a bulk-refresh CLI.

@@ -244,10 +244,15 @@ be worked. Sized for a single session each.
    oracle text in the suggestions panel. Scryfall image CDN, lazy-fetch
    to `mtg_cards/images/normal/<scryfall_id>.jpg`. ~3 h.
 
-9. **Oracle-text-first card-reference store (FP-009).** Already-built
-   substrate (`oracle_snapshots/`, `forge_py.cards.get()`, parity API
-   in `scryfall_client`). Missing: presentation helper, errata diff
-   tooling, bulk-refresh CLI. ~4 h.
+9. ~~**Oracle-text-first card-reference store (FP-009).**~~ ✅ **Built
+   2026-05-22.** New `oracle_store.py` — thin layers over the existing
+   `scryfall_client` snapshot cache (no new datastore): `card_reference()`
+   presentation alias, `check_errata()` (cached snapshot vs fresh Scryfall
+   oracle drift), and `bulk_refresh()` + `commander-oracle-refresh` CLI
+   (`--deck` / `--name` / `--all`, `--stale-days`, `--write`, `--json`).
+   Read-only by default; rewrites drifted snapshots only with `--write`.
+   17 tests (network stubbed). (`format_card_for_display` + `oracle_diff`
+   already covered the rest of the FP-009 surface.)
 
 ### Tier 3 — Deferred until prerequisites exist
 
