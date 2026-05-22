@@ -133,14 +133,15 @@ be worked. Sized for a single session each.
   ~3–5 h. Closes the last gap before the app can be shared beyond the
   original developer.
 
-- **A2. FP-012 first slice — unattended single-deck improve loop.** A
-  bounded step toward the autonomous agent (full ~120 h agent stays
-  parked). Build a loop on top of `commander-auto-curate` +
-  `forge_runner.run_ab_batch`: propose → A/B sim (seat-attributed) →
-  keep/revert by margin → repeat for N rounds on ONE deck, logging each
-  round to knowledge_log. No bandit/Bayesian search yet — fixed N, greedy
-  keep-if-better. Deliverable: `commander-improve --deck <id> --rounds N`.
-  Uses post-fix attribution only (`--min-id 314` semantics). ~6–8 h.
+- ~~**A2. FP-012 first slice — unattended single-deck improve loop.**~~
+  ✅ **Built 2026-05-22.** `commander-improve --deck <id> --rounds N`
+  (`commander_builder/improve.py`). Greedy keep-if-better loop: composes
+  `commander-auto-curate --run-sim` per round, advances the base deck
+  only on a `kept` seat-attributed verdict, stops early on a no-op
+  (zero-change) round or an errored round. Fixed N, no bandit/Bayesian
+  search (those stay parked under the full FP-012). Bracket inferred from
+  the `[B<n>]` filename suffix. 15 tests (loop logic driven by an
+  injected `round_fn`, so no Forge/Anthropic in the suite).
 
 - **A3. FP-001 bounded spike — LLM-piloted Forge AI (time-boxed).** Not
   the full 2–4 wk build. Time-box: wire Claude/Ollama at a *few* Forge

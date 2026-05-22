@@ -1,0 +1,375 @@
+"""commander-improve — greedy single-deck improvement loop (FP-012, slice 1).
+
+The bounded first slice of FP-012 (the autonomous deck-improvement
+agent). Runs the existing ``commander-auto-curate`` pipeline (advisor →
+Claude curator → apply → Forge A/B sim → knowledge_log) on ONE deck for
+``--rounds N`` iterations, advancing **greedily**: a round's proposed
+deck becomes the base for the next round *only* when the seat-attributed
+A/B sim verdict is ``kept`` (the new deck won by the configured margin).
+``reverted`` / ``neutral`` / ``pending`` rounds keep the current base —
+the candidate ``.dck`` is left on disk but not built upon. That's the
+greedy keep-if-better contract.
+
+What this slice deliberately is NOT (still parked under the full FP-012):
+no multi-arm-bandit / Bayesian swap selection, no intent learning, no
+unbounded convergence — just a fixed-N greedy loop. It *composes* the
+auto-curate machinery (one `auto_curate_main` call per round) rather than
+reimplementing the pipeline, so every round inherits seat-attributed
+sims, color-identity filtering, protected-card handling, bracket-aware
+fillers, and knowledge_log rows for free.
+
+Post-fix attribution only: each round's sim uses the seat-attribution
+fix (`e8777b6`), so verdicts are trustworthy and the new knowledge_log
+rows land post-`--min-id 314`.
+
+Entry point: ``commander-improve --deck <id> --rounds N`` (or pass a
+``.dck`` path positionally).
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from .forge_runner import VENDOR_FORGE
+
+# Default Commander deck directory — mirrors compare_versions.DECK_DIR /
+# doctor.DECK_DIR so ``--deck <id>`` resolves against the same place the
+# rest of the toolchain reads decks from.
+DEFAULT_DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
+
+
+@dataclass
+class RoundResult:
+    """Outcome of a single improve round."""
+
+    round: int
+    input_deck: str
+    output_deck: Optional[str]
+    verdict: str  # kept / reverted / neutral / pending / no-op / error
+    advanced: bool  # did the greedy base move forward this round?
+    iteration_id: Optional[int] = None
+    win_rate_old: Optional[float] = None
+    win_rate_new: Optional[float] = None
+    margin: Optional[int] = None
+    applied_adds: int = 0
+    applied_cuts: int = 0
+    error: Optional[str] = None
+
+
+@dataclass
+class ImproveResult:
+    """Aggregate result of an improve run."""
+
+    deck_id: str
+    start_deck: str
+    final_deck: str
+    rounds_requested: int
+    rounds_run: int
+    rounds_kept: int
+    converged: bool  # stopped early because a round proposed no changes
+    history: list[RoundResult] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        return d
+
+
+def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
+    """Run one auto-curate round and project its JSON into a RoundResult.
+
+    Composes ``auto_curate_main`` with ``--run-sim --json`` (capturing
+    its stdout, exactly as batch mode's ``_process_one_deck`` does) so
+    the round inherits the full pipeline. Never raises — pipeline
+    failures land as ``verdict='error'`` so the loop can decide whether
+    to stop.
+    """
+    from ._proposer_cli import auto_curate_main
+
+    argv: list[str] = [
+        str(deck_path),
+        "--bracket", str(args.bracket),
+        "--run-sim",
+        "--json",
+        "--mode", args.mode,
+        "--source", args.source,
+        "--model", args.model,
+        "--sim-games", str(args.sim_games),
+        "--sim-margin", str(args.sim_margin),
+    ]
+    if args.sim_fillers:
+        argv += ["--sim-fillers", args.sim_fillers]
+    if args.db_path:
+        argv += ["--db-path", args.db_path]
+    for card in args.protect:
+        argv += ["--protect", card]
+    if args.protect_from:
+        argv += ["--protect-from", args.protect_from]
+
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = auto_curate_main(argv)
+    except Exception as exc:  # noqa: BLE001 — round isolation
+        return RoundResult(
+            round=round_no, input_deck=str(deck_path), output_deck=None,
+            verdict="error", advanced=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    raw = buf.getvalue().strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        payload = {}
+
+    if rc != 0 or not payload:
+        return RoundResult(
+            round=round_no, input_deck=str(deck_path), output_deck=None,
+            verdict="error", advanced=False,
+            error=f"auto-curate returned rc={rc} with no parseable JSON",
+        )
+
+    proposal = payload.get("proposal") or {}
+    applied_adds = len(proposal.get("applied_adds", []) or [])
+    applied_cuts = len(proposal.get("applied_cuts", []) or [])
+
+    sim_report = payload.get("sim_report") or {}
+    games = sim_report.get("games") or 0
+    wins_a = sim_report.get("wins_a")
+    wins_b = sim_report.get("wins_b")
+    wr_old = round(wins_a / games, 4) if games and wins_a is not None else None
+    wr_new = round(wins_b / games, 4) if games and wins_b is not None else None
+    margin = (wins_b - wins_a) if (wins_a is not None and wins_b is not None) else None
+
+    return RoundResult(
+        round=round_no,
+        input_deck=str(deck_path),
+        output_deck=payload.get("output_deck"),
+        verdict=payload.get("sim_verdict") or "pending",
+        advanced=False,  # the loop sets this when it greedily advances
+        iteration_id=payload.get("iteration_id"),
+        win_rate_old=wr_old,
+        win_rate_new=wr_new,
+        margin=margin,
+        applied_adds=applied_adds,
+        applied_cuts=applied_cuts,
+    )
+
+
+def run_improve_loop(
+    deck_path: Path,
+    deck_id: str,
+    rounds: int,
+    args,
+    *,
+    round_fn: Callable[[Path, int, object], RoundResult] = _default_round_fn,
+) -> ImproveResult:
+    """Greedy keep-if-better loop over ``rounds`` auto-curate rounds.
+
+    The loop is intentionally pure of pipeline detail: it calls
+    ``round_fn`` per round (default composes auto-curate) and only ever
+    advances the base deck on a ``kept`` verdict. Injecting ``round_fn``
+    lets tests drive the loop with scripted verdicts and never touch
+    Forge / Anthropic.
+
+    Stop conditions:
+      - a round errors (verdict='error') → stop, record the round.
+      - a round proposed zero changes (applied_adds + applied_cuts == 0)
+        → converged; record as 'no-op' and stop (nothing left to try).
+      - otherwise run all ``rounds``.
+    """
+    current = Path(deck_path)
+    start = current
+    history: list[RoundResult] = []
+    kept = 0
+    converged = False
+
+    for r in range(1, rounds + 1):
+        rr = round_fn(current, r, args)
+
+        if rr.verdict == "error":
+            history.append(rr)
+            break
+
+        # Convergence: the curator proposed nothing applicable, so
+        # further rounds would just repeat. Mark and stop.
+        if rr.applied_adds == 0 and rr.applied_cuts == 0:
+            rr.verdict = "no-op"
+            history.append(rr)
+            converged = True
+            break
+
+        # Greedy advance: only build on the new deck when it won.
+        if rr.verdict == "kept" and rr.output_deck:
+            current = Path(rr.output_deck)
+            rr.advanced = True
+            kept += 1
+
+        history.append(rr)
+
+    return ImproveResult(
+        deck_id=deck_id,
+        start_deck=str(start),
+        final_deck=str(current),
+        rounds_requested=rounds,
+        rounds_run=len(history),
+        rounds_kept=kept,
+        converged=converged,
+        history=history,
+    )
+
+
+def _print_summary(result: ImproveResult) -> None:
+    """Human-readable run summary."""
+    print()
+    print(f"Improve run on {result.deck_id}")
+    print(f"  start deck:  {Path(result.start_deck).name}")
+    print(f"  final deck:  {Path(result.final_deck).name}")
+    print(
+        f"  rounds:      {result.rounds_run}/{result.rounds_requested} run, "
+        f"{result.rounds_kept} kept"
+        + ("  (converged — a round proposed no changes)" if result.converged else "")
+    )
+    print()
+    for rr in result.history:
+        marker = "✓" if rr.advanced else " "
+        wr = ""
+        if rr.win_rate_old is not None and rr.win_rate_new is not None:
+            wr = f"  old={rr.win_rate_old:.0%} new={rr.win_rate_new:.0%} (Δ{rr.margin:+d})"
+        line = (
+            f"  [{marker}] round {rr.round}: {rr.verdict}"
+            f"  +{rr.applied_adds}/-{rr.applied_cuts}{wr}"
+        )
+        if rr.iteration_id is not None:
+            line += f"  iter#{rr.iteration_id}"
+        if rr.error:
+            line += f"  ERROR: {rr.error}"
+        print(line)
+    print()
+    if result.final_deck != result.start_deck:
+        print(f"Best deck: {result.final_deck}")
+    else:
+        print("No round improved the deck; base unchanged.")
+
+
+def improve_main(argv: Optional[list[str]] = None) -> int:
+    """Entry point for ``commander-improve``.
+
+    Greedy single-deck improve loop. Resolves the deck (by ``--deck
+    <id>`` against the Commander deck dir, or a positional ``.dck``
+    path), infers the bracket from the filename when ``--bracket`` is
+    omitted, then runs ``--rounds N`` auto-curate rounds keeping only
+    rounds whose A/B sim says the new deck won.
+    """
+    p = argparse.ArgumentParser(
+        prog="commander-improve",
+        description=(
+            "Greedy single-deck improvement loop (FP-012 slice 1). Runs "
+            "auto-curate for N rounds, advancing only on a 'kept' A/B "
+            "sim verdict."
+        ),
+    )
+    p.add_argument("deck_path", type=Path, nargs="?", default=None,
+                   help="Path to the .dck file. Omit when using --deck.")
+    p.add_argument("--deck", dest="deck_id", default=None, metavar="ID",
+                   help="Deck id (filename stem) resolved against --deck-dir. "
+                        "Use this OR a positional path, not both.")
+    p.add_argument("--deck-dir", type=Path, default=DEFAULT_DECK_DIR,
+                   help=f"Directory --deck ids resolve against "
+                        f"(default: {DEFAULT_DECK_DIR}).")
+    p.add_argument("--rounds", type=int, required=True,
+                   help="Number of improve rounds to attempt (>= 1). The "
+                        "loop stops early if a round proposes no changes.")
+    p.add_argument("--bracket", type=int, default=None,
+                   help="Target bracket (1-5). Default: inferred from the "
+                        "deck filename's [B<n>] suffix.")
+    # Pass-through curation / sim controls (mirror commander-auto-curate).
+    p.add_argument("--mode", choices=["polish", "overhaul", "free"],
+                   default="polish", help="Curation intensity (default polish).")
+    p.add_argument("--source", default="heuristic",
+                   choices=["heuristic", "bracket_peers", "claude"],
+                   help="Advisor backend (default heuristic).")
+    p.add_argument("--model", default="claude-sonnet-4-5",
+                   help="Anthropic model id for the curator step.")
+    p.add_argument("--sim-games", type=int, default=5,
+                   help="Games per A/B sim each round (default 5).")
+    p.add_argument("--sim-margin", type=int, default=1,
+                   help="Min (wins_new - wins_old) margin to call 'kept' "
+                        "(default 1). Within margin = neutral.")
+    p.add_argument("--sim-fillers", default=None,
+                   help="Comma-separated filler .dck filenames for the pod. "
+                        "Default: auto-pick 2 bracket-matched opponents.")
+    p.add_argument("--db-path", default=None,
+                   help="Override the knowledge_log SQLite path.")
+    p.add_argument("--protect", action="append", default=[], metavar="CARD",
+                   help="Lock a card against cuts. Repeatable.")
+    p.add_argument("--protect-from", default=None, metavar="PATH",
+                   help="File of card names (one per line) protected against cuts.")
+    p.add_argument("--json", action="store_true",
+                   help="Emit the run result as JSON instead of a summary.")
+    args = p.parse_args(argv)
+
+    # Exactly one of {positional path, --deck id} must be supplied.
+    if (args.deck_path is None) == (args.deck_id is None):
+        print("ERROR: pass either a deck_path positional OR --deck <id>, "
+              "not both / neither.", flush=True)
+        return 2
+
+    if args.rounds < 1:
+        print(f"ERROR: --rounds must be >= 1, got {args.rounds}", flush=True)
+        return 2
+
+    # Resolve the deck to an on-disk .dck.
+    from .web._helpers import _bracket_from_filename, _resolve_deck_path
+    if args.deck_path is not None:
+        deck_path = args.deck_path.resolve()
+        if not deck_path.exists():
+            print(f"ERROR: deck not found: {deck_path}", flush=True)
+            return 2
+    else:
+        deck_path = _resolve_deck_path(args.deck_dir, args.deck_id, None)
+        if deck_path is None:
+            print(f"ERROR: deck id {args.deck_id!r} not found under "
+                  f"{args.deck_dir}", flush=True)
+            return 2
+
+    # Resolve the bracket: explicit flag wins, else infer from filename.
+    if args.bracket is None:
+        inferred = _bracket_from_filename(deck_path.name)
+        if inferred is None:
+            print(f"ERROR: --bracket not given and no [B<n>] suffix in "
+                  f"{deck_path.name!r}; pass --bracket 1-5.", flush=True)
+            return 2
+        args.bracket = inferred
+    if not (1 <= args.bracket <= 5):
+        print(f"ERROR: bracket must be 1-5, got {args.bracket}", flush=True)
+        return 2
+
+    deck_id = deck_path.stem
+
+    if not args.json:
+        print(f"[improve] {deck_id} (B{args.bracket}) — up to {args.rounds} "
+              f"rounds, mode={args.mode}, {args.sim_games} games/round",
+              flush=True)
+
+    result = run_improve_loop(deck_path, deck_id, args.rounds, args)
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_summary(result)
+
+    # Exit non-zero only when every round errored (no useful work done).
+    if result.history and all(rr.verdict == "error" for rr in result.history):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(improve_main())

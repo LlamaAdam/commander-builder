@@ -51,6 +51,7 @@ commander-export     = "commander_builder.export:main"
 commander-advise     = "commander_builder.improvement_advisor:main"
 commander-meta-test  = "commander_builder.meta_test:main"
 commander-auto-curate = "commander_builder.proposer:auto_curate_main"
+commander-improve     = "commander_builder.improve:improve_main"
 commander-bulk-import = "commander_builder.moxfield_import:bulk_main"
 commander-config      = "commander_builder._secrets:config_main"
 

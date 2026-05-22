@@ -6,6 +6,30 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1)
+
+#### Added — `commander-improve` greedy single-deck improve loop
+
+- **`feat(improve)`: `commander-improve --deck <id> --rounds N`** — the
+  bounded first slice of FP-012 (the autonomous deck-improvement agent).
+  New `commander_builder/improve.py` runs the existing
+  `commander-auto-curate --run-sim` pipeline for N rounds on ONE deck and
+  advances **greedily**: a round's proposed deck becomes the next round's
+  base only when the seat-attributed A/B verdict is `kept`;
+  `reverted`/`neutral`/`pending` rounds keep the current base. Stops early
+  on a no-op round (curator proposed no changes → converged) or an errored
+  round. Bracket is inferred from the `[B<n>]` filename suffix when
+  `--bracket` is omitted; `--deck <id>` resolves against the Commander
+  deck dir (or pass a `.dck` path positionally). Pass-through curation/sim
+  flags mirror auto-curate (`--mode`, `--sim-games`, `--sim-margin`,
+  `--sim-fillers`, `--model`, `--source`, `--protect*`, `--db-path`).
+  Composes the auto-curate machinery rather than reimplementing it, so
+  every round inherits seat attribution, color-identity filtering,
+  protected-card handling, and knowledge_log rows. The full multi-arm
+  bandit / Bayesian agent stays parked. New `commander-improve` console
+  entry point. 15 tests (loop logic driven by an injected `round_fn` —
+  no Forge/Anthropic in the suite).
+
 ### 2026-05-21/22 — FP-003 shipped, A/B win-attribution fix, FP-002 concluded, FP-002 data-gen substrate
 
 Commits `33536d7`…`7cef5a7` on `feature/2026-04-28-session`. Two future
