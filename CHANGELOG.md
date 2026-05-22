@@ -6,7 +6,31 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
-### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1)
+### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011)
+
+#### Added — web config GET/PUT + Settings panel (FP-011 finished)
+
+- **`feat(web)`: `GET`/`PUT /api/config` + per-user config store.** New
+  `config_store.py` reads/writes a per-user `config.json`
+  (`%LOCALAPPDATA%\commander-builder\config.json` on Windows,
+  `~/.commander-builder/config.json` elsewhere; `COMMANDER_BUILDER_CONFIG`
+  overrides). New `web/routes_config.py` blueprint:
+  - `GET /api/config` returns the config with secrets **redacted** — an
+    `anthropic_api_key_set` boolean + last-4 `anthropic_api_key_hint`; the
+    raw token is never serialized, so a GET→render→PUT round trip can't
+    leak or re-submit it.
+  - `PUT /api/config` validates a sparse update (token shape mirrors the
+    `scripts/scan_secrets.py` anthropic pattern; unknown keys, malformed
+    tokens, out-of-range brackets → 400 with **nothing persisted**),
+    merges into the stored config, and writes the file owner-only
+    (0o600). The app binds 127.0.0.1, so the PUT surface is local-only.
+  - Minimal Settings panel: a native `<dialog>` + `static/settings.js`
+    wired to a topbar **Settings** button. The token field starts blank
+    and shows a "(set · …last4)" hint; leaving it blank keeps the
+    existing key.
+  This was the last open piece of FP-011 (the pre-commit secret scanner
+  shipped earlier in `803debe`). 32 tests (`test_config_store.py` +
+  `test_routes_config.py`, endpoints via Flask test client).
 
 #### Added — `commander-improve` greedy single-deck improve loop
 

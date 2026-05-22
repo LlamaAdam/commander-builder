@@ -124,14 +124,18 @@ These three were unblocked this session (FP-003 concurrent sims shipped,
 curator now programmatic) and promoted out of *Parked plans* so they can
 be worked. Sized for a single session each.
 
-- **A1. Finish FP-011 — web config GET/PUT.** The secret-scan pre-commit
-  hook already exists (`803debe`); the remainder is the per-user config
-  surface. Add `GET /api/config` (returns config with the LLM token
-  **redacted**) and `PUT /api/config` (permissions-restricted write) over
-  `%LOCALAPPDATA%\commander-builder\config.json`. Wire a minimal Settings
-  panel in the web UI. Reuse the secret-scan prefixes for PUT validation.
-  ~3–5 h. Closes the last gap before the app can be shared beyond the
-  original developer.
+- ~~**A1. Finish FP-011 — web config GET/PUT.**~~ ✅ **Built 2026-05-22.**
+  New `config_store.py` (per-user `config.json` at
+  `%LOCALAPPDATA%\commander-builder\` on Windows, `~/.commander-builder/`
+  elsewhere; `COMMANDER_BUILDER_CONFIG` override) + `web/routes_config.py`
+  blueprint: `GET /api/config` returns the config with the token
+  **redacted** (`*_set` flag + last-4 `*_hint`, raw key never echoed);
+  `PUT /api/config` validates a sparse update (token shape mirrors
+  `scripts/scan_secrets.py`; unknown keys + bad values → 400 with nothing
+  persisted), merges, and writes owner-only (0o600). Minimal Settings
+  panel (native `<dialog>` + `settings.js`) wired into the topbar. 32
+  tests (25 store + endpoints via Flask test client). Web config GET/PUT
+  was the last open piece of FP-011 (secret-scan hook already shipped).
 
 - ~~**A2. FP-012 first slice — unattended single-deck improve loop.**~~
   ✅ **Built 2026-05-22.** `commander-improve --deck <id> --rounds N`

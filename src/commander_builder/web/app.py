@@ -218,6 +218,7 @@ def create_app(
     # ``routes_<group>.py`` modules and are wired in here. The
     # remaining inline routes are being migrated incrementally.
     from .routes_audit import make_audit_blueprint
+    from .routes_config import make_config_blueprint
     from .routes_dashboard import make_dashboard_blueprint
     from .routes_decks import make_decks_blueprint
     from .routes_meta import make_meta_blueprint
@@ -234,6 +235,9 @@ def create_app(
     # FP-009: oracle-text presentation endpoint backing the audit
     # panel's hover tooltip + click-to-expand side panel.
     app.register_blueprint(make_oracle_blueprint())
+    # FP-011: per-user config (redacted GET / restricted PUT) backing
+    # the Settings panel — BYO Anthropic token + app preferences.
+    app.register_blueprint(make_config_blueprint())
     app.register_blueprint(make_sim_blueprint(deck_dir, knowledge_db))
 
 

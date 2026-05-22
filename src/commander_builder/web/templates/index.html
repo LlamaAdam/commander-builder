@@ -21,10 +21,54 @@
     <button class="topbar-btn" id="btn-illegal" title="Check the selected deck for banned-in-Commander cards">
       Illegal Cards
     </button>
+    <button class="topbar-btn" id="btn-settings" title="App settings — BYO Anthropic API token + preferences">
+      Settings
+    </button>
     <button class="topbar-btn primary" id="btn-new-deck" title="Import a deck from Moxfield URL or paste a list">
       + New deck
     </button>
   </header>
+
+  <!-- FP-011 Settings panel. Native <dialog> so it needs no extra CSS;
+       settings.js wires GET/PUT /api/config. The API token is never
+       echoed back — the field shows a "set / …last4" hint instead. -->
+  <dialog id="settings-dialog" style="max-width: 30rem; border: 1px solid #888; border-radius: 8px; padding: 1.25rem;">
+    <form id="settings-form" method="dialog">
+      <h2 style="margin-top: 0;">Settings</h2>
+      <p class="muted" id="settings-status" style="min-height: 1.2em;"></p>
+
+      <label style="display: block; margin: 0.75rem 0;">
+        Anthropic API key
+        <span class="muted" id="settings-key-state">(not set)</span><br />
+        <input type="password" id="settings-api-key" autocomplete="off"
+               placeholder="sk-ant-… (leave blank to keep current)"
+               style="width: 100%; box-sizing: border-box;" />
+      </label>
+
+      <label style="display: block; margin: 0.75rem 0;">
+        Default bracket (1–5)<br />
+        <input type="number" id="settings-bracket" min="1" max="5"
+               style="width: 6rem;" />
+      </label>
+
+      <label style="display: block; margin: 0.75rem 0;">
+        Curator model<br />
+        <input type="text" id="settings-model" placeholder="claude-sonnet-4-5"
+               style="width: 100%; box-sizing: border-box;" />
+      </label>
+
+      <label style="display: block; margin: 0.75rem 0;">
+        Moxfield user<br />
+        <input type="text" id="settings-moxfield" placeholder="YourHandle"
+               style="width: 100%; box-sizing: border-box;" />
+      </label>
+
+      <menu style="display: flex; gap: 0.5rem; justify-content: flex-end; padding: 0; margin: 1rem 0 0;">
+        <button type="button" class="topbar-btn" id="settings-cancel">Cancel</button>
+        <button type="button" class="topbar-btn primary" id="settings-save">Save</button>
+      </menu>
+    </form>
+  </dialog>
 
   <main class="layout">
     <aside class="sidebar">
@@ -142,6 +186,7 @@
   <script src="{{ url_for('static', filename='audit_streaming.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='deck_health_ui.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='avg_deck_preview.js') }}?v={{ asset_version }}"></script>
+  <script src="{{ url_for('static', filename='settings.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>
