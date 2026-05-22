@@ -8,6 +8,17 @@ applies once we tag a 1.0.
 
 ### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
 
+#### Docs — FP-008 confirmed already shipped (stale backlog entry)
+
+- **`docs`: mark FP-008 (card-image lazy fetcher) done in STATUS.** No
+  code change — the feature was already fully implemented: `app.js`
+  `renderAddRow` renders lazy/async thumbnails through `cardImageUrl()` →
+  the local `/api/card_image/<size>/<name>` route, with a click-to-expand
+  overlay (`openCardImageOverlay`); the route disk-caches Scryfall bytes
+  (`web/_image_cache.py`, with quota eviction + transient retry) and
+  serves immutable `Cache-Control`. Covered by `test_image_cache.py`. The
+  STATUS Tier-2 entry had simply never been struck through.
+
 #### Added — iteration-graph milestone glyph (#012 UI remainder)
 
 - **`feat(web)`: ⚑ milestone flag on iteration-graph nodes.** Finishes

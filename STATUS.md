@@ -240,9 +240,14 @@ be worked. Sized for a single session each.
    `n_priced_cards_proposed`. UI shows `$X → $Y (Δ)` headline above
    the audit. SSE streaming endpoint emits the same fields.
 
-8. **Card-image lazy fetcher (FP-008).** Render card images alongside
-   oracle text in the suggestions panel. Scryfall image CDN, lazy-fetch
-   to `mtg_cards/images/normal/<scryfall_id>.jpg`. ~3 h.
+8. ~~**Card-image lazy fetcher (FP-008).**~~ ✅ **Already shipped**
+   (confirmed 2026-05-22; entry was stale). The suggestions panel
+   (`app.js` `renderAddRow`) renders lazy (`loading="lazy"`,
+   `decoding="async"`) thumbnails via `cardImageUrl()` → the local
+   `/api/card_image/<size>/<name>` route, with click-to-expand
+   (`openCardImageOverlay`). The route disk-caches Scryfall bytes
+   (`web/_image_cache.py`: quota eviction + transient-retry) and serves
+   `Cache-Control: …immutable`. Covered by `test_image_cache.py`.
 
 9. ~~**Oracle-text-first card-reference store (FP-009).**~~ ✅ **Built
    2026-05-22.** New `oracle_store.py` — thin layers over the existing
