@@ -212,18 +212,53 @@ DEFAULT_CORRELATION_LOG = Path(
 )
 
 
+def pearson_r(xs: list[float], ys: list[float]) -> Optional[float]:
+    """Pearson correlation coefficient of two equal-length series.
+
+    Returns a value in [-1, 1], or ``None`` when it's undefined: fewer
+    than 2 paired points, mismatched lengths, or zero variance in either
+    series (a flat series has no correlation to measure). Pure + numpy-
+    free so it's cheap to unit-test and carries no new dependency.
+    """
+    n = len(xs)
+    if n < 2 or n != len(ys):
+        return None
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    dx = [x - mean_x for x in xs]
+    dy = [y - mean_y for y in ys]
+    cov = sum(a * b for a, b in zip(dx, dy))
+    var_x = sum(a * a for a in dx)
+    var_y = sum(b * b for b in dy)
+    if var_x == 0 or var_y == 0:
+        return None
+    return cov / (var_x ** 0.5 * var_y ** 0.5)
+
+
 def correlation_summary(log_path: Path) -> dict:
-    """Read all rows and compute basic agreement stats. Returns
-    ``{rows, agree, disagree, agreement_rate, errors}`` — the stat we
-    actually care about: how often does forge_py's verdict match
-    Forge's? Pearson r is a follow-up analysis once we have ≥30 rows.
+    """Read all rows and compute agreement + correlation stats.
+
+    Returns ``{rows, agree, disagree, errors, agreement_rate,
+    pearson_r, pearson_n}``:
+
+      - ``agreement_rate`` — how often forge_py's *winner* (old vs new)
+        matches Forge's. The headline directional stat.
+      - ``pearson_r`` — Pearson r between the two engines' per-row
+        *win margins* (``new_wins - old_wins``) across valid rows, or
+        ``None`` when undefined (<2 rows or a flat series). This is the
+        statistic the 2026-04-28 "flip default only when r ≥ 0.90 across
+        ≥30 paired rows" rule is written against. ``pearson_n`` is the
+        number of rows it was computed over.
     """
     if not log_path.exists():
         return {"rows": 0, "agree": 0, "disagree": 0,
-                "agreement_rate": 0.0, "errors": 0}
+                "agreement_rate": 0.0, "errors": 0,
+                "pearson_r": None, "pearson_n": 0}
     rows = 0
     agree = 0
     errors = 0
+    forge_margins: list[float] = []
+    py_margins: list[float] = []
     with log_path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for r in reader:
@@ -251,14 +286,21 @@ def correlation_summary(log_path: Path) -> dict:
             )
             if forge_winner == py_winner:
                 agree += 1
+            # Per-row signal for the Pearson correlation: how decisively
+            # did each engine favor the NEW deck over the old one?
+            forge_margins.append(f_new - f_old)
+            py_margins.append(p_new - p_old)
     valid = max(rows - errors, 0)
     rate = agree / valid if valid else 0.0
+    r_value = pearson_r(forge_margins, py_margins)
     return {
         "rows": rows,
         "agree": agree,
         "disagree": valid - agree,
         "errors": errors,
         "agreement_rate": round(rate, 3),
+        "pearson_r": round(r_value, 3) if r_value is not None else None,
+        "pearson_n": len(forge_margins),
     }
 
 
@@ -291,6 +333,12 @@ def _cli_main(argv: Optional[list[str]] = None) -> int:
     print(f"Agreement rate:  {summary['agreement_rate']:.1%} "
           f"({summary['agree']} / {summary['agree'] + summary['disagree']} valid pairs)")
     print(f"Errors:          {summary['errors']}")
+    if summary["pearson_r"] is not None:
+        gate = "✓ ≥ 0.90" if summary["pearson_r"] >= 0.90 else "below 0.90 gate"
+        print(f"Pearson r:       {summary['pearson_r']:+.3f} "
+              f"(n={summary['pearson_n']}, {gate})")
+    else:
+        print(f"Pearson r:       n/a (need ≥2 valid rows with variance)")
     if summary["rows"] < 30:
         print()
         print("(Need ~30+ rows before per-archetype Pearson r is meaningful;")

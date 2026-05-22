@@ -8,6 +8,16 @@ applies once we tag a 1.0.
 
 ### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
 
+#### Added — Pearson r for the forge_py correlation harness
+
+- **`feat(correlation)`: `pearson_r()` + `correlation_summary` reports
+  `pearson_r`/`pearson_n`.** New pure (numpy-free) Pearson helper; the
+  summary now correlates the two engines' per-row win margins
+  (`new_wins - old_wins`) and reports r against the 2026-04-28 "flip
+  default only when r ≥ 0.90 across ≥30 paired rows" rule (the CLI prints
+  a ✓/below-gate marker). `None` when undefined (<2 rows / flat series).
+  The A3 spike's one noted scaffolding gap. 9 new tests.
+
 #### Docs — FP-001 LLM-pilot feasibility spike (go/no-go memo)
 
 - **`docs(fp001)`: LLM-piloted Forge AI spike → NO-GO (as scoped) /

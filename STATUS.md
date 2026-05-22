@@ -162,6 +162,9 @@ be worked. Sized for a single session each.
   valuable negative result that prevents a 2–4 wk dead-end; FP-001 stays
   parked with a precise unblock condition (see Parked plans). Optional
   cheap follow-up: add a Pearson-r helper beside `correlation_summary`.
+  ✅ **Done 2026-05-22** — `forge_py_correlation.pearson_r()` +
+  `correlation_summary` now returns `pearson_r`/`pearson_n` against the
+  r ≥ 0.90 gate.
 
 ### Tier 1 — Worth doing soon
 

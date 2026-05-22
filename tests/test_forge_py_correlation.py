@@ -15,8 +15,78 @@ from commander_builder.forge_py_correlation import (
     ForgePyABResult,
     correlation_summary,
     log_correlation_row,
+    pearson_r,
     run_forge_py_ab,
 )
+
+
+# --- pearson_r (pure helper) ----------------------------------------------
+
+def test_pearson_perfect_positive():
+    assert pearson_r([1, 2, 3], [2, 4, 6]) == pytest.approx(1.0)
+
+
+def test_pearson_perfect_negative():
+    assert pearson_r([1, 2, 3], [6, 4, 2]) == pytest.approx(-1.0)
+
+
+def test_pearson_uncorrelated_is_near_zero():
+    r = pearson_r([1, 2, 3, 4], [1, 2, 1, 2])
+    assert r is not None and abs(r) < 0.5
+
+
+def test_pearson_undefined_cases():
+    assert pearson_r([1], [1]) is None          # <2 points
+    assert pearson_r([1, 2], [1, 2, 3]) is None  # length mismatch
+    assert pearson_r([5, 5, 5], [1, 2, 3]) is None  # zero variance in x
+    assert pearson_r([1, 2, 3], [7, 7, 7]) is None  # zero variance in y
+
+
+# --- correlation_summary: pearson_r wiring --------------------------------
+
+def _write(log, **margins):
+    """Helper: write one row from forge/py (old,new) win pairs."""
+    log_correlation_row(
+        log, old_deck="x.dck", new_deck="y.dck",
+        bracket=3, mode="1v1", games_per_pod=5,
+        forge_old_wins=margins["f_o"], forge_new_wins=margins["f_n"], forge_draws=0,
+        forge_duration_sec=30.0,
+        py_old_wins=margins["p_o"], py_new_wins=margins["p_n"], py_draws=0,
+        py_duration_sec=0.5,
+    )
+
+
+def test_summary_pearson_none_on_empty(tmp_path):
+    s = correlation_summary(tmp_path / "ghost.csv")
+    assert s["pearson_r"] is None
+    assert s["pearson_n"] == 0
+
+
+def test_summary_pearson_perfect_when_margins_track(tmp_path):
+    log = tmp_path / "corr.csv"
+    # forge margin (f_n - f_o) and py margin move together perfectly.
+    for f_o, f_n, p_o, p_n in [(5, 0, 4, 1), (3, 2, 3, 2), (0, 5, 1, 4)]:
+        _write(log, f_o=f_o, f_n=f_n, p_o=p_o, p_n=p_n)
+    s = correlation_summary(log)
+    assert s["pearson_n"] == 3
+    assert s["pearson_r"] == pytest.approx(1.0, abs=0.05)
+
+
+def test_summary_pearson_skips_error_rows(tmp_path):
+    log = tmp_path / "corr.csv"
+    _write(log, f_o=1, f_n=4, p_o=1, p_n=4)
+    log_correlation_row(
+        log, old_deck="x.dck", new_deck="y.dck",
+        bracket=3, mode="1v1", games_per_pod=5,
+        forge_old_wins=0, forge_new_wins=0, forge_draws=0, forge_duration_sec=0.0,
+        py_old_wins=0, py_new_wins=0, py_draws=0, py_duration_sec=0.0,
+        py_error="boom",
+    )
+    _write(log, f_o=4, f_n=1, p_o=4, p_n=1)
+    s = correlation_summary(log)
+    # Error row excluded from the correlation series.
+    assert s["pearson_n"] == 2
+    assert s["errors"] == 1
 
 
 def test_log_correlation_row_creates_file_with_header(tmp_path):
