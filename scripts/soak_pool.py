@@ -292,8 +292,11 @@ def main(argv=None) -> int:
     p.add_argument("--cpu-low", type=float, default=78.0, help="Add a runner below this CPU%%.")
     p.add_argument("--cpu-high", type=float, default=92.0, help="Retire a runner above this CPU%%.")
     p.add_argument("--control-interval", type=float, default=45.0)
-    p.add_argument("--out", type=Path, default=Path("C:/Users/pilot/soak_throughput.jsonl"))
-    p.add_argument("--summary", type=Path, default=Path("C:/Users/pilot/soak_summary.json"))
+    # Default to the running user's home dir (portable across machines,
+    # and usually inside the Claude Code session folder so the in-app
+    # viewer can open it). Override with --out / --summary.
+    p.add_argument("--out", type=Path, default=Path.home() / "soak_throughput.jsonl")
+    p.add_argument("--summary", type=Path, default=Path.home() / "soak_summary.json")
     args = p.parse_args(argv)
     Soak(args).run()
     return 0
