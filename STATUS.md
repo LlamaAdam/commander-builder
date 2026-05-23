@@ -136,6 +136,10 @@ be worked. Sized for a single session each.
   panel (native `<dialog>` + `settings.js`) wired into the topbar. 32
   tests (25 store + endpoints via Flask test client). Web config GET/PUT
   was the last open piece of FP-011 (secret-scan hook already shipped).
+  **Unified 2026-05-22:** config.json is now the single key store — the
+  audit endpoint resolves the BYO key `header → config.json → env`, and
+  the audit panel's key button opens the Settings dialog (no more
+  per-browser localStorage copy). Verified in Chrome.
 
 - ~~**A2. FP-012 first slice — unattended single-deck improve loop.**~~
   ✅ **Built 2026-05-22.** `commander-improve --deck <id> --rounds N`

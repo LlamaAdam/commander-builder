@@ -56,6 +56,28 @@ _SOURCE_LABEL = {
 }
 
 
+def _resolve_byo_key(header_value: str) -> str:
+    """Resolve the effective BYO Anthropic key for an audit request.
+
+    Single source of truth, in precedence order (FP-011 unification):
+      1. ``X-Anthropic-API-Key`` request header — an ephemeral per-request
+         override (rarely used now the Settings panel exists).
+      2. ``config.json``'s ``anthropic_api_key`` — what the Settings panel
+         writes; the durable per-user key.
+    Returns ``""`` when neither is set, in which case the caller leaves
+    ``os.environ`` untouched so a deployment-level ``ANTHROPIC_API_KEY``
+    (credentials file / container secret) still applies.
+    """
+    header_value = (header_value or "").strip()
+    if header_value:
+        return header_value
+    try:
+        from .. import config_store
+        return (config_store.load_config().get("anthropic_api_key") or "").strip()
+    except Exception:  # noqa: BLE001 — config must never break an audit
+        return ""
+
+
 # Empty shape for deck_health when computation fails entirely. The UI
 # renders tiles based on key presence; missing keys would crash the
 # renderer, so we always ship the full structure even on failure.
@@ -187,7 +209,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 }), 400
             requested = llm
         use_claude = requested == "claude"
-        byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
+        byo_key = _resolve_byo_key(request.headers.get("X-Anthropic-API-Key", ""))
         # Budget mode skips ABU duals + fetches from the manabase
         # essentials safety net. Truthy query values: 1, true, yes.
         budget_raw = (request.args.get("budget") or "").strip().lower()
@@ -347,7 +369,8 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                   and not os.environ.get("ANTHROPIC_API_KEY")):
                 warning = (
                     "Claude analyst was requested but no API key was "
-                    "provided. Click 'Set API key' (sk-…) and try again."
+                    "provided. Open Settings and set your Anthropic API "
+                    "key (sk-ant-…), then try again."
                 )
             else:
                 warning = (
@@ -510,7 +533,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 }), 400
             requested = llm
         use_claude = requested == "claude"
-        byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
+        byo_key = _resolve_byo_key(request.headers.get("X-Anthropic-API-Key", ""))
         budget_raw = (request.args.get("budget") or "").strip().lower()
         budget = budget_raw in ("1", "true", "yes")
         claude_model = (request.args.get("model") or "").strip() or None

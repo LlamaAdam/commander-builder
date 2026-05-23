@@ -8,6 +8,27 @@ applies once we tag a 1.0.
 
 ### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
 
+#### Changed — unified the two Anthropic-key entry points (FP-011)
+
+- **`feat(web)`: config.json is now the single source of truth for the
+  BYO Anthropic key.** Previously there were two disconnected stores: the
+  audit panel's "Set API key" wrote the key to browser `localStorage`
+  (sent as the `X-Anthropic-API-Key` header), while the new Settings
+  panel wrote it server-side to `config.json` — but nothing read the
+  latter for audits. Now:
+  - **Server:** `routes_audit._resolve_byo_key()` resolves the audit key
+    in precedence `header → config.json → env`, so the key saved in
+    Settings actually drives Claude audits. The "no key" fallback warning
+    now points to Settings.
+  - **Client:** the audit panel's key button is relabeled "Set API key…"
+    and **opens the Settings dialog** instead of a `window.prompt`; once a
+    key is configured it reads "API key ✓ (Settings)". The browser no
+    longer stores the raw key — `loadAdvise` dropped the prompt/localStorage
+    path, and any legacy `cb.audit.anthropic_key` is cleared on load.
+  4 new/updated tests (config-key fallback + header-override-config +
+  shared web `client` fixture isolates `COMMANDER_BUILDER_CONFIG`).
+  Verified end-to-end in Chrome.
+
 #### Docs — FP-008 confirmed already shipped (stale backlog entry)
 
 - **`docs`: mark FP-008 (card-image lazy fetcher) done in STATUS.** No

@@ -605,16 +605,19 @@ let _lastSimReport = null;
 // a deck the user moved away from.
 let _lastDashboardPriceUsd = null;
 
-// Audit-backend preference + BYO API key. Stored in localStorage
-// (browser-local; never sent anywhere except the active /api/audit
-// request as the X-Anthropic-API-Key header). Per FP-011.
+// Audit-backend preference. Stored in localStorage (browser-local).
+// FP-011 unification: the BYO Anthropic key is NO LONGER kept in
+// localStorage — it lives server-side in config.json (set via the
+// Settings panel), and the audit endpoint resolves it (header →
+// config.json → env). Any legacy browser-stored key is cleared on
+// load (see clearLegacyAnthropicKey).
 // The localStorage key keeps its legacy name "cb.audit.llm" so users
 // who already toggled Claude don't lose their preference, but the
 // accepted values expanded from "heuristic"/"claude" to also include
 // "bracket_peers" (top-N highest-liked Moxfield decks at the same
 // commander + bracket — see improvement_advisor._bracket_peers_recommendations).
 const _LLM_PREF_KEY = "cb.audit.llm";
-const _ANTHROPIC_KEY = "cb.audit.anthropic_key";
+const _ANTHROPIC_KEY = "cb.audit.anthropic_key";  // legacy; cleared on load
 const _CLAUDE_MODEL_KEY = "cb.audit.claude_model";
 const _BUDGET_KEY = "cb.audit.budget";
 
@@ -818,16 +821,14 @@ function setAutoAuditPref(enabled) {
 function setAuditLLMPref(v) {
   try { localStorage.setItem(_LLM_PREF_KEY, v); } catch (_e) { /* ignore */ }
 }
-function getAnthropicKey() {
-  try { return localStorage.getItem(_ANTHROPIC_KEY) || ""; }
-  catch (_e) { return ""; }
+// FP-011: the BYO key moved server-side (config.json via Settings).
+// Clear any legacy plaintext key a prior version stored in this browser
+// so it doesn't linger. Invoked once at module load below.
+function clearLegacyAnthropicKey() {
+  try { localStorage.removeItem(_ANTHROPIC_KEY); }
+  catch (_e) { /* ignore */ }
 }
-function setAnthropicKey(k) {
-  try {
-    if (k) localStorage.setItem(_ANTHROPIC_KEY, k);
-    else localStorage.removeItem(_ANTHROPIC_KEY);
-  } catch (_e) { /* ignore */ }
-}
+clearLegacyAnthropicKey();
 
 // Whitelist of valid audit source values. Must mirror the server-side
 // validation in routes_audit.py and _AUDIT_SOURCE_OPTIONS above.
@@ -861,27 +862,15 @@ async function loadAdvise(sourceOverride) {
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
   if (!sug) return;
-  const sourcePref = sourceOverride || getAuditLLMPref();
-  // Only the Claude path needs a BYO key. Bracket-peers + heuristic
-  // are key-free, so don't prompt the user for one.
-  const byoKey = sourcePref === "claude" ? getAnthropicKey() : "";
-  if (sourcePref === "claude" && !byoKey) {
-    const k = window.prompt(
-      "Paste your Anthropic API key (stored only in this browser; "
-      + "sent only on audit requests). Cancel to skip and use heuristic.",
-      "",
-    );
-    if (k && k.trim().startsWith("sk-")) {
-      setAnthropicKey(k.trim());
-    } else if (!sourceOverride) {
-      // Only mutate the user's stored preference when this isn't an
-      // explicit override — the auto-kick / upgrade button mustn't
-      // silently change the persisted setting.
-      setAuditLLMPref("heuristic");
-    }
-  }
   const sourceFinal = sourceOverride || getAuditLLMPref();
-  const keyFinal = sourceFinal === "claude" ? getAnthropicKey() : "";
+  // BYO key now lives server-side in config.json (set via the Settings
+  // panel). We no longer prompt for or store it in the browser — the
+  // audit endpoint resolves the key (header → config.json → env) itself
+  // and, when Claude is requested with no key anywhere, falls back to
+  // the heuristic and surfaces a "set your key in Settings" warning.
+  // ``keyFinal`` stays as an optional ephemeral header override that
+  // nothing sets by default.
+  const keyFinal = "";
 
   // Restore the panel header (renderSuggestions strips children
   // beyond the <h3>; we want the header back when re-rendering).
@@ -1104,29 +1093,30 @@ function renderAuditBackendRow(body) {
   budgetLabel.appendChild(document.createTextNode(" Budget mode"));
   row.appendChild(budgetLabel);
 
-  // Manage-key button — clears stored key or prompts for a new one.
+  // Manage-key button — opens the unified Settings panel. FP-011: the
+  // Anthropic key is stored server-side (config.json) and set in ONE
+  // place (Settings), instead of a separate plaintext copy per browser.
+  // The audit endpoint resolves the key header → config.json → env, so
+  // whatever you save in Settings drives Claude audits.
   const keyBtn = el("button",
-    { class: "advise-btn", style: "padding: 4px 10px; font-size: 12px;" },
-    getAnthropicKey() ? "Replace API key" : "Set API key",
+    { class: "advise-btn", style: "padding: 4px 10px; font-size: 12px;",
+      title: "Set or replace your Anthropic API key in Settings." },
+    "Set API key…",
   );
   keyBtn.addEventListener("click", () => {
-    const k = window.prompt(
-      "Anthropic API key (leave empty to forget). "
-      + "Stored in this browser only; sent only as the "
-      + "X-Anthropic-API-Key header on audit requests.",
-      "",
-    );
-    if (k === null) return;       // cancel
-    if (k.trim() === "") {
-      setAnthropicKey("");
-      keyBtn.textContent = "Set API key";
-    } else if (k.trim().startsWith("sk-")) {
-      setAnthropicKey(k.trim());
-      keyBtn.textContent = "Replace API key";
-    } else {
-      window.alert("API key should start with 'sk-'.");
-    }
+    const settingsBtn = document.getElementById("btn-settings");
+    if (settingsBtn) settingsBtn.click();
   });
+  // Reflect whether a key is already configured server-side, so the
+  // button reads "✓ (Settings)" once one is set.
+  fetch("/api/config")
+    .then((r) => r.json())
+    .then((cfg) => {
+      if (cfg && cfg.anthropic_api_key_set) {
+        keyBtn.textContent = "API key ✓ (Settings)";
+      }
+    })
+    .catch(() => { /* leave default label */ });
   row.appendChild(keyBtn);
   return row;
 }

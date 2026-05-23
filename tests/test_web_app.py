@@ -89,6 +89,16 @@ def client(deck_dir, monkeypatch):
         "commander_builder.deck_dashboard.lookup_card", fake_lookup,
     )
 
+    # Isolate the per-user config store: point it at a non-existent temp
+    # path so the audit BYO-key resolver (header → config.json → env)
+    # never picks up a real key from the developer's machine. Without
+    # this, the no-key fallback tests would flake on a box that has a
+    # configured ~/.commander-builder/config.json. (FP-011 unification.)
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG",
+        str(deck_dir.parent / "no_such_config.json"),
+    )
+
     app = create_app(deck_dir=deck_dir)
     app.config["TESTING"] = True
     return app.test_client()
@@ -2841,6 +2851,43 @@ def test_audit_does_not_leak_byo_key_to_subsequent_call(client, monkeypatch):
     r2 = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")
     assert r2.status_code == 200
     assert seen.get("api_key_in_env") is None
+
+
+def test_audit_uses_config_key_when_no_header(client, monkeypatch, tmp_path):
+    """FP-011 unification: with no X-Anthropic-API-Key header, the audit
+    resolves the BYO key from config.json (what the Settings panel
+    writes) and injects it into env for the call's lifetime."""
+    from commander_builder import config_store
+    cfg = tmp_path / "config.json"
+    monkeypatch.setenv("COMMANDER_BUILDER_CONFIG", str(cfg))
+    config_store.save_config({"anthropic_api_key": "sk-ant-fromconfig1234567"})
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")  # no header
+    assert resp.status_code == 200, resp.get_json()
+    assert seen["use_claude"] is True
+    assert seen["api_key_in_env"] == "sk-ant-fromconfig1234567"
+    # Restored afterward — the config key must not linger in the process.
+    import os as _os
+    assert "ANTHROPIC_API_KEY" not in _os.environ
+
+
+def test_audit_header_key_overrides_config(client, monkeypatch, tmp_path):
+    """Header is the per-request override; it wins over config.json."""
+    from commander_builder import config_store
+    cfg = tmp_path / "config.json"
+    monkeypatch.setenv("COMMANDER_BUILDER_CONFIG", str(cfg))
+    config_store.save_config({"anthropic_api_key": "sk-ant-fromconfig1234567"})
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "sk-ant-fromheader9999999"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert seen["api_key_in_env"] == "sk-ant-fromheader9999999"
 
 
 # ---------------------------------------------------------------------------
