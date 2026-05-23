@@ -55,7 +55,11 @@ foreach ($sub in @("new_decks", "control_decks")) {
 }
 Write-Host "decks synced: $copied new file(s)"
 
-$nPairs = (Get-ChildItem "$deckDir\[[]USER[]]* v2 *.dck" -ErrorAction SilentlyContinue).Count
+# Count [USER] base+v2 pairs. NB: glob bracket-escaping is unreliable in
+# Windows PowerShell 5.1 (the old "[[]USER[]]*" pattern matched 0), so
+# filter by name instead (fix reported by box2).
+$nPairs = @(Get-ChildItem "$deckDir\*.dck" -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -like '`[USER`]* v2 *.dck' }).Count
 Write-Host "user v2 pairs now present: $nPairs"
 
 Write-Host "`nSynced. To (re)launch on the unified config writing to the shared inbox:" -ForegroundColor Yellow
