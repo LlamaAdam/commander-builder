@@ -71,13 +71,20 @@ own core count.
 - `sims_done = 0` for the first several minutes is normal (sims in flight).
 - The autoscaler holds CPU ~78–92%, adding/removing runners (4–12).
 
-## Sending results back / merging
-The output is `%USERPROFILE%\soak_throughput.jsonl`. Copy it to the source
-machine and merge (rows are independent — just concatenate):
+## Sending results back / merging (tracked separate, summed together)
+Each machine's rows live in its own `%USERPROFILE%\soak_throughput.jsonl`
+and also carry a `host` tag, so provenance is preserved. Copy this
+machine's file to the source box and merge with a **label per machine** —
+the merger prints a per-source breakdown AND the combined total:
 ```
-python scripts\merge_soak.py path\to\machine1.jsonl path\to\machine2.jsonl
-# add --to-knowledge-log to fold completed sims into knowledge_log:
-python scripts\merge_soak.py *.jsonl --to-knowledge-log
+python scripts\merge_soak.py box1=C:\Users\pilot\soak_throughput.jsonl box2=D:\in\box2.jsonl
+#   source            rows   done   games
+#   box1               260    258    1290
+#   box2               240    239    1195
+#   TOTAL              500    497    2485
+# add --to-knowledge-log to fold completed sims into knowledge_log
+# (source/host kept in each row's manifest):
+python scripts\merge_soak.py box1=... box2=... --to-knowledge-log
 ```
 
 ## Knobs (optional)

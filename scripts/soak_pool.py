@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import socket
 import sys
 import threading
 import time
@@ -161,6 +162,7 @@ class Soak:
                 self.sims_failed += 1
             line = json.dumps({
                 "ts": _now(),
+                "host": self.args.label,
                 "deck_a": base.name, "deck_b": v2.name,
                 "games": getattr(res, "games", None),
                 "wins_a": getattr(res, "wins_a", None),
@@ -292,6 +294,10 @@ def main(argv=None) -> int:
     p.add_argument("--cpu-low", type=float, default=78.0, help="Add a runner below this CPU%%.")
     p.add_argument("--cpu-high", type=float, default=92.0, help="Retire a runner above this CPU%%.")
     p.add_argument("--control-interval", type=float, default=45.0)
+    p.add_argument("--label", default=socket.gethostname(),
+                   help="Provenance tag written as 'host' on every row "
+                        "(default: this machine's hostname). Lets merge_soak "
+                        "keep machines separate while summing the total.")
     # Default to the running user's home dir (portable across machines,
     # and usually inside the Claude Code session folder so the in-app
     # viewer can open it). Override with --out / --summary.
