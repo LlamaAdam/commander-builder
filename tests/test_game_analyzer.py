@@ -156,14 +156,31 @@ def test_per_deck_summary_tracks_eliminations_and_fastest():
     assert summary["B"]["fastest_elimination_turn"] == 5
 
 
-def test_real_test2_rerun_smoke():
-    """End-to-end sanity check against the captured TEST 2 sim."""
-    fixture = Path(__file__).resolve().parents[1] / "test2_rerun_v2.json"
-    if not fixture.exists():
-        pytest.skip("test2_rerun_v2.json fixture not present")
-    payload = json.loads(fixture.read_text(encoding="utf-8"))
-    ma = analyze(payload["stdout"])
-    # Smoke expectations from prior verified runs.
+def test_two_game_match_smoke():
+    """End-to-end sanity on a 2-game match where one deck sweeps.
+
+    Replaces the old ``test_real_test2_rerun_smoke``, which read a
+    captured ``test2_rerun_v2.json`` that was never committed and so
+    skipped forever (silent zero coverage). This committed inline log
+    exercises the same path — multi-game parse + per-deck win tally —
+    without the external fixture.
+    """
+    log = (
+        # Game 1 — First Sliver Fun (seat 1) beats Goblin Rush (seat 2).
+        "Turn: Turn 1 (Ai(1)-First Sliver Fun)\n"
+        "Life: Life: Ai(1)-First Sliver Fun 40 > 38\n"
+        "Life: Life: Ai(2)-Goblin Rush 40 > 0\n"
+        "Game Outcome: Turn 8\n"
+        "Game Outcome: Ai(1)-First Sliver Fun has won\n"
+        "Game Result: Game 1 ended in 48000 ms. Ai(1)-First Sliver Fun has won!\n"
+        # Game 2 — First Sliver Fun sweeps.
+        "Turn: Turn 1 (Ai(1)-First Sliver Fun)\n"
+        "Life: Life: Ai(2)-Goblin Rush 40 > 0\n"
+        "Game Outcome: Turn 9\n"
+        "Game Outcome: Ai(1)-First Sliver Fun has won\n"
+        "Game Result: Game 2 ended in 54000 ms. Ai(1)-First Sliver Fun has won!\n"
+    )
+    ma = analyze(log)
     assert ma.total_games == 2
     assert ma.draws == 0
     summary = ma.per_deck_summary()
