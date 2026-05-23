@@ -46,7 +46,7 @@ Write-Host "Installing package + deps (editable) ..."
 & $venvPy -m pip install --quiet --upgrade pip
 & $venvPy -m pip install --quiet -e . psutil
 
-# 2. Verify the copied Forge runtime (gitignored — must be present).
+# 2. Verify the copied Forge runtime (gitignored - must be present).
 $jar = Get-ChildItem "vendor\forge\forge-gui-desktop-*.jar" -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $jar) {
   throw "MISSING vendor\forge\forge-gui-desktop-*.jar. Copy vendor\forge (446MB) from the source machine into .\vendor\ and re-run."
@@ -55,7 +55,7 @@ if (-not (Test-Path "vendor\jre\bin\java.exe")) {
   throw "MISSING vendor\jre\bin\java.exe. Copy vendor\jre (146MB) into .\vendor\ and re-run."
 }
 $deckCount = (Get-ChildItem "vendor\forge\userdata\decks\commander\*.dck" -ErrorAction SilentlyContinue).Count
-if ($deckCount -lt 2) { throw "Only $deckCount decks under vendor\forge\userdata\decks\commander — the copy is incomplete." }
+if ($deckCount -lt 2) { throw "Only $deckCount decks under vendor\forge\userdata\decks\commander - the copy is incomplete." }
 Write-Host "Forge OK: $($jar.Name) | $deckCount decks" -ForegroundColor Green
 
 # 3. Create cwd-isolated profiles forge2..N (cheap junctions; idempotent).
