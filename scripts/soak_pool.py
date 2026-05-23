@@ -102,6 +102,11 @@ class Soak:
         self.wins_a = 0
         self.wins_b = 0
         self.last_cpu = 0.0
+        # Phase 1 runs at args.games (fast, to bank the FP-002 row gate);
+        # phase 2 switches to args.phase2_games (high-confidence verdicts)
+        # once sims_done crosses args.phase2_after.
+        self.current_games = args.games
+        self.phase = 1
 
         # Worker bookkeeping: free profiles + active worker registry.
         self.free_profiles = list(self.profiles)
@@ -135,7 +140,7 @@ class Soak:
                 continue
             try:
                 res = run_ab_simulation(deck_a_path=base, deck_b_path=v2,
-                                        games=self.args.games, fillers=fillers,
+                                        games=self.current_games, fillers=fillers,
                                         runner=runner)
             except Exception as exc:  # noqa: BLE001
                 self._record(None, f"{type(exc).__name__}: {exc}", base, v2)
@@ -194,8 +199,13 @@ class Soak:
             sph = self.sims_done / elapsed * 3600 if elapsed else 0
             summary = {
                 "updated": _now(), "final": final,
-                "config": {"hours": self.args.hours, "games_per_sim": self.args.games,
+                "config": {"hours": self.args.hours,
+                           "phase1_games": self.args.games,
+                           "phase2_games": self.args.phase2_games,
+                           "phase2_after_rows": self.args.phase2_after,
                            "min": self.args.min, "max": self.max},
+                "phase": self.phase,
+                "current_games_per_sim": self.current_games,
                 "active_runners": self.active_count(),
                 "cpu_pct": round(self.last_cpu, 1),
                 "elapsed_hours": round(elapsed / 3600, 3),
@@ -224,6 +234,16 @@ class Soak:
             with self.lock:
                 self.last_cpu = cpu
                 active = self.active_count()
+            # Phase 2: once enough phase-1 rows are banked, switch new sims
+            # to the high-confidence game count. In-flight phase-1 sims
+            # finish as-is; subsequent sims pick up self.current_games.
+            if self.phase == 1 and self.sims_done >= self.args.phase2_after:
+                with self.lock:
+                    self.current_games = self.args.phase2_games
+                    self.phase = 2
+                print(f"[soak] PHASE 2: {self.sims_done} rows banked -> "
+                      f"switching to {self.args.phase2_games} games/sim for "
+                      f"high-confidence verdicts", flush=True)
             # Autoscale toward the target band.
             if cpu < self.args.cpu_low and active < self.max and self.free_profiles:
                 with self.lock:
@@ -263,7 +283,12 @@ def main(argv=None) -> int:
     p.add_argument("--min", type=int, default=4)
     p.add_argument("--max", type=int, default=12)
     p.add_argument("--start", type=int, default=8)
-    p.add_argument("--games", type=int, default=10)
+    p.add_argument("--games", type=int, default=5,
+                   help="Phase-1 games/sim (fast, banks the FP-002 row gate).")
+    p.add_argument("--phase2-games", type=int, default=40,
+                   help="Phase-2 games/sim (high-confidence verdict pass).")
+    p.add_argument("--phase2-after", type=int, default=200,
+                   help="Switch to phase-2 game count after this many completed sims.")
     p.add_argument("--cpu-low", type=float, default=78.0, help="Add a runner below this CPU%%.")
     p.add_argument("--cpu-high", type=float, default=92.0, help="Retire a runner above this CPU%%.")
     p.add_argument("--control-interval", type=float, default=45.0)
