@@ -25,12 +25,22 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
+
+# Force UTF-8 stdout/stderr so a stray non-ASCII char in a log line can
+# never crash the run on a cp1252 Windows console (this killed a prior
+# launch). errors="replace" makes encoding failures non-fatal.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
 
 from commander_builder.forge_runner import ForgeRunner, VENDOR_FORGE, run_ab_simulation
 from commander_builder._proposer_sim import _pick_filler_decks
@@ -218,12 +228,12 @@ class Soak:
             if cpu < self.args.cpu_low and active < self.max and self.free_profiles:
                 with self.lock:
                     self._spawn()
-                print(f"[soak] cpu {cpu:.0f}% < {self.args.cpu_low} → +1 runner "
+                print(f"[soak] cpu {cpu:.0f}% < {self.args.cpu_low} -> +1 runner "
                       f"({active + 1})", flush=True)
             elif cpu > self.args.cpu_high and active > self.args.min:
                 with self.lock:
                     self._retire_one()
-                print(f"[soak] cpu {cpu:.0f}% > {self.args.cpu_high} → -1 runner "
+                print(f"[soak] cpu {cpu:.0f}% > {self.args.cpu_high} -> -1 runner "
                       f"({active - 1})", flush=True)
 
             if time.time() - last_summary > 20:
