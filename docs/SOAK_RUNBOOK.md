@@ -21,12 +21,11 @@ own core count.
 ## Prerequisites (do these BEFORE asking Claude Code to run)
 
 1. **Windows**, Python 3.10+ (with the `py` launcher).
-2. **Copy the Forge runtime** — it's gitignored (~592 MB), so a clone
-   does NOT include it. From the source machine's `commander-builder`,
-   copy these two folders into this checkout's `vendor\`:
-   - `vendor\forge`  (446 MB — Forge jar + game data + the 188 decks)
-   - `vendor\jre`    (146 MB — bundled Java)
-   (Zip them on the source box, transfer, unzip into `.\vendor\`.)
+2. **The Forge runtime** (`vendor\forge` + `vendor\jre`, ~592 MB) is
+   gitignored, so a clone doesn't include it. It's published as a
+   **GitHub Release asset** — Claude Code downloads it in step 2 below.
+   No flash drive / manual copy needed. Direct URL:
+   `https://github.com/LlamaAdam/commander-builder/releases/download/soak-runtime/soak_runtime.tar.gz`
 
 ## Instructions for Claude Code (run these)
 
@@ -36,12 +35,17 @@ own core count.
      git clone https://github.com/LlamaAdam/commander-builder
      cd commander-builder
 
-2. Verify the Forge runtime was copied in (it's gitignored):
-     - vendor\forge\forge-gui-desktop-*.jar must exist
-     - vendor\jre\bin\java.exe must exist
-     - vendor\forge\userdata\decks\commander\*.dck should be ~188 files
-   If any are missing, STOP and tell me to copy vendor\forge + vendor\jre
-   from the source machine (see Prerequisites). Do not proceed without them.
+2. Download + extract the Forge runtime (gitignored; ~350 MB compressed
+   from the GitHub Release). From the repo root (the `vendor` dir already
+   exists in a clone — it tracks vendor/README.md):
+     curl -L -o soak_runtime.tar.gz https://github.com/LlamaAdam/commander-builder/releases/download/soak-runtime/soak_runtime.tar.gz
+     tar -xf soak_runtime.tar.gz -C vendor
+   (`tar -xf` on a .tar.gz works in both PowerShell and bash on Windows.)
+   Then verify:
+     - vendor\forge\forge-gui-desktop-*.jar exists
+     - vendor\jre\bin\java.exe exists
+     - vendor\forge\userdata\decks\commander\*.dck is ~188 files
+   If the download fails, STOP and tell me — do not proceed without the runtime.
 
 3. Run the turnkey setup (creates venv, installs deps, makes 12 Forge
    profiles, launches the 24h two-phase soak):
