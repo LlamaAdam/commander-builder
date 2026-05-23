@@ -537,7 +537,7 @@ def verdict_breakdown_for_deck(
 # Shape:
 #   {
 #     "nodes": [{id, iteration_n, bracket, verdict, created_at,
-#                card_count, price_usd, audit_version}, ...],
+#                card_count, price_usd, audit_version, milestone}, ...],
 #     "edges": [{from_id, to_id, applied_adds, applied_cuts, rationale,
 #                price_delta_usd, bracket_delta}, ...]
 #   }

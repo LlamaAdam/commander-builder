@@ -196,7 +196,7 @@ def make_dashboard_blueprint(
               "deck_id": str,
               "nodes": [{id, iteration_n, bracket, verdict,
                          created_at, card_count, price_usd,
-                         audit_version}, ...],
+                         audit_version, milestone}, ...],
               "edges": [{from_id, to_id, applied_adds, applied_cuts,
                          rationale, price_delta_usd, bracket_delta}, ...]
             }
