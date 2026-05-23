@@ -142,7 +142,8 @@ class Soak:
             try:
                 res = run_ab_simulation(deck_a_path=base, deck_b_path=v2,
                                         games=self.current_games, fillers=fillers,
-                                        runner=runner)
+                                        runner=runner,
+                                        timeout_per_game=self.args.timeout)
             except Exception as exc:  # noqa: BLE001
                 self._record(None, f"{type(exc).__name__}: {exc}", base, v2)
                 continue
@@ -283,8 +284,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="soak_pool")
     p.add_argument("--hours", type=float, default=24.0)
     p.add_argument("--min", type=int, default=4)
-    p.add_argument("--max", type=int, default=12)
-    p.add_argument("--start", type=int, default=8)
+    p.add_argument("--max", type=int, default=6)
+    p.add_argument("--start", type=int, default=6)
     p.add_argument("--games", type=int, default=5,
                    help="Phase-1 games/sim (fast, banks the FP-002 row gate).")
     p.add_argument("--phase2-games", type=int, default=40,
@@ -294,6 +295,10 @@ def main(argv=None) -> int:
     p.add_argument("--cpu-low", type=float, default=78.0, help="Add a runner below this CPU%%.")
     p.add_argument("--cpu-high", type=float, default=92.0, help="Retire a runner above this CPU%%.")
     p.add_argument("--control-interval", type=float, default=45.0)
+    p.add_argument("--timeout", type=int, default=360,
+                   help="Per-game Forge timeout in seconds (default 360). "
+                        "Generous so the occasional long Commander game "
+                        "isn't killed under lane contention.")
     p.add_argument("--label", default=socket.gethostname(),
                    help="Provenance tag written as 'host' on every row "
                         "(default: this machine's hostname). Lets merge_soak "

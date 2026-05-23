@@ -551,6 +551,7 @@ def run_ab_simulation(
     runner: Optional["ForgeRunner"] = None,
     fillers: Optional[list[str]] = None,
     game_format: str = "commander",
+    timeout_per_game: Optional[int] = None,
 ) -> ABResult:
     """Run a 5-game (configurable) head-to-head between two decks.
 
@@ -633,7 +634,7 @@ def run_ab_simulation(
                 deck_filenames=order,
                 num_games=1,
                 game_format=game_format,
-                timeout_sec=_AB_TIMEOUT_PER_GAME_SEC,
+                timeout_sec=timeout_per_game or _AB_TIMEOUT_PER_GAME_SEC,
             )
         except Exception as exc:  # noqa: BLE001 — never raise from background
             result.status = _AB_STATUS_FAILED
