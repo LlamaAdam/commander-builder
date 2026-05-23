@@ -47,7 +47,10 @@ foreach ($sub in @("new_decks", "control_decks")) {
   if (Test-Path $src) {
     $files = Get-ChildItem "$src\*.dck" -ErrorAction SilentlyContinue
     foreach ($f in $files) {
-      Copy-Item $f.FullName $deckDir -Force
+      # -LiteralPath is REQUIRED: deck filenames contain [ ] which Copy-Item
+      # otherwise treats as wildcard char-classes, silently matching nothing
+      # (it copied 0 files while reporting success — bug found by box2).
+      Copy-Item -LiteralPath $f.FullName -Destination $deckDir -Force
       $copied++
     }
     if ($files) { Write-Host "copied $($files.Count) deck(s) from $sub" -ForegroundColor Green }
