@@ -97,7 +97,12 @@ def detune(deck_text: str, n: int = 12, seed: int | None = None) -> tuple[str, l
     basic_lines = [i for i, ln in enumerate(main)
                    if ln.strip() and _is_basic(_card_name(ln))]
     if not basic_lines:
-        raise ValueError("deck has no basic lands to pad with; can't detune safely")
+        # Nonbasic-heavy manabase (no basics to bump). Add a Wastes line —
+        # Wastes is a colorless basic, legal in EVERY Commander deck (no
+        # color-identity violation) — and pad into it. Keeps detune working
+        # for fetch/dual-only decks instead of erroring.
+        main.append("0 Wastes")
+        basic_lines = [len(main) - 1]
 
     to_remove = removable_idx[:n]
     removed_names = [_card_name(main[i]) for i in to_remove]
