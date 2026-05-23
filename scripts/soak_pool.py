@@ -170,7 +170,11 @@ class Soak:
                 "wins_b": getattr(res, "wins_b", None),
                 "status": getattr(res, "status", "error"),
                 "duration_sec": getattr(res, "duration_sec", None),
-                "error": err,
+                # err is set on the exception path; on the non-exception path
+                # the worker passes None, so fall back to res.error (e.g.
+                # "Forge exited with code N" / "Timed out after Ns") instead of
+                # logging a blank — otherwise failed sims are undiagnosable.
+                "error": err or getattr(res, "error", None),
             })
             with self.args.out.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
