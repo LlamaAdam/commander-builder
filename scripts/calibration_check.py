@@ -30,28 +30,34 @@ from commander_builder.web._helpers import _bracket_from_filename
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
 
 
-def _ensure_control(good_path: Path) -> Path:
-    """Build a do-nothing control matching the good deck's bracket."""
+def _build_controls(good_path: Path, n: int) -> list[Path]:
+    """Build ``n`` distinct do-nothing controls (different commanders, so
+    Forge accepts them as separate decks) matching the good deck's bracket.
+    These fill the whole rest of the pod so the good deck faces ONLY broken
+    opponents and should win ~every game."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from make_control_decks import make_do_nothing
     b = _bracket_from_filename(good_path.name) or 3
-    out = DECK_DIR / f"[CONTROL] do-nothing [B{b}].dck"
-    if not out.exists():
-        out.write_text(
-            make_do_nothing(good_path.read_text(encoding="utf-8"),
-                            f"CONTROL do-nothing [B{b}]"),
-            encoding="utf-8")
+    # Borrow commanders from distinct [USER] decks for variety/legality.
+    srcs = [p for p in sorted(DECK_DIR.glob("[[]USER[]]*.dck"))
+            if " v2 " not in p.name and "-detune" not in p.name
+            and "SPDET" not in p.name and p != good_path]
+    out: list[Path] = []
+    for i in range(n):
+        src = srcs[i % len(srcs)] if srcs else good_path
+        p = DECK_DIR / f"[CONTROL] do-nothing calib{i} [B{b}].dck"
+        p.write_text(make_do_nothing(src.read_text(encoding="utf-8"),
+                                     f"CONTROL do-nothing calib{i} [B{b}]"),
+                     encoding="utf-8")
+        out.append(p)
     return out
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="calibration_check")
     ap.add_argument("--good", default=None, help="Known-good .dck (deck A).")
-    ap.add_argument("--control", default=None, help="Known-bad .dck (deck B). "
-                    "Omit to auto-build a do-nothing control.")
-    ap.add_argument("--games", type=int, default=6)
+    ap.add_argument("--games", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=360)
-    ap.add_argument("--max-control-wins", type=int, default=1)
     args = ap.parse_args(argv)
 
     if args.good:
@@ -63,17 +69,18 @@ def main(argv=None) -> int:
         if not cand:
             raise SystemExit("no [USER] decks to use as the good deck")
         good = cand[0]
-    control = Path(args.control) if args.control else _ensure_control(good)
 
-    br = _bracket_from_filename(good.name) or 3
-    fillers = _pick_filler_decks(DECK_DIR, exclude_paths=[good, control],
-                                 count=2, target_bracket=br, rng=random.Random(1))
-    if len(fillers) < 2:
-        raise SystemExit("need 2 filler decks for a 4-player pod")
+    # Pod = good deck + 3 do-nothing controls. The only functional deck is
+    # ``good``, so it should win ~every game and the broken decks win 0 —
+    # an unambiguous signal that isolates harness correctness from filler
+    # strength (the bug in the first version of this check).
+    controls = _build_controls(good, 3)
+    control_b, fillers = controls[0], [c.name for c in controls[1:]]
 
-    print(f"calibration: GOOD={good.name}  vs  CONTROL={control.name}")
-    print(f"  {args.games} games, fillers={fillers}", flush=True)
-    res = run_ab_simulation(deck_a_path=good, deck_b_path=control,
+    print(f"calibration: GOOD={good.name}  vs a pod of 3 do-nothing controls")
+    print(f"  control(deck B)={control_b.name}  fillers={fillers}")
+    print(f"  {args.games} games", flush=True)
+    res = run_ab_simulation(deck_a_path=good, deck_b_path=control_b,
                             games=args.games, fillers=fillers,
                             timeout_per_game=args.timeout)
     print(f"  status={res.status} good(a)={res.wins_a} control(b)={res.wins_b} "
@@ -82,14 +89,19 @@ def main(argv=None) -> int:
     if res.status != "done":
         print("RESULT: INCONCLUSIVE (sim did not complete)")
         return 2
-    passed = (res.wins_a > res.wins_b) and (res.wins_b <= args.max_control_wins)
+    # The broken deck must win 0; the good deck (only functional one) must
+    # win at least one. If a do-nothing deck ever scores a win, the scoring
+    # is broken.
+    passed = (res.wins_b == 0) and (res.wins_a >= 1)
     if passed:
-        print(f"RESULT: PASS — the harness clearly resolves the broken deck "
-              f"(good {res.wins_a} > control {res.wins_b}).")
+        print(f"RESULT: PASS — broken decks won 0; the good deck won "
+              f"{res.wins_a}/{res.games}. The harness clearly resolves an "
+              f"obviously-broken deck.")
         return 0
-    print(f"RESULT: FAIL — the do-nothing control was NOT clearly beaten "
-          f"(good {res.wins_a}, control {res.wins_b}). The measurement is "
-          f"suspect (scoring bug, or fillers dominating).")
+    print(f"RESULT: FAIL — expected broken deck=0 wins, good deck>=1. Got "
+          f"good={res.wins_a}, control={res.wins_b}. Measurement suspect "
+          f"(scoring bug) — or the good deck can't close out a do-nothing "
+          f"pod within the turn limit (try --games higher / a faster deck).")
     return 1
 
 
