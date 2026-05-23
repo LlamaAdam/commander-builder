@@ -395,13 +395,17 @@ active backlog item.
 The everything-bagel: takes a Moxfield URL, learns the deck's intent,
 converges on a better version unattended. Multi-arm bandit / Bayesian
 opt for swap selection. ~120 h total across 8 components. **Status:
-PARKED (full agent); first slice PROMOTED 2026-05-22 → Active → A2.** All
-three gate conditions are now met — knowledge_log ≥150 rows, the proposer
-is programmatic (`commander-auto-curate`), and `forge_runner` supports
-concurrent JVMs (`run_ab_batch`, FP-003). The bounded first slice (a
-fixed-N greedy single-deck improve loop, no bandit/Bayesian search) is in
-the active backlog; the full multi-arm-bandit agent stays parked as the
-north star.
+PARKED (full agent); slices 1+2 SHIPPED 2026-05-22.** All three gate
+conditions are met — knowledge_log ≥150 rows, the proposer is
+programmatic (`commander-auto-curate`), and `forge_runner` supports
+concurrent JVMs (`run_ab_batch`, FP-003).
+- **Slice 1 (A2):** `commander-improve` fixed-N greedy keep-if-better loop.
+- **Slice 2:** `commander-improve --strategy bandit` — treats candidate
+  swaps as arms and learns which move the win rate via an epsilon-greedy
+  / UCB1 policy (`bandit.py`; per-arm reward = seat-attributed A/B sim
+  margin; advances the base deck on improvement).
+Still parked for the full agent: intent-learning, Bayesian opt, and the
+unattended multi-deck orchestration. North star, not done.
 
 ### FP-013 — Project-tuned LLM (moonshot)
 

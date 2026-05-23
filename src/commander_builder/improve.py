@@ -258,6 +258,124 @@ def _print_summary(result: ImproveResult) -> None:
         print("No round improved the deck; base unchanged.")
 
 
+# ---------------------------------------------------------------------------
+# Bandit strategy (FP-012 slice 2) — treat candidate swaps as arms.
+# ---------------------------------------------------------------------------
+
+def _build_arms_from_advice(deck_path: Path, bracket: int, source: str) -> list:
+    """Run the advisor once and turn its candidate swaps into bandit arms.
+
+    Each arm is a concrete ``(add, cut)`` swap: the i-th proposed add
+    paired with a proposed cut (cuts cycled if fewer than adds). Returns
+    an empty list when the advisor proposes no adds.
+    """
+    from .bandit import Arm
+    from .improvement_advisor import advise
+
+    report = advise(deck_path=deck_path, bracket=bracket, source=source)
+    manifest = report.to_manifest()
+    adds = list(manifest.get("added", []) or [])
+    cuts = list(manifest.get("removed", []) or [])
+    arms: list = []
+    for i, add in enumerate(adds):
+        cut = cuts[i % len(cuts)] if cuts else None
+        key = f"+{add} / -{cut}" if cut else f"+{add}"
+        arms.append(Arm(key=key, add=add, cut=cut))
+    return arms
+
+
+def _make_swap_evaluator(state: dict, args):
+    """Build the real per-arm evaluator: apply one swap to the current
+    best deck, A/B-sim it, and return the seat-attributed win margin as
+    the reward. On a positive margin the candidate becomes the new base
+    (greedy accept), so later pulls build on improvements.
+
+    ``state`` is a mutable ``{"deck": Path}`` the closure advances. Never
+    raises — sim/filler failures map to a 0.0 reward.
+    """
+    from .proposer import Proposal, apply_proposal_to_deck
+    from .forge_runner import run_ab_simulation
+    from ._proposer_sim import _pick_filler_decks
+
+    def evaluate(arm) -> float:
+        base = state["deck"]
+        proposal = Proposal(
+            adds=[arm.add] if arm.add else [],
+            cuts=[arm.cut] if arm.cut else [],
+        )
+        try:
+            candidate = apply_proposal_to_deck(base, proposal, dry_run=False)
+        except Exception:  # noqa: BLE001
+            return 0.0
+        deck_dir = base.parent
+        if args.sim_fillers:
+            fillers = [f.strip() for f in args.sim_fillers.split(",") if f.strip()]
+        else:
+            fillers = _pick_filler_decks(
+                deck_dir, exclude_paths=[base, candidate], count=2,
+                target_bracket=args.bracket,
+            )
+        if len(fillers) < 2:
+            return 0.0
+        ab = run_ab_simulation(
+            deck_a_path=base, deck_b_path=candidate,
+            games=args.sim_games, fillers=fillers,
+        )
+        if getattr(ab, "status", None) != "done":
+            return 0.0
+        reward = float((ab.wins_b or 0) - (ab.wins_a or 0))
+        if reward >= args.sim_margin:
+            state["deck"] = candidate  # advance the base deck
+        return reward
+
+    return evaluate
+
+
+def _print_bandit_summary(deck_id: str, result, final_deck: Path) -> None:
+    print()
+    print(f"Bandit improve run on {deck_id} ({result.rounds_run} pulls, "
+          f"{result.accepted} accepted)")
+    print(f"  best swap:  {result.best_arm_key} (mean reward "
+          f"{result.best_arm_mean:+.2f})")
+    print(f"  final deck: {final_deck.name}")
+    print()
+    print("  Arm stats (by mean reward):")
+    for a in result.arm_stats:
+        if a["pulls"]:
+            print(f"    {a['mean']:+.2f}  ({a['pulls']}x)  {a['key']}")
+
+
+def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
+    """Drive the bandit search: build arms from the advisor, then pull
+    swaps via the chosen policy, advancing the base deck on improvement."""
+    import random
+    from .bandit import make_policy, run_bandit
+
+    arms = _build_arms_from_advice(deck_path, args.bracket, args.source)
+    if not arms:
+        msg = "no candidate swaps from the advisor; nothing to search."
+        print(json.dumps({"error": msg}) if args.json else f"[improve] {msg}",
+              flush=True)
+        return 0
+
+    policy = make_policy(args.bandit_policy, epsilon=args.epsilon, c=args.ucb_c)
+    state = {"deck": deck_path}
+    evaluate = _make_swap_evaluator(state, args)
+    result = run_bandit(
+        arms, args.rounds, evaluate, policy,
+        accept_threshold=args.sim_margin, rng=random.Random(),
+    )
+
+    if args.json:
+        out = result.to_dict()
+        out["deck_id"] = deck_id
+        out["final_deck"] = str(state["deck"])
+        print(json.dumps(out, indent=2))
+    else:
+        _print_bandit_summary(deck_id, result, state["deck"])
+    return 0
+
+
 def improve_main(argv: Optional[list[str]] = None) -> int:
     """Entry point for ``commander-improve``.
 
@@ -270,9 +388,11 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         prog="commander-improve",
         description=(
-            "Greedy single-deck improvement loop (FP-012 slice 1). Runs "
-            "auto-curate for N rounds, advancing only on a 'kept' A/B "
-            "sim verdict."
+            "Single-deck improvement loop (FP-012). --strategy greedy "
+            "(slice 1, default) runs auto-curate for N rounds, advancing "
+            "only on a 'kept' A/B sim verdict. --strategy bandit (slice 2) "
+            "treats candidate swaps as arms and learns which move the win "
+            "rate via an epsilon-greedy / UCB1 policy."
         ),
     )
     p.add_argument("deck_path", type=Path, nargs="?", default=None,
@@ -313,6 +433,22 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                    help="File of card names (one per line) protected against cuts.")
     p.add_argument("--json", action="store_true",
                    help="Emit the run result as JSON instead of a summary.")
+    # Strategy: greedy (slice 1, default) curates a full proposal per
+    # round and keeps it if better; bandit (slice 2) treats individual
+    # candidate swaps as arms and learns which ones move the win rate.
+    p.add_argument("--strategy", choices=["greedy", "bandit"], default="greedy",
+                   help="Search strategy (default greedy). 'bandit' selects "
+                        "individual swaps via a multi-armed-bandit policy.")
+    p.add_argument("--bandit-policy", choices=["epsilon_greedy", "ucb1"],
+                   default="ucb1",
+                   help="Bandit arm-selection policy (default ucb1). Only "
+                        "used with --strategy bandit.")
+    p.add_argument("--epsilon", type=float, default=0.2,
+                   help="Exploration rate for --bandit-policy epsilon_greedy "
+                        "(default 0.2).")
+    p.add_argument("--ucb-c", type=float, default=1.4,
+                   help="Exploration constant for --bandit-policy ucb1 "
+                        "(default 1.4).")
     args = p.parse_args(argv)
 
     # Exactly one of {positional path, --deck id} must be supplied.
@@ -354,9 +490,12 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     deck_id = deck_path.stem
 
     if not args.json:
-        print(f"[improve] {deck_id} (B{args.bracket}) — up to {args.rounds} "
-              f"rounds, mode={args.mode}, {args.sim_games} games/round",
-              flush=True)
+        print(f"[improve] {deck_id} (B{args.bracket}) — strategy={args.strategy}, "
+              f"up to {args.rounds} rounds, mode={args.mode}, "
+              f"{args.sim_games} games/round", flush=True)
+
+    if args.strategy == "bandit":
+        return _run_bandit_strategy(deck_path, deck_id, args)
 
     result = run_improve_loop(deck_path, deck_id, args.rounds, args)
 

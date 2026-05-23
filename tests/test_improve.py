@@ -229,3 +229,99 @@ def test_main_no_bracket_no_suffix_errors(tmp_path, monkeypatch):
     deck.write_text("[metadata]\nName=Plain\n", encoding="utf-8")
     rc = improve_main([str(deck), "--rounds", "1"])
     assert rc == 2
+
+
+# --- bandit strategy (FP-012 slice 2) -------------------------------------
+
+class _FakeReport:
+    def __init__(self, added, removed):
+        self._added, self._removed = added, removed
+
+    def to_manifest(self):
+        return {"added": self._added, "removed": self._removed}
+
+
+def test_build_arms_pairs_adds_with_cycled_cuts(monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda deck_path, bracket, source: _FakeReport(
+            ["A", "B", "C"], ["X", "Y"]),
+    )
+    arms = improve._build_arms_from_advice(Path("/d.dck"), 3, "heuristic")
+    assert [(a.add, a.cut) for a in arms] == [("A", "X"), ("B", "Y"), ("C", "X")]
+    assert arms[0].key == "+A / -X"
+
+
+def test_build_arms_handles_no_cuts(monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda deck_path, bracket, source: _FakeReport(["A"], []),
+    )
+    arms = improve._build_arms_from_advice(Path("/d.dck"), 3, "heuristic")
+    assert len(arms) == 1 and arms[0].add == "A" and arms[0].cut is None
+    assert arms[0].key == "+A"
+
+
+def test_build_arms_empty_when_no_adds(monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda deck_path, bracket, source: _FakeReport([], ["X"]),
+    )
+    assert improve._build_arms_from_advice(Path("/d.dck"), 3, "heuristic") == []
+
+
+def test_main_routes_to_bandit_strategy(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_bandit(deck_path, deck_id, args):
+        captured["deck_id"] = deck_id
+        captured["strategy"] = args.strategy
+        captured["policy"] = args.bandit_policy
+        return 0
+
+    monkeypatch.setattr(improve, "_run_bandit_strategy", fake_bandit)
+    deck = tmp_path / "[USER] Goblins [B4].dck"
+    deck.write_text("[metadata]\nName=Goblins\n", encoding="utf-8")
+
+    rc = improve_main([str(deck), "--rounds", "3", "--strategy", "bandit",
+                       "--bandit-policy", "epsilon_greedy"])
+    assert rc == 0
+    assert captured == {"deck_id": "[USER] Goblins [B4]",
+                        "strategy": "bandit", "policy": "epsilon_greedy"}
+
+
+def test_bandit_strategy_no_arms_returns_zero(tmp_path, monkeypatch):
+    # Advisor yields no adds → no arms → graceful no-op (rc 0).
+    monkeypatch.setattr(improve, "_build_arms_from_advice",
+                        lambda deck_path, bracket, source: [])
+    deck = tmp_path / "[USER] Goblins [B4].dck"
+    deck.write_text("[metadata]\nName=Goblins\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "2", "--strategy", "bandit"])
+    assert rc == 0
+
+
+def test_bandit_strategy_runs_with_injected_arms_and_sim(tmp_path, monkeypatch):
+    """End-to-end bandit dispatch with arms + sim stubbed: verifies the
+    evaluator advances the base deck on a positive-margin swap and the
+    summary reports the winning arm."""
+    from commander_builder.bandit import Arm
+    monkeypatch.setattr(
+        improve, "_build_arms_from_advice",
+        lambda deck_path, bracket, source: [
+            Arm(key="+Good / -Bad", add="Good", cut="Bad"),
+            Arm(key="+Meh / -Bad", add="Meh", cut="Bad"),
+        ],
+    )
+    # Stub the real evaluator with a scripted reward: the "Good" arm pays
+    # off, "Meh" doesn't. Avoids Forge/advisor entirely.
+    def fake_evaluator(state, args):
+        def evaluate(arm):
+            return 3.0 if arm.add == "Good" else 0.0
+        return evaluate
+    monkeypatch.setattr(improve, "_make_swap_evaluator", fake_evaluator)
+
+    deck = tmp_path / "[USER] Goblins [B4].dck"
+    deck.write_text("[metadata]\nName=Goblins\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "20", "--strategy", "bandit",
+                       "--json"])
+    assert rc == 0

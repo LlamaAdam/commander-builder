@@ -8,6 +8,24 @@ applies once we tag a 1.0.
 
 ### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
 
+#### Added — bandit swap-selection strategy (FP-012 slice 2)
+
+- **`feat(improve)`: `commander-improve --strategy bandit`.** The next
+  slice past A2's fixed-N greedy loop: instead of accepting whatever the
+  curator proposes, treat individual candidate swaps as multi-armed-bandit
+  arms and learn — across A/B sims — which ones actually move the win
+  rate. New `bandit.py` is the pure core: an `Arm` model, two policies
+  (`EpsilonGreedy` + `UCB1`), and a `run_bandit` loop driven by an
+  injected evaluator (no Forge/Anthropic/disk — fully unit-tested). The
+  CLI builds arms from the advisor's candidate `(add, cut)` swaps; each
+  pull applies one swap to the current best deck, A/B-sims it
+  (seat-attributed), and rewards the win margin, advancing the base deck
+  on improvement. New flags `--strategy {greedy,bandit}` (default greedy,
+  so A2 behavior is unchanged), `--bandit-policy {epsilon_greedy,ucb1}`,
+  `--epsilon`, `--ucb-c`. The full FP-012 agent (intent-learning,
+  Bayesian opt, multi-deck orchestration) stays parked. 21 new tests
+  (15 core + 6 integration).
+
 #### Changed — unified the two Anthropic-key entry points (FP-011)
 
 - **`feat(web)`: config.json is now the single source of truth for the
