@@ -130,7 +130,9 @@ def _pick_filler_decks(
     exclude_set = {p.name for p in exclude_paths}
     candidates = [
         p.name for p in deck_dir.glob("*.dck")
-        if not p.name.startswith("[USER]") and p.name not in exclude_set
+        if not p.name.startswith("[USER]")
+        and not p.name.startswith("[CONTROL]")  # never use a calibration deck as filler
+        and p.name not in exclude_set
     ]
     if not candidates:
         return []
