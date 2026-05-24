@@ -739,3 +739,248 @@ def test_read_forge_log_tail_missing_returns_empty(tmp_path):
     runner = ForgeRunner(java_path=Path("j"), forge_jar=Path("f"),
                          forge_dir=tmp_path)
     assert runner._read_forge_log_tail() == ""
+
+
+# --- Per-game timeout salvage (operator verdict-scoring policy point 2) -----
+#
+# A single game that hits the per-game wall timeout (combo loop / hang) no
+# longer fails the whole batch. Games already tallied are kept; the timed-out
+# game is credited to the SEAT whose turn it was in the LAST "Turn:" line (the
+# looping/active player), then status=done. Only sim.timed_out triggers this —
+# a genuine non-zero exit / non-timeout error still fails the batch.
+
+
+def _timeout_sim(stdout: str) -> SimResult:
+    """A SimResult shaped like a per-game wall timeout: timed_out=True, no
+    returncode, and the 'Timed out after Ns' error from the runner path."""
+    return SimResult(
+        cmd=["fake"], returncode=None, duration_sec=180.0,
+        stdout=stdout, stderr="", timed_out=True,
+        error="Timed out after 180s",
+    )
+
+
+def _in_progress_turns(active_seat: int, name: str = "Loop") -> str:
+    """A partial game stream that loops: the last Turn line names ``active_seat``
+    as the active player and the game never produces a Game Result."""
+    return (
+        "Turn: Turn 1 (Ai(1)-DeckA)\n"
+        "Turn: Turn 2 (Ai(2)-DeckB)\n"
+        f"Turn: Turn 80 (Ai({active_seat})-{name})\n"
+        f"Turn: Turn 81 (Ai({active_seat})-{name})\n"
+    )
+
+
+def _make_seq_runner(sims: list[SimResult]):
+    """A runner that returns queued SimResults in order, one per run() call."""
+    class _SeqRunner:
+        def __init__(self):
+            self.idx = 0
+            self.calls: list[list[str]] = []
+
+        def run(self, deck_filenames, num_games, **kwargs):
+            self.calls.append(list(deck_filenames))
+            s = sims[self.idx]
+            self.idx += 1
+            return s
+    return _SeqRunner()
+
+
+def test_timeout_salvages_batch_and_credits_active_seat_to_deck_a(tmp_path):
+    """Game 1 completes (deck_a seat 1 wins). Game 2 times out while it is
+    deck_a's turn (deck_a sits in seat 2 on the odd game) -> that game is
+    credited to wins_a and counted; status is done, not failed."""
+    from commander_builder.forge_runner import run_ab_simulation, _AB_STATUS_DONE
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    sims = [
+        # i=0 order [DeckA, DeckB, f1, f2] -> deck_a seat 1, A wins decisively.
+        SimResult(cmd=["fake"], returncode=0, duration_sec=1.0,
+                  stdout=_ab_canned_stdout(
+                      10, 1, "DeckA",
+                      seats=["DeckA", "DeckB", "filler1", "filler2"]),
+                  stderr="", timed_out=False, error=None),
+        # i=1 order [DeckB, DeckA, f1, f2] -> deck_a seat 2. Loop on seat 2.
+        _timeout_sim(_in_progress_turns(active_seat=2)),
+    ]
+    runner = _make_seq_runner(sims)
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=2,
+        runner=runner, fillers=["filler1.dck", "filler2.dck"],
+    )
+
+    assert result.status == _AB_STATUS_DONE          # salvaged, NOT failed
+    assert result.games == 2                         # completed + salvaged
+    assert result.wins_a == 2                        # seat1 win + seat2 loop
+    assert result.wins_b == 0
+    assert result.error is not None
+    assert "active seat 2" in result.error
+    # ASCII-only note (no unicode dashes etc.)
+    assert result.error.isascii()
+
+
+def test_timeout_credits_deck_b_when_it_is_active(tmp_path):
+    from commander_builder.forge_runner import run_ab_simulation, _AB_STATUS_DONE
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    # Single game (i=0): order [DeckA, DeckB, f1, f2] -> deck_b seat 2 loops.
+    sims = [_timeout_sim(_in_progress_turns(active_seat=2))]
+    runner = _make_seq_runner(sims)
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=1,
+        runner=runner, fillers=["filler1.dck", "filler2.dck"],
+    )
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert result.wins_b == 1
+    assert result.wins_a == 0
+
+
+def test_timeout_on_filler_seat_credits_neither(tmp_path):
+    from commander_builder.forge_runner import run_ab_simulation, _AB_STATUS_DONE
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    # i=0: order [DeckA, DeckB, f1, f2]; filler in seat 3 loops.
+    sims = [_timeout_sim(_in_progress_turns(active_seat=3, name="filler1"))]
+    runner = _make_seq_runner(sims)
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=1,
+        runner=runner, fillers=["filler1.dck", "filler2.dck"],
+    )
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert result.wins_a == 0 and result.wins_b == 0
+    assert result.error is not None and result.error.isascii()
+    assert "filler" in result.error.lower() or "none" in result.error.lower()
+
+
+def test_timeout_with_no_turn_line_credits_none(tmp_path):
+    from commander_builder.forge_runner import run_ab_simulation, _AB_STATUS_DONE
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    sims = [_timeout_sim("Boot noise, no Turn lines at all\n")]
+    runner = _make_seq_runner(sims)
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=1,
+        runner=runner, fillers=["filler1.dck", "filler2.dck"],
+    )
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert result.wins_a == 0 and result.wins_b == 0
+
+
+def test_nonzero_exit_without_timeout_still_fails(tmp_path):
+    """A genuine Forge crash (non-zero exit, timed_out=False) must still fail
+    the batch - the salvage path only applies to sim.timed_out."""
+    from commander_builder.forge_runner import run_ab_simulation, _AB_STATUS_FAILED
+
+    deck_a = tmp_path / "a.dck"
+    deck_b = tmp_path / "b.dck"
+    deck_a.write_text("", encoding="utf-8")
+    deck_b.write_text("", encoding="utf-8")
+
+    sims = [SimResult(cmd=["fake"], returncode=1, duration_sec=0.5,
+                      stdout="boom\n", stderr="trace", timed_out=False,
+                      error="Forge exited with code 1")]
+    runner = _make_seq_runner(sims)
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=2,
+        runner=runner, fillers=["f1.dck", "f2.dck"],
+    )
+    assert result.status == _AB_STATUS_FAILED
+
+
+# --- Draw -> life-leader credited as a seat win (policy point 1 applied) -----
+
+
+def test_per_game_draw_with_unique_life_leader_credits_that_seat(tmp_path):
+    """A per-game turn-cap draw with a unique ending_life leader (seat 1 =
+    deck_a) credits deck_a a win even though Forge printed no 'has won!'."""
+    from commander_builder.forge_runner import run_ab_simulation, _AB_STATUS_DONE
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    # i=0: order [DeckA, DeckB, f1, f2]; seat 1 ends with the most life.
+    draw_stdout = (
+        "Turn: Turn 1 (Ai(1)-DeckA)\n"
+        "Turn: Turn 1 (Ai(2)-DeckB)\n"
+        "Turn: Turn 1 (Ai(3)-filler1)\n"
+        "Turn: Turn 1 (Ai(4)-filler2)\n"
+        "Life: Life: Ai(1)-DeckA 40 > 31\n"   # unique top
+        "Life: Life: Ai(2)-DeckB 40 > 14\n"
+        "Life: Life: Ai(3)-filler1 40 > 6\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Result: Game 1 ended in 240000 ms\n"
+        "Match Result: Ai(1)-DeckA: 0 Ai(2)-DeckB: 0 "
+        "Ai(3)-filler1: 0 Ai(4)-filler2: 0\n"
+    )
+    sims = [SimResult(cmd=["fake"], returncode=0, duration_sec=1.0,
+                      stdout=draw_stdout, stderr="", timed_out=False, error=None)]
+    runner = _make_seq_runner(sims)
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=1,
+        runner=runner, fillers=["filler1.dck", "filler2.dck"],
+    )
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert result.wins_a == 1   # draw resolved to seat-1 life leader = deck_a
+    assert result.wins_b == 0
+
+
+def test_per_game_draw_with_tied_top_life_credits_neither(tmp_path):
+    """A draw with no unique life leader stays neutral - neither deck credited."""
+    from commander_builder.forge_runner import run_ab_simulation, _AB_STATUS_DONE
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    draw_stdout = (
+        "Turn: Turn 1 (Ai(1)-DeckA)\n"
+        "Turn: Turn 1 (Ai(2)-DeckB)\n"
+        "Life: Life: Ai(1)-DeckA 40 > 20\n"
+        "Life: Life: Ai(2)-DeckB 40 > 20\n"   # tie at the top
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Result: Game 1 ended in 240000 ms\n"
+        "Match Result: Ai(1)-DeckA: 0 Ai(2)-DeckB: 0 "
+        "Ai(3)-filler1: 0 Ai(4)-filler2: 0\n"
+    )
+    sims = [SimResult(cmd=["fake"], returncode=0, duration_sec=1.0,
+                      stdout=draw_stdout, stderr="", timed_out=False, error=None)]
+    runner = _make_seq_runner(sims)
+
+    result = run_ab_simulation(
+        deck_a, deck_b, games=1,
+        runner=runner, fillers=["filler1.dck", "filler2.dck"],
+    )
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert result.wins_a == 0 and result.wins_b == 0

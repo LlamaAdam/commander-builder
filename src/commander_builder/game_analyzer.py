@@ -96,10 +96,30 @@ class GameAnalysis:
     is_draw: bool
     deck_stats: list[DeckGameStats] = field(default_factory=list)
     confirm_action_count: int = 0  # within this game's window
+    # Operator verdict-scoring policy (2026-05): a turn-cap "Stopping slow
+    # match as draw" game is no longer scored as a no-result. We resolve a
+    # winner = the seat with the STRICTLY-highest ending_life. Decisive games
+    # mirror winner_seat/winner_name here. A draw with no unique life leader
+    # (tie at the top) stays a real draw -> resolved_winner_seat is None.
+    # The raw is_draw / winner_seat / winner_name fields are left UNCHANGED
+    # for backward compatibility with existing consumers.
+    resolved_winner_seat: Optional[int] = None
+    resolved_winner_name: Optional[str] = None
 
     @property
     def winner_normalized(self) -> Optional[str]:
         return _normalize(self.winner_name) if self.winner_name else None
+
+    @property
+    def resolved_winner_normalized(self) -> Optional[str]:
+        return _normalize(self.resolved_winner_name) if self.resolved_winner_name else None
+
+    @property
+    def resolved_is_draw(self) -> bool:
+        """True only when the game has no resolved winner at all. A turn-cap
+        draw that resolved to a unique life leader is NOT a draw under the
+        operator policy."""
+        return self.resolved_winner_seat is None
 
     @property
     def duration_sec(self) -> float:
@@ -322,6 +342,17 @@ def _summarize_game(lines: list[str], end_line: str, game_index: int) -> Optiona
             winner_seat = candidates[0].seat
             winner_name = candidates[0].name
 
+    # Resolve a winner per the operator verdict-scoring policy. For decisive
+    # games this just mirrors winner_seat/winner_name. For turn-cap draws we
+    # pick the seat with the STRICTLY-highest ending_life; a tie at the top
+    # leaves the game a real draw (resolved_winner_seat stays None).
+    resolved_winner_seat = winner_seat
+    resolved_winner_name = winner_name
+    if winner_seat is None and decks:
+        resolved_winner_seat, resolved_winner_name = _resolve_life_leader(
+            list(decks.values())
+        )
+
     return GameAnalysis(
         game_index=game_index,
         duration_ms=duration_ms,
@@ -331,7 +362,26 @@ def _summarize_game(lines: list[str], end_line: str, game_index: int) -> Optiona
         is_draw=is_draw,
         deck_stats=sorted(decks.values(), key=lambda d: d.seat),
         confirm_action_count=confirm_action_count,
+        resolved_winner_seat=resolved_winner_seat,
+        resolved_winner_name=resolved_winner_name,
     )
+
+
+def _resolve_life_leader(
+    decks: list[DeckGameStats],
+) -> tuple[Optional[int], Optional[str]]:
+    """Return the (seat, name) of the deck with the STRICTLY-highest
+    ending_life, or (None, None) if there's no unique maximum (tie at the
+    top) or no usable life data. Decks with an unknown ending_life are
+    excluded from contention."""
+    scored = [d for d in decks if d.ending_life is not None]
+    if not scored:
+        return None, None
+    top = max(d.ending_life for d in scored)  # type: ignore[type-var]
+    leaders = [d for d in scored if d.ending_life == top]
+    if len(leaders) != 1:
+        return None, None  # tie at the top -> stays a real draw
+    return leaders[0].seat, leaders[0].name
 
 
 if __name__ == "__main__":

@@ -495,6 +495,24 @@ _AB_STATUS_FAILED = "failed"
 # one bad game can't hang the whole 5-game batch indefinitely.
 _AB_TIMEOUT_PER_GAME_SEC = 180
 
+# A timed-out game is almost always a combo loop or AI hang. We credit the
+# game to the "active player" — the seat named in the LAST "Turn:" line of
+# the captured stdout (whose turn it is when the loop happens). Matches the
+# shape used by game_analyzer._TURN.
+_AB_TURN_LINE = re.compile(r"^Turn:\s+Turn\s+(\d+)\s+\(Ai\((\d+)\)-(.+?)\)\s*$")
+
+
+def _last_active_seat(stdout: str) -> Optional[int]:
+    """Return the seat (1-based) named in the LAST 'Turn: Turn N (Ai(M)-...)'
+    line of ``stdout``, or None if no Turn line is present. Used to attribute
+    a timed-out (looping) game to whoever was the active player."""
+    seat: Optional[int] = None
+    for raw_line in stdout.splitlines():
+        m = _AB_TURN_LINE.match(raw_line.rstrip())
+        if m:
+            seat = int(m.group(2))
+    return seat
+
 
 @dataclass
 class ABResult:
@@ -642,10 +660,44 @@ def run_ab_simulation(
             result.duration_sec = (datetime.now() - started).total_seconds()
             return result
 
-        # Treat any non-zero exit OR captured error as a failure for
-        # the batch — don't try to salvage partial sims; the dashboard
-        # banner is more useful with "failed at game 2/5" than a
-        # noisy 1-of-5 partial.
+        # Seat attribution is unambiguous: we built `order`, and Forge seats
+        # decks in command-line order (Ai(1)=order[0]). Deck A and deck B
+        # frequently share the same internal `Name=` field, so we must NEVER
+        # attribute by name — seat only.
+        seat_a = order.index(deck_a_path.name) + 1
+        seat_b = order.index(deck_b_path.name) + 1
+
+        # TIMEOUT SALVAGE (operator verdict-scoring policy point 2). A single
+        # game hitting the per-game wall timeout is almost always a combo loop
+        # or AI hang, not a Forge crash. Rather than discarding the whole
+        # batch, credit the looping game to the ACTIVE player (the seat in the
+        # last "Turn:" line) and finish 'done'. Games tallied earlier in the
+        # loop are kept. The subprocess is dead, so we can't continue — return.
+        if sim.timed_out:
+            active_seat = _last_active_seat(sim.stdout)
+            if active_seat == seat_a:
+                result.wins_a += 1
+                note = f"loop at game {i + 1} credited to active seat {active_seat}"
+            elif active_seat == seat_b:
+                result.wins_b += 1
+                note = f"loop at game {i + 1} credited to active seat {active_seat}"
+            elif active_seat is not None:
+                note = (
+                    f"loop at game {i + 1} credited to filler seat {active_seat} "
+                    f"(neither A nor B)"
+                )
+            else:
+                note = f"loop at game {i + 1} credited to none (no Turn line found)"
+            result.games = i + 1
+            result.status = _AB_STATUS_DONE
+            result.error = note
+            result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+            return result
+
+        # Treat any non-zero exit OR captured (non-timeout) error as a genuine
+        # failure for the batch — a real Forge crash / NPE is not a loop, so
+        # don't salvage it; the dashboard banner is more useful with "failed
+        # at game 2/5" than a noisy 1-of-5 partial.
         if sim.error or (sim.returncode is not None and sim.returncode != 0):
             result.status = _AB_STATUS_FAILED
             result.error = sim.error or f"Forge exited with code {sim.returncode}"
@@ -655,31 +707,37 @@ def run_ab_simulation(
         parsed = _parse_sim(sim.stdout)
         match = _analyze_match(sim.stdout)
 
-        # Attribute wins by SEAT, not by deck name. Deck A and deck B
-        # frequently share the same internal `Name=` field (e.g. a curated
-        # deck keeps its parent's Name=, and a detuned deck keeps the
-        # original's), so Forge emits identical "Ai(N)-<Name>" tokens for
-        # both. Name-based attribution then funnels ALL of that name's wins
-        # into whichever of name_a/name_b matches first and zeroes the other
-        # — silently fabricating the verdict. Seat is unambiguous: we built
-        # `order`, and Forge seats decks in command-line order (Ai(1)=order[0]).
-        seat_a = order.index(deck_a_path.name) + 1
-        seat_b = order.index(deck_b_path.name) + 1
+        # Attribute wins by SEAT (see seat_a/seat_b above). log_parser's
+        # deck_results carry the decisive per-seat wins.
         for d in parsed.deck_results:
             if d.seat == seat_a:
                 result.wins_a += d.wins
             elif d.seat == seat_b:
                 result.wins_b += d.wins
 
+        # DRAW -> life/board leader (operator verdict-scoring policy point 1).
+        # log_parser credits no seat for a turn-cap draw. game_analyzer now
+        # resolves such draws to the unique highest-ending_life seat; credit
+        # that seat as a win too so a draw won by deck_a's seat counts as a
+        # deck_a win. Only games that are is_draw AND have a resolved leader
+        # are added here (decisive games are already counted above).
+        for g in match.games:
+            if not g.is_draw or g.resolved_winner_seat is None:
+                continue
+            if g.resolved_winner_seat == seat_a:
+                result.wins_a += 1
+            elif g.resolved_winner_seat == seat_b:
+                result.wins_b += 1
+
         # Per-game turn stats — also seat-based for the same reason. Tally
         # only the games each deck actually won so avg_turns_a reflects "how
         # fast does A close out games it wins", not the average of all games.
         for g in match.games:
-            if g.end_turn is None or g.winner_seat is None:
+            if g.end_turn is None or g.resolved_winner_seat is None:
                 continue
-            if g.winner_seat == seat_a:
+            if g.resolved_winner_seat == seat_a:
                 a_turns.append(g.end_turn)
-            elif g.winner_seat == seat_b:
+            elif g.resolved_winner_seat == seat_b:
                 b_turns.append(g.end_turn)
 
         result.games = i + 1

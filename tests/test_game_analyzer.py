@@ -194,3 +194,59 @@ def test_to_dict_is_json_serializable():
     s = ma.to_json()
     parsed = json.loads(s)
     assert parsed["total_games"] == 1
+
+
+# --- Draw -> life/board leader resolution (operator policy point 1) ---------
+
+
+def test_decisive_game_resolved_winner_matches_winner_seat():
+    """For a normal decisive game, resolved_winner_seat just mirrors
+    winner_seat and resolved_is_draw is False."""
+    log = _game_log(end_turn=12, winner_seat=1, winner_name="Foo Deck")
+    g = analyze(log).games[0]
+    assert g.is_draw is False
+    assert g.resolved_winner_seat == 1
+    assert g.resolved_winner_name == "Foo Deck"
+    assert g.resolved_is_draw is False
+
+
+def test_turn_cap_draw_resolves_to_highest_life_seat():
+    """A turn-cap draw with a STRICTLY-highest ending_life seat resolves a
+    winner = that seat. is_draw/winner_seat stay untouched (backward compat)."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 28\n"
+        "Life: Life: Ai(2)-B 40 > 15\n"
+        "Life: Life: Ai(3)-C 40 > 9\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Result: Game 1 ended in 240000 ms\n"  # no "has won!" clause
+    )
+    g = analyze(log).games[0]
+    # Backward-compat: the raw draw signal is preserved.
+    assert g.is_draw is True
+    assert g.winner_seat is None
+    assert g.winner_name is None
+    # New policy: unique life leader (seat 1 @ 28) is the resolved winner.
+    assert g.resolved_winner_seat == 1
+    assert g.resolved_winner_name == "A"
+    assert g.resolved_is_draw is False
+
+
+def test_turn_cap_draw_with_tied_top_life_stays_a_draw():
+    """A turn-cap draw with NO unique maximum (tie at the top) stays a real
+    draw: resolved_winner_seat is None."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 22\n"
+        "Life: Life: Ai(2)-B 40 > 22\n"  # tie with seat 1 at the top
+        "Life: Life: Ai(3)-C 40 > 5\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Result: Game 1 ended in 240000 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    assert g.resolved_winner_seat is None
+    assert g.resolved_winner_name is None
+    assert g.resolved_is_draw is True
