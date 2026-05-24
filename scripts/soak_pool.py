@@ -114,7 +114,13 @@ class Soak:
         self.workers: dict[Path, dict] = {}  # profile -> {"thread", "retire"}
 
         self.args.out.parent.mkdir(parents=True, exist_ok=True)
-        self.args.out.write_text("", encoding="utf-8")
+        # By default a fresh run truncates its output. --append keeps the
+        # existing rows so a restart (e.g. switching game count to chase a
+        # row-count gate) accumulates instead of wiping prior data.
+        if not getattr(self.args, "append", False):
+            self.args.out.write_text("", encoding="utf-8")
+        elif not self.args.out.exists():
+            self.args.out.write_text("", encoding="utf-8")
         self.stop = threading.Event()
 
     # --- job feed ---------------------------------------------------------
@@ -303,6 +309,10 @@ def main(argv=None) -> int:
                    help="Per-game Forge timeout in seconds (default 360). "
                         "Generous so the occasional long Commander game "
                         "isn't killed under lane contention.")
+    p.add_argument("--append", action="store_true",
+                   help="Append to the output JSONL instead of truncating on "
+                        "start — preserves prior rows across a restart (e.g. "
+                        "when switching game count to chase a row-count gate).")
     p.add_argument("--label", default=socket.gethostname(),
                    help="Provenance tag written as 'host' on every row "
                         "(default: this machine's hostname). Lets merge_soak "
