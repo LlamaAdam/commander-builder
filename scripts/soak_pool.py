@@ -43,11 +43,24 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-from commander_builder.forge_runner import ForgeRunner, VENDOR_FORGE, run_ab_simulation
+from commander_builder.forge_runner import (
+    ForgeRunner, VENDOR_FORGE, run_ab_simulation, run_gauntlet_simulation)
 from commander_builder._proposer_sim import _pick_filler_decks
 from commander_builder.web._helpers import _bracket_from_filename
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
+
+# Fixed 3-deck gauntlet for --mode gauntlet. Held CONSTANT across every test
+# deck AND across machines (committed here) so a v1-vs-v2 win-rate delta is
+# attributable to the deck edit alone, not a shifting field. box1 and box2
+# MUST run the IDENTICAL gauntlet for merged verdicts to be valid. These are
+# the MH3 Commander precons: a balanced, distinct-strategy mid-power field
+# (colorless Eldrazi ramp / graveyard value / artifact-energy).
+GAUNTLET = [
+    "Eldrazi Incursion [M3C] [2024].dck",
+    "Graveyard Overdrive [M3C] [2024].dck",
+    "Creative Energy [M3C] [2024].dck",
+]
 
 
 def _profiles(max_n: int) -> list[Path]:
@@ -82,9 +95,19 @@ def _now() -> str:
 class Soak:
     def __init__(self, args):
         self.args = args
+        self.mode = getattr(args, "mode", "ab")
         self.pairs = _deck_pairs()
         if not self.pairs:
             raise SystemExit("no (base, v2) deck pairs found")
+        if self.mode == "gauntlet":
+            missing = [g for g in GAUNTLET if not (DECK_DIR / g).exists()]
+            if missing:
+                raise SystemExit(
+                    f"gauntlet decks missing from {DECK_DIR}: {missing}")
+            # Each base AND each v2 is tested individually against the fixed
+            # gauntlet; comparing a base's win rate to its v2's (same field)
+            # is the verdict.
+            self.test_decks = [d for pair in self.pairs for d in pair]
         self.profiles = _profiles(args.max)
         if len(self.profiles) < args.min:
             raise SystemExit(f"only {len(self.profiles)} profiles; need >= --min {args.min}")
@@ -134,6 +157,12 @@ class Soak:
                                      count=2, target_bracket=bracket, rng=rng)
         return base, v2, fillers
 
+    def next_gauntlet_job(self) -> Path:
+        with self.lock:
+            test = self.test_decks[self._job_i % len(self.test_decks)]
+            self._job_i += 1
+        return test
+
     # --- one worker -------------------------------------------------------
     def worker(self, profile: Path):
         runner = _runner_for(profile)
@@ -141,6 +170,17 @@ class Soak:
             with self.lock:
                 if self.workers.get(profile, {}).get("retire"):
                     break
+            if self.mode == "gauntlet":
+                test = self.next_gauntlet_job()
+                try:
+                    res = run_gauntlet_simulation(
+                        test, GAUNTLET, games=self.current_games,
+                        runner=runner, timeout_per_game=self.args.timeout)
+                except Exception as exc:  # noqa: BLE001
+                    self._record_gauntlet(None, f"{type(exc).__name__}: {exc}", test)
+                    continue
+                self._record_gauntlet(res, None, test)
+                continue
             base, v2, fillers = self.next_job()
             if len(fillers) < 2:
                 time.sleep(1)
@@ -185,6 +225,40 @@ class Soak:
             with self.args.out.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
+    def _record_gauntlet(self, res, err, test: Path):
+        with self.lock:
+            if res is not None and getattr(res, "status", None) == "done":
+                self.sims_done += 1
+                self.games_done += res.games or 0
+                # Reuse the wins_a/wins_b summary counters as test-wins /
+                # test-losses so the live summary stays meaningful; the JSONL
+                # row below is the authoritative per-deck record.
+                self.wins_a += res.wins or 0
+                self.wins_b += res.losses or 0
+            else:
+                self.sims_failed += 1
+            name = test.name
+            role = "v2" if " v2 " in name else "base"
+            pair_base = name.replace(" v2 ", " ") if role == "v2" else name
+            line = json.dumps({
+                "ts": _now(),
+                "host": self.args.label,
+                "mode": "gauntlet",
+                "test_deck": name,
+                "role": role,            # base | v2
+                "pair_base": pair_base,  # join key: base name for both halves
+                "gauntlet": GAUNTLET,
+                "games": getattr(res, "games", None),
+                "wins": getattr(res, "wins", None),
+                "losses": getattr(res, "losses", None),
+                "draws": getattr(res, "draws", None),
+                "status": getattr(res, "status", "error"),
+                "duration_sec": getattr(res, "duration_sec", None),
+                "error": err or getattr(res, "error", None),
+            })
+            with self.args.out.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+
     # --- scaling ----------------------------------------------------------
     def _spawn(self):
         if not self.free_profiles:
@@ -212,7 +286,8 @@ class Soak:
             sph = self.sims_done / elapsed * 3600 if elapsed else 0
             summary = {
                 "updated": _now(), "final": final,
-                "config": {"hours": self.args.hours,
+                "config": {"mode": self.mode,
+                           "hours": self.args.hours,
                            "phase1_games": self.args.games,
                            "phase2_games": self.args.phase2_games,
                            "phase2_after_rows": self.args.phase2_after,
@@ -235,9 +310,14 @@ class Soak:
 
     # --- run --------------------------------------------------------------
     def run(self):
-        print(f"[soak] start: {self.args.start} runners (min {self.args.min}, "
-              f"max {self.max}), {self.args.games} games/sim, "
-              f"{len(self.pairs)} pairs, budget {self.args.hours}h", flush=True)
+        if self.mode == "gauntlet":
+            units = f"{len(self.test_decks)} test decks vs {len(GAUNTLET)}-deck gauntlet"
+        else:
+            units = f"{len(self.pairs)} pairs"
+        print(f"[soak] start ({self.mode}): {self.args.start} runners "
+              f"(min {self.args.min}, max {self.max}), "
+              f"{self.args.games} games/sim, {units}, "
+              f"budget {self.args.hours}h", flush=True)
         for _ in range(min(self.args.start, self.max)):
             self._spawn()
 
@@ -292,6 +372,13 @@ class Soak:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="soak_pool")
+    p.add_argument("--mode", choices=["ab", "gauntlet"], default="ab",
+                   help="ab (default): legacy v1-vs-v2 in ONE pod with random "
+                        "fillers (the two decks race each other; noisy field). "
+                        "gauntlet: each test deck vs a FIXED 3-deck gauntlet, "
+                        "rotating all 4 seats — isolates the deck change so a "
+                        "v1-vs-v2 win-rate delta is attributable to the edit "
+                        "(4-player, baseline 25%%).")
     p.add_argument("--hours", type=float, default=24.0)
     p.add_argument("--min", type=int, default=4)
     p.add_argument("--max", type=int, default=6)

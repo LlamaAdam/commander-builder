@@ -984,3 +984,134 @@ def test_per_game_draw_with_tied_top_life_credits_neither(tmp_path):
     assert result.status == _AB_STATUS_DONE
     assert result.games == 1
     assert result.wins_a == 0 and result.wins_b == 0
+
+
+# --- run_gauntlet_simulation — one test deck vs a fixed 3-deck gauntlet ------
+
+
+def _gauntlet_draw_stdout(seats: list[str], ending_lives: list[int],
+                          end_turn: int = 50) -> str:
+    """Synthesize a turn-cap draw: per-seat Turn seeds + Life lines (so the
+    analyzer can resolve the draw to the strictly-highest ending-life seat),
+    the draw marker, and a no-winner Game Result."""
+    turn_seeds = "\n".join(
+        f"Turn: Turn 1 (Ai({i + 1})-{n})" for i, n in enumerate(seats)
+    )
+    life_lines = "\n".join(
+        f"Life: Life: Ai({i + 1})-{n} 40 > {ending_lives[i]}"
+        for i, n in enumerate(seats)
+    )
+    return (
+        f"{turn_seeds}\n{life_lines}\n"
+        f"Game Outcome: Turn {end_turn}\n"
+        f"Stopping slow match as draw\n"
+        f"Game Result: Game 1 ended in 240000 ms\n"
+    )
+
+
+def test_run_gauntlet_simulation_tallies_by_test_seat(tmp_path):
+    """wins/losses/draws are attributed to the TEST seat (which the harness
+    controls via rotation), across a decisive win, a decisive loss won by a
+    gauntlet seat, a draw resolved to the test seat, and a true draw."""
+    from commander_builder.forge_runner import (
+        run_gauntlet_simulation, _AB_STATUS_DONE)
+
+    test_deck = tmp_path / "[USER] TestDeck [B4].dck"
+    test_deck.write_text("[Main]\n", encoding="utf-8")
+    gauntlet = ["G1.dck", "G2.dck", "G3.dck"]
+
+    sims = [
+        # g0: test seat 1, TestDeck wins -> WIN
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0, stderr="",
+                  timed_out=False, error=None,
+                  stdout=_ab_canned_stdout(
+                      10, 1, "TestDeck",
+                      seats=["TestDeck", "G1", "G2", "G3"])),
+        # g1: test seat 2, gauntlet G1 (seat 1) wins -> LOSS
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0, stderr="",
+                  timed_out=False, error=None,
+                  stdout=_ab_canned_stdout(
+                      9, 1, "G1",
+                      seats=["G1", "TestDeck", "G2", "G3"])),
+        # g2: test seat 3, draw resolved to seat 3 (highest life) -> WIN
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0, stderr="",
+                  timed_out=False, error=None,
+                  stdout=_gauntlet_draw_stdout(
+                      seats=["G1", "G2", "TestDeck", "G3"],
+                      ending_lives=[10, 5, 30, 0])),
+        # g3: test seat 4, true draw (tie at top, no unique leader) -> DRAW
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0, stderr="",
+                  timed_out=False, error=None,
+                  stdout=_gauntlet_draw_stdout(
+                      seats=["G1", "G2", "G3", "TestDeck"],
+                      ending_lives=[20, 20, 5, 5])),
+    ]
+    result = run_gauntlet_simulation(
+        test_deck, gauntlet, games=4, runner=_make_seq_runner(sims))
+
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 4
+    assert (result.wins, result.losses, result.draws) == (2, 1, 1)
+    assert result.wins + result.losses + result.draws == result.games
+
+
+def test_run_gauntlet_simulation_rotates_test_deck_through_all_seats(tmp_path):
+    """The test deck must occupy seats 1,2,3,4 over four games; gauntlet decks
+    fill the remaining seats in fixed order."""
+    from commander_builder.forge_runner import run_gauntlet_simulation
+
+    test_deck = tmp_path / "[USER] T [B3].dck"
+    test_deck.write_text("[Main]\n", encoding="utf-8")
+    gauntlet = ["G1.dck", "G2.dck", "G3.dck"]
+
+    sims = [
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0, stderr="",
+                  timed_out=False, error=None,
+                  stdout=_ab_canned_stdout(5, 1, "x", seats=["a", "b", "c", "d"]))
+        for _ in range(4)
+    ]
+    result = run_gauntlet_simulation(
+        test_deck, gauntlet, games=4, runner=_make_seq_runner(sims))
+
+    positions = [order.index(test_deck.name) for order in result.seat_orders]
+    assert positions == [0, 1, 2, 3]
+    # Gauntlet order is preserved among the non-test seats.
+    for order in result.seat_orders:
+        non_test = [d for d in order if d != test_deck.name]
+        assert non_test == gauntlet
+
+
+def test_run_gauntlet_simulation_timeout_salvage_credits_active_seat(tmp_path):
+    """A looping game is credited to the active seat: a WIN when that's the
+    test seat, then the batch stops with what it has."""
+    from commander_builder.forge_runner import (
+        run_gauntlet_simulation, _AB_STATUS_DONE)
+
+    test_deck = tmp_path / "[USER] T [B4].dck"
+    test_deck.write_text("[Main]\n", encoding="utf-8")
+    gauntlet = ["G1.dck", "G2.dck", "G3.dck"]
+
+    # game 0: test seat 1; last Turn line names seat 1 (the test deck).
+    looping = SimResult(
+        cmd=["x"], returncode=None, duration_sec=1.0, stderr="",
+        timed_out=True, error="Timed out",
+        stdout="Turn: Turn 30 (Ai(1)-T)\n")
+    result = run_gauntlet_simulation(
+        test_deck, gauntlet, games=4, runner=_make_seq_runner([looping]))
+
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert (result.wins, result.losses, result.draws) == (1, 0, 0)
+
+
+def test_run_gauntlet_simulation_skips_on_wrong_gauntlet_size(tmp_path):
+    from commander_builder.forge_runner import (
+        run_gauntlet_simulation, _AB_STATUS_SKIPPED)
+
+    test_deck = tmp_path / "[USER] T [B3].dck"
+    test_deck.write_text("[Main]\n", encoding="utf-8")
+    result = run_gauntlet_simulation(
+        test_deck, ["G1.dck", "G2.dck"], games=4,
+        runner=_make_seq_runner([]))
+    assert result.status == _AB_STATUS_SKIPPED
+    assert "3 gauntlet decks" in (result.error or "")

@@ -752,6 +752,181 @@ def run_ab_simulation(
 
 
 # ---------------------------------------------------------------------------
+# Gauntlet simulation harness — ONE test deck vs a FIXED 3-deck gauntlet.
+#
+# run_ab_simulation seats the two decks under comparison in the SAME pod, so
+# they race/target each other and the other two seats are random fillers — the
+# "field" is neither controlled nor isolated from the comparison. This harness
+# instead seats a single test deck against three FIXED gauntlet decks. To
+# compare v1 vs v2 you run each against the IDENTICAL gauntlet and diff their
+# win rates: the only thing that changes between the two runs is the deck under
+# test, so the delta attributes cleanly to the deck edit (no cannibalization).
+# Baseline win rate for a fair 4-player pod is 25%.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GauntletResult:
+    """One test deck played N games against a fixed 3-deck gauntlet.
+
+    - ``wins``   — games the TEST seat won (decisive + timeout-salvage credited
+      to its seat + turn-cap draws resolved to its seat as life leader).
+    - ``losses`` — games a GAUNTLET seat won by the same three rules.
+    - ``draws``  — games with no resolved winner (true turn-cap draw).
+
+    wins + losses + draws == games for a ``done`` result.
+    """
+    test_deck: str = ""
+    gauntlet: list[str] = field(default_factory=list)
+    games: int = 0
+    wins: int = 0
+    losses: int = 0
+    draws: int = 0
+    avg_turns_win: float = 0.0
+    status: str = _AB_STATUS_PENDING
+    error: Optional[str] = None
+    duration_sec: float = 0.0
+    seat_orders: list[list[str]] = field(default_factory=list)
+
+
+def run_gauntlet_simulation(
+    test_deck_path: Path,
+    gauntlet_filenames: "list[str]",
+    games: int = 40,
+    *,
+    game_format: str = "commander",
+    runner: "Optional[ForgeRunner]" = None,
+    timeout_per_game: "Optional[int]" = None,
+) -> GauntletResult:
+    """Run ``games`` 4-player pods of ``test_deck`` vs a fixed gauntlet.
+
+    ``gauntlet_filenames`` are three deck *filenames* already present in the
+    Forge userdata commander/ dir. The test deck is rotated through all four
+    seats across games (seat = i % 4 + 1) to cancel turn-order advantage; the
+    gauntlet decks fill the remaining seats in fixed order.
+
+    Per-game resolution mirrors run_ab_simulation exactly — timeout salvage to
+    the active seat, genuine crash -> failed, decisive win by seat, turn-cap
+    draw resolved to the highest-ending-life seat — but tallies from the single
+    test seat's point of view. Never raises; failures land in the result.
+    """
+    from .log_parser import parse as _parse_sim
+    from .game_analyzer import analyze as _analyze_match
+
+    result = GauntletResult(
+        test_deck=test_deck_path.name,
+        gauntlet=list(gauntlet_filenames),
+        status=_AB_STATUS_PENDING,
+    )
+
+    if game_format == "commander" and len(gauntlet_filenames) != 3:
+        result.status = _AB_STATUS_SKIPPED
+        result.error = (
+            f"commander gauntlet sim needs exactly 3 gauntlet decks "
+            f"(got {len(gauntlet_filenames)})"
+        )
+        return result
+
+    if runner is None:
+        try:
+            runner = ForgeRunner.locate()
+        except (FileNotFoundError, OSError) as exc:
+            result.status = _AB_STATUS_SKIPPED
+            result.error = f"Forge not available: {exc}"
+            return result
+
+    win_turns: list[int] = []
+    started = datetime.now()
+    result.status = _AB_STATUS_RUNNING
+
+    for i in range(games):
+        # Rotate the test deck through all four seats over every 4 games.
+        seat_idx = i % 4
+        order = list(gauntlet_filenames)
+        order.insert(seat_idx, test_deck_path.name)
+        result.seat_orders.append(order)
+        test_seat = seat_idx + 1
+
+        try:
+            sim = runner.run(
+                deck_filenames=order,
+                num_games=1,
+                game_format=game_format,
+                timeout_sec=timeout_per_game or _AB_TIMEOUT_PER_GAME_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001 — never raise from a worker
+            result.status = _AB_STATUS_FAILED
+            result.error = f"{type(exc).__name__}: {exc}"
+            result.duration_sec = (datetime.now() - started).total_seconds()
+            return result
+
+        # TIMEOUT SALVAGE (same policy as run_ab_simulation): credit the
+        # looping game to the active seat. Win if that's the test seat, loss if
+        # it's a gauntlet seat, draw if no Turn line was found. Subprocess is
+        # dead, so we stop the batch here with what we have.
+        if sim.timed_out:
+            active_seat = _last_active_seat(sim.stdout)
+            if active_seat == test_seat:
+                result.wins += 1
+            elif active_seat is not None:
+                result.losses += 1
+            else:
+                result.draws += 1
+            result.games = i + 1
+            result.status = _AB_STATUS_DONE
+            result.error = f"loop at game {i + 1} credited to active seat {active_seat}"
+            result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+            return result
+
+        if sim.error or (sim.returncode is not None and sim.returncode != 0):
+            result.status = _AB_STATUS_FAILED
+            result.error = sim.error or f"Forge exited with code {sim.returncode}"
+            result.duration_sec = (datetime.now() - started).total_seconds()
+            return result
+
+        parsed = _parse_sim(sim.stdout)
+        match = _analyze_match(sim.stdout)
+
+        # Decisive winner: log_parser credits the winning seat with d.wins (==1
+        # in a 1-game sim). Attribute by SEAT, never by name.
+        resolved_seat = None
+        end_turn = None
+        for d in parsed.deck_results:
+            if d.wins:
+                resolved_seat = d.seat
+                break
+        if resolved_seat is None:
+            # No decisive win -> resolve a turn-cap draw to the life leader.
+            for g in match.games:
+                if g.is_draw and g.resolved_winner_seat is not None:
+                    resolved_seat = g.resolved_winner_seat
+                    end_turn = g.end_turn
+                    break
+        else:
+            for g in match.games:
+                if g.resolved_winner_seat == resolved_seat:
+                    end_turn = g.end_turn
+                    break
+
+        if resolved_seat == test_seat:
+            result.wins += 1
+            if end_turn is not None:
+                win_turns.append(end_turn)
+        elif resolved_seat is not None:
+            result.losses += 1
+        else:
+            result.draws += 1
+
+        result.games = i + 1
+
+    if win_turns:
+        result.avg_turns_win = round(sum(win_turns) / len(win_turns), 2)
+    result.status = _AB_STATUS_DONE
+    result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Concurrent A/B sims (FP-003) — run N head-to-heads across a pool of
 # cwd-isolated Forge profiles, capping concurrency at the number of profiles.
 # ---------------------------------------------------------------------------
