@@ -82,12 +82,12 @@ def make_sim_blueprint(
         deck_id = payload.get("deck")
         new_text = payload.get("new_text") or ""
         try:
-            games = int(payload.get("games", 5))
+            games = int(payload.get("games", 40))
         except (TypeError, ValueError):
             return jsonify({"error": "games must be int"}), 400
-        if games not in (5, 10, 20):
+        if games not in (10, 40, 100):
             return jsonify({
-                "error": "games must be one of 5, 10, 20",
+                "error": "games must be one of 10, 40, 100",
             }), 400
         try:
             bracket = int(payload.get("bracket", 3))

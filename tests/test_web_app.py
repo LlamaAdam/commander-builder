@@ -1015,14 +1015,14 @@ def test_propose_swap_runs_compare_and_returns_summary(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
     assert body["winner"] == "new"
     assert body["old_wins"] == 4
     assert body["new_wins"] == 11
-    assert body["games_per_pod"] == 5
+    assert body["games_per_pod"] == 10
     # Diff was non-empty (Lotus Cobra added, Cultivate removed).
     assert any("Lotus Cobra" in s for s in body["diff"]["added"])
 
@@ -1041,7 +1041,7 @@ def test_propose_swap_forwards_early_stop_metadata(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
@@ -1066,7 +1066,7 @@ def test_propose_swap_forwards_pod_summaries_with_intra_pod_abort(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 200
     body = resp.get_json()
@@ -1083,7 +1083,7 @@ def test_propose_swap_400_on_bad_games_value(client, monkeypatch):
     resp = client.post("/api/propose_swap", json={
         "deck": "Alpha",
         "new_text": "[Main]\n1 Forest\n",
-        "games": 7,  # not 5/10/20
+        "games": 7,  # not 10/40/100
     })
     assert resp.status_code == 400
 
@@ -1097,7 +1097,7 @@ def test_propose_swap_400_on_no_changes(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Cultivate\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": same_text, "games": 5,
+        "deck": "Alpha", "new_text": same_text, "games": 10,
     })
     assert resp.status_code == 400
     assert "no changes" in resp.get_json()["error"]
@@ -1108,7 +1108,7 @@ def test_propose_swap_404_on_missing_deck(client, monkeypatch):
     resp = client.post("/api/propose_swap", json={
         "deck": "Ghost",
         "new_text": "[Main]\n1 Forest\n",
-        "games": 5,
+        "games": 10,
     })
     assert resp.status_code == 404
 
@@ -1116,7 +1116,7 @@ def test_propose_swap_404_on_missing_deck(client, monkeypatch):
 def test_propose_swap_400_on_empty_new_text(client, monkeypatch):
     _stub_compare(monkeypatch)
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": "", "games": 5,
+        "deck": "Alpha", "new_text": "", "games": 10,
     })
     assert resp.status_code == 400
 
@@ -3060,7 +3060,7 @@ def test_propose_swap_503_when_forge_unavailable(client, monkeypatch):
         "[Main]\n1 Forest\n1 Lotus Cobra\n"
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 503
     body = resp.get_json()
@@ -3159,7 +3159,7 @@ def test_propose_swap_pod_mode_stages_in_commander_folder(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "pod",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "pod",
     })
     assert resp.status_code == 200
     # stage_dir for pod mode is the commander folder (the parent of
@@ -3188,7 +3188,7 @@ def test_propose_swap_1v1_mode_stages_in_constructed_subfolder(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     from pathlib import Path as _P
@@ -3217,7 +3217,7 @@ def test_propose_swap_1v1_converts_both_old_and_new_decks(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     # Both staged files must have the [Commander] section stripped
@@ -3248,7 +3248,7 @@ def test_propose_swap_1v1_uniquifies_metadata_name(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     import re as _re
@@ -3287,7 +3287,7 @@ def test_propose_swap_1v1_cleans_up_staged_files_after_compare(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     # The deck_dir fixture path is tmp_path / "decks"; the
@@ -3316,7 +3316,7 @@ def test_propose_swap_400_on_bad_mode_value(client, monkeypatch):
         "[Main]\n1 Forest\n1 Lotus Cobra\n"
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
         "mode": "skirmish",   # nonsense
     })
     assert resp.status_code == 400
@@ -3338,7 +3338,7 @@ def test_propose_swap_pod_mode_does_not_convert_format(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "pod",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "pod",
     })
     assert resp.status_code == 200
     # Pod mode preserves [Commander] in the staged file.

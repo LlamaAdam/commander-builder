@@ -171,9 +171,9 @@
         </fieldset>
         <fieldset class="games-radio">
           <legend>Games:</legend>
-          <label><input type="radio" name="games" value="5" checked> 5</label>
-          <label><input type="radio" name="games" value="10"> 10</label>
-          <label><input type="radio" name="games" value="20"> 20</label>
+          <label title="Quick look only — +/-0.16 win-rate noise; not a verdict-grade sample."><input type="radio" name="games" value="10"> 10 (quick)</label>
+          <label title="High-confidence — the soak standard (+/-0.08 win-rate). Recommended."><input type="radio" name="games" value="40" checked> 40 (confident)</label>
+          <label title="Publish-grade — +/-0.05 win-rate, but ~2.5x the time of 40."><input type="radio" name="games" value="100"> 100 (publish)</label>
         </fieldset>
         <button class="advise-btn" id="propose-run">Run A/B sim</button>
       </div>
