@@ -76,8 +76,13 @@ def test_detune_never_removes_basics(monkeypatch):
     assert not ({"Forest", "Island"} & set(removed))
 
 
-def test_detune_raises_without_basics_to_pad(monkeypatch):
+def test_detune_no_basics_does_not_raise(monkeypatch):
+    # No-basics decks used to raise "no basics to pad with"; the Wastes
+    # fallback (commit 10220b8) lets them detune instead of crashing —
+    # padding (when needed) uses colorless Wastes, legal under any
+    # color identity.
     monkeypatch.setattr(detune_deck, "load_game_changers", lambda: set())
     no_basics = "[Main]\n1 Sol Ring|C|1\n1 Lightning Bolt|C|2\n"
-    with pytest.raises(ValueError):
-        detune_deck.detune(no_basics, n=1, seed=1)
+    out = detune_deck.detune(no_basics, n=1, seed=1)
+    deck_text = out[0]  # detune returns (deck_text, cuts, n)
+    assert "Wastes" in deck_text  # padded with colorless Wastes, not raised

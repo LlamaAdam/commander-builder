@@ -2306,7 +2306,7 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     # All 5 top-level keys present (UI tile renderer needs each).
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill",
+        "wincon_protection", "self_mill", "role_targets",
     }
     # Named-card signals picked up correctly.
     assert health["mdfc"]["count"] == 1
@@ -2346,7 +2346,7 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     # Still has all keys (UI needs them).
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill",
+        "wincon_protection", "self_mill", "role_targets",
     }
     # Scryfall-dependent signals return zero/null gracefully.
     assert health["mana_sinks"]["count"] == 0
