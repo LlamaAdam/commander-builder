@@ -577,7 +577,7 @@ def test_compute_deck_health_returns_all_five_signals(monkeypatch):
     result = deck_health.compute_deck_health(deck)
     assert set(result.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill",
+        "wincon_protection", "self_mill", "role_targets",
     }
     # Each signal has its expected shape.
     assert "count" in result["mdfc"]
