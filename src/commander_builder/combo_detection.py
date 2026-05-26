@@ -86,6 +86,82 @@ def detect_combos_in_deck(deck_text: str, combos: list[dict] | None = None) -> l
     return found
 
 
+# --------------------------------------------------------------------------- #
+# Bracket awareness — combos push a deck up the WotC bracket ladder.
+# --------------------------------------------------------------------------- #
+# WotC's Commander bracket guidelines single out **two-card infinite combos**
+# as the gating category: Brackets 1–2 (Exhibition / Core) and 3 (Upgraded)
+# all say no *early-game two-card infinite combos*; Bracket 4 (Optimized) and 5
+# (cEDH) are unrestricted. We can't measure "early game" from a static card
+# list, so we treat every game-ending two-card combo as the restricted case
+# (conservative — it can only over-flag, never silently pass an illegal deck).
+#
+# A combo is "game-ending" if it produces a win or an infinite loop. We map
+# each detected combo to the lowest bracket that permits it:
+#   * game-ending, exactly 2 cards -> floor 4  (the WotC-restricted case)
+#   * game-ending, 3+ cards        -> floor 3  (heuristic: more setup = later;
+#                                               still a deliberate combo finish)
+#   * not game-ending (value loop) -> floor 1  (no bracket pressure)
+_GAME_ENDING_TOKENS = ("win the game", "win ", "infinite", "mill out", "lose the game")
+_COMBO_BRACKET_CEILING = 5  # B5/cEDH: unrestricted
+
+
+def is_game_ending(combo: dict) -> bool:
+    """True if the combo's ``produces`` text describes a win or an infinite
+    loop (the bracket-gating category). Case-insensitive substring match."""
+    produces = str(combo.get("produces", "")).lower()
+    return any(tok in produces for tok in _GAME_ENDING_TOKENS)
+
+
+def combo_bracket_floor(combo: dict) -> int:
+    """Lowest WotC bracket that permits a deck containing this combo.
+
+    See the module comment for the mapping rationale. Non-game-ending combos
+    return 1 (no pressure); two-card infinite/win combos return 4."""
+    if not is_game_ending(combo):
+        return 1
+    n_cards = len(combo.get("cards") or [])
+    if n_cards <= 2:
+        return 4
+    return 3
+
+
+def assess_deck_brackets(deck_text: str, bracket: int,
+                         combos: list[dict] | None = None) -> dict:
+    """Assess a deck's detected combos against a target ``bracket``.
+
+    Returns:
+      ``combos``               — every detected combo, each annotated with
+                                 ``bracket_floor`` + ``game_ending``
+      ``recommended_bracket``  — max floor across detected combos (1 if none);
+                                 the lowest bracket the deck's combos justify
+      ``violations``           — combos whose floor > target bracket (i.e. the
+                                 combos that push the deck above its declared
+                                 bracket); empty when the deck is within bracket
+      ``within_bracket``       — True when there are no violations
+
+    Pure-offline (uses the cached/fallback combo DB). The target bracket is
+    typically the ``[B<n>]`` suffix the rest of the pipeline already parses.
+    """
+    found = detect_combos_in_deck(deck_text, combos=combos)
+    annotated: list[dict] = []
+    recommended = 1
+    violations: list[dict] = []
+    for c in found:
+        floor = combo_bracket_floor(c)
+        item = {**c, "bracket_floor": floor, "game_ending": is_game_ending(c)}
+        annotated.append(item)
+        recommended = max(recommended, floor)
+        if floor > bracket:
+            violations.append(item)
+    return {
+        "combos": annotated,
+        "recommended_bracket": recommended,
+        "violations": violations,
+        "within_bracket": not violations,
+    }
+
+
 def refresh_combos(top_n: int = 1500, page_size: int = 500,
                    out_path: Path | None = None,
                    _opener=None) -> int:

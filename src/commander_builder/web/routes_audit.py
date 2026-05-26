@@ -139,6 +139,23 @@ def _compute_deck_health_safe(deck_text: str) -> dict:
         return dict(_EMPTY_DECK_HEALTH)
 
 
+_EMPTY_COMBO_ASSESSMENT = {
+    "combos": [], "recommended_bracket": 1, "violations": [],
+    "within_bracket": True,
+}
+
+
+def _assess_combos_safe(deck_text: str, bracket: int) -> dict:
+    """Wrap ``combo_detection.assess_deck_brackets`` so a combo-DB read or
+    parse failure can't take down the audit. Surfaces detected infinite/win
+    combos and whether they push the deck above its declared bracket."""
+    try:
+        from ..combo_detection import assess_deck_brackets
+        return assess_deck_brackets(deck_text, bracket)
+    except Exception:  # noqa: BLE001 -- defensive at the route layer
+        return dict(_EMPTY_COMBO_ASSESSMENT)
+
+
 def make_audit_blueprint(deck_dir: Path) -> Blueprint:
     """Build a Flask Blueprint for the audit/advise route group.
 
@@ -471,6 +488,10 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             # Best-effort: any individual signal that fails returns
             # its empty shape so the rest of the panel renders.
             "deck_health": _compute_deck_health_safe(original),
+            # Infinite/win combos detected in the deck + whether they push
+            # it above its declared bracket (WotC: two-card infinite combos
+            # are restricted below B4). `violations` is the actionable set.
+            "combo_assessment": _assess_combos_safe(original, bracket),
         })
 
     @bp.route("/api/audit/stream")
@@ -737,6 +758,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                             # is shared.
                             "deck_health": _compute_deck_health_safe(
                                 original,
+                            ),
+                            # Combo/bracket assessment — mirrors the sync
+                            # endpoint so the UI renderer is shared.
+                            "combo_assessment": _assess_combos_safe(
+                                original, bracket,
                             ),
                         })
                         continue

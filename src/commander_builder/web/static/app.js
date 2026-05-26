@@ -1159,6 +1159,13 @@ function renderAuditResult(container, body) {
     container.appendChild(renderDeckHealthTiles(body.deck_health));
   }
 
+  // Infinite/win-combo + bracket-pressure assessment. Renders a red
+  // banner when detected combos exceed the declared bracket, a collapsed
+  // info panel when combos are present but legal, nothing when clean.
+  if (body.combo_assessment) {
+    container.appendChild(renderComboAssessment(body.combo_assessment));
+  }
+
   if (body.diagnosis) {
     container.appendChild(el(
       "p", {}, el("span", { class: "muted" }, "Diagnosis: "),

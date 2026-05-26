@@ -225,6 +225,76 @@ function renderSaltWarningBanner(warning) {
   return wrap;
 }
 
+// Render the infinite/win-combo assessment from /api/audit's
+// `combo_assessment` block. Two visual states:
+//   * VIOLATION (red, border-left): one or more detected combos push the
+//     deck above its declared bracket (WotC restricts two-card infinite
+//     combos below B4). Lists the offending combos + recommended bracket.
+//   * INFO (blue <details>): combos present but legal at this bracket —
+//     collapsed so it doesn't shout, but visible for awareness.
+// Renders nothing when no combos are detected (keeps clean decks clean).
+function renderComboAssessment(assessment) {
+  const combos = (assessment && assessment.combos) || [];
+  if (!combos.length) return document.createDocumentFragment();
+  const violations = assessment.violations || [];
+  const rec = assessment.recommended_bracket || 1;
+
+  const comboLine = (c) => {
+    const li = el("li", {});
+    li.appendChild(el("span", { style: "font-weight: 500;" },
+      (c.cards || []).join(" + ")));
+    li.appendChild(document.createTextNode(
+      `  →  ${c.produces || "combo"} `));
+    li.appendChild(el("span", {
+      class: "pill",
+      style: "padding: 1px 6px; border-radius: 4px; font-size: 11px; "
+           + "font-weight: 600; background: var(--border); color: var(--text);",
+      title: "Lowest WotC bracket that permits this combo.",
+    }, `B${c.bracket_floor}+`));
+    return li;
+  };
+
+  if (violations.length) {
+    const wrap = el("div", {
+      class: "combo-violation-banner",
+      style: "margin: 10px 0; padding: 10px 14px; "
+           + "background: rgba(239, 68, 68, 0.12); "
+           + "border-left: 4px solid #ef4444; border-radius: 6px; "
+           + "color: var(--text);",
+    });
+    wrap.appendChild(el("div",
+      { style: "font-weight: 600; margin-bottom: 4px;" },
+      `Bracket pressure: ${violations.length} `
+      + (violations.length === 1 ? "combo" : "combos")
+      + ` exceed this bracket — this deck plays as Bracket ${rec}.`));
+    const ul = el("ul", {
+      style: "list-style: none; padding: 0; margin: 4px 0 0 0; "
+           + "font-size: 13px;",
+    });
+    for (const c of violations) ul.appendChild(comboLine(c));
+    wrap.appendChild(ul);
+    return wrap;
+  }
+
+  // Legal-at-bracket: collapsed details, informational.
+  const det = el("details", {
+    style: "margin: 10px 0; padding: 8px 12px; "
+         + "background: rgba(96, 165, 250, 0.08); "
+         + "border: 1px solid rgba(96, 165, 250, 0.4); "
+         + "border-radius: 6px; font-size: 13px;",
+  });
+  det.appendChild(el("summary",
+    { style: "cursor: pointer; font-weight: 500;" },
+    `${combos.length} infinite/win combo`
+    + (combos.length === 1 ? "" : "s") + " detected (legal at this bracket)"));
+  const ul = el("ul", {
+    style: "list-style: none; padding: 0; margin: 6px 0 0 0;",
+  });
+  for (const c of combos) ul.appendChild(comboLine(c));
+  det.appendChild(ul);
+  return det;
+}
+
 // Render the EDHREC average-deck preview as a collapsible <details>
 // section. The list is grouped by EDHREC category (Creatures / Lands /
 // Ramp / ...); cards present in the user's current deck are marked

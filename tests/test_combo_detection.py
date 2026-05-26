@@ -7,7 +7,8 @@ import pytest
 
 from commander_builder import combo_detection
 from commander_builder.combo_detection import (
-    detect_combos_in_deck, load_combos, refresh_combos,
+    assess_deck_brackets, combo_bracket_floor, detect_combos_in_deck,
+    is_game_ending, load_combos, refresh_combos,
 )
 
 
@@ -88,3 +89,52 @@ def test_load_combos_prefers_written_db(tmp_path, monkeypatch):
 def test_load_combos_falls_back_when_no_db(tmp_path, monkeypatch):
     monkeypatch.setattr(combo_detection, "COMBO_DATA_PATH", tmp_path / "nope.json")
     assert load_combos() == combo_detection._FALLBACK
+
+
+# --------------------------------------------------------------------------- #
+# bracket awareness
+# --------------------------------------------------------------------------- #
+def test_is_game_ending_matches_win_and_infinite():
+    assert is_game_ending({"produces": "Win the game"})
+    assert is_game_ending({"produces": "Infinite colorless mana"})
+    assert not is_game_ending({"produces": "Card advantage"})
+
+
+def test_combo_bracket_floor_two_card_infinite_is_b4():
+    combo = {"cards": ["A", "B"], "produces": "Win the game"}
+    assert combo_bracket_floor(combo) == 4
+
+
+def test_combo_bracket_floor_three_card_infinite_is_b3():
+    combo = {"cards": ["A", "B", "C"], "produces": "Win the game"}
+    assert combo_bracket_floor(combo) == 3
+
+
+def test_combo_bracket_floor_value_combo_is_b1():
+    combo = {"cards": ["A", "B"], "produces": "Draw two cards"}
+    assert combo_bracket_floor(combo) == 1
+
+
+def test_assess_flags_two_card_combo_as_violation_below_b4():
+    # Thassa's Oracle + Demonic Consultation = two-card win -> floor B4.
+    deck = _deck("Thassa's Oracle", "Demonic Consultation")
+    res = assess_deck_brackets(deck, bracket=2, combos=combo_detection._FALLBACK)
+    assert res["recommended_bracket"] == 4
+    assert not res["within_bracket"]
+    assert any("Thassa's Oracle" in c["cards"] for c in res["violations"])
+    # every detected combo is annotated with its floor + game_ending flag
+    assert all("bracket_floor" in c and "game_ending" in c for c in res["combos"])
+
+
+def test_assess_within_bracket_when_target_meets_floor():
+    deck = _deck("Thassa's Oracle", "Demonic Consultation")
+    res = assess_deck_brackets(deck, bracket=4, combos=combo_detection._FALLBACK)
+    assert res["within_bracket"] and res["violations"] == []
+    assert res["recommended_bracket"] == 4
+
+
+def test_assess_clean_deck_has_no_pressure():
+    deck = _deck("Sol Ring", "Llanowar Elves")
+    res = assess_deck_brackets(deck, bracket=1, combos=combo_detection._FALLBACK)
+    assert res["combos"] == [] and res["recommended_bracket"] == 1
+    assert res["within_bracket"]
