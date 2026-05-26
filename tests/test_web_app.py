@@ -2315,6 +2315,15 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     assert "Silence" in health["wincon_protection"]["cards"]
     assert health["self_mill"]["count"] == 1
     assert "Stitcher's Supplier" in health["self_mill"]["cards"]
+    # Combo/bracket assessment present + well-shaped (this deck has no
+    # infinite combos, so it's clean + within bracket).
+    combo = body.get("combo_assessment")
+    assert combo is not None
+    assert set(combo.keys()) == {
+        "combos", "recommended_bracket", "violations", "within_bracket",
+    }
+    assert combo["combos"] == [] and combo["within_bracket"] is True
+    assert combo["recommended_bracket"] == 1
 
 
 def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(

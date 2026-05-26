@@ -72,8 +72,12 @@ commander-builder already does and where it could drive an improvement.
   stale all-time staple and its rationale says "trending now on EDHREC
   /top" (`evidence.trending=True`). Re-rank only, so a failed fetch can
   never introduce off-archetype/off-color noise.
-- Surface `role_targets` deficits in the web audit UI (data is in the
-  `/api/audit` payload; UI tile not added).
+- ✅ **Surface `role_targets` deficits in the web audit UI (2026-05-26).**
+  A 6th deck-health tile ("Role targets") shows the count of under-built
+  roles with a tooltip itemizing count/target/deficit per role
+  (`deck_health_ui.js`). Complements the saturation guard's excess check.
+  `_EMPTY_DECK_HEALTH` gained the `role_targets` key so the empty/failed
+  path keeps the same shape.
 - ✅ **Feed `detect_combos_in_deck` into bracket enforcement (2026-05-26).**
   `combo_detection.assess_deck_brackets(deck_text, bracket)` maps each
   detected combo to its WotC bracket floor (two-card infinite/win combo →

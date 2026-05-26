@@ -91,6 +91,7 @@ _EMPTY_DECK_HEALTH = {
     "mana_sinks": {"count": 0, "cards": []},
     "wincon_protection": {"count": 0, "cards": []},
     "self_mill": {"count": 0, "cards": []},
+    "role_targets": {"roles": {}, "under_built": []},
 }
 
 

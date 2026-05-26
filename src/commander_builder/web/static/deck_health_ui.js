@@ -125,6 +125,32 @@ function renderDeckHealthTiles(health) {
     flavor: sm.count >= 4 ? "good" : (sm.count >= 1 ? "neutral" : "muted"),
   }));
 
+  // Role-target tile (F2). Flags roles BELOW the deck-template minimums
+  // (ramp/draw/removal/wipe/protection) — the complement of the advisor's
+  // saturation guard (which flags EXCESS). Value is the count of
+  // under-built roles; tooltip itemizes count/target/deficit per role.
+  const rt = health.role_targets || { roles: {}, under_built: [] };
+  const under = rt.under_built || [];
+  const roleLines = Object.entries(rt.roles || {})
+    .map(([role, v]) => {
+      const flag = (v.deficit || 0) > 0 ? "  ⚠ -" + v.deficit : "  ✓";
+      return `${role}: ${v.count}/${v.target}${flag}`;
+    });
+  row.appendChild(renderHealthTile({
+    label: "Role targets",
+    value: under.length === 0 ? "OK" : `${under.length} low`,
+    sub: under.length ? under.join(", ") : "",
+    tooltip: roleLines.length
+      ? `Core roles vs deck-template minimums:\n${roleLines.join("\n")}\n\n`
+        + `Roles below target are under-built — the advisor's saturation `
+        + `guard flags the opposite (excess). Targets: ramp 10, draw 10, `
+        + `removal 8, wipe 3, protection 4.`
+      : "Role-target signal unavailable (Scryfall lookup failed).",
+    flavor: roleLines.length === 0 ? "muted"
+          : (under.length === 0 ? "good"
+          : (under.length <= 2 ? "neutral" : "warn")),
+  }));
+
   return row;
 }
 
