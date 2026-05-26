@@ -216,6 +216,44 @@ async function selectDeck(deckId, li, opts) {
 
 let _proposeMode = "ab";   // "ab" (Run A/B sim) or "save" (Edit deck)
 
+// Per-game wall-time (seconds) by bracket — conservative (slow side of the
+// observed distribution) so ETAs don't breed "is it stuck?" questions. Pod =
+// 4-player commander; duel = 1v1 (~3-5x faster). With parallel-pod dispatch,
+// wall-time tracks the SLOWEST concurrent pod, not the sum.
+const _POD_SEC_PER_GAME = { 1: 15, 2: 22, 3: 30, 4: 55, 5: 75 };
+const _DUEL_SEC_PER_GAME = { 1: 4, 2: 6, 3: 8, 4: 14, 5: 22 };
+
+function _bracketOfActiveDeck() {
+  const m = (_activeDeckId || "").match(/\[B(\d)\]/);
+  return m ? parseInt(m[1], 10) : 3;
+}
+
+// Estimated A/B-sim wall-clock. Returns { sec, str } where str is "~N min"
+// (>=90s) or "~Ns". Shared by the live Games hint and the run-status line so
+// the two never diverge.
+function simEta(games, mode, bracket) {
+  const table = (mode === "pod") ? _POD_SEC_PER_GAME : _DUEL_SEC_PER_GAME;
+  const perGame = table[bracket] ?? table[3];
+  const sec = games * perGame;
+  const str = sec >= 90 ? `~${Math.round(sec / 60)} min` : `~${sec}s`;
+  return { sec, str };
+}
+
+// Update the live time hint next to the Games radios. Reads the currently
+// checked games + mode and the active deck's bracket. No-op in save mode
+// (the hint span is hidden with the rest of the sim controls).
+function updateGamesEta() {
+  const span = $("games-eta");
+  if (!span) return;
+  const gEl = document.querySelector('input[name="games"]:checked');
+  const mEl = document.querySelector('input[name="mode"]:checked');
+  if (_proposeMode === "save" || !gEl) { span.textContent = ""; return; }
+  const games = parseInt(gEl.value, 10);
+  const mode = mEl ? mEl.value : "pod";
+  const bracket = _bracketOfActiveDeck();
+  span.textContent = `${simEta(games, mode, bracket).str} on B${bracket}`;
+}
+
 async function openProposeModal(opts) {
   if (!_activeDeckId) return;
   _proposeMode = (opts && opts.saveOnly) ? "save" : "ab";
@@ -237,6 +275,7 @@ async function openProposeModal(opts) {
   }
   status.textContent = "";
   result.innerHTML = "";
+  updateGamesEta();  // show the time hint for the current selection on open
   ta.value = "Loading…";
   modal.hidden = false;
   try {
@@ -310,26 +349,10 @@ async function runProposeSwap() {
   // estimate misled users about how long to wait. Real datapoint that
   // forced this fix: a B4 10g pod sim took ~700s vs. the old flat
   // 150s estimate.
-  const bracketMatch = (_activeDeckId || "").match(/\[B(\d)\]/);
-  const bracket = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
-  // Per-game wall-time in seconds, keyed by bracket. Conservative
-  // (slow side of observed distribution) so users don't get
-  // over-optimistic ETAs that breed "is it stuck?" questions.
-  // Pod = 4-player commander; duel = 1v1 constructed (~3-5x faster).
-  // With parallel-pod dispatch (Sprint 1A) + intra-pod abort (1C),
-  // wall-time tracks the SLOWEST pod, not the sum — these figures
-  // already account for that. 1B early-stop is effectively a no-op
-  // when filler_pairs == cpu_count (all pods run concurrently,
-  // nothing queued to cancel), so we don't discount for it.
-  const podSecPerGame = { 1: 15, 2: 22, 3: 30, 4: 55, 5: 75 };
-  const duelSecPerGame = { 1: 4, 2: 6, 3: 8, 4: 14, 5: 22 };
-  const perGame = (mode === "pod")
-    ? (podSecPerGame[bracket] ?? podSecPerGame[3])
-    : (duelSecPerGame[bracket] ?? duelSecPerGame[3]);
-  const etaSec = games * perGame;
-  const etaStr = etaSec >= 90
-    ? `~${Math.round(etaSec / 60)} min`
-    : `~${etaSec}s`;
+  const bracket = _bracketOfActiveDeck();
+  // ETA via the shared estimator (see simEta) so the run-status line and the
+  // live Games hint never disagree.
+  const etaStr = simEta(games, mode, bracket).str;
   status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} `
     + `games on B${bracket} via Forge — ${etaStr}…`;
   btn.disabled = true;
@@ -2753,6 +2776,11 @@ document.addEventListener("DOMContentLoaded", () => {
   if (closeBtn) closeBtn.addEventListener("click", closeProposeModal);
   const runBtn = $("propose-run");
   if (runBtn) runBtn.addEventListener("click", runProposeSwap);
+
+  // Live time hint: recompute the ETA whenever the game count or mode
+  // changes (radios are static markup, so bind once here).
+  document.querySelectorAll('input[name="games"], input[name="mode"]')
+    .forEach((r) => r.addEventListener("change", updateGamesEta));
 
   // Generic modal-close buttons (Add-deck modal + Alert modal).
   document.querySelectorAll("[data-close]").forEach((btn) => {
