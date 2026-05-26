@@ -50,10 +50,23 @@ commander-builder already does and where it could drive an improvement.
   / proposer) — the principles in these guides (curve, interaction count,
   wincon density) can sharpen what the curator optimizes for.
 
-## Most actionable next steps (not yet started — operator's call)
-1. **EDHREC `/top` time-windowed candidates** — recency-aware staple
-   suggestions; smallest lift, builds on existing edhrec_client.
-2. **Tune `ROLE_SATURATION_THRESHOLDS` + deck-health targets** against the
-   archidekt template ratios.
-3. **Combo detection** (new capability) — bigger lift; ties into bracket
-   enforcement.
+## Implemented (2026-05-24) — all three shipped
+1. ✅ **EDHREC `/top` time-windowed candidates** — `edhrec_client.fetch_top_cards(slug)`
+   (year/month/week or card type) + `commander-top` CLI. Recency-aware
+   staples. (9da091e)
+2. ✅ **Deck-health target ratios** — `staples.ROLE_TARGETS` +
+   `role_target_report()`, wired into `compute_deck_health` as a
+   `role_targets` signal (flags roles BELOW the template minimums —
+   complements the saturation guard's EXCESS check). (5ad1db3)
+3. ✅ **Combo detection** — `combo_detection.py`: `detect_combos_in_deck()`
+   + `commander-combos` CLI (`--deck` / `--refresh`). Hand-curated offline
+   fallback + a top-1500 `data/combos.json` built from Commander
+   Spellbook's API (the full 500MB export is too big to bundle). (95c05a2)
+
+### Follow-ups (not done — natural next steps)
+- Wire `fetch_top_cards` into the advisor as a candidate *source*
+  (currently a standalone tool/CLI).
+- Surface `role_targets` deficits in the web audit UI (data is in the
+  `/api/audit` payload; UI tile not added).
+- Feed `detect_combos_in_deck` into bracket enforcement (combos push a
+  deck up brackets) + surface in the audit.
