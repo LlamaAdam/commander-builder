@@ -8,14 +8,17 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](docs/architecture.md).
 
-**Last updated:** 2026-05-22 (FP-003 shipped, A/B win-attribution fix,
-FP-002 concluded not viable)
+**Last updated:** 2026-05-26 (FP-002 reopened — margin regression on
+40-game soak rows; first result in)
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
 (concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML predictor)
-concluded NOT VIABLE** via this pipeline (no negative class — see Parked
-plans). 130+ commits on `feature/2026-04-28-session` ahead of `master`.
+REOPENED** under the margin-regression framing now that 40-game soak
+rows supply a negative class — curation is empirically ~neutral; one
+significant predictor (`wincon_protection`). See Parked plans +
+[docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md). 130+
+commits on `feature/2026-04-28-session` ahead of `master`.
 
 ---
 
@@ -273,13 +276,15 @@ be worked. Sized for a single session each.
     knowledge_log row writer. See [CHANGELOG.md](CHANGELOG.md)
     2026-05-15/16 entry for the full breakdown.
 
-11. ~~**Phase 3 ML training (FP-002).**~~ 🔭 **Concluded NOT VIABLE**
-    (2026-05-22) via this pipeline. After the A/B attribution fix
-    (`e8777b6`), the curator's swaps almost never make a deck worse than
-    its input (detune depths 0–10 → 11 kept / 3 neutral / 0 reverted),
-    so the kept-vs-reverted classifier has no negative class. A future
-    FP-002 needs a different framing (regress on improvement margin),
-    not more sim hours. See Parked plans.
+11. **Phase 3 ML training (FP-002).** 🔬 **REOPENED (2026-05-26) under the
+    margin-regression framing** the 2026-05-22 NOT-VIABLE note called for.
+    40-game soak rows now give a negative class (29 decks → 6 kept / 4
+    reverted / 19 neutral) and a signed margin target.
+    `scripts/margin_analysis.py` (pure stdlib) regresses it on deck-health
+    features: curation is empirically ~neutral (mean +0.0009), one
+    significant predictor (`wincon_protection` r=+0.45). Not yet a shippable
+    model — needs ~80+ unique decks. See Parked plans +
+    [docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md).
 
 12. ~~**Concurrent Forge sims (FP-003).**~~ ✅ **Shipped** (2026-05-22,
     `0f8f945`). `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims
@@ -330,16 +335,34 @@ scaffolding are documented in the memo.
 ### FP-002 — Phase 3 ML predictor
 
 `ml_dataset.py` ready (25 features, deck-level train/eval split, no
-leakage). **Status: CONCLUDED NOT VIABLE (2026-05-22) via this
-pipeline.** After the A/B win-attribution fix (`e8777b6`), the curator's
-swaps almost never make a deck *worse* than its input — verified across
-detune depths 0–10 → 11 kept / 3 neutral / **0 reverted**. The
-kept-vs-reverted classifier has no negative class to learn. The prior
-labels (78 kept / 153 reverted) were measurement artifacts of the
-name-attribution bug; post-fix rows start at `--min-id 314` (pre-fix
-rows kept in the DB as archive, never deleted). A future FP-002 would
-need a different framing — e.g. regress on improvement *margin* — not
-more sim hours.
+leakage). **Status: REOPENED under the margin-regression framing
+(2026-05-26); first result in — see
+[docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md).**
+
+The original *kept-vs-reverted classifier* was concluded NOT VIABLE on
+2026-05-22 because, after the A/B win-attribution fix (`e8777b6`), the
+curator's swaps almost never made a deck *worse* (detune depths 0–10 →
+11 kept / 3 neutral / **0 reverted**) — no negative class. STATUS.md
+proposed the unblock: *"regress on improvement margin."*
+
+The accumulated **40-game** soak rows deliver exactly that. Both the
+blocker and the framing are now resolved:
+- **Negative class exists** at high confidence: of 29 decks (≥40 games,
+  11,960 games total), **kept=6 / reverted=4 / neutral=19**. Curation
+  *can* hurt; it just usually doesn't.
+- `scripts/margin_analysis.py` (pure stdlib — sklearn/numpy/scipy are
+  NOT installed) regresses win-rate margin on pre-sim deck-health
+  features. **Finding: curation is empirically ~neutral** (mean margin
+  +0.0009; 19/29 neutral). **One feature clears significance:**
+  `wincon_protection` `r=+0.45` (t=2.6) — curation pays off most on decks
+  that already protect their win; near-useless on decks with big role
+  deficits.
+
+**Not yet a shippable predictor:** n=29 decks is too thin and only one
+feature is significant. Graduation needs **more unique decks (~80+), not
+more games per deck**. Actionable today (no model): point curation at
+already-coherent decks; fix structure (F2 `under_built`) before curating.
+Covered by `tests/test_margin_analysis.py` (13 tests).
 
 ### FP-003 — Concurrent Forge sims
 
