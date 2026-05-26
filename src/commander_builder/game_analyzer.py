@@ -390,7 +390,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: game_analyzer.py <sim_result.json>")
         raise SystemExit(2)
-    payload = json.loads(open(sys.argv[1], encoding="utf-8").read())
+    with open(sys.argv[1], encoding="utf-8") as _fh:
+        payload = json.loads(_fh.read())
     stdout = payload.get("stdout", "")
     ma = analyze(stdout)
     print(ma.to_json())

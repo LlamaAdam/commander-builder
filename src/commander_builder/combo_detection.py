@@ -169,10 +169,16 @@ def refresh_combos(top_n: int = 1500, page_size: int = 500,
     backend (paginated, ordering=-popularity) and write a compact
     ``data/combos.json``. Returns the count written. ``_opener`` is
     injectable for tests (defaults to urllib)."""
-    opener = _opener or (lambda url: urllib.request.urlopen(
-        urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
-                                             "Accept": "application/json"}),
-        timeout=60).read())
+    def _default_opener(url: str) -> bytes:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": USER_AGENT,
+                          "Accept": "application/json"})
+        # `with` so the response socket is closed promptly (the lambda
+        # form leaked it until GC — every other urlopen here uses `with`).
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.read()
+
+    opener = _opener or _default_opener
     url = f"{SPELLBOOK_API}?ordering=-popularity&limit={page_size}"
     collected: list[dict] = []
     while url and len(collected) < top_n:

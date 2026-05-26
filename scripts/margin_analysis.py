@@ -222,7 +222,8 @@ def build_gauntlet_samples(
             skipped.append(f"{name} (deck file not found)")
             continue
         try:
-            text = open(path, encoding="utf-8").read()
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
         except OSError:
             skipped.append(f"{name} (unreadable)")
             continue
@@ -357,7 +358,8 @@ def build_samples(
             skipped.append(f"{name} (deck file not found)")
             continue
         try:
-            text = open(path, encoding="utf-8").read()
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
         except OSError:
             skipped.append(f"{name} (unreadable)")
             continue
