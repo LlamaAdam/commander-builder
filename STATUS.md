@@ -15,8 +15,9 @@
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
 (concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML predictor)
 REOPENED** under the margin-regression framing now that 40-game soak
-rows supply a negative class — curation is empirically ~neutral; one
-significant predictor (`wincon_protection`). See Parked plans +
+rows supply a negative class — curation is empirically ~neutral across
+two designs (A/B + unconfounded gauntlet); no feature survives
+cross-validation. See Parked plans +
 [docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md). 130+
 commits on `feature/2026-04-28-session` ahead of `master`.
 
@@ -281,9 +282,11 @@ be worked. Sized for a single session each.
     40-game soak rows now give a negative class (29 decks → 6 kept / 4
     reverted / 19 neutral) and a signed margin target.
     `scripts/margin_analysis.py` (pure stdlib) regresses it on deck-health
-    features: curation is empirically ~neutral (mean +0.0009), one
-    significant predictor (`wincon_protection` r=+0.45). Not yet a shippable
-    model — needs ~80+ unique decks. See Parked plans +
+    features in two designs (`--mode ab` + unconfounded `--mode gauntlet`):
+    curation is empirically ~neutral in both (mean +0.0009 / −0.0108) and
+    **no feature survives cross-validation** (the A/B `wincon_protection`
+    hit did not replicate in the gauntlet). Not yet a shippable model —
+    needs ~80+ unique decks. See Parked plans +
     [docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md).
 
 12. ~~**Concurrent Forge sims (FP-003).**~~ ✅ **Shipped** (2026-05-22,
@@ -346,23 +349,31 @@ curator's swaps almost never made a deck *worse* (detune depths 0–10 →
 proposed the unblock: *"regress on improvement margin."*
 
 The accumulated **40-game** soak rows deliver exactly that. Both the
-blocker and the framing are now resolved:
-- **Negative class exists** at high confidence: of 29 decks (≥40 games,
-  11,960 games total), **kept=6 / reverted=4 / neutral=19**. Curation
-  *can* hurt; it just usually doesn't.
-- `scripts/margin_analysis.py` (pure stdlib — sklearn/numpy/scipy are
-  NOT installed) regresses win-rate margin on pre-sim deck-health
-  features. **Finding: curation is empirically ~neutral** (mean margin
-  +0.0009; 19/29 neutral). **One feature clears significance:**
-  `wincon_protection` `r=+0.45` (t=2.6) — curation pays off most on decks
-  that already protect their win; near-useless on decks with big role
-  deficits.
+blocker and the framing are now resolved, and the result is
+**cross-validated across two experimental designs**:
+- **Negative class exists** at high confidence (A/B design): of 29 decks
+  (≥40 games, 11,960 games), **kept=6 / reverted=4 / neutral=19**.
+  Curation *can* hurt; it just usually doesn't.
+- `scripts/margin_analysis.py` (pure stdlib — sklearn/numpy/scipy NOT
+  installed) regresses win-rate margin on pre-sim deck-health features in
+  two modes: `--mode ab` (v1-vs-v2 in-pod) and `--mode gauntlet` (each
+  deck vs a fixed 3-deck gauntlet — *unconfounded*).
+- **Finding (robust across both designs): curation is empirically
+  ~neutral** — mean margin +0.0009 (A/B) and −0.0108 (gauntlet, 26 decks
+  / 5,760 games), both ≈ 0; most decks land in the neutral band.
+- **No feature survives cross-validation.** The A/B "significant"
+  `wincon_protection` (r=+0.45, t=2.6) did **not** replicate in the
+  cleaner gauntlet design (r=+0.22, t=1.1) → confound artifact, don't
+  build on it. The only directionally-consistent (weak) signal is
+  `deficit_total` / `under_built_roles` (negative in both): curation adds
+  the **least** to structurally-deficient decks.
 
-**Not yet a shippable predictor:** n=29 decks is too thin and only one
-feature is significant. Graduation needs **more unique decks (~80+), not
-more games per deck**. Actionable today (no model): point curation at
-already-coherent decks; fix structure (F2 `under_built`) before curating.
-Covered by `tests/test_margin_analysis.py` (13 tests).
+**Not yet a shippable predictor:** n≈26–29 decks is too thin and no
+feature clears significance under cross-validation. Graduation needs
+**more unique decks (~80+), not more games per deck**, and trusting only
+features that agree across both designs. Actionable today (no model):
+curation's expected gain is ~0; fix structure (F2 `under_built`) before
+curating. Covered by `tests/test_margin_analysis.py` (18 tests).
 
 ### FP-003 — Concurrent Forge sims
 

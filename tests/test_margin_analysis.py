@@ -124,6 +124,67 @@ def test_build_samples_reports_missing_deck(tmp_path):
     assert not samples and len(skipped) == 1 and "not found" in skipped[0]
 
 
+def _grow(*, pair_base, role, games, wins, losses, draws=0):
+    return {"mode": "gauntlet", "pair_base": pair_base, "role": role,
+            "test_deck": pair_base, "games": games, "wins": wins,
+            "losses": losses, "draws": draws, "status": "done"}
+
+
+# --------------------------------------------------------------------------- #
+# gauntlet mode (unconfounded: base & v2 each vs the same fixed gauntlet)
+# --------------------------------------------------------------------------- #
+def test_gauntlet_aggregates_base_and_v2_separately():
+    rows = [
+        _grow(pair_base="D.dck", role="base", games=40, wins=10, losses=30),
+        _grow(pair_base="D.dck", role="v2", games=40, wins=18, losses=22),
+        _grow(pair_base="D.dck", role="v2", games=40, wins=2, losses=38),  # sums
+    ]
+    pairs = ma.aggregate_gauntlet(rows, min_games=40)
+    p = pairs["D.dck"]
+    assert (p.base_w, p.base_l) == (10, 30)
+    assert (p.v2_w, p.v2_l) == (20, 60)
+    assert p.complete
+
+
+def test_gauntlet_margin_is_winrate_difference():
+    p = ma.GauntletPair("D.dck", base_w=10, base_l=30, v2_w=20, v2_l=20)
+    # base wr = 10/40 = .25 ; v2 wr = 20/40 = .5 ; margin = +.25
+    assert p.margin == pytest.approx(0.25)
+    assert p.verdict() == "kept"
+
+
+def test_gauntlet_pair_incomplete_without_both_roles():
+    p = ma.GauntletPair("D.dck", base_w=10, base_l=30)  # no v2 games
+    assert not p.complete and p.margin is None and p.verdict() == "undecided"
+
+
+def test_gauntlet_ignores_bad_roles_and_low_games():
+    rows = [
+        _grow(pair_base="D.dck", role="base", games=5, wins=2, losses=3),   # low
+        _grow(pair_base="D.dck", role="filler", games=40, wins=1, losses=1),  # bad role
+        _grow(pair_base="D.dck", role="base", games=40, wins=10, losses=30),
+        _grow(pair_base="D.dck", role="v2", games=40, wins=15, losses=25),
+    ]
+    pairs = ma.aggregate_gauntlet(rows, min_games=40)
+    p = pairs["D.dck"]
+    assert (p.base_w, p.base_l) == (10, 30) and (p.v2_w, p.v2_l) == (15, 25)
+
+
+def test_build_gauntlet_samples_joins_and_skips(tmp_path):
+    (tmp_path / "[USER] D [B4].dck").write_text(_DECK, encoding="utf-8")
+    rows = [
+        _grow(pair_base="[USER] D [B4].dck", role="base", games=40, wins=10, losses=30),
+        _grow(pair_base="[USER] D [B4].dck", role="v2", games=40, wins=20, losses=20),
+        _grow(pair_base="[USER] Gone [B3].dck", role="base", games=40, wins=5, losses=35),
+        _grow(pair_base="[USER] Gone [B3].dck", role="v2", games=40, wins=5, losses=35),
+    ]
+    pairs = ma.aggregate_gauntlet(rows, min_games=40)
+    samples, skipped = ma.build_gauntlet_samples(pairs, [str(tmp_path)])
+    assert len(samples) == 1 and samples[0].deck == "[USER] D [B4].dck"
+    assert samples[0].margin == pytest.approx(0.25)
+    assert len(skipped) == 1 and "not found" in skipped[0]
+
+
 def test_analyze_counts_verdicts_and_ranks_features(tmp_path):
     # Two decks, opposite outcomes -> one kept, one reverted.
     for name in ("[USER] A [B4].dck", "[USER] B [B4].dck"):

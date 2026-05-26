@@ -123,6 +123,117 @@ def aggregate_pairs(rows: list[dict], min_games: int = 0) -> dict[str, Pair]:
 
 
 # --------------------------------------------------------------------------- #
+# Gauntlet aggregation (unconfounded design)
+# --------------------------------------------------------------------------- #
+# In gauntlet mode each deck plays the SAME fixed 3-deck gauntlet on its own,
+# so base and v2 never share a pod -- their win-rates are directly comparable
+# without the head-to-head confound the A/B pod design carries. Each row is one
+# (test_deck, role) result vs the gauntlet: {role: base|v2, pair_base, wins,
+# losses, draws, games}. Margin = winrate(v2) - winrate(base).
+@dataclass
+class GauntletPair:
+    pair_base: str                      # the original deck filename (the key)
+    base_w: int = 0
+    base_l: int = 0
+    base_g: int = 0
+    v2_w: int = 0
+    v2_l: int = 0
+    v2_g: int = 0
+
+    @staticmethod
+    def _wr(w: int, l: int) -> Optional[float]:
+        d = w + l
+        return w / d if d else None
+
+    @property
+    def base_winrate(self) -> Optional[float]:
+        return self._wr(self.base_w, self.base_l)
+
+    @property
+    def v2_winrate(self) -> Optional[float]:
+        return self._wr(self.v2_w, self.v2_l)
+
+    @property
+    def complete(self) -> bool:
+        return self.base_winrate is not None and self.v2_winrate is not None
+
+    @property
+    def margin(self) -> Optional[float]:
+        """winrate(v2) - winrate(base), in [-1, 1]. None unless both sides
+        have decisive games."""
+        bw, vw = self.base_winrate, self.v2_winrate
+        return None if bw is None or vw is None else vw - bw
+
+    def verdict(self, band: float = NEUTRAL_BAND) -> str:
+        m = self.margin
+        if m is None:
+            return "undecided"
+        if m > band:
+            return "kept"
+        if m < -band:
+            return "reverted"
+        return "neutral"
+
+
+def aggregate_gauntlet(rows: list[dict], min_games: int = 0) -> dict[str, GauntletPair]:
+    """Group gauntlet rows by `pair_base`, summing each role's wins/losses."""
+    pairs: dict[str, GauntletPair] = {}
+    for r in rows:
+        if int(r.get("games", 0) or 0) < min_games:
+            continue
+        key = r.get("pair_base")
+        role = r.get("role")
+        if not key or role not in ("base", "v2"):
+            continue
+        p = pairs.get(key)
+        if p is None:
+            p = pairs[key] = GauntletPair(pair_base=key)
+        w = int(r.get("wins", 0) or 0)
+        l = int(r.get("losses", 0) or 0)
+        g = int(r.get("games", 0) or 0)
+        if role == "base":
+            p.base_w += w
+            p.base_l += l
+            p.base_g += g
+        else:
+            p.v2_w += w
+            p.v2_l += l
+            p.v2_g += g
+    return pairs
+
+
+def build_gauntlet_samples(
+    pairs: dict[str, GauntletPair],
+    decks_dirs: list[str],
+) -> tuple[list[Sample], list[str]]:
+    """Join each complete gauntlet pair to its base deck file -> feature sample.
+
+    Features describe the ORIGINAL (base) deck, same substrate as the A/B path,
+    so the two analyses are directly comparable."""
+    samples: list[Sample] = []
+    skipped: list[str] = []
+    for name, p in sorted(pairs.items()):
+        m = p.margin
+        if m is None:
+            skipped.append(f"{name} (incomplete: base or v2 has no decisive games)")
+            continue
+        path = _find_deck(p.pair_base, decks_dirs)
+        if path is None:
+            skipped.append(f"{name} (deck file not found)")
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            skipped.append(f"{name} (unreadable)")
+            continue
+        samples.append(Sample(
+            deck=name, margin=m, games=p.base_g + p.v2_g,
+            features=deck_features(text, name),
+        ))
+    return samples, skipped
+
+
+# --------------------------------------------------------------------------- #
 # Deck-composition features (of the ORIGINAL deck)
 # --------------------------------------------------------------------------- #
 _BRACKET_RE = re.compile(r"\[B(\d)\]")
@@ -296,7 +407,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--inbox", default=DEFAULT_INBOX,
-                    help="dir holding *throughput*.jsonl soak rows")
+                    help="dir holding the soak JSONL rows")
+    ap.add_argument("--mode", choices=("ab", "gauntlet"), default="ab",
+                    help="ab = v1-vs-v2-in-pod (*throughput*.jsonl); "
+                         "gauntlet = each deck vs a fixed gauntlet, unconfounded "
+                         "(*gauntlet*.jsonl). Default ab.")
     ap.add_argument("--decks", default=None, action="append",
                     help="dir holding deck .dck files; repeatable (search path). "
                          "Default: <inbox>/{box2_decks,popular_decks,new_decks} "
@@ -315,10 +430,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                       ("box2_decks", "popular_decks", "new_decks",
                        "gauntlet_decks", "control_decks")]
         decks_dirs.append(repo_decks)
-    rows = load_rows(args.inbox)
-    pairs = aggregate_pairs(rows, min_games=args.min_games)
-    samples, skipped = build_samples(pairs, decks_dirs)
+    if args.mode == "gauntlet":
+        rows = load_rows(args.inbox, "*gauntlet*.jsonl")
+        pairs = aggregate_gauntlet(rows, min_games=args.min_games)
+        samples, skipped = build_gauntlet_samples(pairs, decks_dirs)
+    else:
+        rows = load_rows(args.inbox)
+        pairs = aggregate_pairs(rows, min_games=args.min_games)
+        samples, skipped = build_samples(pairs, decks_dirs)
     report = analyze(samples)
+    report["mode"] = args.mode
     report["skipped"] = skipped
     report["min_games"] = args.min_games
 
@@ -326,10 +447,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(report, indent=2))
         return 0
 
-    print(f"FP-002 margin analysis  (min_games={args.min_games})")
+    margin_desc = ("winrate(v2)-winrate(base) vs fixed gauntlet"
+                   if args.mode == "gauntlet" else "per-deck win-rate delta")
+    print(f"FP-002 margin analysis  (mode={args.mode}, min_games={args.min_games})")
     print(f"  decks: {report['n_decks']}   games: {report['total_games']}")
     print(f"  mean curator margin: {report['mean_margin']:+.4f}  "
-          f"(>0 = curation helps; per-deck win-rate delta)")
+          f"(>0 = curation helps; {margin_desc})")
     v = report["verdicts"]
     print(f"  per-deck verdicts: kept={v['kept']}  "
           f"reverted={v['reverted']}  neutral={v['neutral']}")
