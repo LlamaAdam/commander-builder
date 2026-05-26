@@ -43,6 +43,9 @@ from typing import Optional
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = REPO_ROOT / ".cache" / "edhrec"
 EDHREC_BASE = "https://edhrec.com"
+# Direct JSON API (no HTML scrape). Used by fetch_top_cards for the
+# time-windowed / by-type "top cards" pages.
+EDHREC_JSON_BASE = "https://json.edhrec.com/pages"
 USER_AGENT = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
 REQUEST_SLEEP_SEC = 0.5  # EDHREC isn't rate-limited like Scryfall but be polite.
 CACHE_TTL_HOURS = 24
@@ -428,6 +431,90 @@ def _parse_commander_page(commander_name: str, slug: str, html: str) -> Commande
                 for r in related if isinstance(r, dict)
             ]
     return page
+
+
+# Recognized "top" page slugs: time windows + card types. EDHREC serves
+# each at json.edhrec.com/pages/top/<slug>.json.
+TOP_WINDOWS = ("year", "month", "week")  # year == "Past 2 Years"
+TOP_TYPES = ("creatures", "instants", "sorceries", "artifacts",
+             "enchantments", "planeswalkers", "lands", "battles")
+
+
+def fetch_top_cards(
+    slug: str = "year",
+    cache: bool = True,
+    ttl_hours: int = CACHE_TTL_HOURS,
+) -> list[CardEntry]:
+    """Fetch EDHREC's "top cards" page for a time window or card type.
+
+    ``slug`` is a window (``year`` = past 2 years, ``month``, ``week``) or
+    a card type (``creatures``, ``instants``, ``lands``, …). Returns a
+    ``CardEntry`` list ranked by popularity (``num_decks`` desc). Recency-
+    aware: ``month``/``week`` surface cards trending NOW vs all-time
+    staples — a stronger signal for "what to add" than a stale staple.
+
+    Returns ``[]`` on any failure (network/404/parse) so callers degrade
+    gracefully. Cached to ``.cache/edhrec/top-<slug>.json``.
+    """
+    cache_path = _cache_path(f"top-{slug}")
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return [CardEntry(**e) for e in data.get("cards", [])]
+        except (OSError, ValueError, TypeError):
+            pass
+
+    url = f"{EDHREC_JSON_BASE}/top/{urllib.parse.quote(slug)}.json"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        raw = _http_get_text_with_retry(url)
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001 — degrade to empty on any failure
+        return []
+
+    buckets: dict[str, list[CardEntry]] = {}
+    _walk_for_cardlists(payload, buckets)
+    seen: set[str] = set()
+    cards: list[CardEntry] = []
+    for lst in buckets.values():
+        for c in lst:
+            key = c.name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cards.append(c)
+    # /top "inclusion" is a raw deck count, not a %, so rank by num_decks.
+    cards.sort(key=lambda c: c.num_decks, reverse=True)
+
+    if cache and cards:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"slug": slug,
+                        "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        "cards": [asdict(c) for c in cards]}),
+            encoding="utf-8")
+    return cards
+
+
+def top_main(argv=None) -> int:
+    """``commander-top`` — list EDHREC's most-played cards for a window/type."""
+    import argparse
+    p = argparse.ArgumentParser(
+        prog="commander-top",
+        description="EDHREC top cards by time window (year/month/week) or "
+                    "card type (creatures/instants/lands/…).")
+    p.add_argument("slug", nargs="?", default="year",
+                   help="year (past 2yr) | month | week | a card type. Default year.")
+    p.add_argument("--limit", type=int, default=25)
+    args = p.parse_args(argv)
+    cards = fetch_top_cards(args.slug)
+    if not cards:
+        print(f"(no top cards for {args.slug!r} — bad slug or network)")
+        return 1
+    print(f"EDHREC top cards [{args.slug}] (by deck count):")
+    for i, c in enumerate(cards[:args.limit], 1):
+        print(f"  {i:>3}. {c.name}  ({c.num_decks:,} decks)")
+    return 0
 
 
 def fetch_commander_page(
