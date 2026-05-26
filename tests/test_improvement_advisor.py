@@ -99,6 +99,37 @@ def test_heuristic_recommends_high_synergy_first():
     assert "high_synergy" in adds[0].reason
 
 
+def test_heuristic_floats_trending_card_up_and_annotates():
+    """A candidate that's also trending on EDHREC /top should rank above an
+    equally-ranked non-trending candidate, and say so in its reason."""
+    deck = {"Sol Ring"}
+    page = _fake_edhrec_page(
+        top=[("Stale Staple", 80.0), ("Hot New Pick", 70.0)],
+        synergy=[],
+    )
+    # Default order would be Stale Staple first (higher inclusion / earlier).
+    recs = _heuristic_swap_recommendations(
+        deck, page, trending={"hot new pick"})
+    adds = [r for r in recs if r.action == "add"]
+    assert adds[0].card == "Hot New Pick"          # trending floats up
+    assert adds[0].evidence.get("trending") is True
+    assert "trending" in adds[0].reason.lower()
+    # The non-trending card is still present, just lower + unannotated.
+    stale = next(r for r in adds if r.card == "Stale Staple")
+    assert stale.evidence.get("trending") is False
+
+
+def test_heuristic_trending_is_optional_and_inert_when_absent():
+    """Without a trending set, behavior + evidence shape are unchanged
+    (trending defaults False, ordering follows synergy-then-top)."""
+    deck = {"Sol Ring"}
+    page = _fake_edhrec_page(top=[("A Card", 80.0)], synergy=[])
+    recs = _heuristic_swap_recommendations(deck, page)
+    add = next(r for r in recs if r.action == "add")
+    assert add.evidence.get("trending") is False
+    assert "trending" not in add.reason.lower()
+
+
 def test_heuristic_skips_cards_already_in_deck():
     deck = {"Sol Ring", "Synergy Card"}
     page = _fake_edhrec_page(

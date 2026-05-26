@@ -119,6 +119,14 @@ def _heuristic_swap_recommendations(
     # Backward compat for callers that still pass ``tag_page=`` —
     # promoted to a list internally. Drop in a future version.
     tag_page: Optional[CommanderPage] = None,
+    # Recency signal: lowercased names of cards currently trending on
+    # EDHREC's time-windowed ``/top`` view (``edhrec_client.fetch_top_cards``).
+    # A candidate add that is ALSO trending gets floated up in the ranking
+    # and annotated — a card spiking this month is a stronger add than a
+    # stale all-time staple. Only *re-ranks existing commander-relevant
+    # candidates*; it never introduces off-archetype/off-color cards, so a
+    # bad/empty fetch can only fail to boost, never add noise.
+    trending: Optional[set[str]] = None,
 ) -> list[SwapRecommendation]:
     """Pure-data swap proposals from EDHREC inclusion-% deltas.
 
@@ -301,6 +309,9 @@ def _heuristic_swap_recommendations(
                 f"EDHREC {bucket}: in {inclusion_phrase}"
                 + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
             )
+        is_trending = bool(trending) and c.name.lower() in trending
+        if is_trending:
+            reason_text += " — trending now on EDHREC /top"
         add_recs.append(SwapRecommendation(
             card=c.name,
             action="add",
@@ -310,18 +321,26 @@ def _heuristic_swap_recommendations(
                 "synergy_pct": c.synergy_pct,
                 "source": f"edhrec.{bucket}",
                 "role": role,
+                "trending": is_trending,
             },
         ))
 
-    # Re-rank by diagnosis priority roles, when present. Adds in the
-    # priority-role list float to the top in their listed order;
-    # everything else keeps its original (synergy-then-top) ordering.
-    # Stable sort preserves intra-bucket order.
-    if diagnosis and diagnosis.priority_roles:
-        priority_index = {r: i for i, r in enumerate(diagnosis.priority_roles)}
-        def _rank(r: SwapRecommendation) -> int:
+    # Re-rank by diagnosis priority roles (primary) then trending status
+    # (secondary). Adds whose role is in the priority list float to the top
+    # in listed order; within the same role-rank, cards currently trending
+    # on EDHREC /top come first. When there's no diagnosis, role-rank is
+    # constant so trending becomes the primary key (a recency boost over the
+    # default synergy-then-top order). Stable sort preserves intra-key order.
+    if (diagnosis and diagnosis.priority_roles) or trending:
+        priority_index = (
+            {r: i for i, r in enumerate(diagnosis.priority_roles)}
+            if diagnosis else {}
+        )
+        def _rank(r: SwapRecommendation) -> tuple[int, int]:
             role = r.evidence.get("role", "unknown")
-            return priority_index.get(role, len(priority_index) + 1)
+            role_rank = priority_index.get(role, len(priority_index) + 1)
+            trending_rank = 0 if r.evidence.get("trending") else 1
+            return (role_rank, trending_rank)
         add_recs.sort(key=_rank)
 
     # Split adds into two pools:

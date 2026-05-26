@@ -64,8 +64,14 @@ commander-builder already does and where it could drive an improvement.
    Spellbook's API (the full 500MB export is too big to bundle). (95c05a2)
 
 ### Follow-ups
-- Wire `fetch_top_cards` into the advisor as a candidate *source*
-  (currently a standalone tool/CLI).
+- ✅ **Wire `fetch_top_cards` into the advisor (2026-05-26).** The heuristic
+  recommender now takes a `trending` set sourced from
+  `edhrec_client.fetch_top_cards("month")` (lazy + best-effort in
+  `improvement_advisor._fetch_trending_lazy`). It *re-ranks* existing
+  commander-relevant candidates — a card spiking this month floats above a
+  stale all-time staple and its rationale says "trending now on EDHREC
+  /top" (`evidence.trending=True`). Re-rank only, so a failed fetch can
+  never introduce off-archetype/off-color noise.
 - Surface `role_targets` deficits in the web audit UI (data is in the
   `/api/audit` payload; UI tile not added).
 - ✅ **Feed `detect_combos_in_deck` into bracket enforcement (2026-05-26).**

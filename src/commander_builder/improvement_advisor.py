@@ -582,6 +582,7 @@ def _advise_steps(
     edhrec_page: Optional[CommanderPage] = None
     average_deck: Optional[AverageDeck] = None
     tag_pages: Optional[list[CommanderPage]] = None
+    trending_names: Optional[set[str]] = None
     bracket_peer_ref_count: int = 0
     recs: list[SwapRecommendation]
     effective_source = source  # mutate on fallback
@@ -685,6 +686,28 @@ def _advise_steps(
                 average_deck = None
         return average_deck
 
+    def _fetch_trending_lazy() -> set[str]:
+        """Pull the cards currently trending on EDHREC's time-windowed
+        ``/top`` view (past month) as a lowercased name set.
+
+        Recency signal for the heuristic: a candidate add that's spiking
+        this month is a stronger pick than a stale all-time staple. Used
+        only to *re-rank* commander-relevant candidates, never to introduce
+        cards, so a failed/empty fetch is harmless (no boost, no noise).
+        Best-effort + memoized for the call.
+        """
+        nonlocal trending_names
+        if trending_names is None:
+            try:
+                from .edhrec_client import fetch_top_cards
+                trending_names = {
+                    c.name.lower() for c in fetch_top_cards("month")
+                    if getattr(c, "name", None)
+                }
+            except Exception:  # noqa: BLE001
+                trending_names = set()
+        return trending_names
+
     if source == "bracket_peers":
         peer_recs, ref_count = _bracket_peers_recommendations(
             commander_name=primary_commander,
@@ -706,6 +729,7 @@ def _advise_steps(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
+                trending=_fetch_trending_lazy(),
             )
             effective_source = "heuristic"
     elif source == "claude":
@@ -735,6 +759,7 @@ def _advise_steps(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
+                trending=_fetch_trending_lazy(),
             )
             effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
@@ -747,6 +772,7 @@ def _advise_steps(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
+                trending=_fetch_trending_lazy(),
             )
             effective_source = "heuristic"
     else:
@@ -755,6 +781,7 @@ def _advise_steps(
             main_cards, page,
             average_deck=_fetch_avg_deck_lazy(),
             tag_pages=_fetch_tag_pages_lazy(),
+            trending=_fetch_trending_lazy(),
         )
 
     yield AdvicePhase("primary", {
