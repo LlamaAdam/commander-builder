@@ -373,8 +373,11 @@ def _resolve_life_leader(
     """Return the (seat, name) of the deck with the STRICTLY-highest
     ending_life, or (None, None) if there's no unique maximum (tie at the
     top) or no usable life data. Decks with an unknown ending_life are
-    excluded from contention."""
-    scored = [d for d in decks if d.ending_life is not None]
+    excluded from contention. Eliminated seats are also excluded — a player
+    who already lost (life <= 0, or commander-damage/poison/mill while still
+    at positive life) must never be crowned the winner of a turn-cap draw."""
+    scored = [d for d in decks
+              if d.ending_life is not None and not d.eliminated]
     if not scored:
         return None, None
     top = max(d.ending_life for d in scored)  # type: ignore[type-var]

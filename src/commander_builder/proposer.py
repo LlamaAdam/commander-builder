@@ -589,8 +589,16 @@ def _curator_complete_via_cli(system: str, user_msg: str, *,
     import time as _time
 
     prompt = f"{system}\n\n---\n\n{user_msg}"
+    # Scrub everything that could redirect the subscription CLI to a BILLED
+    # endpoint or inject an API key — not just the two token vars. The CLI
+    # honors ANTHROPIC_BASE_URL / ANTHROPIC_API_URL (proxy/redirect) and the
+    # CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX toggles (cloud-billed
+    # backends). Dropping every ANTHROPIC_* key plus those toggles keeps the
+    # invariant: invoking `claude` must use the logged-in subscription, never
+    # inherit billing config from a parent shell that also does API work.
+    _BILLING_REDIRECT_VARS = {"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"}
     env = {k: v for k, v in os.environ.items()
-           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+           if not k.startswith("ANTHROPIC_") and k not in _BILLING_REDIRECT_VARS}
     cmd = [claude, "-p", "--output-format", "json"]
 
     # One retry: the subscription CLI occasionally returns a transient error

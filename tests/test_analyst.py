@@ -215,9 +215,78 @@ def test_claude_verdict_handles_empty_response(monkeypatch):
     fake_module = types.ModuleType("anthropic")
     fake_module.Anthropic = FakeClient
     monkeypatch.setitem(sys.modules, "anthropic", fake_module)
-    with pytest.raises(RuntimeError, match="empty response"):
+    # Empty response now raises NotImplementedError (not RuntimeError) so the
+    # analyze() router — which only catches NotImplementedError — degrades to
+    # the heuristic verdict instead of crashing the pipeline.
+    with pytest.raises(NotImplementedError, match="empty response"):
         claude_verdict(_input(), AnalystConfig())
     # monkeypatch.setitem auto-cleans up; no manual pop needed.
+
+
+def test_claude_verdict_tolerates_code_fenced_json(monkeypatch):
+    """Model output wrapped in ```json ... ``` must still parse (not crash)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    fenced = ('```json\n{"label": "kept", "confidence": 0.8, '
+              '"reasoning": "x", "lessons": []}\n```')
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response(fenced)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    v = claude_verdict(_input(), AnalystConfig())
+    assert v.label == "kept" and v.confidence == 0.8
+
+
+def test_claude_verdict_unparseable_degrades_via_notimplemented(monkeypatch):
+    """Non-JSON prose => NotImplementedError so analyze() falls back."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response("I think this looks fine!")
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    with pytest.raises(NotImplementedError):
+        claude_verdict(_input(), AnalystConfig())
+
+
+def test_claude_verdict_non_numeric_confidence_defaults(monkeypatch):
+    """A model that writes confidence: "high" must not crash with ValueError."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    payload = '{"label": "kept", "confidence": "high", "reasoning": "x"}'
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response(payload)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    v = claude_verdict(_input(), AnalystConfig())
+    assert v.label == "kept" and v.confidence == 0.5  # defaulted
 
 
 # --- ollama_verdict success path (mocked HTTP) -----------------------------

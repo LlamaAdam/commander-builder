@@ -250,3 +250,23 @@ def test_turn_cap_draw_with_tied_top_life_stays_a_draw():
     assert g.resolved_winner_seat is None
     assert g.resolved_winner_name is None
     assert g.resolved_is_draw is True
+
+
+def test_turn_cap_draw_does_not_crown_eliminated_seat():
+    """If the highest-ending_life seat was ELIMINATED (life hit <= 0), it must
+    not be crowned the draw winner. Here all three seats died (life <= 0), so
+    there's no valid living leader and the game stays a real draw — previously
+    seat A (ending_life 0, the max) was wrongly resolved as the winner."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 0\n"     # eliminated (after <= 0), but the max
+        "Life: Life: Ai(2)-B 40 > -5\n"    # eliminated
+        "Life: Life: Ai(3)-C 40 > -10\n"   # eliminated
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Result: Game 1 ended in 240000 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    assert g.resolved_winner_seat is None   # eliminated seat A not crowned
+    assert g.resolved_is_draw is True

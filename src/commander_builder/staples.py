@@ -762,6 +762,13 @@ def classify_role_extended(oracle_text: str, type_line: str = "") -> str:
     should route through here so the two surfaces never disagree
     about what bucket a card belongs in.
     """
+    # Lands take priority over the oracle-text payoff/wincon patterns: a land
+    # whose text mentions landfall / "whenever a land enters" / "for each land
+    # you control" (creature-lands, Field of the Dead, etc.) must classify as a
+    # land, not land_payoff/win_condition. Defer to classify_role, which
+    # short-circuits on the type line, before pattern-matching oracle text.
+    if "land" in (type_line or "").lower():
+        return classify_role(oracle_text, type_line)
     text = (oracle_text or "").lower()
     if any(p.search(text) for p in _LAND_PAYOFF_PATTERNS):
         return "land_payoff"

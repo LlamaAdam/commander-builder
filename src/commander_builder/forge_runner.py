@@ -691,6 +691,13 @@ def run_ab_simulation(
             result.games = i + 1
             result.status = _AB_STATUS_DONE
             result.error = note
+            # Finalize avg_turns from the games completed BEFORE the timeout —
+            # otherwise a batch that ran several decisive games then looped on
+            # the last one reports avg_turns_a/b = 0.0 (silent data loss).
+            if a_turns:
+                result.avg_turns_a = round(sum(a_turns) / len(a_turns), 2)
+            if b_turns:
+                result.avg_turns_b = round(sum(b_turns) / len(b_turns), 2)
             result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
             return result
 
@@ -875,6 +882,10 @@ def run_gauntlet_simulation(
             result.games = i + 1
             result.status = _AB_STATUS_DONE
             result.error = f"loop at game {i + 1} credited to active seat {active_seat}"
+            # Finalize avg_turns_win from games completed before the timeout
+            # (otherwise it's silently reported as 0.0 on the salvage path).
+            if win_turns:
+                result.avg_turns_win = round(sum(win_turns) / len(win_turns), 2)
             result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
             return result
 

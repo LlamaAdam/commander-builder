@@ -8,6 +8,7 @@ from commander_builder.staples import (
     ROLE_SATURATION_THRESHOLDS,
     UNIVERSAL_STAPLES_LC,
     classify_role,
+    classify_role_extended,
     confidence_tier,
     count_deck_roles,
     is_basic_land,
@@ -15,6 +16,32 @@ from commander_builder.staples import (
     is_universal_staple,
     render_frequency_label,
 )
+
+
+# ---------------------------------------------------------------------------
+# classify_role_extended — lands must win over land_payoff / win_condition
+# ---------------------------------------------------------------------------
+
+def test_classify_role_extended_land_with_landfall_text_is_land():
+    # A land whose oracle text would match a land_payoff pattern must still
+    # classify as a land (type line wins), not "land_payoff". Regression for
+    # the missing type-line guard in classify_role_extended.
+    role = classify_role_extended(
+        "Whenever a land enters the battlefield under your control, "
+        "create a 2/2 Zombie.",
+        type_line="Land",
+    )
+    assert role == "land"
+
+
+def test_classify_role_extended_nonland_payoff_still_classifies():
+    # The land guard must not suppress land_payoff for actual non-land cards.
+    role = classify_role_extended(
+        "Landfall - whenever a land enters the battlefield under your "
+        "control, draw a card.",
+        type_line="Enchantment",
+    )
+    assert role == "land_payoff"
 
 
 # ---------------------------------------------------------------------------

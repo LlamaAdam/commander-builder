@@ -224,6 +224,43 @@ restatements of the numbers.
 """
 
 
+def _parse_verdict_payload(text: str, backend: str) -> dict:
+    """Tolerantly recover a verdict JSON object from possibly-fenced or
+    prose-prefixed model output.
+
+    Raises ``NotImplementedError`` (not ``JSONDecodeError``) when nothing
+    parseable is found, so ``analyze()`` — which only catches
+    NotImplementedError — degrades cleanly to the heuristic verdict instead
+    of crashing the whole pipeline on a malformed LLM response."""
+    import re as _re
+    s = (text or "").strip()
+    if s.startswith("```"):
+        s = _re.sub(r"^```[a-zA-Z0-9]*\n?", "", s)
+        s = _re.sub(r"\n?```$", "", s).strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    m = _re.search(r"\{.*\}", s, _re.DOTALL)  # first balanced-ish object
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+    raise NotImplementedError(
+        f"{backend}: could not parse a JSON verdict from model output")
+
+
+def _safe_confidence(value: object) -> float:
+    """Coerce a model-supplied confidence to float, defaulting to 0.5 on a
+    non-numeric value (e.g. the model writes \"high\" instead of 0.9) so the
+    verdict doesn't crash with ValueError."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     """Render a verdict via the Claude API.
 
@@ -289,15 +326,15 @@ def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
         if hasattr(block, "text"):
             text += block.text
     if not text.strip():
-        raise RuntimeError("claude_verdict: empty response from API")
+        raise NotImplementedError("claude_verdict: empty response from API")
 
-    parsed = json.loads(text)
+    parsed = _parse_verdict_payload(text, "claude_verdict")
     label = parsed.get("label", "neutral")
     if label not in {"kept", "reverted", "neutral"}:
         label = "neutral"
     return Verdict(
         label=label,
-        confidence=float(parsed.get("confidence", 0.5)),
+        confidence=_safe_confidence(parsed.get("confidence", 0.5)),
         reasoning=str(parsed.get("reasoning", "")),
         lessons=list(parsed.get("lessons", []) or []),
         source="claude",
@@ -358,14 +395,14 @@ def ollama_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
 
     text = payload.get("response", "")
     if not text:
-        raise RuntimeError("ollama_verdict: empty response from daemon")
-    parsed = json.loads(text)
+        raise NotImplementedError("ollama_verdict: empty response from daemon")
+    parsed = _parse_verdict_payload(text, "ollama_verdict")
     label = parsed.get("label", "neutral")
     if label not in {"kept", "reverted", "neutral"}:
         label = "neutral"
     return Verdict(
         label=label,
-        confidence=float(parsed.get("confidence", 0.5)),
+        confidence=_safe_confidence(parsed.get("confidence", 0.5)),
         reasoning=str(parsed.get("reasoning", "")),
         lessons=list(parsed.get("lessons", []) or []),
         source="ollama",

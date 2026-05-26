@@ -521,10 +521,12 @@ def fetch_commander_page(
     commander_or_slug: str,
     cache: bool = True,
     ttl_hours: int = CACHE_TTL_HOURS,
-) -> CommanderPage:
+) -> Optional[CommanderPage]:
     """Fetch + parse one commander's EDHREC page. Caches the parsed
     CommanderPage to disk; subsequent calls within `ttl_hours` skip the
-    network."""
+    network. Returns ``None`` when EDHREC has no page (404 — unknown/mis-slugged
+    commander), the retries are exhausted, or parsing fails; callers must
+    handle None (the heuristic recommender already does)."""
     slug = commander_or_slug if "-" in commander_or_slug and commander_or_slug.islower() \
         else commander_slug(commander_or_slug)
     cache_path = _cache_path(slug)
@@ -979,6 +981,10 @@ if __name__ == "__main__":
         print("Usage: edhrec_client.py <commander-name-or-slug>")
         sys.exit(2)
     page = fetch_commander_page(" ".join(sys.argv[1:]))
+    if page is None:
+        print(json.dumps({"error": "no EDHREC page found (unknown commander, "
+                          "bad slug, or fetch failed)"}))
+        sys.exit(1)
     print(json.dumps({
         "commander": page.commander_name,
         "slug": page.slug,

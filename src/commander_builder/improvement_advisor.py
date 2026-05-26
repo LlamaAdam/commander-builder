@@ -779,6 +779,7 @@ def _advise_steps(
         page = _fetch_edhrec_lazy()
         recs = _heuristic_swap_recommendations(
             main_cards, page,
+            diagnosis=diagnosis,
             average_deck=_fetch_avg_deck_lazy(),
             tag_pages=_fetch_tag_pages_lazy(),
             trending=_fetch_trending_lazy(),
