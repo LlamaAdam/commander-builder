@@ -932,3 +932,40 @@ def count_deck_roles(card_names) -> "dict[str, int]":
         )
         out[role] += 1
     return out
+
+
+# Recommended MINIMUM count per role — the "gold-standard" EDH deck-
+# template ratios (Command Zone / widely-published guides; see
+# docs/deck-building-resources.md). The floor a well-rounded deck should
+# clear, mirroring ROLE_SATURATION_THRESHOLDS (the ceiling): a deck below
+# target for a role is under-built there.
+#   ramp 10 · card draw 10 · targeted removal 8 · board wipes 3 ·
+#   protection 4 (situational but recommended).
+ROLE_TARGETS: dict[str, int] = {
+    "ramp": 10,
+    "draw": 10,
+    "removal": 8,
+    "wipe": 3,
+    "protection": 4,
+}
+
+
+def role_target_report(card_names) -> dict:
+    """Compare a deck's role counts against ROLE_TARGETS.
+
+    Returns ``{"roles": {role: {count, target, deficit}}, "under_built":
+    [role, …]}`` — ``deficit`` is ``max(0, target - count)`` and
+    ``under_built`` lists roles below target, worst-deficit first. The
+    audit surfaces this so a deck light on (say) ramp or removal gets a
+    "needs more X" nudge — the complement of the saturation guard, which
+    only flags *excess*.
+    """
+    counts = count_deck_roles(card_names)
+    roles: dict[str, dict] = {}
+    for role, target in ROLE_TARGETS.items():
+        count = int(counts.get(role, 0))
+        roles[role] = {"count": count, "target": target,
+                       "deficit": max(0, target - count)}
+    under = sorted((r for r, v in roles.items() if v["deficit"] > 0),
+                   key=lambda r: roles[r]["deficit"], reverse=True)
+    return {"roles": roles, "under_built": under}

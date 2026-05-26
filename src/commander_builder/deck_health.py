@@ -510,4 +510,19 @@ def compute_deck_health(deck_text: str) -> dict:
         "mana_sinks": count_mana_sinks(deck_text),
         "wincon_protection": count_wincon_protection(deck_text),
         "self_mill": count_self_mill_enablers(deck_text),
+        # Role target ratios (F2): flag roles below the gold-standard
+        # template minimums (ramp/draw/removal/wipe/protection). The
+        # complement of the saturation guard, which flags excess.
+        "role_targets": _role_targets_signal(deck_text),
     }
+
+
+def _role_targets_signal(deck_text: str) -> dict:
+    """Deck-health signal: role counts vs ROLE_TARGETS minimums. Degrades
+    to an empty shape on any failure so the rest of the panel renders."""
+    try:
+        from .staples import role_target_report
+        names = [name for _qty, name in _iter_main_cards(deck_text)]
+        return role_target_report(names)
+    except Exception:  # noqa: BLE001
+        return {"roles": {}, "under_built": []}
