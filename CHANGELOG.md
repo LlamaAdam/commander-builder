@@ -19,8 +19,8 @@ applies once we tag a 1.0.
   A/B "significant" feature (`wincon_protection`) did NOT replicate in the
   cleaner design → confound artifact. Only `deficit_total`/`under_built_roles`
   agree across designs (curation adds least to structurally-deficient decks).
-  18 tests; `docs/fp002-margin-analysis.md` + deck-gen plan
-  (`docs/fp002-deckgen-plan.md`).
+  18 tests; `docs/future-plans.md` + deck-gen plan
+  (`docs/future-plans.md`).
 - **`feat(combo)`: infinite-combo → bracket enforcement.**
   `combo_detection.assess_deck_brackets()` maps each detected combo to its WotC
   bracket floor (two-card infinite/win → B4, 3+-card → B3), flags combos
@@ -36,13 +36,13 @@ applies once we tag a 1.0.
 - **`feat(fp-007)`: card-reference panel (slice 1).** `GET /api/card/<name>`
   (identity / commander-legality / price / printing over the cached
   `scryfall_client`) + a topbar "Cards" search + reference overlay. FP-007
-  flipped PARKED → STARTED (`docs/fp007-plan.md`); the FP-006 gate is met.
+  flipped PARKED → STARTED (`docs/future-plans.md`); the FP-006 gate is met.
 - **`feat(fp-010)`: desktop EXE (started).** `commander_builder/desktop.py`
   (Flask on a daemon thread + native pywebview window), `packaging/`
   PyInstaller spec + `scripts/build_desktop.py` (verified: builds
   `dist/CommanderBuilder/CommanderBuilder.exe` with Flask assets bundled),
   `[desktop]` extra. `bootstrap.py` first-run dependency detection +
-  Forge-jar downloader (`commander-builder-bootstrap`). `docs/fp010-plan.md`.
+  Forge-jar downloader (`commander-builder-bootstrap`). `docs/future-plans.md`.
 - **`feat(forge)`: `run_ab_parallel`** — split one A/B matchup's games into even
   chunks across cwd-isolated Forge profiles, run concurrently (capped at
   physical cores via `psutil`), and aggregate per-seat wins into one ABResult.

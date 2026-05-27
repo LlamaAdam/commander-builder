@@ -18,7 +18,7 @@ REOPENED** under the margin-regression framing now that 40-game soak
 rows supply a negative class — curation is empirically ~neutral across
 two designs (A/B + unconfounded gauntlet); no feature survives
 cross-validation. See Parked plans +
-[docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md). 130+
+[docs/future-plans.md](docs/future-plans.md). 130+
 commits on `feature/2026-04-28-session` ahead of `master`.
 
 ---
@@ -287,7 +287,7 @@ be worked. Sized for a single session each.
     **no feature survives cross-validation** (the A/B `wincon_protection`
     hit did not replicate in the gauntlet). Not yet a shippable model —
     needs ~80+ unique decks. See Parked plans +
-    [docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md).
+    [docs/future-plans.md](docs/future-plans.md).
 
 12. ~~**Concurrent Forge sims (FP-003).**~~ ✅ **Shipped** (2026-05-22,
     `0f8f945`). `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims
@@ -340,7 +340,7 @@ scaffolding are documented in the memo.
 `ml_dataset.py` ready (25 features, deck-level train/eval split, no
 leakage). **Status: REOPENED under the margin-regression framing
 (2026-05-26); first result in — see
-[docs/fp002-margin-analysis.md](docs/fp002-margin-analysis.md).**
+[docs/future-plans.md](docs/future-plans.md).**
 
 The original *kept-vs-reverted classifier* was concluded NOT VIABLE on
 2026-05-22 because, after the A/B win-attribution fix (`e8777b6`), the
@@ -379,7 +379,7 @@ curating. Covered by `tests/test_margin_analysis.py` (18 tests).
 out-of-sample predictor on the cross-validated `deficit_total` signal —
 acquire/curate ~30 more commanders, then a 40-game gauntlet soak
 (~12–18h on box1). Pipeline + commands in
-[docs/fp002-deckgen-plan.md](docs/fp002-deckgen-plan.md). Separately, the
+[docs/future-plans.md](docs/future-plans.md). Separately, the
 low-N noise problem this analysis exposed is now **fixed at the source**:
 A/B verdicts below 20 decisive games record as `inconclusive`, not a
 confident kept/reverted (`_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT`).
@@ -410,7 +410,7 @@ Single web/desktop program consolidating deck testing + card reference
 + rules + library + replays. ~6–10 weeks. **Status: STARTED 2026-05-26
 (incremental).** The FP-006 gate ("web app works for a full cycle via
 browser") is met — verified end-to-end in Chrome this session. Plan +
-slice breakdown in [docs/fp007-plan.md](docs/fp007-plan.md); the
+slice breakdown in [docs/future-plans.md](docs/future-plans.md); the
 substrate is ~80% built (web shell, `oracle_store`, `mtg_cards/`,
 combo/rules), so this is navigation + a shared card-reference surface,
 not a rewrite. **Next concrete build: slice 1 — card-reference panel**
@@ -432,7 +432,7 @@ CommanderBuilder.exe`, Flask assets bundled). `commander_builder/desktop.py`
 + `packaging/commander-builder.spec` + `scripts/build_desktop.py`;
 `[desktop]` extra + `commander-builder-desktop` entry; 6 tests. Forge/JRE/
 `mtg_cards/` external (too big) — first-run downloader is the next slice.
-See [docs/fp010-plan.md](docs/fp010-plan.md).
+See [docs/future-plans.md](docs/future-plans.md).
 
 Remaining slices: first-run Forge/JRE/`mtg_cards` downloader, deck-dir
 picker, app icon + single-instance + graceful shutdown, installer, and a
