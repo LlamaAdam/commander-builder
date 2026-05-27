@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .forge_runner import VENDOR_FORGE
+from .intent import Intent, intent_protect_cards, learn_intent
 
 # Default Commander deck directory — mirrors compare_versions.DECK_DIR /
 # doctor.DECK_DIR so ``--deck <id>`` resolves against the same place the
@@ -88,8 +89,23 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
     the round inherits the full pipeline. Never raises — pipeline
     failures land as ``verdict='error'`` so the loop can decide whether
     to stop.
+
+    Intent integration (Slice A)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    When ``args.intent`` is an ``Intent`` object, its ``key_wincons``
+    are appended to the ``--protect`` list passed to auto-curate, so
+    the curator cannot cut the deck's identity pieces.  The intent's
+    ``themes`` are passed as ``--intent-themes`` to auto-curate if
+    that flag is supported; auto-curate ignores unknown flags, so this
+    is forward-compatible.
     """
     from ._proposer_cli import auto_curate_main
+
+    # Merge intent-derived protect cards with any CLI-specified ones.
+    # intent_protect_cards returns [] when args.intent is None/missing.
+    intent: Optional[Intent] = getattr(args, "intent", None)
+    protect_cards = list(getattr(args, "protect", []) or [])
+    protect_cards += intent_protect_cards(intent)
 
     argv: list[str] = [
         str(deck_path),
@@ -106,7 +122,7 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
         argv += ["--sim-fillers", args.sim_fillers]
     if args.db_path:
         argv += ["--db-path", args.db_path]
-    for card in args.protect:
+    for card in protect_cards:
         argv += ["--protect", card]
     if args.protect_from:
         argv += ["--protect-from", args.protect_from]
@@ -225,6 +241,23 @@ def run_improve_loop(
     )
 
 
+def _print_intent(intent: Intent) -> None:
+    """Human-readable one-liner for the learned intent."""
+    parts = [f"archetype={intent.archetype}"]
+    if intent.themes:
+        parts.append(f"themes={','.join(intent.themes)}")
+    if intent.tribal_type:
+        parts.append(f"tribal={intent.tribal_type}")
+    if intent.color_identity:
+        parts.append(f"colors={''.join(intent.color_identity)}")
+    if intent.key_wincons:
+        wc_preview = ", ".join(intent.key_wincons[:3])
+        if len(intent.key_wincons) > 3:
+            wc_preview += f" +{len(intent.key_wincons) - 3} more"
+        parts.append(f"wincons=[{wc_preview}]")
+    print(f"[improve] intent: {'; '.join(parts)}", flush=True)
+
+
 def _print_summary(result: ImproveResult) -> None:
     """Human-readable run summary."""
     print()
@@ -238,7 +271,7 @@ def _print_summary(result: ImproveResult) -> None:
     )
     print()
     for rr in result.history:
-        marker = "✓" if rr.advanced else " "
+        marker = "+" if rr.advanced else " "
         wr = ""
         if rr.win_rate_old is not None and rr.win_rate_new is not None:
             wr = f"  old={rr.win_rate_old:.0%} new={rr.win_rate_new:.0%} (Δ{rr.margin:+d})"
@@ -439,16 +472,26 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--strategy", choices=["greedy", "bandit"], default="greedy",
                    help="Search strategy (default greedy). 'bandit' selects "
                         "individual swaps via a multi-armed-bandit policy.")
-    p.add_argument("--bandit-policy", choices=["epsilon_greedy", "ucb1"],
+    p.add_argument("--bandit-policy", choices=["epsilon_greedy", "ucb1", "thompson"],
                    default="ucb1",
                    help="Bandit arm-selection policy (default ucb1). Only "
-                        "used with --strategy bandit.")
+                        "used with --strategy bandit. 'thompson' uses "
+                        "Thompson sampling (Gaussian posterior per arm).")
     p.add_argument("--epsilon", type=float, default=0.2,
                    help="Exploration rate for --bandit-policy epsilon_greedy "
                         "(default 0.2).")
     p.add_argument("--ucb-c", type=float, default=1.4,
                    help="Exploration constant for --bandit-policy ucb1 "
                         "(default 1.4).")
+    # Intent learning (FP-012 Slice A).
+    p.add_argument("--learn-intent", dest="learn_intent_path",
+                   type=Path, default=None, metavar="DCK",
+                   help="Path to a .dck file whose intent (archetype, themes, "
+                        "key win-cons) is learned before the improve loop "
+                        "starts. The intent's key win-cons are added to the "
+                        "protected-card list (auto-protect) and its themes "
+                        "serve as a soft bias on candidate adds. Intent is "
+                        "advisory: the win-margin objective remains primary.")
     args = p.parse_args(argv)
 
     # Exactly one of {positional path, --deck id} must be supplied.
@@ -489,8 +532,28 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
 
     deck_id = deck_path.stem
 
+    # Intent learning (Slice A): learn the deck's intent before the loop.
+    # Defaults to None when --learn-intent is not supplied.
+    args.intent: Optional[Intent] = None
+    if args.learn_intent_path is not None:
+        intent_src = args.learn_intent_path.resolve()
+        if not intent_src.exists():
+            print(f"ERROR: --learn-intent deck not found: {intent_src}", flush=True)
+            return 2
+        if not args.json:
+            print(f"[improve] learning intent from {intent_src.name} ...", flush=True)
+        try:
+            args.intent = learn_intent(intent_src)
+            if not args.json:
+                _print_intent(args.intent)
+        except Exception as exc:  # noqa: BLE001 — intent is advisory
+            if not args.json:
+                print(f"[improve] intent learning failed ({exc}); "
+                      "proceeding without intent.", flush=True)
+            args.intent = None
+
     if not args.json:
-        print(f"[improve] {deck_id} (B{args.bracket}) — strategy={args.strategy}, "
+        print(f"[improve] {deck_id} (B{args.bracket}) -- strategy={args.strategy}, "
               f"up to {args.rounds} rounds, mode={args.mode}, "
               f"{args.sim_games} games/round", flush=True)
 
