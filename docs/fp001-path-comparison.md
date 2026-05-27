@@ -72,3 +72,66 @@ experiment has answered the underlying question.
 upstream repo + license + build; locate the AI decision entry points; identify
 where a seam goes; check for an existing AI/sim hook; produce a real effort
 number). Memo only, no commitment -- mirrors how the original A3 spike was run.
+
+---
+
+# Path-B scoping spike -- result (2026-05-27)
+
+**Verdict: GO on Path B as the experiment** (freeze a Forge fork on 2.0.12).
+The decision seam is real, clean, and localized; the build is standard; the
+correlation question disappears. Read-only research only -- no fork, no build.
+
+## Findings
+
+- **Upstream + license confirmed.** Our vendored `forge-gui-desktop-2.0.12`
+  (`vendor/forge/`) is mainline [Card-Forge/forge](https://github.com/Card-Forge/forge)
+  -- GPL, Maven build (`mvn -U -B clean -P windows-linux install`), modular
+  (`forge-core` / `forge-game` / `forge-ai` / `forge-gui-desktop`). `2.0.12` is a
+  current upstream version, so a fork bases cleanly on the matching tag. GPL is
+  fine for internal/experimental use; only *redistributing* a modified JAR
+  carries source-sharing obligations (we wouldn't).
+- **The seam already exists in Forge source.** `forge.game.player.PlayerController`
+  is an abstract policy class with two shipped subclasses confirmed in the fat
+  jar (23,259 classes inspected): `forge.ai.PlayerControllerAi` (stock AI) and
+  `forge.player.PlayerControllerHuman` (GUI). A third `PlayerControllerLLM` is
+  exactly the Agent/Policy seam the original spike wanted -- it's present at the
+  *source* level; the CLI just doesn't expose it. (The memo's "no seam" was true
+  only of the subprocess interface.)
+- **Headless AI-vs-AI sim already exists** (`sim` mode -- what `forge_runner`
+  already drives). Injection point: the one spot where sim setup instantiates
+  `PlayerControllerAi` per seat -- assign `PlayerControllerLLM` to one seat. A
+  small, localized source change, not a rewrite.
+- **Minimal-surface trick (de-risks the 60+-method API).** `PlayerController`
+  declares ~60+ abstract decision methods (`chooseSpellAbilityToPlay`,
+  `getAbilityToPlay`, `declareAttackers`, `declareBlockers`, `chooseTargetsFor`,
+  `mulliganKeepHand`, plus ~30 chooseX). To keep games valid we **extend
+  `PlayerControllerAi` and override only the 2-3 high-leverage methods**
+  (`declareAttackers` + which-spell-to-play), delegating everything else to
+  `super` (stock AI). One open build-time check: confirm those methods aren't
+  `final`.
+- **Java<->Python bridge is cheap.** `PlayerControllerLLM` (Java) serializes the
+  local game state and POSTs to a localhost Python sidecar that wraps our
+  existing `analyst.py` LLM client, returning the chosen decision. Reuses the
+  whole built harness (`run_ab_*`, `forge_py_correlation`, Pearson gate).
+- **Precedent.** [LearnForge](https://github.com/thesilencelies/LearnForge) (an
+  RL AI built on Forge) modifies Forge source via Maven -- the fork-and-subclass
+  route is the established way to drive Forge's decisions, not a network hack.
+  (Forge also has a `forge.gamemodes.net` RemoteClient path and a
+  `forge.ai.simulation.*` lookahead subsystem; neither is needed here, but the
+  net path is a fallback if subclassing proves awkward.)
+
+## Effort to first real number (Pearson r + win-rate delta)
+
+| Step | Estimate | Risk |
+|------|----------|------|
+| Maven build of 2.0.12 from source; run a headless sim from the build | 0.5-1.5 d | first green build is the main friction |
+| Map `PlayerController` API; pick override points + delegate-to-`super` | ~1 d | confirm targets aren't `final` |
+| `PlayerControllerLLM` + the one-spot controller-assignment patch | 1-2 d | low |
+| Java->Python LLM sidecar over `analyst.py` | ~1 d | low (pattern exists) |
+| Emit results into `forge_py_correlation` log; run >=30 paired games (Ollama free first, then a Claude batch) | 0.5-1 d + machine | cost guardrail already specced ($3-30/30 games) |
+| **Total** | **~1-1.5 weeks** to a measured delta | **correlation risk = zero** (it *is* Forge) |
+
+Compare Path A: weeks-to-months *and* an unproven correlation milestone before
+any LLM-pilot number exists. **Path B reaches a trustworthy answer ~5-10x
+faster.** Recommend: build the frozen-fork experiment, get the delta, and only
+fund Path A's native-engine work if the delta proves worth having natively.
