@@ -3,7 +3,7 @@
 A one-click way to grab all of your public Moxfield decks and feed them
 into commander-builder's existing `Bulk URLs` import tab. Avoids the
 need for a server-side user-listing endpoint (Moxfield's public API
-doesn't expose deck listings by username — see [HANDOFF_2026-05-19.md][1]).
+doesn't expose deck listings by username — see [HANDOFF.md][1]).
 
 ## What it does
 
@@ -105,4 +105,4 @@ The bookmarklet runs in your browser's authenticated session against
 already-rendered DOM, sidestepping all of that. CORS-free, no API key,
 no server-side scraping infrastructure.
 
-[1]: HANDOFF_2026-05-19.md
+[1]: HANDOFF.md

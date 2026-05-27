@@ -2,7 +2,7 @@
 
 > Single technical reference for the project: module map, data flow,
 > persistence, coding conventions, and the decisions that shaped them.
-> [STATUS.md](../STATUS.md) tracks operational state; [CHANGELOG.md](../CHANGELOG.md)
+> [STATUS.md](STATUS.md) tracks operational state; [CHANGELOG.md](CHANGELOG.md)
 > records what landed.
 
 ---
@@ -591,7 +591,7 @@ All MTG-stack repos are public on GitHub. Before every commit:
 ## Key decisions (rationale captured at the time)
 
 For *recent* decisions (last few days) see
-[STATUS.md](../STATUS.md#decisions-recently-made-recent-context). Older
+[STATUS.md](STATUS.md#decisions-recently-made-recent-context). Older
 load-bearing decisions:
 
 - **Python over Node.js.** Better stdlib subprocess management for

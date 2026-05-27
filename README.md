@@ -15,8 +15,8 @@ ground-truth simulation and an LLM (Claude or local Ollama) acts as the
 analyst that reads sim deltas and decides what to try next.
 
 **Source-of-truth docs:**
-- [STATUS.md](STATUS.md) — current state, open backlog, parked plans
-- [CHANGELOG.md](CHANGELOG.md) — what landed, in reverse chronological order
+- [STATUS.md](docs/STATUS.md) — current state, open backlog, parked plans
+- [CHANGELOG.md](docs/CHANGELOG.md) — what landed, in reverse chronological order
 - [docs/architecture.md](docs/architecture.md) — module map, data flow,
   conventions, working principles
 
@@ -174,7 +174,7 @@ bulk + per-card snapshots + Magic Comp Rules). Both projects read via
 
 ## Where to start when picking this up cold
 
-1. `STATUS.md` — current state, open backlog, parked plans
+1. `docs/STATUS.md` — current state, open backlog, parked plans
 2. `docs/architecture.md` — how the pieces fit
 3. `python -m pytest tests/` — confirm the suite is green
 4. `git log --oneline -10` — what landed most recently

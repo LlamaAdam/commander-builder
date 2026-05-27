@@ -6,7 +6,7 @@
 > **Three sections** — *State of the tree* (right now), *Open backlog*
 > (next work, ranked), *Parked plans* (deliberately deferred). History
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
-> conventions live in [docs/architecture.md](docs/architecture.md).
+> conventions live in [docs/architecture.md](architecture.md).
 
 **Last updated:** 2026-05-26 (FP-002 reopened — margin regression on
 40-game soak rows; first result in)
@@ -18,7 +18,7 @@ REOPENED** under the margin-regression framing now that 40-game soak
 rows supply a negative class — curation is empirically ~neutral across
 two designs (A/B + unconfounded gauntlet); no feature survives
 cross-validation. See Parked plans +
-[docs/future-plans.md](docs/future-plans.md). 130+
+[docs/future-plans.md](future-plans.md). 130+
 commits on `feature/2026-04-28-session` ahead of `master`.
 
 ---
@@ -157,7 +157,7 @@ be worked. Sized for a single session each.
 
 - ~~**A3. FP-001 bounded spike — LLM-piloted Forge AI (time-boxed).**~~
   ✅ **Memo delivered 2026-05-22 — verdict NO-GO (as scoped) / GO
-  redirected + gated.** See [docs/fp001-llm-pilot-spike.md](docs/fp001-llm-pilot-spike.md).
+  redirected + gated.** See [docs/fp001-llm-pilot-spike.md](fp001-llm-pilot-spike.md).
   Finding: you **cannot** pilot Forge 2.0.12's AI with an LLM — it's a
   vendored compiled JAR run as a fire-and-forget subprocess with no
   decision-injection seam (only read-stdout / kill-process), and there's
@@ -287,7 +287,7 @@ be worked. Sized for a single session each.
     **no feature survives cross-validation** (the A/B `wincon_protection`
     hit did not replicate in the gauntlet). Not yet a shippable model —
     needs ~80+ unique decks. See Parked plans +
-    [docs/future-plans.md](docs/future-plans.md).
+    [docs/future-plans.md](future-plans.md).
 
 12. ~~**Concurrent Forge sims (FP-003).**~~ ✅ **Shipped** (2026-05-22,
     `0f8f945`). `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims
@@ -323,7 +323,7 @@ spec. Token cost: ~$0.10–$1.00 per game.
 **Status: PARKED.** The wrapper we've built IS the streamlined Python
 interface. Highest-leverage move toward "fewer draws / better signal" is
 Claude/Ollama-piloted Forge AI, not a new engine. The **bounded go/no-go
-spike ran 2026-05-22** ([docs/fp001-llm-pilot-spike.md](docs/fp001-llm-pilot-spike.md)):
+spike ran 2026-05-22** ([docs/fp001-llm-pilot-spike.md](fp001-llm-pilot-spike.md)):
 **verdict NO-GO as scoped** — Forge 2.0.12 is an unpilotable compiled-JAR
 black box (no decision-injection seam; no source), so the LLM-pilot idea
 can't host on Forge at all. It's **redirected to `forge_py`** (Python
@@ -340,7 +340,7 @@ scaffolding are documented in the memo.
 `ml_dataset.py` ready (25 features, deck-level train/eval split, no
 leakage). **Status: REOPENED under the margin-regression framing
 (2026-05-26); first result in — see
-[docs/future-plans.md](docs/future-plans.md).**
+[docs/future-plans.md](future-plans.md).**
 
 The original *kept-vs-reverted classifier* was concluded NOT VIABLE on
 2026-05-22 because, after the A/B win-attribution fix (`e8777b6`), the
@@ -379,7 +379,7 @@ curating. Covered by `tests/test_margin_analysis.py` (18 tests).
 out-of-sample predictor on the cross-validated `deficit_total` signal —
 acquire/curate ~30 more commanders, then a 40-game gauntlet soak
 (~12–18h on box1). Pipeline + commands in
-[docs/future-plans.md](docs/future-plans.md). Separately, the
+[docs/future-plans.md](future-plans.md). Separately, the
 low-N noise problem this analysis exposed is now **fixed at the source**:
 A/B verdicts below 20 decisive games record as `inconclusive`, not a
 confident kept/reverted (`_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT`).
@@ -410,7 +410,7 @@ Single web/desktop program consolidating deck testing + card reference
 + rules + library + replays. ~6–10 weeks. **Status: STARTED 2026-05-26
 (incremental).** The FP-006 gate ("web app works for a full cycle via
 browser") is met — verified end-to-end in Chrome this session. Plan +
-slice breakdown in [docs/future-plans.md](docs/future-plans.md); the
+slice breakdown in [docs/future-plans.md](future-plans.md); the
 substrate is ~80% built (web shell, `oracle_store`, `mtg_cards/`,
 combo/rules), so this is navigation + a shared card-reference surface,
 not a rewrite. **Next concrete build: slice 1 — card-reference panel**
@@ -432,7 +432,7 @@ CommanderBuilder.exe`, Flask assets bundled). `commander_builder/desktop.py`
 + `packaging/commander-builder.spec` + `scripts/build_desktop.py`;
 `[desktop]` extra + `commander-builder-desktop` entry; 6 tests. Forge/JRE/
 `mtg_cards/` external (too big) — first-run downloader is the next slice.
-See [docs/future-plans.md](docs/future-plans.md).
+See [docs/future-plans.md](future-plans.md).
 
 Remaining slices: first-run Forge/JRE/`mtg_cards` downloader, deck-dir
 picker, app icon + single-instance + graceful shutdown, installer, and a
@@ -484,7 +484,7 @@ iteration rows; realistic timeline 18–30 months out.
 
 ## Decisions recently made (recent context)
 
-For older decisions see [docs/architecture.md](docs/architecture.md#key-decisions).
+For older decisions see [docs/architecture.md](architecture.md#key-decisions).
 
 - **2026-05-14 — Synthetic test text is insufficient.** The chrome-
   audit follow-up caught 9 classifier bugs that all passed
