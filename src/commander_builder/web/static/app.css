@@ -534,3 +534,8 @@ body {
 .verdict.pending  { background: var(--panel-2); color: var(--muted); }
 .iteration .name { font-size: 14px; }
 .iteration .delta { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+
+/* #013 two-version card diff */
+.version-compare .diff-added h4   { color: var(--good); }
+.version-compare .diff-removed h4 { color: var(--bad); }
+.version-compare .diff-card-list { list-style: square; color: var(--text, #ddd); }

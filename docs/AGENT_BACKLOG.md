@@ -34,7 +34,7 @@ Last refresh: 2026-05-19 at commit `f6f3603` (post-handoff doc).
 | [#010](#010-refresh-card-lists-auto-suggestion-for-self-mill) | MEDIUM | done | ~2h | `refresh_card_lists.py`: auto-suggest self-mill candidates from oracle text |
 | [#011](#011--batch-mode-for-commander-auto-curate) | MEDIUM | done | ~3h | Auto-curate batch mode for overnight library runs |
 | [#012](#012-knowledge-log-milestone-tag) | LOW | done | ~2h | knowledge_log: `milestone` column + PATCH endpoint + ⚑ graph glyph (UI flag landed 2026-05-22) |
-| [#013](#013-two-version-audit-diff-ui) | LOW | open | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
+| [#013](#013-two-version-audit-diff-ui) | LOW | done | ~4h | Two-version audit diff UI (v1 vs v2 side-by-side) |
 | [#014](#014-tier-29-oracle-text-card-reference-store) | LOW | done | ~4h | Tier 2.9: oracle-text-first card-reference store (FP-009) |
 | [#015](#015-fp-001--fp-002--fp-004--fp-011) | — | parked | — | FP-001 / FP-002 / FP-004 / FP-011 (see STATUS.md) |
 | [#016](#016-concurrent-forge-sims-fp-003) | MEDIUM | done | ~3-4h | FP-003: concurrent Forge sims (gated on #011) |
@@ -554,26 +554,35 @@ adding them inline per the policy in [§ How to use this file](#how-to-use-this-
 
 ## #013 — Two-version audit diff UI
 
-- **status**: `open`
+- **status**: `done` (2026-05-26) — design call resolved with the
+  operator: **scope = card delta only** (added / removed / unchanged
+  cards), **selection UX = two-picker in the iteration-history panel**
+  (pick any two rows → render the delta side-by-side). Role/health
+  deltas deferred (not requested).
 - **priority**: LOW
 - **scope**: ~4h
-- **do_not_pick_without_human**: true (UX design call)
+- **do_not_pick_without_human**: true (UX design call) — satisfied by
+  the operator's design answers before build.
 - **files**:
-  - `src/commander_builder/web/routes_dashboard.py` (new endpoint
-    `GET /api/audit_diff?from_id=&to_id=`)
-  - `src/commander_builder/web/static/app.js` (new view; lots of
-    rendering work)
-  - `tests/test_web_app.py`
+  - `src/commander_builder/knowledge_log.py` — `audit_card_diff()` +
+    `_parse_main_cards()` (pure, snapshot-only card-delta logic).
+  - `src/commander_builder/web/routes_dashboard.py` — endpoint
+    `GET /api/audit_diff?from_id=&to_id=` → `{from, to, diff}`.
+  - `src/commander_builder/web/static/app.js` — `renderVersionCompare()`
+    two-picker compare UI in the iteration-history panel (shown when
+    ≥2 iterations exist).
+  - `src/commander_builder/web/static/app.css` — added/removed colors.
+  - `tests/test_web_app.py` — 5 tests (pure diff logic + route
+    200/400/404).
 - **context**: today the iteration history is a linear list. You
   can see what changed between v1 → v2 (the manifest captures
   applied_adds/cuts) but you can't compare two distant versions
   side-by-side.
-- **why human first**: this is real UX work. Best done after a
-  conversation about what "diff" means here (card delta? role
-  composition delta? deck-health delta? all three?). The
-  acceptance_criteria below is a placeholder.
 - **acceptance_criteria**:
-  - [ ] (TBD post-design)
+  - [x] Pick any two iteration versions and see the card delta
+    (added / removed / unchanged + from/to totals).
+  - [x] Backend delta is pure + unit-tested (no DB/web needed).
+  - [x] Endpoint returns 400 on missing ids, 404 on unknown iteration.
 
 ---
 

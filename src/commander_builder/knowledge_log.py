@@ -259,8 +259,8 @@ def update_verdict(
     db_path: Path = DEFAULT_DB_PATH,
 ) -> None:
     """Mark an iteration's verdict (Phase 2 analyst writes this after sim)."""
-    if verdict not in {"kept", "reverted", "neutral", "pending"}:
-        raise ValueError(f"verdict must be one of kept/reverted/neutral/pending, got {verdict!r}")
+    if verdict not in {"kept", "reverted", "neutral", "inconclusive", "pending"}:
+        raise ValueError(f"verdict must be one of kept/reverted/neutral/inconclusive/pending, got {verdict!r}")
     with _connect(db_path) as conn:
         conn.execute(
             "UPDATE iterations SET verdict = ?, verdict_notes = ? WHERE id = ?",
@@ -295,9 +295,9 @@ def update_iteration_sim(
     (SQLite COALESCE-style update; we just skip those fields in
     the SET clause).
     """
-    if verdict not in {"kept", "reverted", "neutral", "pending"}:
+    if verdict not in {"kept", "reverted", "neutral", "inconclusive", "pending"}:
         raise ValueError(
-            f"verdict must be one of kept/reverted/neutral/pending, "
+            f"verdict must be one of kept/reverted/neutral/inconclusive/pending, "
             f"got {verdict!r}"
         )
     set_clauses = ["verdict = ?"]
@@ -514,8 +514,8 @@ def verdict_breakdown_for_deck(
         for row in cur.fetchall():
             key = row["audit_version"] or "unknown"
             bucket = out.setdefault(key, {
-                "kept": 0, "reverted": 0,
-                "neutral": 0, "pending": 0, "total": 0,
+                "kept": 0, "reverted": 0, "neutral": 0,
+                "inconclusive": 0, "pending": 0, "total": 0,
             })
             verdict = row["verdict"] or "pending"
             if verdict in bucket:
@@ -579,6 +579,74 @@ def _count_main_cards(deck_snapshot: Optional[str]) -> int:
                 except (TypeError, ValueError):
                     total += 1
     return total
+
+
+def _parse_main_cards(deck_snapshot: Optional[str]) -> dict:
+    """Parse a .dck snapshot's [Main] section into {card_name: quantity}.
+
+    Card names are normalized to their base name (the bit before any `|set|n`
+    suffix), so the same card across two snapshots compares equal regardless
+    of printing. Quantities are summed. Non-[Main] sections are ignored, to
+    match `_count_main_cards`."""
+    cards: dict = {}
+    if not deck_snapshot:
+        return cards
+    in_main = False
+    for raw in deck_snapshot.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_main = stripped.lower() == "[main]"
+            continue
+        if not in_main:
+            continue
+        m = _MAIN_LINE_RE.match(stripped)
+        if not m:
+            continue
+        try:
+            qty = int(m.group(1))
+        except (TypeError, ValueError):
+            qty = 1
+        name = m.group(2).strip()
+        if name:
+            cards[name] = cards.get(name, 0) + qty
+    return cards
+
+
+def audit_card_diff(from_snapshot: Optional[str], to_snapshot: Optional[str]) -> dict:
+    """Card-level delta between two .dck snapshots (#013 audit diff).
+
+    Compares the [Main] sections as quantity-maps and returns::
+
+        {"added":   [{"name", "qty"}, ...],   # net-added (to has more)
+         "removed": [{"name", "qty"}, ...],   # net-removed (from had more)
+         "unchanged": <int>,                  # cards with identical quantity
+         "from_total": <int>, "to_total": <int>}
+
+    `qty` is the magnitude of the change (e.g. a 1->3 basic-land bump is
+    `added qty=2`). Added/removed are sorted by name. Pure + snapshot-only,
+    so it's safe to unit-test without the DB or web layer."""
+    a = _parse_main_cards(from_snapshot)
+    b = _parse_main_cards(to_snapshot)
+    added, removed, unchanged = [], [], 0
+    for name in set(a) | set(b):
+        delta = b.get(name, 0) - a.get(name, 0)
+        if delta > 0:
+            added.append({"name": name, "qty": delta})
+        elif delta < 0:
+            removed.append({"name": name, "qty": -delta})
+        else:
+            unchanged += 1
+    added.sort(key=lambda c: c["name"].lower())
+    removed.sort(key=lambda c: c["name"].lower())
+    return {
+        "added": added,
+        "removed": removed,
+        "unchanged": unchanged,
+        "from_total": sum(a.values()),
+        "to_total": sum(b.values()),
+    }
 
 
 def _node_price_from_manifest(manifest: Optional[dict]) -> Optional[float]:

@@ -28,6 +28,8 @@ from flask import Blueprint, current_app, jsonify, request
 
 from ..deck_dashboard import build_dashboard
 from ..knowledge_log import (
+    audit_card_diff,
+    get_iteration,
     iteration_graph_for_deck,
     iterations_for_deck,
     pricing_series_for_deck,
@@ -236,7 +238,7 @@ def make_dashboard_blueprint(
             **graph,
         })
 
-    _VALID_VERDICTS = {"kept", "reverted", "neutral", "pending"}
+    _VALID_VERDICTS = {"kept", "reverted", "neutral", "inconclusive", "pending"}
 
     @bp.route("/api/iterations/<int:iteration_id>/verdict", methods=["PATCH"])
     def update_iteration_verdict(iteration_id: int):
@@ -266,7 +268,7 @@ def make_dashboard_blueprint(
         verdict = body.get("verdict")
         if not isinstance(verdict, str) or verdict not in _VALID_VERDICTS:
             return jsonify({
-                "error": "verdict must be one of kept/reverted/neutral/pending",
+                "error": "verdict must be one of kept/reverted/neutral/inconclusive/pending",
             }), 400
         notes = body.get("notes")
         if notes is not None and not isinstance(notes, str):
@@ -351,6 +353,43 @@ def make_dashboard_blueprint(
             "deck_id": deck_id,
             "total_iterations": total,
             "breakdown": breakdown,
+        })
+
+    @bp.route("/api/audit_diff")
+    def audit_diff_route():
+        """Card-level delta between two iteration versions (#013).
+
+        ``GET /api/audit_diff?from_id=&to_id=`` -> ``{from, to, diff}`` where
+        ``diff`` is added / removed / unchanged cards between the two
+        snapshots' [Main] sections (see ``audit_card_diff``). Powers the
+        compare-two-versions view in the iteration-history panel.
+        """
+        def _meta(it):
+            return {
+                "id": it.id,
+                "deck_id": it.deck_id,
+                "audit_version": it.audit_version,
+                "verdict": it.verdict,
+                "milestone": it.milestone,
+                "created_at": it.created_at,
+            }
+
+        try:
+            from_id = int(request.args["from_id"])
+            to_id = int(request.args["to_id"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "from_id and to_id are required integers"}), 400
+
+        a = get_iteration(from_id, db_path=knowledge_db)
+        b = get_iteration(to_id, db_path=knowledge_db)
+        missing = [str(i) for i, it in ((from_id, a), (to_id, b)) if it is None]
+        if missing:
+            return jsonify({"error": f"iteration(s) not found: {', '.join(missing)}"}), 404
+
+        return jsonify({
+            "from": _meta(a),
+            "to": _meta(b),
+            "diff": audit_card_diff(a.deck_snapshot, b.deck_snapshot),
         })
 
     return bp

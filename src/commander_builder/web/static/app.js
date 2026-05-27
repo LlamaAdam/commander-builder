@@ -476,14 +476,20 @@ function renderSaveIterationBlock(body) {
   // Verdict radios.
   const fs = el("fieldset", { class: "games-radio" });
   fs.appendChild(el("legend", {}, "Verdict:"));
+  // Below ~20 decisive games the result is below the noise floor, so the
+  // default verdict is "inconclusive" regardless of who edged ahead — a 3-2
+  // isn't a kept. At a trustworthy sample size, default to the winner.
+  const _decisive = (body.old_wins || 0) + (body.new_wins || 0);
   const defaultVerdict =
-    body.winner === "new" ? "kept"
+    _decisive < 20 ? "inconclusive"
+    : body.winner === "new" ? "kept"
     : body.winner === "old" ? "reverted"
     : "neutral";
   for (const [val, label] of [
     ["kept", "Kept (apply changes)"],
     ["reverted", "Reverted (discard)"],
-    ["neutral", "Neutral (inconclusive)"],
+    ["neutral", "Neutral (true tie)"],
+    ["inconclusive", "Inconclusive (too few games)"],
     ["pending", "Pending (decide later)"],
   ]) {
     const lbl = el("label");
@@ -1687,6 +1693,112 @@ function renderAuditResult(container, body) {
 }
 
 
+// Two-version card-diff compare UI (#013). Two pickers over the deck's
+// iteration history; "Compare" fetches /api/audit_diff and renders the
+// added / removed / unchanged card delta between the chosen versions.
+function renderVersionCompare(iterations) {
+  const wrap = el("div", {
+    class: "version-compare",
+    style: "margin-top: 12px; border-top: 1px solid var(--border, #2a2a2a); padding-top: 10px;",
+  });
+  wrap.appendChild(el("p", {
+    class: "muted",
+    style: "margin: 0 0 6px; font-size: 12px;",
+  }, "Compare two versions — card delta"));
+
+  const label = (it) => {
+    const ver = it.audit_version || `#${it.id}`;
+    const verdict = it.verdict ? ` · ${it.verdict}` : "";
+    const flag = it.milestone ? " ★" : "";
+    return `${ver}${flag} — ${it.deck_name || ("#" + it.id)}${verdict}`;
+  };
+  const mkSelect = (selectedIdx) => {
+    const sel = el("select", {
+      class: "version-compare-pick",
+      style: "max-width: 46%; font-size: 12px; padding: 3px 4px;",
+    });
+    iterations.forEach((it, i) => {
+      const opt = el("option", { value: String(it.id) }, label(it));
+      if (i === selectedIdx) opt.setAttribute("selected", "selected");
+      sel.appendChild(opt);
+    });
+    return sel;
+  };
+
+  // Default: oldest -> newest. iterations may arrive newest- or
+  // oldest-first; either way the two extremes are the useful default.
+  const fromSel = mkSelect(0);
+  const toSel = mkSelect(iterations.length - 1);
+
+  const controls = el("div", {
+    style: "display: flex; gap: 6px; align-items: center; flex-wrap: wrap;",
+  });
+  controls.appendChild(fromSel);
+  controls.appendChild(el("span", { class: "muted", style: "font-size: 12px;" }, "→"));
+  controls.appendChild(toSel);
+  const compareBtn = el("button", {
+    class: "advise-btn",
+    style: "font-size: 12px; padding: 4px 10px;",
+  }, "Compare");
+  controls.appendChild(compareBtn);
+  wrap.appendChild(controls);
+
+  const result = el("div", { style: "margin-top: 10px;" });
+  wrap.appendChild(result);
+
+  const cardList = (title, cards, cls) => {
+    const box = el("div", { class: `diff-col diff-${cls}`, style: "flex: 1; min-width: 0;" });
+    box.appendChild(el("h4", {
+      style: "margin: 0 0 4px; font-size: 12px;",
+    }, `${title} (${cards.length})`));
+    if (!cards.length) {
+      box.appendChild(el("p", { class: "muted", style: "font-size: 12px; margin: 0;" }, "—"));
+      return box;
+    }
+    const ul = el("ul", { class: "diff-card-list", style: "margin: 0; padding-left: 16px; font-size: 12px;" });
+    for (const c of cards) {
+      const qty = c.qty && c.qty > 1 ? `${c.qty}× ` : "";
+      ul.appendChild(el("li", {}, `${qty}${c.name}`));
+    }
+    box.appendChild(ul);
+    return box;
+  };
+
+  compareBtn.addEventListener("click", async () => {
+    const fromId = fromSel.value;
+    const toId = toSel.value;
+    result.innerHTML = "";
+    if (fromId === toId) {
+      result.appendChild(el("p", { class: "muted", style: "font-size: 12px;" },
+        "Pick two different versions to compare."));
+      return;
+    }
+    compareBtn.disabled = true;
+    compareBtn.textContent = "Comparing…";
+    try {
+      const data = await fetchJSON(
+        `/api/audit_diff?from_id=${encodeURIComponent(fromId)}&to_id=${encodeURIComponent(toId)}`,
+      );
+      const d = data.diff;
+      result.appendChild(el("p", {
+        class: "muted", style: "font-size: 12px; margin: 0 0 6px;",
+      }, `${d.from_total} cards → ${d.to_total} cards · ${d.unchanged} unchanged`));
+      const cols = el("div", { style: "display: flex; gap: 16px;" });
+      cols.appendChild(cardList("Added", d.added, "added"));
+      cols.appendChild(cardList("Removed", d.removed, "removed"));
+      result.appendChild(cols);
+    } catch (e) {
+      result.appendChild(el("p", { class: "muted", style: "font-size: 12px;" },
+        `Compare failed: ${e.message}`));
+    }
+    compareBtn.disabled = false;
+    compareBtn.textContent = "Compare";
+  });
+
+  return wrap;
+}
+
+
 function renderDashboard(data, iterations) {
   const dash = $("dashboard");
   dash.innerHTML = "";
@@ -1887,6 +1999,10 @@ function renderDashboard(data, iterations) {
       graphWrap.appendChild(toggleBtn);
       graphWrap.appendChild(graphContainer);
       histPanel.appendChild(graphWrap);
+
+      // Two-version card diff (#013). Pick any two iterations and render
+      // the added/removed/unchanged card delta side-by-side.
+      histPanel.appendChild(renderVersionCompare(iterations));
     }
     dash.appendChild(histPanel);
   }

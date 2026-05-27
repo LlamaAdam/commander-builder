@@ -651,7 +651,7 @@ def test_patch_verdict_rejects_unknown_value(seeded_client):
         json={"verdict": "approved"},
     )
     assert resp.status_code == 400
-    assert "kept/reverted/neutral/pending" in resp.get_json()["error"]
+    assert "kept/reverted/neutral/inconclusive/pending" in resp.get_json()["error"]
 
 
 def test_patch_verdict_rejects_missing_body(seeded_client):
@@ -4422,3 +4422,116 @@ def test_audit_payload_name_known_defaults_true_when_unset(client, monkeypatch):
     for entry in body["added"] + body["removed"]:
         assert entry.get("name_known", True) is True
     assert body["unknown_card_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #013 — two-version audit diff (card delta + /api/audit_diff route)
+# ---------------------------------------------------------------------------
+
+def test_audit_card_diff_pure_added_removed_unchanged():
+    """Pure card-delta logic: net add/remove/unchanged across two snapshots."""
+    from commander_builder.knowledge_log import audit_card_diff
+
+    a = (
+        "[Commander]\n1 Omnath\n\n"
+        "[Main]\n1 Forest\n1 Cultivate\n1 Lotus Cobra\n2 Island\n"
+    )
+    b = (
+        "[Commander]\n1 Omnath\n\n"
+        "[Main]\n1 Forest\n1 Tireless Tracker\n1 Lotus Cobra\n1 Island\n"
+    )
+    diff = audit_card_diff(a, b)
+
+    added = {c["name"]: c["qty"] for c in diff["added"]}
+    removed = {c["name"]: c["qty"] for c in diff["removed"]}
+    assert added == {"Tireless Tracker": 1}
+    assert removed == {"Cultivate": 1, "Island": 1}  # Island 2->1 is net -1
+    assert diff["unchanged"] == 2                      # Forest, Lotus Cobra
+    assert diff["from_total"] == 5 and diff["to_total"] == 4
+
+
+def test_audit_card_diff_ignores_non_main_sections_and_empty():
+    from commander_builder.knowledge_log import audit_card_diff
+
+    assert audit_card_diff(None, None) == {
+        "added": [], "removed": [], "unchanged": 0,
+        "from_total": 0, "to_total": 0,
+    }
+    # Commander-section differences must not leak into the Main delta.
+    a = "[Commander]\n1 Alpha\n\n[Main]\n1 Forest\n"
+    b = "[Commander]\n1 Beta\n\n[Main]\n1 Forest\n"
+    diff = audit_card_diff(a, b)
+    assert diff["added"] == [] and diff["removed"] == []
+    assert diff["unchanged"] == 1
+
+
+@pytest.fixture
+def diff_client(deck_dir, tmp_path, monkeypatch):
+    """Client backed by two iterations with *different* [Main] sections so
+    the diff endpoint has a real delta to render."""
+    from commander_builder.knowledge_log import Iteration, init_db, record_iteration
+
+    db = tmp_path / "diff_klog.sqlite"
+    init_db(db)
+
+    def _snap(name, *main_lines):
+        return (
+            "[metadata]\n" f"Name={name}\n\n"
+            "[Commander]\n1 Omnath, Locus of Creation\n\n"
+            "[Main]\n" + "".join(f"{ln}\n" for ln in main_lines)
+        )
+
+    v1 = Iteration(
+        deck_id="omnath", deck_name="Omnath v1", bracket=3,
+        audit_version="v1", verdict="pending", milestone=None,
+        deck_snapshot=_snap("Omnath v1", "1 Forest", "1 Cultivate", "2 Island"),
+    )
+    from_id = record_iteration(v1, db_path=db)
+
+    v2 = Iteration(
+        deck_id="omnath", deck_name="Omnath v2", bracket=3,
+        audit_version="v2", verdict="kept", milestone="champion",
+        parent_id=from_id,
+        deck_snapshot=_snap("Omnath v2", "1 Forest", "1 Lotus Cobra", "1 Island"),
+    )
+    to_id = record_iteration(v2, db_path=db)
+
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    client._diff_ids = (from_id, to_id)  # type: ignore[attr-defined]
+    return client
+
+
+def test_audit_diff_route_returns_card_delta(diff_client):
+    from_id, to_id = diff_client._diff_ids
+    resp = diff_client.get(f"/api/audit_diff?from_id={from_id}&to_id={to_id}")
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    assert body["from"]["id"] == from_id
+    assert body["to"]["id"] == to_id
+    assert body["from"]["audit_version"] == "v1"
+    assert body["to"]["verdict"] == "kept"
+    assert body["to"]["milestone"] == "champion"
+
+    diff = body["diff"]
+    added = {c["name"]: c["qty"] for c in diff["added"]}
+    removed = {c["name"]: c["qty"] for c in diff["removed"]}
+    assert added == {"Lotus Cobra": 1}
+    assert removed == {"Cultivate": 1, "Island": 1}
+    assert diff["unchanged"] == 1  # Forest
+
+
+def test_audit_diff_route_400_on_missing_ids(diff_client):
+    assert diff_client.get("/api/audit_diff").status_code == 400
+    assert diff_client.get("/api/audit_diff?from_id=1").status_code == 400
+    assert diff_client.get("/api/audit_diff?from_id=x&to_id=y").status_code == 400
+
+
+def test_audit_diff_route_404_on_unknown_iteration(diff_client):
+    from_id, _to_id = diff_client._diff_ids
+    resp = diff_client.get(f"/api/audit_diff?from_id={from_id}&to_id=999999")
+    assert resp.status_code == 404
+    assert "999999" in resp.get_json()["error"]
+
