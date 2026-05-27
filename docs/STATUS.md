@@ -340,6 +340,17 @@ is ~1–2 days (add an `LLMAgent` over `analyst.py` + a Pearson-r helper;
 run ≥30 paired games for r ≥ 0.90). Experiment design + reusable
 scaffolding are documented in the memo.
 
+**UPDATE 2026-05-27 — promoted to an ACTIVE experiment via Path B (fork
+Forge), not Path A (forge_py).** Scoping confirmed Forge's decision seam
+exists in source (`PlayerController` is abstract; subclass it), so a
+*frozen* fork of Forge 2.0.12 with an LLM-piloted seat answers the
+"does piloting help?" question in ~1–1.5 weeks with zero correlation
+risk — vs weeks-to-months + unproven correlation for forge_py. A-vs-B
+analysis + scoping result in [fp001-path-comparison.md](fp001-path-comparison.md);
+step-by-step build guide in [fp001-pathb-handoff.md](fp001-pathb-handoff.md).
+Path A (native engine) stays parked, funded only if the measured delta
+proves worth having natively.
+
 ### FP-002 — Phase 3 ML predictor
 
 `ml_dataset.py` ready (25 features, deck-level train/eval split, no
