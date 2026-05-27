@@ -6,6 +6,75 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-05-26 — FP-002 reopened + cross-validated, FP-007/FP-010 started, deep audit + fixes
+
+#### Added
+
+- **`feat(fp-002)`: margin-regression analysis on the 40-game soak rows.**
+  `scripts/margin_analysis.py` (pure stdlib — sklearn/numpy/scipy absent)
+  regresses curator win-rate margin on pre-sim deck-health features in two
+  designs: `--mode ab` (v1-vs-v2 in-pod) and `--mode gauntlet` (each deck vs a
+  fixed gauntlet, unconfounded). **Finding (robust across both): curation is
+  empirically ~neutral** (mean margin +0.0009 A/B, −0.0108 gauntlet); the one
+  A/B "significant" feature (`wincon_protection`) did NOT replicate in the
+  cleaner design → confound artifact. Only `deficit_total`/`under_built_roles`
+  agree across designs (curation adds least to structurally-deficient decks).
+  18 tests; `docs/fp002-margin-analysis.md` + deck-gen plan
+  (`docs/fp002-deckgen-plan.md`).
+- **`feat(combo)`: infinite-combo → bracket enforcement.**
+  `combo_detection.assess_deck_brackets()` maps each detected combo to its WotC
+  bracket floor (two-card infinite/win → B4, 3+-card → B3), flags combos
+  exceeding the declared bracket, recommends the bracket the deck actually
+  plays at. Surfaced in `/api/audit` (+ stream) as `combo_assessment` and
+  rendered as a bracket-pressure banner / collapsed panel.
+- **`feat(advisor)`: EDHREC `/top` trending as a recency boost.** The heuristic
+  recommender takes a `trending` set from `fetch_top_cards("month")`; trending
+  candidates float up (secondary to diagnosis priority) and are annotated.
+  Re-rank only — never introduces off-archetype/off-color cards.
+- **`feat(web)`: role-targets deck-health tile** (under-built-role deficits) +
+  `combo_assessment` in the audit payload.
+- **`feat(fp-007)`: card-reference panel (slice 1).** `GET /api/card/<name>`
+  (identity / commander-legality / price / printing over the cached
+  `scryfall_client`) + a topbar "Cards" search + reference overlay. FP-007
+  flipped PARKED → STARTED (`docs/fp007-plan.md`); the FP-006 gate is met.
+- **`feat(fp-010)`: desktop EXE (started).** `commander_builder/desktop.py`
+  (Flask on a daemon thread + native pywebview window), `packaging/`
+  PyInstaller spec + `scripts/build_desktop.py` (verified: builds
+  `dist/CommanderBuilder/CommanderBuilder.exe` with Flask assets bundled),
+  `[desktop]` extra. `bootstrap.py` first-run dependency detection +
+  Forge-jar downloader (`commander-builder-bootstrap`). `docs/fp010-plan.md`.
+- **`feat(forge)`: `run_ab_parallel`** — split one A/B matchup's games into even
+  chunks across cwd-isolated Forge profiles, run concurrently (capped at
+  physical cores via `psutil`), and aggregate per-seat wins into one ABResult.
+
+#### Changed
+
+- **`feat(sim)`: A/B sim game-count options `5/10/20` → `10/40/100`** (default
+  40, the soak high-confidence standard) with a live per-bracket time-hint next
+  to the selector. 5-game sims are below the noise floor.
+- **`feat(sim)`: low-N verdict gating.** Below 20 decisive games an A/B result
+  records as a new `inconclusive` verdict (distinct from a genuine `neutral`
+  tie) rather than a confident kept/reverted that a single-game flip could
+  invert. Wired through `_proposer_sim`, `knowledge_log`, the dashboard
+  PATCH allow-list, and the web save-verdict radios.
+
+#### Fixed
+
+- **`fix(web)`: security batch** — `_resolve_deck_path` `?path=` now `.dck`-locked
+  (no clobbering non-deck files); image cache validates image magic before
+  caching (no HTML-error-body served as `.jpg`) + TOCTOU-guarded read; BYO
+  Anthropic key staged into `os.environ` under a serializing lock that always
+  restores (sync + SSE paths); 3 unguarded route reads → clean 500s.
+- **`fix`: 7 correctness bugs from a deep subsystem audit** — advisor default
+  path dropped `diagnosis=`; `classify_role_extended` misclassified lands;
+  subscription-CLI env scrub widened to all `ANTHROPIC_*` + bedrock/vertex
+  toggles; `fetch_commander_page` Optional + guarded `__main__`;
+  `_resolve_life_leader` no longer crowns an eliminated seat; `forge_runner`
+  timeout-salvage preserves `avg_turns`; `analyst` tolerates fenced/prose LLM
+  output + non-numeric confidence (degrades to heuristic).
+- **`fix`: ResourceWarning leaks** — file/socket handles closed in
+  `margin_analysis`, `combo_detection.refresh_combos`, `game_analyzer`.
+
 ### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
 
 #### Added — bandit swap-selection strategy (FP-012 slice 2)
