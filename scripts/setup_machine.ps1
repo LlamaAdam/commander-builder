@@ -21,10 +21,23 @@ param(
   [int]$Profiles = 12,
   [switch]$Launch,
   [double]$Hours = 24,
-  [int]$Games = 5,
+  # Operator directive (soak-sims.md): always 40-game sims for high-confidence
+  # verdicts — never 5. phase2-after defaults to 999999 so the soak stays at 40
+  # throughout (no fast phase-1 fallback to a lower game count).
+  [int]$Games = 40,
   [int]$Phase2Games = 40,
-  [int]$Phase2After = 200
+  [int]$Phase2After = 999999,
+  # Concurrency. Defaults match this hardware's sweet spot: 12 physical cores.
+  # Benchmark (2026-05-26, Ryzen 9 3900X 12c/24t): a fixed sim workload finished
+  # no faster at 24 workers than 12 (293s vs 292s) because SMT hyperthreads don't
+  # help CPU-bound Forge JVMs. Past soaks ran --max 6 (~48% CPU = half idle);
+  # 12 is ~1.6x the throughput with no contention penalty. Don't exceed physical
+  # cores. --start at --max so the soak begins saturated instead of climbing.
+  [int]$Min = 4,
+  [int]$Max = 12,
+  [int]$Start = 12
 )
+if ($Start -gt $Max) { $Start = $Max }
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot   # scripts\ -> repo root
 Set-Location $repo
@@ -67,11 +80,12 @@ $nProf = (Get-ChildItem -Directory "vendor\forge*").Count
 Write-Host "Profiles ready: $nProf (forge + forge2..$Profiles)" -ForegroundColor Green
 
 # 4. Launch (optional) or print the command.
-$cmd = ".\.venv\Scripts\python.exe scripts\soak_pool.py --hours $Hours --games $Games --phase2-games $Phase2Games --phase2-after $Phase2After"
+$cmd = ".\.venv\Scripts\python.exe scripts\soak_pool.py --hours $Hours --min $Min --max $Max --start $Start --games $Games --phase2-games $Phase2Games --phase2-after $Phase2After"
 if ($Launch) {
-  Write-Host "Launching soak (detached) ..." -ForegroundColor Cyan
+  Write-Host "Launching soak (detached) at min $Min / max $Max / start $Start runners ..." -ForegroundColor Cyan
   Start-Process -FilePath $venvPy `
-    -ArgumentList @("scripts\soak_pool.py","--hours",$Hours,"--games",$Games,
+    -ArgumentList @("scripts\soak_pool.py","--hours",$Hours,
+                    "--min",$Min,"--max",$Max,"--start",$Start,"--games",$Games,
                     "--phase2-games",$Phase2Games,"--phase2-after",$Phase2After) `
     -RedirectStandardOutput "soak_run.log" -RedirectStandardError "soak_run.err.log" `
     -WindowStyle Hidden

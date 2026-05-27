@@ -1045,6 +1045,29 @@ def _runner_for(profile: Path) -> "ForgeRunner":
     return ForgeRunner.locate() if profile == VENDOR_FORGE else ForgeRunner.for_profile(profile)
 
 
+def _default_max_workers() -> int:
+    """Best default worker count for CPU-bound Forge sims: PHYSICAL cores.
+
+    Benchmarked on a 12-core/24-thread Ryzen 9 3900X: 24 concurrent Forge JVMs
+    finished a fixed workload no faster than 12 (293s vs 292s) because each game
+    is CPU-bound and SMT/hyperthreads add ~nothing — past one JVM per physical
+    core, every game just runs proportionally slower. So we cap at physical
+    cores. Uses psutil (a project dependency) when present; falls back to
+    logical//2 (the usual SMT ratio), then logical, when it can't be detected.
+    Callers can always override with ``max_workers``.
+    """
+    try:
+        import psutil  # project dep (soak_pool); soft-imported so the lib
+        phys = psutil.cpu_count(logical=False)  # doesn't hard-require it here
+        if phys:
+            return phys
+    except Exception:  # noqa: BLE001
+        pass
+    import os as _os
+    logical = _os.cpu_count() or 1
+    return max(1, logical // 2) if logical > 1 else 1
+
+
 def _even_chunks(total: int, parts: int) -> "list[int]":
     """Split ``total`` games into at most ``parts`` balanced, EVEN-sized chunks.
 
@@ -1088,8 +1111,11 @@ def run_ab_parallel(
     the per-seat wins / turn stats are summed back into ONE ABResult with the
     same fields a serial run would have produced.
 
-    Auto-sizing: ``max_workers`` defaults to ``min(cpu_count, len(profiles),
-    games)``. ``profiles`` defaults to every vendor/forge* profile on the host;
+    Auto-sizing: workers default to ``min(physical_cores, len(profiles),
+    games)`` — physical, not logical, because SMT threads don't speed up these
+    CPU-bound JVMs (benchmarked: 24 workers == 12 on a 12c/24t part). Pass
+    ``max_workers`` to override. ``profiles`` defaults to every vendor/forge*
+    profile on the host;
     two chunks never share a profile (they'd collide on the deck dir, cache, and
     forge.log). With a single profile this degenerates to one serial chunk.
 
@@ -1115,11 +1141,11 @@ def run_ab_parallel(
         result.error = "no Forge profiles found (expected vendor/forge[, forge2..N])"
         return result
 
-    import os as _os
-    cores = _os.cpu_count() or 1
-    cap = min(cores, len(profiles), games)
+    cap = min(_default_max_workers(), len(profiles), games)
     if max_workers is not None:
-        cap = max(1, min(max_workers, cap))
+        # An explicit max_workers overrides the physical-core default but is
+        # still bounded by available profiles and the game count.
+        cap = max(1, min(max_workers, len(profiles), games))
 
     sizes = _even_chunks(games, cap)
     parts = len(sizes)
