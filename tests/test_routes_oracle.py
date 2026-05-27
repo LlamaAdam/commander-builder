@@ -356,3 +356,105 @@ def test_unknown_card_is_not_cached(client, monkeypatch):
     assert r2.status_code == 404
     # Both calls hit the upstream — no cached 404.
     assert len(call_log) == 2
+
+
+# ---------------------------------------------------------------------------
+# image_url — decorative image URL field (FP-008/FP-009 requirement)
+# ---------------------------------------------------------------------------
+
+def test_response_includes_image_url_field(client, monkeypatch):
+    """Every oracle response MUST carry an ``image_url`` field — even
+    if the client never renders it, the field contract must hold so
+    callers don't need to special-case its absence.
+
+    The URL routes through the local disk-cache route
+    (``/api/card_image/normal/<name>``) rather than pointing directly
+    at Scryfall, so the browser's card tooltip and image overlay both
+    stay alive during a Scryfall outage.
+    """
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        _make_fake_lookup([]),
+    )
+    resp = client.get("/api/oracle/Krenko, Mob Boss")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "image_url" in body, "image_url must be present in the response"
+    url = body["image_url"]
+    assert url is not None
+    assert url.startswith("/api/card_image/normal/")
+
+
+def test_image_url_encodes_card_name(client, monkeypatch):
+    """Card names with spaces, commas, and ``//`` separators must be
+    URL-encoded in the image_url so the ``/api/card_image`` route
+    receives an intact name via Flask's ``path:`` converter.
+
+    Unencoded spaces become ``%20`` (not ``+``); ``//`` becomes
+    ``%2F%2F``. Without encoding, ``Fire // Ice`` would produce a
+    literal ``/`` in the path and get mis-routed by the WSGI layer.
+    """
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        _make_fake_lookup([]),
+    )
+    # Test with a space + comma in the name.
+    resp = client.get("/api/oracle/Krenko, Mob Boss")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    # Comma and space should both be encoded.
+    assert "Krenko" in body["image_url"]
+    # Must not contain a raw space.
+    assert " " not in body["image_url"]
+
+
+def test_image_url_uses_canonical_scryfall_name(client, monkeypatch):
+    """``image_url`` should use the card's canonical Scryfall name
+    (the ``name`` field in the Scryfall response) rather than whatever
+    casing the caller used.
+
+    This matters because the disk-cache slug is derived from the name;
+    using the canonical form means ``krenko, mob boss`` and
+    ``Krenko, Mob Boss`` both produce the same URL and share the same
+    cached image on disk.
+    """
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        _make_fake_lookup([]),
+    )
+    # Lowercase query — Scryfall response carries the properly-cased name.
+    resp_lower = client.get("/api/oracle/krenko, mob boss")
+    resp_proper = client.get("/api/oracle/Krenko, Mob Boss")
+    assert resp_lower.status_code == 200
+    assert resp_proper.status_code == 200
+    # Both should encode to the same image_url (same canonical name).
+    assert resp_lower.get_json()["image_url"] == resp_proper.get_json()["image_url"]
+
+
+def test_image_url_for_split_card(client, monkeypatch):
+    """Split/DFC card names containing ``//`` must survive the
+    round-trip through URL encoding: the image_url should encode
+    ``//`` as ``%2F%2F`` so the path stays unambiguous.
+    """
+    import urllib.parse
+
+    # Build a minimal fake card whose name includes '//'.
+    def _fake_lookup(name, cache=True):
+        return {
+            "name": name,
+            "mana_cost": "{1}{R}{U}",
+            "type_line": "Instant // Instant",
+            "oracle_text": "Fire: deal 2 damage // Ice: tap target permanent",
+            "power": None, "toughness": None, "loyalty": None, "cmc": 2.0,
+        }
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        _fake_lookup,
+    )
+    resp = client.get("/api/oracle/Fire // Ice")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    url = body["image_url"]
+    # '/' in the name must be %-encoded so the path is unambiguous.
+    assert "%2F" in url, f"Expected %-encoded slash in image_url, got: {url!r}"

@@ -13,7 +13,17 @@ tooltip + side panel in the audit UI:
       "toughness":   str | None,    # creatures only
       "loyalty":     str | None,    # planeswalkers only
       "cmc":         float | None,  # mana value
+      "image_url":   str | None,    # decorative: local /api/card_image/normal/<name>
     }
+
+``image_url`` is a server-relative URL pointing to the existing
+``/api/card_image/normal/<name>`` route which disk-caches Scryfall
+bytes and serves them with ``Cache-Control: immutable``. Clients
+should treat this field as purely decorative — oracle text is the
+authoritative rules surface; the image is for human recognition only.
+The field is always present (never absent); it is set to ``None`` only
+when ``name`` is empty (which already returns 400 before projection
+runs).
 
 Built via ``make_oracle_blueprint()``. The route is the UI surface
 for FP-009 (Oracle-text card-reference store presentation helper):
@@ -54,6 +64,8 @@ from __future__ import annotations
 import time
 from threading import Lock
 
+import urllib.parse
+
 from flask import Blueprint, jsonify
 
 
@@ -69,12 +81,7 @@ _PROJECTION_CACHE_TTL_SEC = 3600.0  # 1 hour — see module docstring
 _PROJECTION_CACHE_MAX = 512
 
 
-# Fields we project out of the Scryfall response. The UI needs
-# enough to render a card-frame-like tooltip + a full oracle panel,
-# but no more — we deliberately drop Scryfall fields like
-# ``image_uris`` (thumbnails go through ``cardImageUrl`` directly
-# on the client) and ``prices`` (already surfaced elsewhere in the
-# audit payload).
+# Fields copied straight from the Scryfall response.
 _PROJECTED_FIELDS = (
     "name",
     "mana_cost",
@@ -87,11 +94,44 @@ _PROJECTED_FIELDS = (
 )
 
 
-def _project_card(card: dict) -> dict:
+def _image_url_for(name: str) -> str:
+    """Server-relative URL for the disk-cached Scryfall card image.
+
+    Routes through ``/api/card_image/normal/<name>`` — the existing
+    route in ``routes_meta.py`` that fetches once from Scryfall and
+    serves subsequent requests from disk with ``Cache-Control:
+    immutable``.
+
+    ``normal`` size (488×680 px) is the right balance for a card-
+    reference panel: legible oracle text at 1x, fast to load
+    (~150 KB), and matches what the audit panel's click-to-expand
+    overlay already uses.
+    """
+    # URL-encode just the card name so names with spaces, commas, and
+    # ``//`` separators survive the path segment unchanged. Use
+    # ``quote`` with ``safe=""`` so ``//`` becomes ``%2F%2F`` and
+    # Flask's ``path:`` converter on the receiving route reconstitutes
+    # the original name correctly.
+    encoded = urllib.parse.quote(name, safe="")
+    return f"/api/card_image/normal/{encoded}"
+
+
+def _project_card(card: dict, name: str) -> dict:
     """Reduce a Scryfall response to the UI's tooltip/side-panel
-    fields. Missing fields surface as ``None`` so the client can
-    decide how to render (e.g. no power/toughness on a sorcery)."""
-    return {field: card.get(field) for field in _PROJECTED_FIELDS}
+    fields.  Missing fields surface as ``None`` so the client can
+    decide how to render (e.g. no power/toughness on a sorcery).
+
+    ``image_url`` is always included as a decorative URL pointing to
+    the local image-cache route. Oracle text is the authoritative
+    surface; the image is for human recognition only.
+    """
+    out = {field: card.get(field) for field in _PROJECTED_FIELDS}
+    # Use the canonical name from Scryfall if available (preserves
+    # exact casing for the image-cache route); fall back to the
+    # user-supplied name when the response doesn't carry "name".
+    canonical_name = card.get("name") or name
+    out["image_url"] = _image_url_for(canonical_name)
+    return out
 
 
 def _cache_get(key: str) -> dict | None:
@@ -189,7 +229,7 @@ def make_oracle_blueprint() -> Blueprint:
                 "name": name,
             }), 404
 
-        payload = _project_card(card)
+        payload = _project_card(card, name)
         _cache_put(cache_key, payload)
         resp = jsonify(payload)
         resp.headers["X-Oracle-Cache"] = "miss"
