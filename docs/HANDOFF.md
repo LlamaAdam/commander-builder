@@ -24,6 +24,8 @@ orients + records the latest session deltas:
 | **`STATUS.md`** | **Source of truth.** Current state, ranked open backlog, and *Parked plans* (the FP-### catalog). Start here. |
 | `CHANGELOG.md` | Per-commit history of what landed. |
 | `docs/future-plans.md` | Consolidated detailed FP plans/findings (FP-002 margin analysis + deck-gen, FP-007, FP-010). |
+| `docs/PROJECT-MANAGER.md` | **PM agent prompt + routing playbook** — triage work to the orchestrator, an isolated local worker, or escalate. Use to drive the project at scale. |
+| `docs/orch-worklist.md` | The live orchestrator red-test queue + workflow. |
 | `docs/architecture.md` | Architecture + key decisions. |
 
 - **Branch:** `feature/2026-04-28-session` (the active line; on `origin`).
