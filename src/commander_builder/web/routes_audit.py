@@ -25,11 +25,43 @@ refactor (tier-3 issue #3.1).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import threading
 from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
+
+# The Anthropic SDK reads the API key from the process-global os.environ, so a
+# BYO key has to be staged there for the duration of a Claude-using advise
+# call. On a threaded server two concurrent Claude requests would otherwise
+# interleave their set/restore (corrupting each other's env, or one billing
+# the other's key). This lock serializes the env window; heuristic (non-Claude)
+# requests bypass it entirely and run concurrently as before.
+_CLAUDE_ENV_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _claude_api_key_env(use_claude: bool, byo_key: str):
+    """Scope a BYO Anthropic key into os.environ for a Claude advise call,
+    serialized across requests and always restored (even on raise / client
+    disconnect). No-op for non-Claude requests."""
+    if not use_claude:
+        yield
+        return
+    with _CLAUDE_ENV_LOCK:
+        saved = os.environ.get("ANTHROPIC_API_KEY")
+        if byo_key:
+            os.environ["ANTHROPIC_API_KEY"] = byo_key
+        try:
+            yield
+        finally:
+            if byo_key:
+                if saved is None:
+                    os.environ.pop("ANTHROPIC_API_KEY", None)
+                else:
+                    os.environ["ANTHROPIC_API_KEY"] = saved
 
 from ..edhrec_client import fetch_salt_list
 from ._helpers import (
@@ -240,10 +272,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
 
         try:
             from ..improvement_advisor import advise as _advise, DEFAULT_CLAUDE_MODEL
-            saved_key = os.environ.get("ANTHROPIC_API_KEY")
-            if use_claude and byo_key:
-                os.environ["ANTHROPIC_API_KEY"] = byo_key
-            try:
+            with _claude_api_key_env(use_claude, byo_key):
                 report = _advise(
                     path, bracket=bracket,
                     source=requested,
@@ -251,14 +280,6 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
                     budget=budget,
                 )
-            finally:
-                # Always restore env, even on raise — the BYO key must
-                # not linger in the process for unrelated requests.
-                if use_claude and byo_key:
-                    if saved_key is None:
-                        os.environ.pop("ANTHROPIC_API_KEY", None)
-                    else:
-                        os.environ["ANTHROPIC_API_KEY"] = saved_key
         except FileNotFoundError as exc:
             return jsonify({"error": str(exc)}), 404
         except Exception as exc:
@@ -581,6 +602,12 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     f"data: {json.dumps(payload)}\n\n"
                 )
 
+            # Serialize the Claude env window across requests (same lock as
+            # _claude_api_key_env). Acquired manually because the key must
+            # stay set across the whole streaming generator; released in the
+            # finally below (runs on completion, raise, or client disconnect).
+            if use_claude:
+                _CLAUDE_ENV_LOCK.acquire()
             saved_key = os.environ.get("ANTHROPIC_API_KEY")
             if use_claude and byo_key:
                 os.environ["ANTHROPIC_API_KEY"] = byo_key
@@ -782,13 +809,15 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     "detail": f"{type(exc).__name__}: {exc}",
                 })
             finally:
-                # Always restore the BYO Anthropic key — the env mutation
-                # must not linger across requests.
+                # Always restore the BYO Anthropic key + release the env
+                # lock — neither must linger across requests.
                 if use_claude and byo_key:
                     if saved_key is None:
                         os.environ.pop("ANTHROPIC_API_KEY", None)
                     else:
                         os.environ["ANTHROPIC_API_KEY"] = saved_key
+                if use_claude:
+                    _CLAUDE_ENV_LOCK.release()
 
         return Response(
             stream_with_context(event_stream()),

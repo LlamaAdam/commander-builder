@@ -218,6 +218,47 @@ def test_resolve_traversal_attempt_blocked(deck_dir):
     assert _resolve_deck_path(deck_dir, None, sneaky) is None
 
 
+def test_claude_api_key_env_sets_and_restores(monkeypatch):
+    """The BYO-key context manager stages the key into os.environ and
+    always restores it — including on exception and when there was no
+    prior key (pops it back out) — so a concurrent request can't inherit
+    a transiently-set key."""
+    import os
+    from commander_builder.web.routes_audit import _claude_api_key_env
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    # No prior key -> set inside, popped back out after.
+    with _claude_api_key_env(True, "sk-byo"):
+        assert os.environ["ANTHROPIC_API_KEY"] == "sk-byo"
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+    # Restores even when the body raises.
+    with pytest.raises(RuntimeError):
+        with _claude_api_key_env(True, "sk-byo"):
+            raise RuntimeError("boom")
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+    # Prior key is restored to its original value.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-original")
+    with _claude_api_key_env(True, "sk-byo"):
+        assert os.environ["ANTHROPIC_API_KEY"] == "sk-byo"
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-original"
+
+    # Non-Claude path is a no-op (doesn't touch env).
+    with _claude_api_key_env(False, "sk-byo"):
+        assert os.environ["ANTHROPIC_API_KEY"] == "sk-original"
+
+
+def test_resolve_explicit_path_non_dck_inside_dir_blocked(deck_dir):
+    """A non-.dck file inside deck_dir must NOT resolve — otherwise a
+    crafted ?path= could make DELETE/PUT clobber a pool JSON / soak summary
+    / staged file that merely lives alongside the decks."""
+    victim = deck_dir / "soak_summary.json"
+    victim.write_text("{}", encoding="utf-8")
+    assert _resolve_deck_path(deck_dir, None, str(victim)) is None
+    assert victim.exists()  # untouched
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------

@@ -35,7 +35,11 @@ def _resolve_deck_path(
     """Resolve a deck identifier or explicit path to a real file.
 
     Both forms are validated against ``deck_dir`` — explicit paths must
-    be inside ``deck_dir`` after resolution, otherwise None is returned.
+    be inside ``deck_dir`` after resolution AND carry a ``.dck`` suffix,
+    otherwise None is returned. The ``.dck`` lock matters because this
+    resolver also backs the DELETE/PUT deck routes: without it a crafted
+    ``?path=`` could target a non-deck file inside the dir (pool JSON,
+    soak summary, a staged file) and the write/delete would clobber it.
 
     Moved here from ``web/app.py`` in the 2026-05-14 Tier-1 #0a
     cleanup so the 5 blueprint factories can import it directly
@@ -50,6 +54,10 @@ def _resolve_deck_path(
         return candidate if candidate.exists() else None
     if explicit_path:
         candidate = Path(explicit_path).resolve()
+        # Only ever resolve to actual deck files — never arbitrary files
+        # that merely happen to live inside deck_dir.
+        if candidate.suffix.lower() != ".dck":
+            return None
         try:
             candidate.relative_to(deck_dir.resolve())
         except ValueError:

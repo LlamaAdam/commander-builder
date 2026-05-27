@@ -255,7 +255,10 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
 
         import re as _re
         existing = _re.search(r"^Moxfield=(.+)$", text, _re.MULTILINE)
@@ -338,7 +341,10 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
         import re as _re
         m = _re.search(r"^Moxfield=(.+)$", text, _re.MULTILINE)
         if not m:
@@ -426,10 +432,14 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         gc_set = load_game_changers()
 
         # Read deck card names.
+        try:
+            deck_text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
         names: list[str] = []
         in_main = False
         in_cmdr = False
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in deck_text.splitlines():
             s = raw.strip()
             if not s:
                 continue

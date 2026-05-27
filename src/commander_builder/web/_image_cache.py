@@ -100,6 +100,24 @@ def _ext_for(size: str) -> str:
     return ".png" if size == "png" else ".jpg"
 
 
+def _looks_like_image(data: bytes) -> bool:
+    """True if ``data`` starts with a known image magic number.
+
+    Guards the cache against a 200-with-non-image-body: Scryfall (or an
+    interposing proxy / rate-limiter) can return HTTP 200 with an HTML or
+    JSON error page. Without this check that body gets written as a ``.jpg``
+    and served back ``immutable`` for the cache lifetime. We accept JPEG /
+    PNG / GIF magics (covers every Scryfall image version) and reject
+    everything else (HTML starts with ``<``, JSON with ``{``)."""
+    if not data:
+        return False
+    return (
+        data[:3] == b"\xff\xd8\xff"   # JPEG
+        or data[:4] == b"\x89PNG"     # PNG (4-byte signature prefix)
+        or data[:4] == b"GIF8"        # GIF
+    )
+
+
 def cache_path(name: str, size: str, root: Optional[Path] = None) -> Path:
     """Disk path for the cached ``<name>`` / ``<size>`` image. No IO."""
     base = root if root is not None else _cards_root()
@@ -260,6 +278,13 @@ def fetch_and_cache(
         raise ValueError(f"unsupported size {size!r}; expected one of {sorted(ALLOWED_SIZES)}")
     fetch = http_get or _default_http_get
     data = fetch(_scryfall_image_url(name, size))
+    # Never cache a non-image body (HTML/JSON error page returned as 200) —
+    # it would be served back as a broken `.jpg` `immutable` until evicted.
+    if not _looks_like_image(data):
+        raise ValueError(
+            f"upstream returned a non-image body for {name!r}/{size} "
+            f"({len(data)} bytes); refusing to cache"
+        )
     path = cache_path(name, size, root=root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -288,6 +313,12 @@ def serve_image(
         raise ValueError(f"unsupported size {size!r}; expected one of {sorted(ALLOWED_SIZES)}")
     path = cache_path(name, size, root=root)
     if path.is_file():
-        return path.read_bytes(), content_type_for(size)
+        try:
+            return path.read_bytes(), content_type_for(size)
+        except OSError:
+            # TOCTOU: a concurrent fetch's quota eviction can unlink the
+            # file between is_file() and read_bytes(). Fall through and
+            # refetch rather than surfacing a spurious 502.
+            pass
     data = fetch_and_cache(name, size, root=root, http_get=http_get)
     return data, content_type_for(size)
