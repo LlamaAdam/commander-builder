@@ -24,6 +24,11 @@
     <button class="topbar-btn" id="btn-settings" title="App settings — BYO Anthropic API token + preferences">
       Settings
     </button>
+    <form id="card-search-form" style="display: inline-flex; gap: 4px; align-items: center; margin: 0;" title="Look up any card's oracle text, identity, legality, and price">
+      <input type="text" id="card-search-input" placeholder="Card lookup…" autocomplete="off"
+             style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); width: 150px;" />
+      <button type="submit" class="topbar-btn" id="card-search-btn">Cards</button>
+    </form>
     <button class="topbar-btn primary" id="btn-new-deck" title="Import a deck from Moxfield URL or paste a list">
       + New deck
     </button>

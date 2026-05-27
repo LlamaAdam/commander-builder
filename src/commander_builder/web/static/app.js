@@ -728,6 +728,85 @@ function openCardImageOverlay(cardName) {
   document.body.appendChild(scrim);
 }
 
+// FP-007 card-reference panel: fetch /api/card/<name> and show a richer
+// overlay than openCardImageOverlay — image + oracle text, identity,
+// commander legality, USD price, and printing. Backs the topbar "Cards"
+// search box.
+async function openCardReference(name) {
+  name = (name || "").trim();
+  if (!name) return;
+  const prior = document.getElementById("_card-ref-overlay");
+  if (prior) prior.remove();
+  const scrim = el("div", {
+    id: "_card-ref-overlay",
+    style: "position: fixed; inset: 0; background: rgba(0,0,0,0.7); "
+         + "z-index: 1000; display: flex; align-items: center; "
+         + "justify-content: center;",
+  });
+  const panel = el("div", {
+    style: "background: var(--bg); border: 1px solid var(--border); "
+         + "border-radius: 8px; padding: 16px; max-width: 760px; "
+         + "max-height: 88vh; overflow: auto; display: flex; gap: 16px; "
+         + "box-shadow: 0 4px 32px rgba(0,0,0,0.5);",
+  });
+  panel.addEventListener("click", (e) => e.stopPropagation());  // clicks inside keep it open
+  panel.appendChild(el("div", { class: "muted" }, `Looking up "${name}"…`));
+  scrim.appendChild(panel);
+  function close() { scrim.remove(); document.removeEventListener("keydown", onKey); }
+  function onKey(e) { if (e.key === "Escape") close(); }
+  scrim.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(scrim);
+
+  try {
+    const resp = await fetch(`/api/card/${encodeURIComponent(name)}`);
+    panel.innerHTML = "";
+    if (resp.status === 404) {
+      panel.appendChild(el("p", {}, `No card found for "${name}".`));
+      return;
+    }
+    if (!resp.ok) {
+      panel.appendChild(el("p", {}, `Lookup failed (HTTP ${resp.status}).`));
+      return;
+    }
+    const c = await resp.json();
+    // Left: image. Right: details.
+    panel.appendChild(el("img", {
+      src: cardImageUrl(c.name, "normal"), alt: c.name,
+      style: "width: 240px; height: auto; border-radius: 8px; flex: 0 0 auto;",
+    }));
+    const info = el("div", { style: "flex: 1 1 auto; min-width: 260px;" });
+    info.appendChild(el("h2", { style: "margin: 0 0 2px;" }, c.name || name));
+    const sub = [c.mana_cost, c.type_line].filter(Boolean).join("  •  ");
+    if (sub) info.appendChild(el("div", { class: "muted", style: "margin-bottom: 8px;" }, sub));
+    if (c.oracle_text) {
+      info.appendChild(el("div", {
+        style: "white-space: pre-wrap; font-size: 13px; line-height: 1.4; "
+             + "margin-bottom: 10px;",
+      }, c.oracle_text));
+    }
+    const ci = (c.color_identity && c.color_identity.length)
+      ? c.color_identity.join("") : "Colorless";
+    const facts = [
+      `Color identity: ${ci}`,
+      `Commander: ${c.commander_legal ? "legal" : "not legal"}`,
+      c.price_usd != null ? `Price: $${c.price_usd.toFixed(2)}` : "Price: n/a",
+      (c.set || c.collector_number)
+        ? `Printing: ${(c.set || "").toUpperCase()} #${c.collector_number || "?"}`
+          + (c.rarity ? ` (${c.rarity})` : "")
+        : null,
+    ].filter(Boolean);
+    const ul = el("ul", { style: "list-style: none; padding: 0; margin: 0; "
+                                + "font-size: 13px;" });
+    for (const f of facts) ul.appendChild(el("li", {}, f));
+    info.appendChild(ul);
+    panel.appendChild(info);
+  } catch (e) {
+    panel.innerHTML = "";
+    panel.appendChild(el("p", {}, `Lookup error: ${e.message}`));
+  }
+}
+
 // Build a card-image URL that goes through the local server-side
 // disk cache instead of hammering Scryfall on every render.
 //
@@ -2897,6 +2976,16 @@ document.addEventListener("DOMContentLoaded", () => {
   // changes (radios are static markup, so bind once here).
   document.querySelectorAll('input[name="games"], input[name="mode"]')
     .forEach((r) => r.addEventListener("change", updateGamesEta));
+
+  // FP-007 topbar card lookup: submit -> card-reference overlay.
+  const cardForm = $("card-search-form");
+  if (cardForm) {
+    cardForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const input = $("card-search-input");
+      if (input && input.value.trim()) openCardReference(input.value);
+    });
+  }
 
   // Generic modal-close buttons (Add-deck modal + Alert modal).
   document.querySelectorAll("[data-close]").forEach((btn) => {
