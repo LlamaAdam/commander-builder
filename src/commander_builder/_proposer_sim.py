@@ -35,25 +35,43 @@ from typing import Optional
 # signal even though it's noisy. The CLI can tune via --sim-margin.
 _DEFAULT_SIM_MARGIN = 1
 
+# Below this many DECISIVE games (wins_a + wins_b, draws excluded), an A/B
+# result is too noisy to call: the win-rate standard error is ~0.5/sqrt(N)
+# (N=10 -> +/-0.16, N=20 -> +/-0.11), which swamps the ~0.01-0.05 effect a
+# curator swap actually has. Below the threshold the verdict is 'inconclusive'
+# rather than a confident kept/reverted that a single-game flip could invert.
+MIN_DECISIVE_GAMES_FOR_VERDICT = 20
 
-def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN) -> str:
+
+def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
+                     min_decisive: int = MIN_DECISIVE_GAMES_FOR_VERDICT) -> str:
     """Map an ``ABResult`` to a verdict label.
 
-    Returns one of 'kept' / 'reverted' / 'neutral' / 'pending':
+    Returns one of 'kept' / 'reverted' / 'neutral' / 'inconclusive' / 'pending':
 
-      'kept'     -- new deck won at least ``margin`` more games than old
-      'reverted' -- old deck won at least ``margin`` more games than new
-      'neutral'  -- difference within margin (e.g. 3-2 with margin=2)
-      'pending'  -- sim didn't complete (status='skipped' or 'failed')
+      'kept'         -- new deck won at least ``margin`` more games than old
+      'reverted'     -- old deck won at least ``margin`` more games than new
+      'neutral'      -- difference within margin at a TRUSTWORTHY sample size
+                        (e.g. 21-20 over 41 decisive games)
+      'inconclusive' -- fewer than ``min_decisive`` decisive games, so the
+                        result is below the noise floor regardless of margin
+                        (a 3-2 at 5 games is a coin flip, not a tie)
+      'pending'      -- sim didn't complete (status='skipped' or 'failed')
 
-    The neutral case is genuine: a 5-game sim that splits 3-2 is below
-    the noise floor of Forge's AI. Without --sim-games 20+, treat
-    near-ties as neutral rather than overfitting to single-game flips.
+    The split between 'neutral' and 'inconclusive' matters: 'neutral' is a
+    real near-tie we can trust; 'inconclusive' is "not enough games to say."
+    Gating low-N runs to 'inconclusive' stops a noise verdict from being
+    recorded as authoritative.
     """
     status = getattr(ab_result, "status", None)
     if status != "done":
         return "pending"
-    delta = (ab_result.wins_b or 0) - (ab_result.wins_a or 0)
+    wins_a = ab_result.wins_a or 0
+    wins_b = ab_result.wins_b or 0
+    decisive = wins_a + wins_b
+    if decisive < min_decisive:
+        return "inconclusive"
+    delta = wins_b - wins_a
     if delta >= margin:
         return "kept"
     if delta <= -margin:

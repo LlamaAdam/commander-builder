@@ -2245,30 +2245,47 @@ def test_auto_curate_main_rejects_negative_max(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_verdict_from_ab_kept_when_new_deck_wins():
-    """3-1 in 4 games with margin=1 -> kept. The 2-game spread is the
-    'new deck won meaningfully' signal Phase 3's predictor will train on."""
+    """20-12 over 32 decisive games (>= the min-decisive threshold) with
+    margin=1 -> kept."""
     from commander_builder.proposer import _verdict_from_ab
     from commander_builder.forge_runner import ABResult
-    ab = ABResult(wins_a=1, wins_b=3, games=4, status="done")
+    ab = ABResult(wins_a=12, wins_b=20, games=32, status="done")
     assert _verdict_from_ab(ab, margin=1) == "kept"
 
 
 def test_verdict_from_ab_reverted_when_old_deck_wins():
-    """3-1 the other way (wins_a > wins_b) → reverted."""
+    """20-12 the other way (wins_a > wins_b) over enough games -> reverted."""
     from commander_builder.proposer import _verdict_from_ab
     from commander_builder.forge_runner import ABResult
-    ab = ABResult(wins_a=3, wins_b=1, games=4, status="done")
+    ab = ABResult(wins_a=20, wins_b=12, games=32, status="done")
     assert _verdict_from_ab(ab, margin=1) == "reverted"
 
 
 def test_verdict_from_ab_neutral_within_margin():
-    """2-3 in 5 games with margin=2 → neutral. The 1-game spread is
-    inside the noise floor of Forge AI; calling it 'kept' would
-    overfit Phase 3 to single-game flips."""
+    """20-21 over 41 decisive games with margin=2 -> neutral: a genuine
+    near-tie at a TRUSTWORTHY sample size (not 'inconclusive')."""
     from commander_builder.proposer import _verdict_from_ab
     from commander_builder.forge_runner import ABResult
-    ab = ABResult(wins_a=2, wins_b=3, games=5, status="done")
+    ab = ABResult(wins_a=20, wins_b=21, games=41, status="done")
     assert _verdict_from_ab(ab, margin=2) == "neutral"
+
+
+def test_verdict_from_ab_inconclusive_below_min_decisive():
+    """A 1-3 result (decisive=4, below the noise floor) is 'inconclusive',
+    NOT 'kept' -- even though the margin would otherwise call it kept. This
+    is the gate that stops a low-N coin-flip being recorded as authoritative."""
+    from commander_builder.proposer import _verdict_from_ab
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=1, wins_b=3, games=4, status="done")
+    assert _verdict_from_ab(ab, margin=1) == "inconclusive"
+    # Just under the threshold is still inconclusive ...
+    assert _verdict_from_ab(
+        ABResult(wins_a=9, wins_b=10, games=19, status="done")) == "inconclusive"
+    # ... and exactly at the threshold resolves normally.
+    assert _verdict_from_ab(
+        ABResult(wins_a=8, wins_b=12, games=20, status="done"), margin=1) == "kept"
+    # The threshold is tunable for callers that know N is trustworthy.
+    assert _verdict_from_ab(ab, margin=1, min_decisive=1) == "kept"
 
 
 def test_verdict_from_ab_pending_when_sim_did_not_complete():
@@ -2503,9 +2520,12 @@ def test_auto_curate_main_run_sim_records_verdict(
     from commander_builder.forge_runner import ABResult
 
     def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        # 5-15 over 20 decisive games: same 0.25/0.75 win rates as a 1-3, but
+        # at/above the min-decisive threshold so the verdict resolves to 'kept'
+        # rather than being gated to 'inconclusive'.
         return ABResult(
             deck_a=deck_a_path.name, deck_b=deck_b_path.name,
-            wins_a=1, wins_b=3, games=4,
+            wins_a=5, wins_b=15, games=20,
             avg_turns_a=12.0, avg_turns_b=10.5,
             status="done",
         )
@@ -2527,7 +2547,7 @@ def test_auto_curate_main_run_sim_records_verdict(
     from commander_builder.proposer import auto_curate_main
     rc = auto_curate_main([
         str(deck), "--bracket", "3", "--db-path", str(db),
-        "--run-sim", "--sim-games", "4",
+        "--run-sim", "--sim-games", "20",
     ])
     assert rc == 0
 
@@ -2536,12 +2556,12 @@ def test_auto_curate_main_run_sim_records_verdict(
     its = iterations_for_deck("sim-id", db_path=db)
     assert len(its) == 1
     it = its[0]
-    assert it.verdict == "kept"               # new won 3-1
-    assert it.win_rate_old == 0.25            # 1/4
-    assert it.win_rate_new == 0.75            # 3/4
-    assert it.margin == 2                      # 3 - 1
+    assert it.verdict == "kept"               # new won 15-5
+    assert it.win_rate_old == 0.25            # 5/20
+    assert it.win_rate_new == 0.75            # 15/20
+    assert it.margin == 10                     # 15 - 5
     assert it.sim_report is not None
-    assert it.sim_report["wins_b"] == 3
+    assert it.sim_report["wins_b"] == 15
 
     out = capsys.readouterr().out
     assert "A/B sim" in out
@@ -2665,8 +2685,9 @@ def test_auto_curate_main_json_mode_surfaces_sim_block(
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["sim_run"] is True
-    # 3-2 with margin=2 -> neutral (within 1 vs requested 2).
-    assert payload["sim_verdict"] == "neutral"
+    # 3-2 over only 5 decisive games is below the min-decisive threshold ->
+    # 'inconclusive' (the low-N gate fires before the margin check).
+    assert payload["sim_verdict"] == "inconclusive"
     assert payload["sim_report"]["wins_b"] == 3
     assert payload["sim_error"] is None
 

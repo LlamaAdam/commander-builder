@@ -521,8 +521,21 @@ def test_verdict_breakdown_includes_all_verdicts_zeroed(db):
     assert bucket["kept"] == 1
     assert bucket["reverted"] == 0
     assert bucket["neutral"] == 0
+    assert bucket["inconclusive"] == 0
     assert bucket["pending"] == 0
     assert bucket["total"] == 1
+
+
+def test_update_verdict_accepts_inconclusive(db):
+    """'inconclusive' (low-N gate from _verdict_from_ab) is a valid verdict."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="pending"),
+        db_path=db,
+    )
+    it_id = recent_iterations(db_path=db)[0].id
+    update_verdict(it_id, "inconclusive", db_path=db)  # must not raise
+    assert recent_iterations(db_path=db)[0].verdict == "inconclusive"
 
 
 # ---------------------------------------------------------------------------
