@@ -99,6 +99,16 @@ def launch(
     if port is None:
         port = find_free_port(host)
     serve(deck_dir, host, port)
+    # First-run dependency check — warn (never block) so the user knows why
+    # Forge-backed audits/sims may be unavailable on a fresh install.
+    try:
+        from .bootstrap import check_dependencies
+        status = check_dependencies()
+        if status.missing:
+            print(f"[desktop] missing dependencies: {', '.join(status.missing)} "
+                  f"— run `commander-builder-bootstrap` for details", flush=True)
+    except Exception:  # noqa: BLE001
+        pass
     wait_until_up(host, port)
     url = f"http://{host}:{port}/"
     webview.create_window(APP_TITLE, url, width=1280, height=860)

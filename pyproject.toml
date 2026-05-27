@@ -60,6 +60,7 @@ commander-oracle-refresh = "commander_builder.oracle_store:main"
 commander-bulk-import = "commander_builder.moxfield_import:bulk_main"
 commander-config      = "commander_builder._secrets:config_main"
 commander-builder-desktop = "commander_builder.desktop:main"
+commander-builder-bootstrap = "commander_builder.bootstrap:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
