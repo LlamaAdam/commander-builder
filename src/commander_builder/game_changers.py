@@ -118,7 +118,12 @@ def _parse_card_names_from_html(html: str) -> set[str]:
 def fetch_game_changers(use_cache: bool = True) -> set[str]:
     """Fetch the Game Changers list from WotC. Returns the parsed names
     union'd with the bundled fallback (so a parser regression can't shrink
-    the list). Caches to `.cache/game_changers.json`."""
+    the list). Caches to `.cache/game_changers.json`.
+
+    The cache is persisted ONLY when the scrape actually produced names. A
+    failed/empty scrape degrades to the fallback WITHOUT writing the cache,
+    so the fallback-only result doesn't masquerade as "fresh" for the whole
+    TTL and block a retry on the next call."""
     if use_cache and _cache_is_fresh(CACHE_PATH):
         try:
             data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
@@ -134,7 +139,11 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
 
     merged = set(scraped) | set(_FALLBACK)
 
-    if use_cache:
+    # Only persist when the scrape produced names. On a failed/empty scrape
+    # we return the fallback but do NOT write the cache — otherwise the
+    # fallback-only list would be cached "fresh" for the full TTL and never
+    # retried.
+    if use_cache and scraped:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         CACHE_PATH.write_text(
             json.dumps({
