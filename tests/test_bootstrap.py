@@ -103,3 +103,21 @@ def test_download_forge_raises_when_no_asset(tmp_path):
             _get_release=lambda: {"assets": []},
             _download=lambda url, dest: None,
         )
+
+
+# --------------------------------------------------------------------------- #
+# _pick_jre_asset -- platform JRE selection from a Temurin release (FP-010)
+# --------------------------------------------------------------------------- #
+def test_pick_jre_asset_selects_platform_archive():
+    release = {"assets": [
+        {"name": "OpenJDK17U-jre_x64_windows_hotspot_17.0.11_9.zip",
+         "browser_download_url": "win"},
+        {"name": "OpenJDK17U-jre_x64_linux_hotspot_17.0.11_9.tar.gz",
+         "browser_download_url": "lin"},
+        {"name": "OpenJDK17U-jre_aarch64_mac_hotspot_17.0.11_9.tar.gz",
+         "browser_download_url": "mac"},
+    ]}
+    assert bootstrap._pick_jre_asset(release, "Windows", "AMD64")["browser_download_url"] == "win"
+    assert bootstrap._pick_jre_asset(release, "Linux", "x86_64")["browser_download_url"] == "lin"
+    assert bootstrap._pick_jre_asset(release, "Darwin", "arm64")["browser_download_url"] == "mac"
+    assert bootstrap._pick_jre_asset({"assets": []}, "Windows", "AMD64") is None

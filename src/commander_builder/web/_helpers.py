@@ -805,7 +805,7 @@ def read_protected_cards(deck_text: str) -> list[str]:
     wrapped in double quotes, so users who want a one-line list of
     no-comma names can still do:
 
-        Protect=\"Sol Ring\", \"Lightning Bolt\", \"Counterspell\"
+        Protect="Sol Ring", "Lightning Bolt", "Counterspell"
 
     Quoted form mixes safely with bare lines on the same .dck.
 
@@ -816,7 +816,7 @@ def read_protected_cards(deck_text: str) -> list[str]:
     Whitespace trimmed per entry; empty entries silently dropped.
     """
     import re as _re
-    # Quoted-entry pattern: matches `\"...\"` sequences. We pull each
+    # Quoted-entry pattern: matches `"..."` sequences. We pull each
     # quoted chunk out separately and treat unquoted leftover as a
     # single bare entry (preserves the comma-in-name case).
     _quoted_re = _re.compile(r'"([^"]*)"')
@@ -849,7 +849,7 @@ def read_protected_cards(deck_text: str) -> list[str]:
         if not value:
             continue
         if '"' in value:
-            # Quoted form: pull each \"...\" chunk out; ignore any
+            # Quoted form: pull each "..." chunk out; ignore any
             # commas / whitespace between chunks.
             for m in _quoted_re.finditer(value):
                 _add(m.group(1))

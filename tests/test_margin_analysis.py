@@ -203,3 +203,29 @@ def test_analyze_counts_verdicts_and_ranks_features(tmp_path):
     rs = [abs(f["pearson_r"]) for f in report["feature_correlations"]
           if f["pearson_r"] is not None]
     assert rs == sorted(rs, reverse=True)
+
+
+# --------------------------------------------------------------------------- #
+# single_feature_ols -- the analysis->predictor step (FP-002)
+# --------------------------------------------------------------------------- #
+def test_single_feature_ols_recovers_linear_signal():
+    # margin = 2 * feature exactly -> slope 2, r2 1, ~0 out-of-sample error.
+    samples = [
+        ma.Sample(deck=f"d{i}", margin=2.0 * i, games=40, features={"f": float(i)})
+        for i in range(8)
+    ]
+    res = ma.single_feature_ols(samples, "f")
+    assert res["n"] == 8
+    assert abs(res["slope"] - 2.0) < 1e-6
+    assert res["r2"] > 0.99
+    assert res["loo_rmse"] < 1e-6
+
+
+def test_single_feature_ols_constant_feature_is_safe():
+    samples = [
+        ma.Sample(deck=f"d{i}", margin=0.1 * i, games=40, features={"f": 5.0})
+        for i in range(5)
+    ]
+    res = ma.single_feature_ols(samples, "f")
+    assert res["slope"] == 0.0   # no variance -> no slope, not a crash
+    assert res["r2"] == 0.0

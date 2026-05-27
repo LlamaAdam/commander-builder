@@ -120,3 +120,20 @@ def test_is_game_changer_lookup(monkeypatch):
     )
     assert is_game_changer("Cyclonic Rift") is True
     assert is_game_changer("Sol Ring") is False
+
+
+def test_failed_scrape_is_not_cached(tmp_path, monkeypatch):
+    """A failed/empty WotC scrape must degrade to the fallback WITHOUT
+    persisting the cache -- otherwise the fallback-only list would look
+    "fresh" for the whole TTL and never retry."""
+    from commander_builder import game_changers
+    cache = tmp_path / "game_changers.json"
+    monkeypatch.setattr(game_changers, "CACHE_PATH", cache)
+
+    def _boom(url, *a, **kw):
+        raise OSError("network down")
+    monkeypatch.setattr(game_changers, "_http_get_text", _boom)
+
+    result = game_changers.fetch_game_changers(use_cache=True)
+    assert result == set(game_changers._FALLBACK)   # degrades to fallback
+    assert not cache.exists()                        # but does NOT persist it
