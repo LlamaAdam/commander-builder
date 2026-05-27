@@ -283,6 +283,82 @@ def download_jre(
     return dest
 
 
+def extract_jre(archive: Path, jre_dir: Optional[Path] = None) -> Path:
+    """Extract a downloaded Temurin JRE archive (.zip / .tar.gz) into
+    ``jre_dir`` so that ``jre_dir/bin/java[.exe]`` exists.
+
+    Temurin archives nest everything under a single top-level directory
+    (e.g. ``jdk-17.0.11+9-jre/``); its contents are flattened into
+    ``jre_dir``. Returns ``jre_dir``. Raises ``RuntimeError`` on an
+    unsupported archive type or if extraction yields no ``bin/java``.
+    """
+    import shutil
+    import tarfile
+    import tempfile
+    import zipfile
+    from .forge_runner import VENDOR_JRE
+
+    jre_dir = jre_dir or VENDOR_JRE
+    name = archive.name.lower()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(tmp_path)
+        elif name.endswith((".tar.gz", ".tgz")):
+            with tarfile.open(archive, "r:gz") as tf:
+                # filter='data' (py3.12+) blocks path-traversal members.
+                try:
+                    tf.extractall(tmp_path, filter="data")
+                except TypeError:  # pragma: no cover - older pythons
+                    tf.extractall(tmp_path)
+        else:
+            raise RuntimeError(f"unsupported JRE archive type: {archive.name}")
+
+        # Flatten the single nested top-level dir, if present.
+        entries = list(tmp_path.iterdir())
+        src = entries[0] if (len(entries) == 1 and entries[0].is_dir()) else tmp_path
+
+        jre_dir.mkdir(parents=True, exist_ok=True)
+        for child in src.iterdir():
+            target = jre_dir / child.name
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+            shutil.move(str(child), str(target))
+
+    bindir = jre_dir / "bin"
+    if not ((bindir / "java.exe").exists() or (bindir / "java").exists()):
+        raise RuntimeError(
+            f"JRE extraction did not produce bin/java under {jre_dir}"
+        )
+    return jre_dir
+
+
+def ensure_jre(
+    jre_dir: Optional[Path] = None,
+    *,
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+    _get_release: Optional[Callable[[], dict]] = None,
+    _download: Optional[Callable[[str, Path], None]] = None,
+) -> Path:
+    """First-run convenience: download AND extract a Temurin JRE so
+    ``jre_dir/bin/java[.exe]`` exists, unless it already does. Returns
+    ``jre_dir``. Test seams mirror ``download_jre``."""
+    from .forge_runner import VENDOR_JRE
+    jre_dir = jre_dir or VENDOR_JRE
+    bindir = jre_dir / "bin"
+    if (bindir / "java.exe").exists() or (bindir / "java").exists():
+        return jre_dir
+    archive = download_jre(
+        jre_dir, system=system, machine=machine,
+        _get_release=_get_release, _download=_download,
+    )
+    return extract_jre(archive, jre_dir)
+
+
 def prime_card_cache(
     names: Optional[list[str]] = None,
     *,
@@ -399,7 +475,14 @@ def main(argv=None) -> int:
             rc = 1
         else:
             print(f"  saved: {arch}")
-            print("  (extract the archive under vendor/jre/ to complete installation)")
+            print("  extracting...")
+            try:
+                jdir = extract_jre(arch)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  extract failed: {type(exc).__name__}: {exc}")
+                rc = 1
+            else:
+                print(f"  installed JRE -> {jdir}")
 
     if args.prime_cards:
         names = args.prime_cards_list  # None -> built-in default list
