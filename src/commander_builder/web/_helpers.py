@@ -805,7 +805,7 @@ def read_protected_cards(deck_text: str) -> list[str]:
     wrapped in double quotes, so users who want a one-line list of
     no-comma names can still do:
 
-        Protect="Sol Ring", "Lightning Bolt", "Counterspell"
+        Protect=\"Sol Ring\", \"Lightning Bolt\", \"Counterspell\"
 
     Quoted form mixes safely with bare lines on the same .dck.
 
@@ -816,7 +816,7 @@ def read_protected_cards(deck_text: str) -> list[str]:
     Whitespace trimmed per entry; empty entries silently dropped.
     """
     import re as _re
-    # Quoted-entry pattern: matches `"..."` sequences. We pull each
+    # Quoted-entry pattern: matches `\"...\"` sequences. We pull each
     # quoted chunk out separately and treat unquoted leftover as a
     # single bare entry (preserves the comma-in-name case).
     _quoted_re = _re.compile(r'"([^"]*)"')
@@ -849,7 +849,7 @@ def read_protected_cards(deck_text: str) -> list[str]:
         if not value:
             continue
         if '"' in value:
-            # Quoted form: pull each "..." chunk out; ignore any
+            # Quoted form: pull each \"...\" chunk out; ignore any
             # commas / whitespace between chunks.
             for m in _quoted_re.finditer(value):
                 _add(m.group(1))
@@ -962,3 +962,58 @@ def project_salt_warning(
         "threshold": threshold,
         "cards": hits,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cross-deck library search — which decks run a given card
+# ---------------------------------------------------------------------------
+#
+# Backs the unified app's "which of my decks run this card?" lookup
+# (FP-007 next slice). Pure file read over the .dck set in a directory.
+
+
+def decks_containing_card(deck_dir: Path, card_name: str) -> list[str]:
+    """Return the SORTED deck IDs whose [Commander] or [Main] section
+    runs ``card_name``.
+
+    Each ``.dck`` file in ``deck_dir`` is scanned. A deck matches when
+    its ``[Commander]`` or ``[Main]`` section contains a line for
+    ``card_name``, matched case-insensitively and ignoring the leading
+    quantity and any ``|SET|CN`` edition tail (so ``1 Sol Ring|CLB|871``
+    matches ``"sol ring"``). The deck ID returned is the filename stem
+    (e.g. ``"Alpha [B3]"`` for ``Alpha [B3].dck``). Empty list when no
+    deck runs the card.
+
+    Only ``[Commander]`` and ``[Main]`` count — sideboard / considering
+    / metadata sections are ignored, mirroring the card-section scope
+    used elsewhere in this module.
+    """
+    import re as _re
+    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+    target = card_name.strip().lower()
+    matches: list[str] = []
+    for path in deck_dir.glob("*.dck"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        in_card_section = False
+        found = False
+        for raw in text.splitlines():
+            s = raw.strip()
+            if not s:
+                continue
+            if s.startswith("[") and s.endswith("]"):
+                in_card_section = s.lower() in ("[commander]", "[main]")
+                continue
+            if not in_card_section:
+                continue
+            m = line_pattern.match(s)
+            if not m:
+                continue
+            if m.group(2).strip().lower() == target:
+                found = True
+                break
+        if found:
+            matches.append(path.stem)
+    return sorted(matches)
