@@ -70,6 +70,22 @@ def _default_serve(deck_dir: Optional[str], host: str, port: int) -> threading.T
     return t
 
 
+def _resolve_deck_dir(deck_dir: Optional[str]) -> Optional[str]:
+    """Resolve the effective deck directory for launch().
+
+    ``deck_dir`` (CLI arg or explicit kwarg) wins; otherwise fall back to
+    ``config_store.get_deck_dir()`` so the configured / default value is
+    used when launching via the packaged EXE with no CLI flag.
+    """
+    if deck_dir is not None:
+        return deck_dir
+    try:
+        from .config_store import get_deck_dir
+        return str(get_deck_dir())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def launch(
     deck_dir: Optional[str] = None,
     host: str = DEFAULT_HOST,
@@ -84,6 +100,10 @@ def launch(
     loop). Returns the served URL — handy for tests that inject a non-
     blocking fake ``webview``. ``serve`` is injectable too so tests can
     avoid spinning a real Flask server.
+
+    ``deck_dir`` is resolved via ``_resolve_deck_dir``: an explicit value
+    wins; otherwise ``config_store.get_deck_dir()`` supplies the persisted
+    or platform-default location.
     """
     if webview is None:
         try:
@@ -98,7 +118,9 @@ def launch(
     serve = serve or _default_serve
     if port is None:
         port = find_free_port(host)
-    serve(deck_dir, host, port)
+
+    effective_deck_dir = _resolve_deck_dir(deck_dir)
+    serve(effective_deck_dir, host, port)
     # First-run dependency check — warn (never block) so the user knows why
     # Forge-backed audits/sims may be unavailable on a fresh install.
     try:
@@ -106,7 +128,7 @@ def launch(
         status = check_dependencies()
         if status.missing:
             print(f"[desktop] missing dependencies: {', '.join(status.missing)} "
-                  f"— run `commander-builder-bootstrap` for details", flush=True)
+                  f"-- run `commander-builder-bootstrap` for details", flush=True)
     except Exception:  # noqa: BLE001
         pass
     wait_until_up(host, port)
@@ -123,8 +145,10 @@ def main(argv=None) -> int:
         description="Run Commander Builder as a native desktop window.",
     )
     ap.add_argument("--deck-dir", default=None,
-                    help="Directory of .dck files (default: the Forge "
-                         "userdata decks dir, same as the web app).")
+                    help="Directory of .dck files. Overrides the persisted "
+                         "deck_dir config setting. If neither is set, uses "
+                         "%%USERPROFILE%%\\Documents\\CommanderBuilder\\decks "
+                         "(Windows) or ~/Documents/CommanderBuilder/decks.")
     args = ap.parse_args(argv)
     launch(deck_dir=args.deck_dir)
     return 0

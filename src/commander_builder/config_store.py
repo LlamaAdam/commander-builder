@@ -44,8 +44,13 @@ _FILE_NAME = "config.json"
 #   str     — stored as-is; None / "" clears the key.
 SECRET_KEYS = frozenset({"anthropic_api_key"})
 _INT_KEYS = frozenset({"default_bracket"})
-_STR_KEYS = frozenset({"model", "moxfield_user"})
+_STR_KEYS = frozenset({"model", "moxfield_user", "deck_dir"})
 ALLOWED_KEYS = SECRET_KEYS | _INT_KEYS | _STR_KEYS
+
+# Default deck-dir used when no deck_dir is configured.
+# Uses %USERPROFILE%\Documents\CommanderBuilder\decks on Windows;
+# ~/Documents/CommanderBuilder/decks elsewhere.
+_DECK_DIR_ENV_VAR = "COMMANDER_BUILDER_DECK_DIR"
 
 # Mirrors the anthropic-key pattern in ``scripts/scan_secrets.py``
 # (kept in sync by hand — scripts/ isn't an importable package). Used to
@@ -202,3 +207,31 @@ def apply_update(
             cfg[key] = value
     save_config(cfg, target)
     return cfg
+
+
+def get_deck_dir(path: Optional[Path] = None) -> Path:
+    """Resolve the active deck directory.
+
+    Resolution order (first wins):
+    1. ``COMMANDER_BUILDER_DECK_DIR`` environment variable.
+    2. ``deck_dir`` key in the persisted config (set via ``PUT /api/config``).
+    3. Platform default:
+       Windows: ``%USERPROFILE%\\Documents\\CommanderBuilder\\decks``
+       other:   ``~/Documents/CommanderBuilder/decks``
+
+    The directory is NOT created by this function — callers decide when to
+    create it (e.g. on first actual write, not on every lookup).
+    """
+    env_override = os.environ.get(_DECK_DIR_ENV_VAR)
+    if env_override:
+        return Path(env_override)
+
+    cfg = load_config(path)
+    configured = cfg.get("deck_dir")
+    if configured:
+        return Path(configured)
+
+    # Platform default.
+    user_profile = os.environ.get("USERPROFILE") if os.name == "nt" else None
+    home = Path(user_profile) if user_profile else Path.home()
+    return home / "Documents" / "CommanderBuilder" / "decks"
