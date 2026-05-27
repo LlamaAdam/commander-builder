@@ -27,7 +27,7 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** ~1287 passing fast lane (+slow with `--run-slow`), ~167s
+- **Tests:** ~1548 passing fast lane (+slow with `--run-slow`), ~167s
   offline. Zero warnings under `python -W default`.
 - **Branch:** `feature/2026-04-28-session` (130+ commits ahead of
   `master`, in sync with `origin`).

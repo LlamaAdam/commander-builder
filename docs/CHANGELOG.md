@@ -6,6 +6,25 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-05-27 — FP-002/007/008-009/010 slices landed (4 review branches merged)
+
+Built in parallel isolated worktrees, reviewed (green fast lane + scope audit +
+a line-by-line correctness pass), and merged to `feature` (`--no-ff` each):
+- **FP-002**: `scripts/build_fp002_deckset.py` — acquire top-liked Moxfield base
+  + Claude-curated v2 for ~30 commanders toward the 80-deck margin-regression
+  goal (resumable; smoke-tested live).
+- **FP-007**: unified nav shell (Decks/Cards/Rules left-rail), `/api/library`
+  cross-deck card search (backed by `decks_containing_card`), and
+  `/api/rules/combo` + `/api/rules/game_changers`.
+- **FP-008/009**: `image_url` added to the `/api/oracle` projection (rest of the
+  oracle/card surface was already shipped).
+- **FP-010**: first-run downloader + JRE extraction (`extract_jre`/`ensure_jre`)
+  + deck-dir picker + window chrome (icon/single-instance/graceful shutdown) + a
+  Windows CI build job. Review caught + fixed a latent crash — the app icon is a
+  `webview.start()` kwarg, not a `create_window()` param (tests had masked it).
+Fast lane: 1548 passed / 141 skipped on merged `feature`. (Installer slice for
+FP-010 deferred — needs Inno Setup/NSIS tooling.)
+
 ### 2026-05-27 — orchestrator worklist landed (4 items, reviewed + folded)
 
 The autonomous commander-orchestrator cleared the `orch/worklist` queue;
