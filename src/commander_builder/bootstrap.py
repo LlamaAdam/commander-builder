@@ -166,6 +166,51 @@ def _pick_forge_jar_asset(release: dict) -> Optional[dict]:
     return max(candidates, key=_ver)
 
 
+def _pick_jre_asset(release: dict, system: str, machine: str) -> Optional[dict]:
+    """From an Adoptium/Temurin GitHub release payload, pick the JRE archive
+    asset matching the caller's platform.
+
+    Mirrors ``_pick_forge_jar_asset`` but keys off the OS + arch tokens that
+    Temurin embeds in its asset names (e.g.
+    ``OpenJDK17U-jre_x64_windows_hotspot_17.0.11_9.zip``):
+
+      ``system``  is ``platform.system()``:
+        "Windows" -> "windows", "Linux" -> "linux", "Darwin" -> "mac".
+      ``machine`` is ``platform.machine()``:
+        "AMD64"/"x86_64" -> "x64", "arm64"/"aarch64" -> "aarch64".
+
+    Returns the matching asset dict (has ``name`` + ``browser_download_url``)
+    or None when no asset matches.
+    """
+    os_token = {
+        "windows": "windows",
+        "linux": "linux",
+        "darwin": "mac",
+    }.get((system or "").lower())
+    arch_token = {
+        "amd64": "x64",
+        "x86_64": "x64",
+        "x64": "x64",
+        "arm64": "aarch64",
+        "aarch64": "aarch64",
+    }.get((machine or "").lower())
+    if os_token is None or arch_token is None:
+        return None
+
+    assets = release.get("assets") or []
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        name = (a.get("name") or "").lower()
+        if not name:
+            continue
+        if "jre" not in name:
+            continue
+        if os_token in name and arch_token in name:
+            return a
+    return None
+
+
 def download_forge(
     forge_dir: Optional[Path] = None,
     *,
