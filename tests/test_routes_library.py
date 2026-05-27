@@ -113,3 +113,24 @@ def test_library_response_shape(client):
     assert "count" in body
     assert isinstance(body["decks"], list)
     assert isinstance(body["count"], int)
+
+
+# ---------------------------------------------------------------------------
+# Polish (FP-007): empty / error state shapes the JS UI renders against
+# ---------------------------------------------------------------------------
+
+def test_library_zero_count_when_card_absent(client):
+    """count=0 + empty decks list gives the JS its 'No decks run this card.'
+    empty-state branch (renderLibraryResults checks !decks.length)."""
+    body = client.get("/api/library?card=Black+Lotus").get_json()
+    assert body["count"] == 0
+    assert body["decks"] == []
+    # card field must echo the query so the header renders correctly.
+    assert body["card"] == "Black Lotus"
+
+
+def test_library_400_body_has_error_field(client):
+    """400 response includes an 'error' key so the JS can surface a
+    friendly message rather than a raw status code string."""
+    body = client.get("/api/library?card=").get_json()
+    assert "error" in body
