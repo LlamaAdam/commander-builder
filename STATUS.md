@@ -426,10 +426,17 @@ that *interprets* cards uses oracle, not OCR'd images.
 
 ### FP-010 — Package web app as desktop EXE
 
-PyInstaller + pywebview, ~16 h. Bundle Forge + JRE, first-run downloader
-for the 180 MB `mtg_cards/` folder. **Status: PARKED.** Don't start
-until the web app demonstrably works for a full iteration cycle on real
-decks (≥5 audits via the browser without touching a CLI).
+PyInstaller + pywebview, ~16 h. **Status: STARTED 2026-05-26 — launcher
++ freeze pipeline working, EXE builds** (`dist/CommanderBuilder/
+CommanderBuilder.exe`, Flask assets bundled). `commander_builder/desktop.py`
++ `packaging/commander-builder.spec` + `scripts/build_desktop.py`;
+`[desktop]` extra + `commander-builder-desktop` entry; 6 tests. Forge/JRE/
+`mtg_cards/` external (too big) — first-run downloader is the next slice.
+See [docs/fp010-plan.md](docs/fp010-plan.md).
+
+Remaining slices: first-run Forge/JRE/`mtg_cards` downloader, deck-dir
+picker, app icon + single-instance + graceful shutdown, installer, and a
+Windows CI build job.
 
 ### FP-011 — BYO LLM token
 
