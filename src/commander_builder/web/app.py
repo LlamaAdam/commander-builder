@@ -222,14 +222,18 @@ def create_app(
     from .routes_config import make_config_blueprint
     from .routes_dashboard import make_dashboard_blueprint
     from .routes_decks import make_decks_blueprint
+    from .routes_library import make_library_blueprint
     from .routes_meta import make_meta_blueprint
     from .routes_oracle import make_oracle_blueprint
+    from .routes_rules import make_rules_blueprint
     from .routes_sim import make_sim_blueprint
     app.register_blueprint(make_audit_blueprint(deck_dir))
     app.register_blueprint(make_dashboard_blueprint(
         deck_dir, knowledge_db, _list_decks,
     ))
     app.register_blueprint(make_decks_blueprint(deck_dir))
+    # FP-007 slice 2: cross-deck library search (which decks run a card?).
+    app.register_blueprint(make_library_blueprint(deck_dir))
     app.register_blueprint(
         make_meta_blueprint(deck_dir, _list_decks, _ASSET_VERSION),
     )
@@ -240,6 +244,8 @@ def create_app(
     # projection (identity / legality / price / printing) behind the
     # topbar "Cards" search box.
     app.register_blueprint(make_cards_blueprint())
+    # FP-007 slice 3: combo + bracket rules lookup.
+    app.register_blueprint(make_rules_blueprint())
     # FP-011: per-user config (redacted GET / restricted PUT) backing
     # the Settings panel — BYO Anthropic token + app preferences.
     app.register_blueprint(make_config_blueprint())

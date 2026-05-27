@@ -76,11 +76,60 @@
   </dialog>
 
   <main class="layout">
-    <aside class="sidebar">
-      <h2>Decks</h2>
-      <ul class="deck-list" id="deck-list">
-        <li class="muted">Loading…</li>
-      </ul>
+    <!-- FP-007: left-rail nav shell — Decks / Cards / Rules sections -->
+    <nav class="left-rail" id="left-rail">
+      <button class="rail-btn active" data-section="decks"   title="Deck dashboard">Decks</button>
+      <button class="rail-btn"        data-section="cards"   title="Card reference + library search">Cards</button>
+      <button class="rail-btn"        data-section="rules"   title="Combo and bracket rules lookup">Rules</button>
+    </nav>
+
+    <aside class="sidebar" id="sidebar-panel">
+      <!-- DECKS section (default visible) -->
+      <div id="section-decks">
+        <h2>Decks</h2>
+        <ul class="deck-list" id="deck-list">
+          <li class="muted">Loading...</li>
+        </ul>
+      </div>
+
+      <!-- CARDS section: card reference + library search -->
+      <div id="section-cards" hidden>
+        <h2>Card Library</h2>
+        <p class="muted" style="font-size:12px;margin:0 0 8px;">
+          Which of your decks run a card?
+        </p>
+        <form id="library-search-form" style="display:flex;gap:4px;flex-direction:column;">
+          <input type="text" id="library-card-input" placeholder="Card name..."
+                 autocomplete="off"
+                 style="padding:6px 8px;border-radius:4px;border:1px solid var(--border);
+                        background:var(--bg);color:var(--text);" />
+          <button type="submit" class="advise-btn" style="margin:0;">Search decks</button>
+        </form>
+        <div id="library-results" style="margin-top:12px;"></div>
+      </div>
+
+      <!-- RULES section: combo + bracket lookup -->
+      <div id="section-rules" hidden>
+        <h2>Rules &amp; Combos</h2>
+        <p class="muted" style="font-size:12px;margin:0 0 8px;">
+          Look up combos by color identity or view Game Changers.
+        </p>
+        <form id="combo-search-form" style="display:flex;gap:4px;flex-direction:column;">
+          <label class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;">
+            Color identity (e.g. WUB, R, G)
+          </label>
+          <input type="text" id="combo-identity-input" placeholder="WUBRG"
+                 maxlength="5" autocomplete="off"
+                 style="padding:6px 8px;border-radius:4px;border:1px solid var(--border);
+                        background:var(--bg);color:var(--text);" />
+          <button type="submit" class="advise-btn" style="margin:0;">Find combos</button>
+        </form>
+        <button class="topbar-btn" id="rules-game-changers-btn"
+                style="margin-top:8px;width:100%;">
+          Show Game Changers
+        </button>
+        <div id="rules-results" style="margin-top:12px;"></div>
+      </div>
     </aside>
 
     <section class="dashboard" id="dashboard">
@@ -188,6 +237,8 @@
     </div>
   </div>
 
+  <!-- FP-007: unified nav shell + library/rules UI -->
+  <script src="{{ url_for('static', filename='nav.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='iteration_graph.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='audit_streaming.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='deck_health_ui.js') }}?v={{ asset_version }}"></script>
