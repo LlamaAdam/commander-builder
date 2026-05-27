@@ -6,6 +6,37 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-05-27 — orchestrator worklist landed (4 items, reviewed + folded)
+
+The autonomous commander-orchestrator cleared the `orch/worklist` queue;
+each fix was reviewed against its pinned contract and the worklist tests
+were folded into permanent per-module homes (coverage now rides with the
+code on `feature`, not the disposable branch). Full `--run-slow` suite green
+(1618 passed).
+
+#### Added
+
+- **`feat(fp-002)`: `margin_analysis.single_feature_ols(samples, feature)`** —
+  pure-stdlib single-feature OLS (slope/intercept/r²) plus a leave-one-out
+  cross-validated RMSE (the honest out-of-sample error for the
+  analysis→predictor step); constant-feature safe (slope 0.0, no ZeroDiv).
+- **`feat(fp-010)`: `bootstrap._pick_jre_asset(release, system, machine)`** —
+  picks the Temurin/Adoptium JRE archive for the caller's OS+arch from a
+  GitHub release payload (mirrors `_pick_forge_jar_asset`); `None` when no
+  asset matches. Enables first-run JRE auto-fetch.
+- **`feat(fp-007)`: `web/_helpers.decks_containing_card(deck_dir, card_name)`** —
+  cross-deck library search ("which of my decks run this card?"): sorted deck
+  IDs whose `[Commander]`/`[Main]` runs the card, case-insensitive, leading
+  quantity and `|SET|CN` edition tail stripped.
+
+#### Fixed
+
+- **`fix(game_changers)`: don't cache a failed/empty scrape.**
+  `fetch_game_changers` now persists `.cache/game_changers.json` only when the
+  WotC scrape actually produced names; a failed/empty scrape degrades to the
+  bundled fallback *without* writing the cache, so it no longer masquerades as
+  "fresh" for the full TTL and blocks a retry.
+
 ### 2026-05-26 — FP-002 reopened + cross-validated, FP-007/FP-010 started, deep audit + fixes
 
 #### Added

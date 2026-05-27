@@ -31,16 +31,21 @@ cd C:\dev\commander-orchestrator
 Each fix lands on an orchestrator auto-fix branch off `orch/worklist`; review +
 merge, or cherry-pick the source change back onto `feature`.
 
-## Work items (all confirmed RED against current `feature`)
+## Work items — LANDED 2026-05-27 (queue currently empty)
 
-| # | Test | Add to (existing file) | What to implement |
-|---|------|------------------------|-------------------|
-| 1 | `test_failed_scrape_is_not_cached` | `game_changers.py` | (bug) don't persist the cache when the WotC scrape failed/returned empty, so the next call retries |
-| 2 | `test_single_feature_ols_*` | `scripts/margin_analysis.py` | **FP-002**: `single_feature_ols(samples, feature)` — pure-stdlib OLS of margin~feature + leave-one-out RMSE (the analysis→predictor step) |
-| 3 | `test_pick_jre_asset_*` | `bootstrap.py` | **FP-010**: `_pick_jre_asset(release, system, machine)` — choose the Temurin JRE archive for a platform (mirrors `_pick_forge_jar_asset`) |
-| 4 | `test_decks_containing_card_*` | `web/_helpers.py` | **FP-007**: `decks_containing_card(deck_dir, card_name)` — cross-deck library search; sorted deck IDs containing the card |
+The four items below were implemented by the orchestrator, reviewed against
+their pinned contracts, and merged to `feature` (`27e3423..0f94711`). Each
+test was folded from `tests/test_orch_worklist.py` into its permanent
+per-module home, so coverage now rides with the code. Full `--run-slow`
+suite green (1618 passed). Seed the next batch here when there's new
+orchestrator-suitable work.
 
-Each test's section comment in `test_orch_worklist.py` carries the full contract.
+| # | Test (now lives in) | File | What landed |
+|---|---------------------|------|-------------|
+| 1 | `tests/test_game_changers.py` | `game_changers.py` | (bug) don't persist the cache when the WotC scrape failed/returned empty, so the next call retries |
+| 2 | `tests/test_margin_analysis.py` | `scripts/margin_analysis.py` | **FP-002**: `single_feature_ols(samples, feature)` — pure-stdlib OLS of margin~feature + leave-one-out RMSE (the analysis→predictor step) |
+| 3 | `tests/test_bootstrap.py` | `bootstrap.py` | **FP-010**: `_pick_jre_asset(release, system, machine)` — choose the Temurin JRE archive for a platform (mirrors `_pick_forge_jar_asset`) |
+| 4 | `tests/test_web_helpers.py` | `web/_helpers.py` | **FP-007**: `decks_containing_card(deck_dir, card_name)` — cross-deck library search; sorted deck IDs containing the card |
 
 ## Workflow
 

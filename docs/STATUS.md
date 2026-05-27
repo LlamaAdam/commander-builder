@@ -8,8 +8,10 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-05-26 (FP-002 reopened — margin regression on
-40-game soak rows; first result in)
+**Last updated:** 2026-05-27 (orchestrator landed 4 worklist items onto
+`feature`: game_changers cache-guard bug fix + FP-002 `single_feature_ols`
++ FP-010 `_pick_jre_asset` + FP-007 `decks_containing_card`; FP-002 still
+reopened under the margin-regression framing)
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
@@ -286,8 +288,11 @@ be worked. Sized for a single session each.
     curation is empirically ~neutral in both (mean +0.0009 / −0.0108) and
     **no feature survives cross-validation** (the A/B `wincon_protection`
     hit did not replicate in the gauntlet). Not yet a shippable model —
-    needs ~80+ unique decks. See Parked plans +
-    [docs/future-plans.md](future-plans.md).
+    needs ~80+ unique decks. **Analysis-to-predictor step landed
+    (2026-05-27):** `margin_analysis.single_feature_ols(samples, feature)`
+    — pure-stdlib single-feature OLS + leave-one-out cross-validated RMSE
+    (the honest out-of-sample error), constant-feature safe. See Parked
+    plans + [docs/future-plans.md](future-plans.md).
 
 12. ~~**Concurrent Forge sims (FP-003).**~~ ✅ **Shipped** (2026-05-22,
     `0f8f945`). `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims
@@ -413,9 +418,11 @@ browser") is met — verified end-to-end in Chrome this session. Plan +
 slice breakdown in [docs/future-plans.md](future-plans.md); the
 substrate is ~80% built (web shell, `oracle_store`, `mtg_cards/`,
 combo/rules), so this is navigation + a shared card-reference surface,
-not a rewrite. **Next concrete build: slice 1 — card-reference panel**
-(`/api/card/<name>` + topbar search). Slices land behind the working
-app so `feature`/CI stay green.
+not a rewrite. Card-reference panel (`/api/card`) shipped; cross-deck
+library search helper `_helpers.decks_containing_card(deck_dir, card_name)`
+landed 2026-05-27 (which of my decks run this card — sorted deck IDs,
+qty + `|SET|CN` stripped). Next: nav-shell / rules / library slices.
+Slices land behind the working app so `feature`/CI stay green.
 
 ### FP-008 / FP-009 — Card images + oracle-text store
 
@@ -433,6 +440,10 @@ CommanderBuilder.exe`, Flask assets bundled). `commander_builder/desktop.py`
 `[desktop]` extra + `commander-builder-desktop` entry; 6 tests. Forge/JRE/
 `mtg_cards/` external (too big) — first-run downloader is the next slice.
 See [docs/future-plans.md](future-plans.md).
+
+JRE bootstrap piece landed 2026-05-27: `bootstrap._pick_jre_asset(release,
+system, machine)` selects the Temurin JRE archive for the caller's platform
+(mirrors `_pick_forge_jar_asset`), so first-run can auto-fetch a JRE.
 
 Remaining slices: first-run Forge/JRE/`mtg_cards` downloader, deck-dir
 picker, app icon + single-instance + graceful shutdown, installer, and a
