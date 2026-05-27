@@ -1013,6 +1013,183 @@ def run_ab_batch(
     return results  # type: ignore[return-value]
 
 
+# ---------------------------------------------------------------------------
+# Parallel single-matchup A/B (the "100-game commander test" speedup).
+#
+# run_ab_simulation runs its `games` serially in ONE Forge process per game,
+# so a 100-game commander test pins a single core for ~an hour. The games are
+# independent, so we can split them into chunks, run one chunk per cwd-isolated
+# Forge profile concurrently, and sum the per-seat wins back into a single
+# ABResult that's identical in shape to a serial run. On a box with P profiles
+# and C cores this is a ~min(P, C)x wall-clock win (12 profiles here -> ~5 min).
+# ---------------------------------------------------------------------------
+
+
+def _discover_profiles(max_n: int = 64) -> "list[Path]":
+    """All existing cwd-isolated Forge profiles: vendor/forge, vendor/forge2..N.
+
+    Mirrors the layout soak_pool.py relies on — vendor/forge is profile 1 and
+    vendor/forge{i} (i>=2) are the extras. Only directories that actually exist
+    are returned, so concurrency can never exceed the profiles on this host.
+    """
+    out = [VENDOR_FORGE]
+    for i in range(2, max_n + 1):
+        p = VENDOR_FORGE.parent / f"forge{i}"
+        if p.is_dir():
+            out.append(p)
+    return out
+
+
+def _runner_for(profile: Path) -> "ForgeRunner":
+    """ForgeRunner bound to ``profile``'s cwd (shares the located java + jar)."""
+    return ForgeRunner.locate() if profile == VENDOR_FORGE else ForgeRunner.for_profile(profile)
+
+
+def _even_chunks(total: int, parts: int) -> "list[int]":
+    """Split ``total`` games into at most ``parts`` balanced, EVEN-sized chunks.
+
+    Even sizes matter: run_ab_simulation alternates A-first/B-first by its
+    internal game index, so an odd-sized chunk hands deck A one extra first-seat
+    game. We split by A/B *pairs* (each pair = one A-first + one B-first game) so
+    every chunk stays seat-balanced. For an odd ``total`` the single leftover
+    game lands on the first chunk — an unavoidable 1-game seat skew, no worse
+    than a serial odd-count run.
+    """
+    if total < 1:
+        return []
+    parts = max(1, min(parts, total))
+    pairs, leftover = divmod(total, 2)  # leftover is 0 or 1
+    base, extra = divmod(pairs, parts)
+    sizes = [(base + (1 if k < extra else 0)) * 2 for k in range(parts)]
+    if leftover:
+        sizes[0] += 1
+    return [s for s in sizes if s > 0]
+
+
+def run_ab_parallel(
+    deck_a_path: Path,
+    deck_b_path: Path,
+    games: int = 100,
+    *,
+    fillers: Optional[list[str]] = None,
+    game_format: str = "commander",
+    timeout_per_game: Optional[int] = None,
+    max_workers: Optional[int] = None,
+    profiles: "Optional[list[Path]]" = None,
+    _sim_fn: "Callable[..., ABResult]" = run_ab_simulation,
+) -> ABResult:
+    """Run a single ``games``-game A/B matchup in parallel across Forge profiles.
+
+    Drop-in faster replacement for ``run_ab_simulation`` when you want one big
+    head-to-head (e.g. the 100-game commander test) to finish in wall-clock
+    ``games / min(profiles, cores)`` time instead of running every game on one
+    core. The games are split into even chunks (see ``_even_chunks``), each chunk
+    runs as its own ``run_ab_simulation`` on a distinct cwd-isolated profile, and
+    the per-seat wins / turn stats are summed back into ONE ABResult with the
+    same fields a serial run would have produced.
+
+    Auto-sizing: ``max_workers`` defaults to ``min(cpu_count, len(profiles),
+    games)``. ``profiles`` defaults to every vendor/forge* profile on the host;
+    two chunks never share a profile (they'd collide on the deck dir, cache, and
+    forge.log). With a single profile this degenerates to one serial chunk.
+
+    Like ``run_ab_simulation`` it never raises — per-chunk failures are folded
+    into the aggregate ``status``/``error`` and the wins from completed chunks
+    are still reported (a crash in chunk 3 doesn't discard 90 good games).
+    """
+    result = ABResult(
+        deck_a=deck_a_path.name,
+        deck_b=deck_b_path.name,
+        games=0,
+        status=_AB_STATUS_PENDING,
+    )
+    if games < 1:
+        result.status = _AB_STATUS_SKIPPED
+        result.error = "games must be >= 1"
+        return result
+
+    if profiles is None:
+        profiles = _discover_profiles()
+    if not profiles:
+        result.status = _AB_STATUS_SKIPPED
+        result.error = "no Forge profiles found (expected vendor/forge[, forge2..N])"
+        return result
+
+    import os as _os
+    cores = _os.cpu_count() or 1
+    cap = min(cores, len(profiles), games)
+    if max_workers is not None:
+        cap = max(1, min(max_workers, cap))
+
+    sizes = _even_chunks(games, cap)
+    parts = len(sizes)
+    runners = [_runner_for(p) for p in profiles[:parts]]
+
+    result.status = _AB_STATUS_RUNNING
+    started = datetime.now()
+
+    # One chunk per runner — a dedicated profile each, so no queue/handoff is
+    # needed (unlike run_ab_batch, which multiplexes many jobs over few
+    # runners). Threads are fine: each chunk blocks in subprocess.run waiting on
+    # its JVM, with the GIL released.
+    chunk_results: "list[Optional[ABResult]]" = [None] * parts
+
+    def _do(idx: int, size: int, runner: "ForgeRunner"):
+        chunk_results[idx] = _sim_fn(
+            deck_a_path,
+            deck_b_path,
+            games=size,
+            runner=runner,
+            fillers=fillers,
+            game_format=game_format,
+            timeout_per_game=timeout_per_game,
+        )
+
+    with ThreadPoolExecutor(max_workers=parts) as ex:
+        futures = [ex.submit(_do, i, sz, runners[i]) for i, sz in enumerate(sizes)]
+        for f in futures:
+            f.result()  # surface unexpected (non-ABResult) exceptions
+
+    # --- aggregate the chunks back into one ABResult -----------------------
+    a_turn_weight = b_turn_weight = 0.0
+    statuses: list[str] = []
+    errors: list[str] = []
+    for ci, res in enumerate(chunk_results):
+        if res is None:  # _do always assigns, but stay defensive
+            statuses.append(_AB_STATUS_FAILED)
+            errors.append(f"chunk {ci}: no result")
+            continue
+        statuses.append(res.status)
+        result.wins_a += res.wins_a
+        result.wins_b += res.wins_b
+        result.games += res.games
+        result.seat_orders.extend(res.seat_orders)
+        # Weight each chunk's avg_turns by the wins it averaged over, so the
+        # combined mean stays a true per-win average (not a mean of means).
+        a_turn_weight += res.avg_turns_a * res.wins_a
+        b_turn_weight += res.avg_turns_b * res.wins_b
+        if res.error:
+            errors.append(f"chunk {ci} ({res.status}): {res.error}")
+
+    if result.wins_a:
+        result.avg_turns_a = round(a_turn_weight / result.wins_a, 2)
+    if result.wins_b:
+        result.avg_turns_b = round(b_turn_weight / result.wins_b, 2)
+    result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+
+    # Status precedence: any genuine failure -> failed (wins from completed
+    # chunks are still reported); else all-skipped -> skipped; else done.
+    if _AB_STATUS_FAILED in statuses:
+        result.status = _AB_STATUS_FAILED
+    elif statuses and all(s == _AB_STATUS_SKIPPED for s in statuses):
+        result.status = _AB_STATUS_SKIPPED
+    else:
+        result.status = _AB_STATUS_DONE
+    if errors:
+        result.error = "; ".join(errors)
+    return result
+
+
 if __name__ == "__main__":
     # Smoke entry point: `python -m commander_builder.forge_runner deck1.dck ...`
     import sys

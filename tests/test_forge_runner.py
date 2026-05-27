@@ -1115,3 +1115,146 @@ def test_run_gauntlet_simulation_skips_on_wrong_gauntlet_size(tmp_path):
         runner=_make_seq_runner([]))
     assert result.status == _AB_STATUS_SKIPPED
     assert "3 gauntlet decks" in (result.error or "")
+
+
+# --- run_ab_parallel — single matchup chunked across profiles ---------------
+
+
+def test_even_chunks_splits_into_balanced_even_sizes():
+    from commander_builder.forge_runner import _even_chunks
+
+    sizes = _even_chunks(100, 12)
+    assert sum(sizes) == 100
+    assert all(s % 2 == 0 for s in sizes)  # every chunk seat-balanced
+    assert max(sizes) - min(sizes) <= 2    # balanced
+    # Fewer games than parts -> at most `games` chunks, none empty.
+    assert _even_chunks(3, 8) == [2, 1] or sum(_even_chunks(3, 8)) == 3
+    assert _even_chunks(1, 8) == [1]
+    assert _even_chunks(0, 8) == []
+
+
+def test_even_chunks_odd_total_puts_leftover_on_first_chunk():
+    from commander_builder.forge_runner import _even_chunks
+
+    sizes = _even_chunks(101, 4)
+    assert sum(sizes) == 101
+    # Exactly one odd chunk (the leftover game); the rest stay even.
+    assert sum(1 for s in sizes if s % 2 == 1) == 1
+
+
+def _stub_runners(monkeypatch):
+    """_runner_for builds real ForgeRunners (needs the vendor jar); stub it so
+    the parallel tests stay environment-independent. _sim_fn ignores the runner."""
+    monkeypatch.setattr(
+        "commander_builder.forge_runner._runner_for",
+        lambda profile: object(),
+    )
+
+
+def test_run_ab_parallel_aggregates_chunk_results(tmp_path, monkeypatch):
+    """100 games fanned across 4 fake profiles must sum per-seat wins, games,
+    and seat_orders back into one ABResult identical in shape to a serial run.
+    """
+    from commander_builder.forge_runner import run_ab_parallel, ABResult
+    _stub_runners(monkeypatch)
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    profiles = [tmp_path / "forge", tmp_path / "forge2",
+                tmp_path / "forge3", tmp_path / "forge4"]
+
+    seen_sizes: list[int] = []
+
+    def fake_sim(da, db, *, games, runner, fillers, game_format, timeout_per_game):
+        seen_sizes.append(games)
+        # Each chunk: A wins 60%, B wins 40%, avg turns A=10, B=8.
+        wa, wb = (games * 3) // 5, games - (games * 3) // 5
+        return ABResult(
+            deck_a=da.name, deck_b=db.name,
+            wins_a=wa, wins_b=wb, games=games,
+            avg_turns_a=10.0, avg_turns_b=8.0,
+            status="done",
+            seat_orders=[[da.name, db.name, "f1", "f2"]] * games,
+        )
+
+    result = run_ab_parallel(
+        deck_a, deck_b, games=100,
+        fillers=["f1.dck", "f2.dck"],
+        profiles=profiles, max_workers=4,
+        _sim_fn=fake_sim,
+    )
+
+    assert result.status == "done"
+    assert result.games == 100
+    assert sum(seen_sizes) == 100
+    assert len(seen_sizes) == 4              # one chunk per profile
+    assert result.wins_a + result.wins_b == 100
+    assert result.wins_a > result.wins_b     # A favored in every chunk
+    assert len(result.seat_orders) == 100
+    # Weighted avg turns collapses to the per-chunk constants.
+    assert result.avg_turns_a == 10.0
+    assert result.avg_turns_b == 8.0
+
+
+def test_run_ab_parallel_keeps_wins_when_one_chunk_fails(tmp_path, monkeypatch):
+    """A crash in one chunk marks the aggregate failed but still reports the
+    wins from the chunks that completed (no silent discard of good games)."""
+    from commander_builder.forge_runner import run_ab_parallel, ABResult
+    _stub_runners(monkeypatch)
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+    profiles = [tmp_path / "forge", tmp_path / "forge2"]
+
+    calls = {"n": 0}
+
+    def fake_sim(da, db, *, games, runner, fillers, game_format, timeout_per_game):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ABResult(deck_a=da.name, deck_b=db.name, wins_a=games,
+                            games=games, status="done")
+        return ABResult(deck_a=da.name, deck_b=db.name, status="failed",
+                        error="Forge exited with code 1")
+
+    result = run_ab_parallel(
+        deck_a, deck_b, games=50,
+        fillers=["f1.dck", "f2.dck"],
+        profiles=profiles, max_workers=2,
+        _sim_fn=fake_sim,
+    )
+
+    assert result.status == "failed"
+    assert result.wins_a > 0                 # completed chunk's wins survive
+    assert "code 1" in (result.error or "")
+
+
+def test_run_ab_parallel_single_profile_is_serial(tmp_path, monkeypatch):
+    """One profile -> one chunk holding all games (graceful degenerate case)."""
+    from commander_builder.forge_runner import run_ab_parallel, ABResult
+    _stub_runners(monkeypatch)
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    sizes: list[int] = []
+
+    def fake_sim(da, db, *, games, runner, fillers, game_format, timeout_per_game):
+        sizes.append(games)
+        return ABResult(deck_a=da.name, deck_b=db.name, wins_a=games,
+                        games=games, status="done")
+
+    result = run_ab_parallel(
+        deck_a, deck_b, games=40,
+        fillers=["f1.dck", "f2.dck"],
+        profiles=[tmp_path / "forge"],
+        _sim_fn=fake_sim,
+    )
+    assert sizes == [40]
+    assert result.games == 40 and result.status == "done"
