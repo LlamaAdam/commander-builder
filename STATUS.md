@@ -375,6 +375,15 @@ features that agree across both designs. Actionable today (no model):
 curation's expected gain is ~0; fix structure (F2 `under_built`) before
 curating. Covered by `tests/test_margin_analysis.py` (18 tests).
 
+**Next (decided 2026-05-26): grow to ~80+ unique decks** to attempt a real
+out-of-sample predictor on the cross-validated `deficit_total` signal —
+acquire/curate ~30 more commanders, then a 40-game gauntlet soak
+(~12–18h on box1). Pipeline + commands in
+[docs/fp002-deckgen-plan.md](docs/fp002-deckgen-plan.md). Separately, the
+low-N noise problem this analysis exposed is now **fixed at the source**:
+A/B verdicts below 20 decisive games record as `inconclusive`, not a
+confident kept/reverted (`_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT`).
+
 ### FP-003 — Concurrent Forge sims
 
 ✅ **SHIPPED (2026-05-22, `0f8f945`).** `forge_runner.run_ab_batch(jobs,
@@ -398,9 +407,15 @@ in the active backlog.
 ### FP-007 — Unified MTG application
 
 Single web/desktop program consolidating deck testing + card reference
-+ rules + library + replays. ~6–10 weeks. **Status: PARKED.** Substrate
-ready (`mtg_cards/`); product-readiness gates not yet met. Ship FP-006
-fully first.
++ rules + library + replays. ~6–10 weeks. **Status: STARTED 2026-05-26
+(incremental).** The FP-006 gate ("web app works for a full cycle via
+browser") is met — verified end-to-end in Chrome this session. Plan +
+slice breakdown in [docs/fp007-plan.md](docs/fp007-plan.md); the
+substrate is ~80% built (web shell, `oracle_store`, `mtg_cards/`,
+combo/rules), so this is navigation + a shared card-reference surface,
+not a rewrite. **Next concrete build: slice 1 — card-reference panel**
+(`/api/card/<name>` + topbar search). Slices land behind the working
+app so `feature`/CI stay green.
 
 ### FP-008 / FP-009 — Card images + oracle-text store
 
