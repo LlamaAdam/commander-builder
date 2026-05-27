@@ -162,3 +162,22 @@ path is free (shake out the harness); flip to Claude for the M4 batch.
 A committed verdict in `fp001-path-comparison.md`: measured win-rate delta over
 >=30 seat-balanced paired games (Ollama + a Claude batch), with tokens/$/latency,
 and a go/no-go recommendation on funding Path A. Total budget ~1-1.5 weeks.
+
+## 11. Free rider -- FP-004 (deterministic sim seed)
+
+FP-004 (reproducible sims) was parked because Forge 2.0.12 exposes no `--seed`
+and JVM **bytecode** instrumentation is too brittle. **Once we own a Forge
+source fork (this doc), that objection dies** -- seeding is a small source
+patch, so fold it in while you're in the build:
+
+- Locate Forge's central RNG (it routes randomness through a small number of
+  `Random`/`MyRandom`-style sources used for shuffling + coin flips/dice).
+- Seed it deterministically at **match start** from a `--seed N` CLI arg (or
+  `FORGE_SIM_SEED` env), defaulting to current behavior (time-seeded) when
+  unset so normal play is unchanged.
+- Acceptance: two `sim` runs with the same `--seed`, same decks, and the stock
+  AI on both seats produce identical game logs / outcomes.
+
+Value beyond FP-004: a fixed seed also makes the FP-001 LLM-vs-stock A/B
+*lower-variance* (same shuffles on both seats), so fewer paired games are
+needed to detect a given win-rate delta. Worth doing early in the fork.

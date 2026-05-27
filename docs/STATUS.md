@@ -411,7 +411,11 @@ separate `cwd`-isolated profiles avoid file-locking races.
 ### FP-004 — Forge sim seed
 
 Forge 2.0.12 has no `--seed`. JVM bytecode-instrumentation would be
-brittle. **Status: PARKED.** Watch upstream.
+brittle. **Status: PARKED standalone, but UNBLOCKED by the FP-001 fork
+(2026-05-27)** — once we own a Forge source fork, seeding the engine RNG is
+a small source patch, not brittle bytecode. Folded in as a free rider on the
+FP-001 Path-B handoff (section 11); also lowers LLM-vs-stock sim variance.
+Don't pursue standalone.
 
 ### FP-006 — Web GUI
 
@@ -484,6 +488,14 @@ concurrent JVMs (`run_ab_batch`, FP-003).
   margin; advances the base deck on improvement).
 Still parked for the full agent: intent-learning, Bayesian opt, and the
 unattended multi-deck orchestration. North star, not done.
+- **UNPARKED 2026-05-27** for two tractable next slices (gates were met; the
+  "parked" was scope, not a blocker): **Slice A — intent-learning** (reuse
+  `archetype.classify` + `staples.detect_themes` to bias the improve loop +
+  protect signature pieces) and **Slice B1 — Thompson-sampling policy**
+  (pure-stdlib, alongside the shipped ε-greedy/UCB1). **Slice B2 (full GP
+  Bayesian-opt over swap combinations)** stays parked behind a numpy-dependency
+  + sim-cost decision. Designs + decisions in
+  [fp012-next-slices.md](fp012-next-slices.md); awaiting go-ahead to build.
 
 ### FP-013 — Project-tuned LLM (moonshot)
 
