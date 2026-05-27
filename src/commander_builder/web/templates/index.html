@@ -77,10 +77,16 @@
 
   <main class="layout">
     <!-- FP-007: left-rail nav shell — Decks / Cards / Rules sections -->
-    <nav class="left-rail" id="left-rail">
-      <button class="rail-btn active" data-section="decks"   title="Deck dashboard">Decks</button>
-      <button class="rail-btn"        data-section="cards"   title="Card reference + library search">Cards</button>
-      <button class="rail-btn"        data-section="rules"   title="Combo and bracket rules lookup">Rules</button>
+    <nav class="left-rail" id="left-rail" aria-label="Main sections">
+      <button class="rail-btn active" data-section="decks"
+              aria-label="Decks" aria-pressed="true"
+              title="Deck dashboard">Decks</button>
+      <button class="rail-btn"        data-section="cards"
+              aria-label="Cards" aria-pressed="false"
+              title="Card reference + library search">Cards</button>
+      <button class="rail-btn"        data-section="rules"
+              aria-label="Rules" aria-pressed="false"
+              title="Combo and bracket rules lookup">Rules</button>
     </nav>
 
     <aside class="sidebar" id="sidebar-panel">

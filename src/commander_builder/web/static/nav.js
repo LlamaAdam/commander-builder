@@ -49,9 +49,11 @@
   const SECTIONS = ["decks", "cards", "rules"];
 
   function activateSection(name) {
-    // Toggle rail buttons.
+    // Toggle rail buttons + sync aria-pressed for screen readers.
     document.querySelectorAll(".rail-btn").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.section === name);
+      const isActive = btn.dataset.section === name;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-pressed", isActive ? "true" : "false");
     });
     // Show/hide sidebar sections.
     SECTIONS.forEach((s) => {
