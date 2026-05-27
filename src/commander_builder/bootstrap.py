@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 FORGE_RELEASES_API = "https://api.github.com/repos/Card-Forge/forge/releases/latest"
+TEMURIN_RELEASES_API = (
+    "https://api.github.com/repos/adoptium/temurin17-binaries/releases/latest"
+)
 _USER_AGENT = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
 
 
@@ -239,6 +242,98 @@ def download_forge(
     return dest
 
 
+def download_jre(
+    jre_dir: Optional[Path] = None,
+    *,
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+    _get_release: Optional[Callable[[], dict]] = None,
+    _download: Optional[Callable[[str, Path], None]] = None,
+) -> Path:
+    """Download a Temurin JRE 17 archive for the current platform into
+    ``jre_dir`` and return the archive path.
+
+    ``system`` / ``machine`` default to ``platform.system()`` /
+    ``platform.machine()``. ``_get_release`` / ``_download`` are injectable
+    for tests. Raises ``RuntimeError`` when no suitable asset is found.
+
+    Note: this downloads only the *archive* (zip / tar.gz). Extraction is
+    the caller's responsibility — a first-run UI can do it with
+    ``zipfile`` or ``tarfile`` after the download completes.
+    """
+    import platform as _platform
+    from .forge_runner import VENDOR_JRE
+    jre_dir = jre_dir or VENDOR_JRE
+    system = system or _platform.system()
+    machine = machine or _platform.machine()
+
+    get_release = _get_release or _fetch_temurin_release
+    download = _download or _stream_to_file
+
+    release = get_release()
+    asset = _pick_jre_asset(release, system, machine)
+    if asset is None:
+        raise RuntimeError(
+            f"no Temurin JRE asset found for system={system!r}, "
+            f"machine={machine!r} in the latest release"
+        )
+    jre_dir.mkdir(parents=True, exist_ok=True)
+    dest = jre_dir / asset["name"]
+    download(asset["browser_download_url"], dest)
+    return dest
+
+
+def prime_card_cache(
+    names: Optional[list[str]] = None,
+    *,
+    _lookup: Optional[Callable[[str], Optional[dict]]] = None,
+) -> dict:
+    """Prime the Scryfall card-snapshot cache for a list of card names.
+
+    ``names`` defaults to a small representative set (dual lands + 5 staples)
+    chosen for quick first-run warm-up. Each card is fetched once via
+    ``scryfall_client.lookup_card`` (cache-first, writes the snapshot on
+    miss). Returns ``{"primed": [<name>, ...], "errors": [<name>, ...]}``.
+
+    ``_lookup`` is injectable for tests; defaults to
+    ``scryfall_client.lookup_card``.
+    """
+    _DEFAULT_PRIME_NAMES = [
+        "Sol Ring", "Command Tower", "Arcane Signet",
+        "Path to Exile", "Swords to Plowshares",
+        "Cultivate", "Kodama's Reach",
+        "Cyclonic Rift", "Demonic Tutor",
+        "Rhystic Study",
+    ]
+    targets = names if names is not None else _DEFAULT_PRIME_NAMES
+
+    if _lookup is None:
+        from .scryfall_client import lookup_card as _lookup_fn
+        _lookup = _lookup_fn
+
+    primed: list[str] = []
+    errors: list[str] = []
+    for name in targets:
+        try:
+            result = _lookup(name)
+            if result is not None:
+                primed.append(name)
+            else:
+                errors.append(name)
+        except Exception:  # noqa: BLE001
+            errors.append(name)
+    return {"primed": primed, "errors": errors}
+
+
+def _fetch_temurin_release() -> dict:
+    req = urllib.request.Request(
+        TEMURIN_RELEASES_API,
+        headers={"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
 def _fetch_latest_release() -> dict:
     req = urllib.request.Request(
         FORGE_RELEASES_API,
@@ -271,7 +366,19 @@ def main(argv=None) -> int:
                          "other action given).")
     ap.add_argument("--download-forge", action="store_true",
                     help="download the latest Forge desktop jar.")
+    ap.add_argument("--download-jre", action="store_true",
+                    help="download a Temurin JRE 17 archive for the current "
+                         "platform into vendor/jre/.")
+    ap.add_argument("--prime-cards", action="store_true",
+                    help="warm the Scryfall card-snapshot cache with a small "
+                         "representative set of staple cards.")
+    ap.add_argument("--prime-cards-list", nargs="+", metavar="NAME",
+                    default=None,
+                    help="prime the cache for specific card names (overrides "
+                         "the built-in list; requires --prime-cards).")
     args = ap.parse_args(argv)
+
+    rc = 0
 
     if args.download_forge:
         print("Downloading the latest Forge desktop jar...")
@@ -279,8 +386,28 @@ def main(argv=None) -> int:
             jar = download_forge()
         except Exception as exc:  # noqa: BLE001
             print(f"  failed: {type(exc).__name__}: {exc}")
-            return 1
-        print(f"  saved: {jar}")
+            rc = 1
+        else:
+            print(f"  saved: {jar}")
+
+    if args.download_jre:
+        print("Downloading Temurin JRE 17 archive...")
+        try:
+            arch = download_jre()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  failed: {type(exc).__name__}: {exc}")
+            rc = 1
+        else:
+            print(f"  saved: {arch}")
+            print("  (extract the archive under vendor/jre/ to complete installation)")
+
+    if args.prime_cards:
+        names = args.prime_cards_list  # None -> built-in default list
+        print("Priming Scryfall card-snapshot cache...")
+        result = prime_card_cache(names=names)
+        print(f"  primed: {len(result['primed'])} cards")
+        if result["errors"]:
+            print(f"  errors: {result['errors']}")
 
     status = check_dependencies()
     print("Dependency status:")
@@ -289,7 +416,7 @@ def main(argv=None) -> int:
     print(f"  mtg_cards : {status.cards_dir or 'absent (primes on demand)'}")
     for note in status.notes:
         print(f"  - {note}")
-    return 0 if status.forge_present and status.jre_present else 0
+    return rc
 
 
 if __name__ == "__main__":

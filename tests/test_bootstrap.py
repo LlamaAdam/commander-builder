@@ -121,3 +121,117 @@ def test_pick_jre_asset_selects_platform_archive():
     assert bootstrap._pick_jre_asset(release, "Linux", "x86_64")["browser_download_url"] == "lin"
     assert bootstrap._pick_jre_asset(release, "Darwin", "arm64")["browser_download_url"] == "mac"
     assert bootstrap._pick_jre_asset({"assets": []}, "Windows", "AMD64") is None
+
+
+# --------------------------------------------------------------------------- #
+# download_jre (FP-010 slice 1 -- injected HTTP, never touches the network)
+# --------------------------------------------------------------------------- #
+_JRE_RELEASE = {"assets": [
+    {"name": "OpenJDK17U-jre_x64_windows_hotspot_17.0.11_9.zip",
+     "browser_download_url": "https://example/jre-win.zip"},
+    {"name": "OpenJDK17U-jre_x64_linux_hotspot_17.0.11_9.tar.gz",
+     "browser_download_url": "https://example/jre-lin.tar.gz"},
+]}
+
+
+def test_download_jre_writes_archive(tmp_path):
+    jre_dir = tmp_path / "jre"
+    got = {}
+
+    def fake_download(url, dest):
+        got["url"] = url
+        dest.write_bytes(b"PK\x03\x04")  # fake zip header
+
+    arch = bootstrap.download_jre(
+        jre_dir=jre_dir,
+        system="Windows", machine="AMD64",
+        _get_release=lambda: _JRE_RELEASE,
+        _download=fake_download,
+    )
+    assert arch.exists()
+    assert arch.parent == jre_dir
+    assert got["url"] == "https://example/jre-win.zip"
+    assert arch.name.endswith(".zip")
+
+
+def test_download_jre_raises_when_no_matching_asset(tmp_path):
+    with pytest.raises(RuntimeError, match="no Temurin JRE asset"):
+        bootstrap.download_jre(
+            jre_dir=tmp_path / "jre",
+            system="FreeBSD", machine="i386",
+            _get_release=lambda: _JRE_RELEASE,
+            _download=lambda url, dest: None,
+        )
+
+
+def test_download_jre_creates_jre_dir(tmp_path):
+    """download_jre creates the target directory when it does not exist."""
+    jre_dir = tmp_path / "deep" / "jre"
+    assert not jre_dir.exists()
+
+    bootstrap.download_jre(
+        jre_dir=jre_dir,
+        system="Linux", machine="x86_64",
+        _get_release=lambda: _JRE_RELEASE,
+        _download=lambda url, dest: dest.write_bytes(b""),
+    )
+    assert jre_dir.exists()
+
+
+# --------------------------------------------------------------------------- #
+# prime_card_cache (FP-010 slice 1 -- injected lookup, no network)
+# --------------------------------------------------------------------------- #
+def test_prime_card_cache_primes_all_on_success():
+    names = ["Sol Ring", "Command Tower", "Path to Exile"]
+    result = bootstrap.prime_card_cache(
+        names=names,
+        _lookup=lambda n: {"name": n},  # always returns a hit
+    )
+    assert result["primed"] == names
+    assert result["errors"] == []
+
+
+def test_prime_card_cache_records_errors_on_miss():
+    def _lookup(name):
+        if name == "Nonexistent Card":
+            return None
+        return {"name": name}
+
+    result = bootstrap.prime_card_cache(
+        names=["Sol Ring", "Nonexistent Card", "Command Tower"],
+        _lookup=_lookup,
+    )
+    assert "Sol Ring" in result["primed"]
+    assert "Command Tower" in result["primed"]
+    assert "Nonexistent Card" in result["errors"]
+
+
+def test_prime_card_cache_records_errors_on_exception():
+    def _lookup(name):
+        raise RuntimeError("network timeout")
+
+    result = bootstrap.prime_card_cache(
+        names=["Sol Ring"],
+        _lookup=_lookup,
+    )
+    assert result["primed"] == []
+    assert "Sol Ring" in result["errors"]
+
+
+def test_prime_card_cache_uses_default_list_when_names_none():
+    """Calling prime_card_cache(names=None) uses the built-in default list."""
+    called = []
+    result = bootstrap.prime_card_cache(
+        names=None,
+        _lookup=lambda n: called.append(n) or {"name": n},
+    )
+    assert len(called) >= 5  # default list has at least 5 staples
+    assert result["errors"] == []
+
+
+# --------------------------------------------------------------------------- #
+# TEMURIN_RELEASES_API constant present
+# --------------------------------------------------------------------------- #
+def test_temurin_releases_api_constant():
+    assert "adoptium" in bootstrap.TEMURIN_RELEASES_API
+    assert "temurin17" in bootstrap.TEMURIN_RELEASES_API
