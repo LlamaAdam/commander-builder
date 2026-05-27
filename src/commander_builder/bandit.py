@@ -140,12 +140,101 @@ class BanditResult:
         return asdict(self)
 
 
-def make_policy(name: str, *, epsilon: float = 0.2, c: float = 1.4) -> BanditPolicy:
-    """Factory: ``"epsilon_greedy"`` or ``"ucb1"``."""
+class ThompsonSampling(BanditPolicy):
+    """Thompson sampling via a Gaussian (normal-normal) posterior per arm.
+
+    Each arm maintains a running Bayesian estimate of its true mean
+    reward using a conjugate Gaussian model with a known (estimated)
+    variance.  At each pull the policy samples a value from each arm's
+    posterior, then picks the arm with the highest sampled value.
+
+    Model details (pure stdlib, no numpy/scipy)
+    -------------------------------------------
+    Prior: N(0, prior_var).  After ``n`` observations with mean
+    ``x_bar`` the posterior is N(mu_n, sigma_n^2) where::
+
+        precision_prior = 1.0 / prior_var
+        precision_obs   = n / obs_var     (obs_var defaults to 1.0)
+        sigma_n^2       = 1 / (precision_prior + precision_obs)
+        mu_n            = sigma_n^2 * (precision_obs * x_bar)
+
+    Sampling from N(mu, sigma^2) without numpy: the Box-Muller
+    transform on two uniform samples gives a standard normal; we
+    scale and shift to the posterior.
+
+    Hyperparameters
+    ---------------
+    prior_var:
+        Variance of the prior (default 1.0).  Larger values mean a
+        wider prior, giving early pulls more uncertainty and hence
+        more exploration.
+    obs_var:
+        Assumed observation noise variance (default 1.0).  Should
+        be set to the rough squared scale of the reward signal; the
+        default is appropriate for win-margin rewards O(1-5).
+
+    Cold-start: untried arms have no posterior mean -- we sample
+    from the prior directly so they're explored with the same
+    probability as any other uncertain arm (unlike epsilon-greedy /
+    UCB1 which force exhaustive cold-start via the ``untried`` list).
+    """
+
+    name = "thompson"
+
+    def __init__(self, prior_var: float = 1.0, obs_var: float = 1.0):
+        if prior_var <= 0:
+            raise ValueError(f"prior_var must be > 0, got {prior_var}")
+        if obs_var <= 0:
+            raise ValueError(f"obs_var must be > 0, got {obs_var}")
+        self.prior_var = prior_var
+        self.obs_var = obs_var
+
+    @staticmethod
+    def _sample_normal(mu: float, sigma: float, rng: random.Random) -> float:
+        """Sample one value from N(mu, sigma^2) via Box-Muller (stdlib only)."""
+        import math
+        # Box-Muller: two uniform samples → one standard normal.
+        # u1 must not be exactly 0 to avoid log(0).
+        while True:
+            u1 = rng.random()
+            if u1 > 0.0:
+                break
+        u2 = rng.random()
+        z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+        return mu + sigma * z
+
+    def _posterior_sample(self, arm: Arm, rng: random.Random) -> float:
+        """Draw one sample from ``arm``'s posterior."""
+        n = arm.pulls
+        if n == 0:
+            # No data: sample from prior N(0, prior_var).
+            return self._sample_normal(0.0, self.prior_var ** 0.5, rng)
+        x_bar = arm.mean  # running mean reward
+        # Conjugate Gaussian update.
+        precision_prior = 1.0 / self.prior_var
+        precision_obs = n / self.obs_var
+        sigma_n2 = 1.0 / (precision_prior + precision_obs)
+        mu_n = sigma_n2 * (precision_obs * x_bar)
+        return self._sample_normal(mu_n, sigma_n2 ** 0.5, rng)
+
+    def select(self, arms: list[Arm], rng: random.Random) -> Arm:
+        if not arms:
+            raise ValueError("no arms to select from")
+        # Sample each arm's posterior and pick the highest.
+        samples = [(self._posterior_sample(a, rng), i) for i, a in enumerate(arms)]
+        _, best_idx = max(samples)
+        return arms[best_idx]
+
+
+def make_policy(name: str, *, epsilon: float = 0.2, c: float = 1.4,
+                prior_var: float = 1.0, obs_var: float = 1.0) -> BanditPolicy:
+    """Factory: ``"epsilon_greedy"``, ``"ucb1"``, or ``"thompson"``."""
     if name == "epsilon_greedy":
         return EpsilonGreedy(epsilon=epsilon)
     if name == "ucb1":
         return UCB1(c=c)
+    if name == "thompson":
+        return ThompsonSampling(prior_var=prior_var, obs_var=obs_var)
     raise ValueError(f"unknown bandit policy: {name!r}")
 
 

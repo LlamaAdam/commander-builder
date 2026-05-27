@@ -13,6 +13,7 @@ from commander_builder.bandit import (
     Arm,
     BanditResult,
     EpsilonGreedy,
+    ThompsonSampling,
     UCB1,
     make_policy,
     run_bandit,
@@ -160,3 +161,101 @@ def test_run_bandit_validates_inputs():
         run_bandit([Arm("a")], rounds=0, evaluate=lambda a: 0.0, policy=UCB1())
     with pytest.raises(ValueError):
         run_bandit([], rounds=3, evaluate=lambda a: 0.0, policy=UCB1())
+
+
+# --- ThompsonSampling (FP-012 Slice B1) ----------------------------------
+
+def test_thompson_validation():
+    with pytest.raises(ValueError):
+        ThompsonSampling(prior_var=0.0)
+    with pytest.raises(ValueError):
+        ThompsonSampling(obs_var=-1.0)
+
+
+def test_thompson_selects_from_arms():
+    """ThompsonSampling must return one of the supplied arms."""
+    arms = [Arm("a"), Arm("b"), Arm("c")]
+    pol = ThompsonSampling()
+    rng = random.Random(42)
+    selected = pol.select(arms, rng)
+    assert selected in arms
+
+
+def test_thompson_no_arms_raises():
+    pol = ThompsonSampling()
+    with pytest.raises(ValueError):
+        pol.select([], random.Random(0))
+
+
+def test_thompson_cold_start_explores_all(monkeypatch):
+    """With no observations every arm's posterior is just the prior;
+    over 100 draws each arm should be selected at least once."""
+    arms = [Arm(str(i)) for i in range(5)]
+    pol = ThompsonSampling(prior_var=1.0, obs_var=1.0)
+    rng = random.Random(7)
+    selected_keys = {pol.select(arms, rng).key for _ in range(100)}
+    assert selected_keys == {a.key for a in arms}
+
+
+def test_thompson_prefers_high_reward_arm():
+    """After many observations the posterior for the high-reward arm
+    should dominate; Thompson should select it most of the time."""
+    arms = [
+        Arm("good", pulls=50, total_reward=150.0),   # mean = 3.0
+        Arm("bad",  pulls=50, total_reward=-50.0),   # mean = -1.0
+    ]
+    pol = ThompsonSampling(prior_var=1.0, obs_var=1.0)
+    rng = random.Random(99)
+    picks = [pol.select(arms, rng).key for _ in range(200)]
+    good_count = picks.count("good")
+    # Good arm should dominate — expect at least 75% of selections.
+    assert good_count > 150, f"good arm selected only {good_count}/200 times"
+
+
+def test_thompson_run_bandit_identifies_best_arm():
+    """run_bandit with Thompson policy should identify the best-reward arm."""
+    arms = [Arm("best"), Arm("mediocre"), Arm("worst")]
+    rewards = {"best": 4.0, "mediocre": 1.0, "worst": -1.0}
+    result = run_bandit(
+        arms, rounds=60,
+        evaluate=lambda arm: rewards[arm.key],
+        policy=ThompsonSampling(prior_var=2.0, obs_var=1.0),
+        accept_threshold=2.0,
+        rng=random.Random(12345),
+    )
+    assert result.best_arm_key == "best"
+    assert result.rounds_run == 60
+    best_pulls = next(a["pulls"] for a in result.arm_stats if a["key"] == "best")
+    # Thompson should have pulled the best arm significantly more than others.
+    assert best_pulls > 30
+
+
+def test_make_policy_thompson():
+    pol = make_policy("thompson")
+    assert isinstance(pol, ThompsonSampling)
+
+
+def test_make_policy_thompson_with_hyperparams():
+    pol = make_policy("thompson", prior_var=2.0, obs_var=0.5)
+    assert isinstance(pol, ThompsonSampling)
+    assert pol.prior_var == 2.0
+    assert pol.obs_var == 0.5
+
+
+def test_make_policy_unknown_still_raises():
+    with pytest.raises(ValueError):
+        make_policy("gp_bo")
+
+
+def test_thompson_result_json_serializable():
+    """A bandit run with Thompson should produce a JSON-safe result."""
+    import json
+    arms = [Arm("a", add="A", cut="X"), Arm("b", add="B", cut="Y")]
+    result = run_bandit(
+        arms, rounds=10,
+        evaluate=lambda arm: 1.0 if arm.key == "a" else 0.0,
+        policy=ThompsonSampling(),
+        rng=random.Random(0),
+    )
+    blob = json.loads(json.dumps(result.to_dict()))
+    assert blob["best_arm_key"] in ("a", "b")
