@@ -317,6 +317,84 @@ def t_stat(r: float, n: int) -> Optional[float]:
     return r * math.sqrt((n - 2) / (1 - r * r))
 
 
+def _ols_fit(xs: list[float], ys: list[float]) -> tuple[float, float]:
+    """Ordinary least-squares slope + intercept of ys ~ xs.
+
+    Returns ``(slope, intercept)``. A feature with no variance (constant
+    column) yields ``slope == 0.0`` and ``intercept == mean(ys)`` rather
+    than a ZeroDivisionError, so a constant column is safe."""
+    m = len(xs)
+    if m == 0:
+        return 0.0, 0.0
+    mx = sum(xs) / m
+    my = sum(ys) / m
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx == 0:
+        return 0.0, my
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    slope = sxy / sxx
+    intercept = my - slope * mx
+    return slope, intercept
+
+
+def single_feature_ols(samples: list["Sample"], feature: str) -> dict:
+    """Pure-stdlib single-feature OLS fit of margin on `feature`, plus a
+    leave-one-out cross-validated RMSE -- the honest out-of-sample error.
+
+    Returns a dict with:
+      "n"        : int   -- number of samples
+      "slope"    : float -- OLS slope of margin ~ feature (0.0 when the
+                            feature has no variance, so a constant column
+                            is safe rather than a ZeroDivisionError)
+      "intercept": float
+      "r2"       : float -- coefficient of determination in [0, 1] (0.0 when
+                            the feature is constant / no fit)
+      "loo_rmse" : float -- root mean squared error of leave-one-out
+                            predictions (refit on n-1 points, predict the
+                            held-out one)
+    """
+    xs = [s.features.get(feature, 0.0) for s in samples]
+    ys = [s.margin for s in samples]
+    n = len(samples)
+
+    slope, intercept = _ols_fit(xs, ys)
+
+    # r2: 1 - SS_res / SS_tot, clamped to [0, 1]. SS_tot == 0 (or a constant
+    # feature giving slope 0) -> no fit -> r2 = 0.0.
+    if n == 0:
+        return {"n": 0, "slope": 0.0, "intercept": 0.0, "r2": 0.0, "loo_rmse": 0.0}
+    my = sum(ys) / n
+    ss_tot = sum((y - my) ** 2 for y in ys)
+    if ss_tot == 0:
+        r2 = 0.0
+    else:
+        ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+        r2 = 1.0 - ss_res / ss_tot
+        r2 = max(0.0, min(1.0, r2))
+
+    # Leave-one-out RMSE: refit on the other n-1 points, predict the held-out
+    # one. Needs at least 3 points to leave one out and still fit a line.
+    if n < 3:
+        loo_rmse = 0.0
+    else:
+        sq_err = 0.0
+        for i in range(n):
+            xs_i = xs[:i] + xs[i + 1:]
+            ys_i = ys[:i] + ys[i + 1:]
+            s_i, b_i = _ols_fit(xs_i, ys_i)
+            pred = s_i * xs[i] + b_i
+            sq_err += (ys[i] - pred) ** 2
+        loo_rmse = math.sqrt(sq_err / n)
+
+    return {
+        "n": n,
+        "slope": slope,
+        "intercept": intercept,
+        "r2": r2,
+        "loo_rmse": loo_rmse,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Analysis
 # --------------------------------------------------------------------------- #
