@@ -190,9 +190,44 @@ body {
 .alert-body .pill.warn { background: var(--warn); color: #4a3308; }
 .alert-body .pill.good { background: var(--good); color: #08361d; }
 
+/* --- FP-007 unified nav shell --- */
+
+/* Left-rail icon strip: three section buttons stacked vertically. */
+.left-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 6px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  align-items: center;
+  width: 56px;
+}
+.rail-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  width: 44px;
+  text-align: center;
+  line-height: 1.2;
+}
+.rail-btn:hover { color: var(--text); background: var(--panel-2); }
+.rail-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
 .layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 56px 280px 1fr;
   height: calc(100vh - 53px);
   overflow: hidden;
 }
