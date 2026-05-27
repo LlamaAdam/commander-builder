@@ -170,8 +170,10 @@ def _make_fake_server_handle():
     return handle
 
 
-def test_launch_passes_icon_to_create_window(monkeypatch, tmp_path):
-    """launch() passes the icon path string to webview.create_window."""
+def test_launch_passes_icon_to_start(monkeypatch, tmp_path):
+    """launch() passes the icon path to webview.start() -- pywebview's icon
+    is a start() kwarg, NOT a create_window() param (passing it to
+    create_window raises TypeError on a real window)."""
     monkeypatch.setattr(desktop, "wait_until_up", lambda *a, **k: True)
 
     # Provide a real icon file.
@@ -182,6 +184,7 @@ def test_launch_passes_icon_to_create_window(monkeypatch, tmp_path):
     monkeypatch.setattr(desktop, "__file__", str(tmp_path / "desktop.py"))
 
     create_calls = {}
+    start_calls = {}
 
     class FakeWindow:
         events = MagicMock()
@@ -192,8 +195,8 @@ def test_launch_passes_icon_to_create_window(monkeypatch, tmp_path):
             create_calls.update(kw)
             return FakeWindow()
         @staticmethod
-        def start():
-            pass
+        def start(**kw):
+            start_calls.update(kw)
 
     desktop.launch(
         deck_dir=None, host="127.0.0.1", port=9901,
@@ -201,15 +204,18 @@ def test_launch_passes_icon_to_create_window(monkeypatch, tmp_path):
         serve=lambda *a, **k: _make_fake_server_handle(),
         _acquire_lock=_make_fake_lock,
     )
-    assert create_calls.get("icon") == str(icon_file)
+    assert "icon" not in create_calls          # NOT a create_window param
+    assert start_calls.get("icon") == str(icon_file)
 
 
-def test_launch_icon_none_when_absent(monkeypatch, tmp_path):
-    """launch() passes icon=None when the icon file does not exist."""
+def test_launch_no_icon_kwarg_when_absent(monkeypatch, tmp_path):
+    """launch() calls start() with NO icon kwarg when the asset is absent
+    (and never passes icon to create_window)."""
     monkeypatch.setattr(desktop, "wait_until_up", lambda *a, **k: True)
     monkeypatch.setattr(desktop, "__file__", str(tmp_path / "desktop.py"))
 
     create_calls = {}
+    start_calls = {}
 
     class FakeWebview:
         @staticmethod
@@ -217,8 +223,8 @@ def test_launch_icon_none_when_absent(monkeypatch, tmp_path):
             create_calls.update(kw)
             return None
         @staticmethod
-        def start():
-            pass
+        def start(**kw):
+            start_calls.update(kw)
 
     desktop.launch(
         deck_dir=None, host="127.0.0.1", port=9902,
@@ -226,7 +232,8 @@ def test_launch_icon_none_when_absent(monkeypatch, tmp_path):
         serve=lambda *a, **k: _make_fake_server_handle(),
         _acquire_lock=_make_fake_lock,
     )
-    assert create_calls.get("icon") is None
+    assert "icon" not in create_calls
+    assert "icon" not in start_calls
 
 
 def test_launch_acquires_instance_lock(monkeypatch):

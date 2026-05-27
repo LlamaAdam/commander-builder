@@ -329,11 +329,7 @@ def launch(
     wait_until_up(host, port)
     url = f"http://{host}:{port}/"
 
-    icon = _icon_path()
-    win = webview.create_window(
-        APP_TITLE, url, width=1280, height=860,
-        icon=str(icon) if icon else None,
-    )
+    win = webview.create_window(APP_TITLE, url, width=1280, height=860)
 
     # Graceful Flask shutdown on window close.
     def _on_closing():
@@ -344,7 +340,14 @@ def launch(
     if win is not None and hasattr(win, "events") and hasattr(win.events, "closing"):
         win.events.closing += _on_closing
 
-    webview.start()
+    # pywebview's window/app icon is a `webview.start()` kwarg -- NOT a
+    # create_window() param (passing icon= to create_window raises TypeError
+    # on a real window). Only pass it when an icon asset is actually present.
+    icon = _icon_path()
+    if icon is not None:
+        webview.start(icon=str(icon))
+    else:
+        webview.start()
     return url
 
 
