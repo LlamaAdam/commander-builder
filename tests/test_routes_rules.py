@@ -184,3 +184,33 @@ def test_game_changers_source_field(client):
 def test_game_changers_count_nonzero(client):
     body = client.get("/api/rules/game_changers").get_json()
     assert body["count"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Polish (FP-007): empty / error state shapes the JS UI renders against
+# ---------------------------------------------------------------------------
+
+def test_combo_empty_identity_filter_returns_identity_field(client, monkeypatch):
+    """When no combos match an identity, 'identity' echoes the query so
+    renderComboResults can show 'No combos for that color identity.' rather
+    than the generic fallback."""
+    monkeypatch.setattr(
+        "commander_builder.combo_detection.load_combos",
+        lambda **kw: list(_FAKE_COMBOS),
+    )
+    body = client.get("/api/rules/combo?identity=R").get_json()
+    assert body["count"] == 0
+    assert body["identity"] == "R"   # JS checks identity to pick message
+
+
+def test_combo_no_identity_empty_returns_null_identity(client, monkeypatch):
+    """When called with no identity and no combos exist, identity is null
+    so the JS falls back to 'No combos found.' rather than the identity
+    variant."""
+    monkeypatch.setattr(
+        "commander_builder.combo_detection.load_combos",
+        lambda **kw: [],
+    )
+    body = client.get("/api/rules/combo").get_json()
+    assert body["count"] == 0
+    assert body["identity"] is None

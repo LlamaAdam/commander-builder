@@ -49,9 +49,11 @@
   const SECTIONS = ["decks", "cards", "rules"];
 
   function activateSection(name) {
-    // Toggle rail buttons.
+    // Toggle rail buttons + sync aria-pressed for screen readers.
     document.querySelectorAll(".rail-btn").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.section === name);
+      const isActive = btn.dataset.section === name;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-pressed", isActive ? "true" : "false");
     });
     // Show/hide sidebar sections.
     SECTIONS.forEach((s) => {
@@ -115,7 +117,7 @@
       [decks.length + " deck" + (decks.length !== 1 ? "s" : "") + " run " + card]);
     container.appendChild(header);
     if (!decks.length) {
-      container.appendChild(navEl("p", { class: "muted" }, ["No decks found."]));
+      container.appendChild(navEl("p", { class: "muted" }, ["No decks run this card."]));
       return;
     }
     const list = navEl("ul", { style: "list-style:none;padding:0;margin:0;" }, []);
@@ -151,13 +153,20 @@
       const input = $id("library-card-input");
       const results = $id("library-results");
       const card = (input ? input.value : "").trim();
-      if (!card) return;
-      results.innerHTML = '<p class="muted">Searching...</p>';
+      if (!card) {
+        results.innerHTML = '<p class="muted">Enter a card name to search.</p>';
+        return;
+      }
+      results.innerHTML = '<p class="muted" aria-live="polite">Loading…</p>';
       try {
         const data = await navFetch("/api/library?card=" + encodeURIComponent(card));
         renderLibraryResults(results, data);
       } catch (err) {
-        results.innerHTML = '<p class="muted">Error: ' + err.message + "</p>";
+        const status = err.message.match(/-> (\d+)/);
+        const msg = status && status[1] === "400"
+          ? "Invalid search — please enter a card name."
+          : "Could not load library results. Please try again.";
+        results.innerHTML = '<p class="muted" role="alert">' + msg + "</p>";
       }
     });
   }
@@ -172,7 +181,7 @@
     const identity = data.identity || "";
     if (!combos.length) {
       container.appendChild(navEl("p", { class: "muted" },
-        ["No combos found" + (identity ? " for " + identity : "") + "."]));
+        [identity ? "No combos for that color identity." : "No combos found."]));
       return;
     }
     const header = navEl("p", { style: "font-size:13px;font-weight:600;margin:0 0 6px;" },
@@ -223,13 +232,14 @@
         const input = $id("combo-identity-input");
         const results = $id("rules-results");
         const identity = (input ? input.value : "").trim().toUpperCase();
-        results.innerHTML = '<p class="muted">Searching...</p>';
+        results.innerHTML = '<p class="muted" aria-live="polite">Loading…</p>';
         try {
           const url = "/api/rules/combo" + (identity ? "?identity=" + encodeURIComponent(identity) : "");
           const data = await navFetch(url);
           renderComboResults(results, data);
         } catch (err) {
-          results.innerHTML = '<p class="muted">Error: ' + err.message + "</p>";
+          results.innerHTML =
+            '<p class="muted" role="alert">Could not load combos. Please try again.</p>';
         }
       });
     }
@@ -238,12 +248,13 @@
     if (gcBtn) {
       gcBtn.addEventListener("click", async () => {
         const results = $id("rules-results");
-        results.innerHTML = '<p class="muted">Loading...</p>';
+        results.innerHTML = '<p class="muted" aria-live="polite">Loading…</p>';
         try {
           const data = await navFetch("/api/rules/game_changers");
           renderGameChangers(results, data);
         } catch (err) {
-          results.innerHTML = '<p class="muted">Error: ' + err.message + "</p>";
+          results.innerHTML =
+            '<p class="muted" role="alert">Could not load Game Changers. Please try again.</p>';
         }
       });
     }
