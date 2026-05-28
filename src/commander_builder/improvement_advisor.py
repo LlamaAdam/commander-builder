@@ -395,6 +395,7 @@ def advise(
     match_dir: Path = MATCH_DIR,
     claude_model: str = DEFAULT_CLAUDE_MODEL,
     budget: bool = False,
+    intent_themes: Optional[list[str]] = None,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck.
 
@@ -432,6 +433,7 @@ def advise(
         use_claude=use_claude, source=source,
         deck_dir=deck_dir, match_dir=match_dir,
         claude_model=claude_model, budget=budget,
+        intent_themes=intent_themes,
     ):
         if phase.phase == "complete":
             final_report = phase.data.get("report")
@@ -464,6 +466,7 @@ def _advise_steps(
     match_dir: Path = MATCH_DIR,
     claude_model: str = DEFAULT_CLAUDE_MODEL,
     budget: bool = False,
+    intent_themes: Optional[list[str]] = None,
 ):
     """Generator version of :func:`advise` — yields ``AdvicePhase``
     events as each stage of the pipeline completes.
@@ -594,15 +597,19 @@ def _advise_steps(
         return edhrec_page
 
     def _fetch_tag_pages_lazy() -> list[CommanderPage]:
-        """Pull EDHREC ``/tags/<slug>`` pages for both the detected
-        tribe AND any themes detected from the deck's oracle text.
+        """Pull EDHREC ``/tags/<slug>`` pages for the deck's themes.
 
-        Tribal slug comes from ``tribe_tag_slug(tribe)``; theme
-        slugs come from ``detect_themes(deck_oracles)`` which scans
-        for Tokens / Spellslinger / Aristocrats / +1+1 counters /
-        Landfall / Lifegain / Reanimator / Equipment / Artifacts /
-        Enchantress signals (each gated by a per-theme min-count
-        threshold so goodstuff decks don't trip every theme).
+        Priority order:
+          1. Intent themes (``intent_themes`` from ``--intent-themes``):
+             explicit slugs learned from the deck's intent analysis.
+             Highest-confidence signal — the user asked us to bias toward
+             these archetypes.
+          2. Tribe (``tribe_tag_slug(tribe)``): tribal decks have the
+             tightest archetype identity, so this ranks above oracle-text
+             scanning.
+          3. Oracle-text scan (``detect_themes``): Tokens / Spellslinger /
+             Aristocrats / +1+1 counters / Landfall / Lifegain /
+             Reanimator / Equipment / Artifacts / Enchantress signals.
 
         Returns the list of successfully-fetched tag pages (may be
         empty for non-tribal, non-themed decks). Capped at 4 pages
@@ -616,14 +623,23 @@ def _advise_steps(
             return tag_pages
         slugs: list[str] = []
         seen_slugs: set[str] = set()
-        # Tribe first (highest signal — tribal decks have the
-        # tightest archetype identity).
+        # Intent-themes first (soft-bias from FP-012 Slice A): these are
+        # the slugs the improvement loop explicitly wants to bias toward.
+        # Prepending ensures they claim slots in the 4-page cap before
+        # the auto-detected slugs, giving the intent the loudest voice.
+        for s in (intent_themes or []):
+            s = s.strip()
+            if s and s not in seen_slugs:
+                slugs.append(s)
+                seen_slugs.add(s)
+        # Tribe second (highest auto-detected signal — tribal decks have
+        # the tightest archetype identity).
         if tribe:
             s = tribe_tag_slug(tribe)
             if s and s not in seen_slugs:
                 slugs.append(s)
                 seen_slugs.add(s)
-        # Detected themes second. Scan the deck's oracle texts via
+        # Detected themes third. Scan the deck's oracle texts via
         # the cached scryfall lookups (no extra network — just
         # ``lookup_card`` per card, all already warm from the
         # role-classifier pass earlier in this audit).
