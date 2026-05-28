@@ -166,6 +166,19 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                    help="Minimum (wins_new - wins_old) margin to call "
                         "'kept'. Mirrored for 'reverted'. Within "
                         "margin = neutral. Default 1.")
+    # Intent-theme bias (FP-012 Slice A soft-bias finish).
+    # Comma-separated EDHREC tag-page slugs that the deck's intent
+    # identified as its themes (e.g. "tokens,aristocrats").  When
+    # provided, these slugs are prepended to the tag-page fetch list
+    # inside the advisor so candidates sourced from those archetype
+    # pages are ranked first.  Empty / absent = no bias (identical
+    # behavior to today).  The flag is additive: auto-detected themes
+    # from oracle-text scanning still run after these.
+    p.add_argument("--intent-themes", default=None, metavar="SLUGS",
+                   help="Comma-separated EDHREC tag-page slugs from the "
+                        "deck's learned intent (e.g. 'tokens,aristocrats'). "
+                        "Soft-biases candidate adds toward those archetypes. "
+                        "Empty / absent = no bias.")
     args = p.parse_args(argv)
 
     # Exactly one of {deck_path, --batch} must be provided. Reject
@@ -250,10 +263,18 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     if not args.json:
         print(f"[1/3] Running advisor on {args.deck_path.name} (B{args.bracket})...",
               flush=True)
+    # Parse --intent-themes into a slug list (comma-separated, stripped).
+    # Empty string / absent flag both produce an empty list so no-bias
+    # path is identical to the pre-FP-012-slice-A behavior.
+    _raw_intent_themes = args.intent_themes or ""
+    _intent_themes: list[str] = [
+        s.strip() for s in _raw_intent_themes.split(",") if s.strip()
+    ]
     report = advise(
         deck_path=args.deck_path,
         bracket=args.bracket,
         source=args.source,
+        intent_themes=_intent_themes if _intent_themes else None,
     )
     advice_dict = report.to_manifest()
     candidate_add_count = len(advice_dict.get("added", []))

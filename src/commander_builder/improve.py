@@ -126,6 +126,12 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
         argv += ["--protect", card]
     if args.protect_from:
         argv += ["--protect-from", args.protect_from]
+    # Soft-bias: pass the intent's themes as --intent-themes so the
+    # advisor candidate pool is ranked toward those EDHREC tag pages.
+    # Only appended when themes are non-empty — the no-themes path
+    # must be identical to pre-Slice-A behavior.
+    if intent is not None and intent.themes:
+        argv += ["--intent-themes", ",".join(intent.themes)]
 
     buf = io.StringIO()
     try:

@@ -366,3 +366,278 @@ def test_improve_main_no_learn_intent_sets_none(tmp_path, monkeypatch):
 
     assert rc == 0
     assert loop_args[0].intent is None
+
+
+# ---------------------------------------------------------------------------
+# FP-012 Slice A finish: theme-bias round-trip tests
+# ---------------------------------------------------------------------------
+
+def _patch_acm_in_proposer_cli(monkeypatch, fake_fn):
+    """Patch auto_curate_main in commander_builder._proposer_cli.
+
+    _default_round_fn does a local import:
+        from ._proposer_cli import auto_curate_main
+    so the patch must land on the module attribute, not a local binding.
+    The proposer → _proposer_cli circular import means _proposer_cli can
+    only be imported AFTER commander_builder.proposer is loaded; importing
+    'commander_builder.improve' triggers the full chain, so by the time
+    this helper runs the module is available in sys.modules.
+    """
+    import sys
+    mod = sys.modules.get("commander_builder._proposer_cli")
+    if mod is None:
+        # Force the full chain; proposer resolves the circular dep.
+        from commander_builder.proposer import auto_propose  # noqa: F401
+        mod = sys.modules["commander_builder._proposer_cli"]
+    monkeypatch.setattr(mod, "auto_curate_main", fake_fn)
+
+
+def _make_minimal_args(intent=None):
+    """Build the minimal argparse.Namespace _default_round_fn needs."""
+    import argparse
+    return argparse.Namespace(
+        bracket=3,
+        mode="polish",
+        source="heuristic",
+        model="claude-sonnet-4-5",
+        sim_games=5,
+        sim_margin=1,
+        sim_fillers=None,
+        db_path=None,
+        protect=[],
+        protect_from=None,
+        intent=intent,
+    )
+
+
+def test_default_round_fn_appends_intent_themes_to_argv(tmp_path, monkeypatch):
+    """_default_round_fn appends --intent-themes when intent.themes is non-empty.
+
+    The fake auto_curate_main captures the argv; the test asserts
+    --intent-themes with the comma-joined slugs is present.
+    """
+    from commander_builder import improve  # triggers full import chain
+
+    received_argv: list[list[str]] = []
+
+    def fake_acm(argv):
+        received_argv.append(list(argv))
+        return 0
+
+    _patch_acm_in_proposer_cli(monkeypatch, fake_acm)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    args = _make_minimal_args(
+        intent=Intent(
+            archetype="tokens",
+            themes=["tokens", "aristocrats"],
+            key_wincons=[],
+        )
+    )
+
+    improve._default_round_fn(deck, 1, args)
+
+    assert received_argv, "auto_curate_main was never called"
+    argv = received_argv[0]
+    assert "--intent-themes" in argv, f"--intent-themes missing from argv: {argv}"
+    idx = argv.index("--intent-themes")
+    assert argv[idx + 1] == "tokens,aristocrats"
+
+
+def test_default_round_fn_no_themes_no_flag(tmp_path, monkeypatch):
+    """_default_round_fn does NOT append --intent-themes when themes is empty."""
+    from commander_builder import improve
+
+    received_argv: list[list[str]] = []
+
+    def fake_acm(argv):
+        received_argv.append(list(argv))
+        return 0
+
+    _patch_acm_in_proposer_cli(monkeypatch, fake_acm)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    args = _make_minimal_args(
+        intent=Intent(archetype="midrange", themes=[], key_wincons=[])
+    )
+
+    improve._default_round_fn(deck, 1, args)
+
+    assert received_argv, "auto_curate_main was never called"
+    assert "--intent-themes" not in received_argv[0]
+
+
+def test_default_round_fn_no_intent_no_flag(tmp_path, monkeypatch):
+    """_default_round_fn does NOT append --intent-themes when intent is None."""
+    from commander_builder import improve
+
+    received_argv: list[list[str]] = []
+
+    def fake_acm(argv):
+        received_argv.append(list(argv))
+        return 0
+
+    _patch_acm_in_proposer_cli(monkeypatch, fake_acm)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+
+    improve._default_round_fn(deck, 1, _make_minimal_args(intent=None))
+
+    assert received_argv, "auto_curate_main was never called"
+    assert "--intent-themes" not in received_argv[0]
+
+
+def test_improve_main_themes_reach_round_fn(tmp_path, monkeypatch):
+    """End-to-end: --learn-intent with themes biases the round_fn argv.
+
+    Wires fake learn_intent (returns Intent with themes=["tokens"]) and a
+    fake run_improve_loop that captures args. Verifies the intent's themes
+    land on args.intent when the loop is invoked.
+    """
+    from commander_builder import improve
+
+    def fake_learn(path, **kw):
+        return Intent(archetype="tokens", themes=["tokens"], key_wincons=[])
+
+    monkeypatch.setattr(improve, "learn_intent", fake_learn)
+
+    captured_args: list = []
+
+    def fake_loop(deck_path, deck_id, rounds, args, **kw):
+        captured_args.append(args)
+        return improve.ImproveResult(
+            deck_id=deck_id, start_deck=str(deck_path),
+            final_deck=str(deck_path), rounds_requested=rounds,
+            rounds_run=0, rounds_kept=0, converged=False,
+        )
+
+    monkeypatch.setattr(improve, "run_improve_loop", fake_loop)
+
+    deck = tmp_path / "[USER] Tokens [B3].dck"
+    deck.write_text("[metadata]\nName=Tokens\n", encoding="utf-8")
+
+    rc = improve.improve_main([
+        str(deck), "--rounds", "1",
+        "--learn-intent", str(deck),
+    ])
+
+    assert rc == 0
+    assert captured_args, "run_improve_loop was not called"
+    intent = captured_args[0].intent
+    assert intent is not None
+    assert "tokens" in intent.themes
+
+
+def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
+    """--intent-themes flag is parsed and forwarded to advise() as intent_themes.
+
+    auto_curate_main does a lazy `from .improvement_advisor import advise`
+    inside the function body; patching the module attribute is sufficient.
+    """
+    # Trigger full import chain so the module is in sys.modules.
+    from commander_builder.proposer import auto_propose  # noqa: F401
+    from commander_builder._proposer_cli import auto_curate_main
+    import commander_builder.improvement_advisor as _ia
+
+    received: dict = {}
+
+    def fake_advise(deck_path, bracket, source=None, intent_themes=None, **kw):
+        received["intent_themes"] = intent_themes
+        import types
+        return types.SimpleNamespace(
+            to_manifest=lambda: {"added": [], "removed": []},
+        )
+
+    monkeypatch.setattr(_ia, "advise", fake_advise)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3",
+        "--intent-themes", "tokens,aristocrats",
+        "--dry-run", "--no-log",
+    ])
+
+    assert rc == 0
+    assert received.get("intent_themes") == ["tokens", "aristocrats"]
+
+
+def test_advise_passes_intent_themes_to_tag_pages(tmp_path, monkeypatch):
+    """advise() with intent_themes propagates the slugs to _fetch_tag_pages_lazy.
+
+    Stubs fetch_tag_page to record attempted slugs.  Intent themes must
+    appear first in the fetch order (before any auto-detected tribe/themes).
+    """
+    import commander_builder.improvement_advisor as _ia
+    from commander_builder.edhrec_client import CommanderPage
+
+    fetched_slugs: list[str] = []
+
+    def fake_fetch_tag_page(slug):
+        fetched_slugs.append(slug)
+        return None  # None pages are skipped — we only care about the slugs
+
+    def fake_fetch_commander_page(commander):
+        return CommanderPage(
+            commander_name=commander,
+            slug="test-commander",
+            fetched_at="2026-01-01T00:00:00",
+            top_cards=[],
+            high_synergy_cards=[],
+            new_cards=[],
+            category_lists={},
+        )
+
+    def fake_lookup_card(name):
+        return {
+            "oracle_text": "",
+            "type_line": "Creature",
+            "color_identity": ["G"],
+        }
+
+    monkeypatch.setattr(_ia, "fetch_tag_page", fake_fetch_tag_page)
+    monkeypatch.setattr(_ia, "fetch_commander_page", fake_fetch_commander_page)
+    monkeypatch.setattr(_ia, "lookup_card", fake_lookup_card)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+
+    # The advisor may raise once it hits the colour-identity Scryfall call;
+    # that's fine — we only need _fetch_tag_pages_lazy to have run.
+    try:
+        _ia.advise(
+            deck,
+            bracket=3,
+            source="heuristic",
+            intent_themes=["tokens", "aristocrats"],
+        )
+    except Exception:
+        pass
+
+    assert "tokens" in fetched_slugs, f"intent slug 'tokens' not fetched; got {fetched_slugs}"
+    assert "aristocrats" in fetched_slugs, (
+        f"intent slug 'aristocrats' not fetched; got {fetched_slugs}"
+    )
+    # Intent themes must precede any auto-detected slugs.
+    tok_idx = fetched_slugs.index("tokens")
+    arist_idx = fetched_slugs.index("aristocrats")
+    assert tok_idx < arist_idx
