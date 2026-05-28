@@ -43,3 +43,26 @@ jobs:
           path: dist/CommanderBuilder/
           if-no-files-found: error
           retention-days: 14
+
+      # -----------------------------------------------------------------------
+      # Installer step (runs on tag pushes and manual dispatch).
+      # windows-latest runners ship Inno Setup 6 pre-installed; ISCC.exe is on
+      # PATH as "ISCC".  build_installer.py auto-detects it via shutil.which.
+      # -----------------------------------------------------------------------
+      - name: Build Windows installer (Inno Setup)
+        run: python scripts/build_installer.py
+
+      - name: Sanity-check the installer was produced
+        shell: pwsh
+        run: |
+          $setup = "dist/installer/CommanderBuilder-Setup.exe"
+          if (-not (Test-Path $setup)) { throw "Installer not found at $setup" }
+          "installer: $((Get-Item $setup).Length) bytes"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CommanderBuilder-Setup
+          path: dist/installer/CommanderBuilder-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
