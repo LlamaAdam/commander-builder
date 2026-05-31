@@ -1,0 +1,20 @@
+FP-002 margin analysis  (mode=gauntlet, min_games=40)
+  decks: 45   games: 10360
+  mean curator margin: -0.0133  (>0 = curation helps; winrate(v2)-winrate(base) vs fixed gauntlet)
+  per-deck verdicts: kept=7  reverted=12  neutral=26
+
+  feature -> margin correlation (|r| desc, n=45 decks):
+    bracket              r=-0.219  t= -1.47   
+    mana_sinks           r=+0.212  t=  1.42   
+    deficit_total        r=-0.169  t= -1.12   
+    under_built_roles    r=-0.167  t= -1.11   
+    mdfc                 r=+0.105  t=  0.69   
+    wincon_protection    r=+0.092  t=   0.6   
+    self_mill            r=-0.083  t= -0.54   
+    basic_lands          r=-0.064  t= -0.42   
+    spell_density        r=-0.064  t= -0.42   
+    main_count           r=-0.032  t= -0.21   
+
+  skipped 1 pair(s): [USER] Kinnan FP2 [B5].dck (incomplete: base or v2 has no decisive games)
+
+  note: |t|>=2 (~p<.05, df=n-2) flagged with *. With ~30 decks this is exploratory.
