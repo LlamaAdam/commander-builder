@@ -32,7 +32,11 @@ from pathlib import Path
 from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CACHE_PATH = REPO_ROOT / ".cache" / "game_changers.json"
+# Cache filename is versioned so we don't read files written by the prior
+# (over-permissive) parser. Bumping the suffix is the simplest "invalidate
+# polluted caches everywhere" mechanism -- old game_changers.json files are
+# just orphaned. Bump again whenever the schema or parser changes shape.
+CACHE_PATH = REPO_ROOT / ".cache" / "game_changers.v2.json"
 USER_AGENT = "commander-builder/0.2"
 # WotC's Commander Brackets official page. May 404 / redirect over time;
 # the fetch path is wrapped in a broad try/except so failures fall back to
@@ -86,32 +90,59 @@ def _http_get_text(url: str, timeout: int = 20) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
+_CHROME_BLOCK_RE = re.compile(
+    r"<(nav|header|footer|aside)\b[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _looks_like_card_name(text: str) -> bool:
+    """Heuristic guard against site-chrome / sentence fragments.
+
+    Real Magic card names: 1-7 words, Title Case, may include
+    ``,`` ``'`` ``-`` ``/``. Reject sentence-punctuation chars and ``&``
+    (no real Magic card has ``&``; this also catches "Banned & Restricted
+    List" once entities are decoded — previously slipped through as
+    ``Banned &amp; Restricted List``).
+    """
+    if not 2 <= len(text) <= 50:
+        return False
+    if not text[0].isupper():
+        return False
+    if any(c in text for c in (":", "|", "(", "—", "•", "&", ";", "?", "!")):
+        return False
+    if len(text.split()) > 7:
+        return False
+    return True
+
+
 def _parse_card_names_from_html(html: str) -> set[str]:
     """Best-effort extraction of card names from the WotC announcement page.
 
-    The page format isn't structured — it's a series of HTML lists with the
-    card names interspersed. We pull text from every `<li>` and filter to
-    strings that look like Magic card names (Title Case, optional comma).
-    Inevitably noisy; the caller should treat the output as additive over
-    the fallback rather than authoritative."""
+    Two defenses against polluting the result with site-chrome links (the
+    prior scraper let "About", "Privacy Policy", "Wizards Play Network",
+    "Banned &amp; Restricted List", etc. through):
+
+    1. Strip ``<nav>`` / ``<header>`` / ``<footer>`` / ``<aside>`` blocks
+       before scanning ``<li>`` items — that is where the WotC page packs
+       its site-wide nav, and every observed chrome ``<li>`` lived in one
+       of them.
+    2. Decode HTML entities first (``&amp;`` -> ``&``) so the ``&``
+       reject-char in :func:`_looks_like_card_name` actually fires.
+
+    Inevitably still noisy; the caller should union with the bundled
+    ``_FALLBACK`` rather than treat this as authoritative.
+    """
+    import html as _html_mod
+    decoded = _html_mod.unescape(html)
+    body = _CHROME_BLOCK_RE.sub("", decoded)
     li_re = re.compile(r"<li[^>]*>(.+?)</li>", re.DOTALL | re.IGNORECASE)
     tag_re = re.compile(r"<[^>]+>")
     candidates: set[str] = set()
-    for m in li_re.finditer(html):
+    for m in li_re.finditer(body):
         text = tag_re.sub("", m.group(1)).strip()
-        # Filter heuristics: card names are 2-50 chars, start with a capital,
-        # and don't contain pipes/colons (which mark sentences).
-        if not 2 <= len(text) <= 50:
-            continue
-        if not text[0].isupper():
-            continue
-        if any(c in text for c in (":", "|", "(", "—", "•")):
-            continue
-        # Reject sentences that just happen to start with a capital.
-        words = text.split()
-        if len(words) > 7:
-            continue
-        candidates.add(text)
+        if _looks_like_card_name(text):
+            candidates.add(text)
     return candidates
 
 
@@ -127,7 +158,11 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
     if use_cache and _cache_is_fresh(CACHE_PATH):
         try:
             data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-            return set(data.get("cards", [])) | set(_FALLBACK)
+            # Re-apply the card-name filter to cached entries so caches written
+            # before the stricter parser self-heal on next read (the prior
+            # parser persisted site-chrome strings like "Privacy Policy").
+            cached = {c for c in data.get("cards", []) if _looks_like_card_name(c)}
+            return cached | set(_FALLBACK)
         except (OSError, ValueError):
             pass  # Re-fetch on cache corruption.
 

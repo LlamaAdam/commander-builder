@@ -13,6 +13,85 @@ from commander_builder.game_changers import (
 )
 
 
+def test_parser_strips_nav_header_footer_chrome():
+    """Site-chrome <li> items in <nav>/<header>/<footer>/<aside> wrappers
+    must NOT be returned as card names (the prior parser let "About",
+    "Privacy Policy", "Wizards Play Network", etc. through).
+    """
+    html = """
+    <html><body>
+    <nav><ul>
+        <li><a href="/about">About</a></li>
+        <li><a href="/privacy">Privacy Policy</a></li>
+        <li><a href="/wpn">Wizards Play Network</a></li>
+    </ul></nav>
+    <header><ul><li>Articles</li><li>Events</li></ul></header>
+    <main>
+        <ul>
+            <li>Sol Ring</li>
+            <li>Demonic Tutor</li>
+            <li>Yawgmoth, Thran Physician</li>
+        </ul>
+    </main>
+    <footer><ul><li>Terms</li><li>Sitemap</li></ul></footer>
+    </body></html>
+    """
+    out = _parse_card_names_from_html(html)
+    assert "Sol Ring" in out
+    assert "Demonic Tutor" in out
+    assert "Yawgmoth, Thran Physician" in out
+    # Chrome must be stripped:
+    for chrome in ("About", "Privacy Policy", "Wizards Play Network",
+                   "Articles", "Events", "Terms", "Sitemap"):
+        assert chrome not in out, f"chrome leaked: {chrome!r}"
+
+
+def test_parser_decodes_html_entities_and_rejects_ampersand():
+    """``&amp;`` must decode to ``&`` and then the entry must be rejected
+    (no Magic card has ``&`` in its name -- this kills the
+    "Banned &amp; Restricted List" entry the prior parser persisted)."""
+    html = "<main><ul><li>Banned &amp; Restricted List</li><li>Sol Ring</li></ul></main>"
+    out = _parse_card_names_from_html(html)
+    assert "Sol Ring" in out
+    assert "Banned & Restricted List" not in out
+    assert "Banned &amp; Restricted List" not in out
+
+
+def test_cache_path_is_versioned():
+    """The cache filename is versioned (.v2.json) so files written by the
+    prior over-permissive parser are orphaned and ignored on read -- the
+    cleanest "invalidate polluted caches everywhere" mechanism."""
+    from commander_builder.game_changers import CACHE_PATH
+    assert CACHE_PATH.name == "game_changers.v2.json", (
+        f"unversioned cache path would still read pre-fix files: {CACHE_PATH}"
+    )
+
+
+def test_load_filters_punctuation_chrome_from_cache(tmp_path, monkeypatch):
+    """Defense in depth: even if a cache somehow contains entries with
+    sentence punctuation or ampersands (e.g. "Banned & Restricted List"),
+    the post-read filter strips them. (Single-word chrome like "About"
+    cannot be filtered after the fact -- the parser + cache-version bump
+    handle that on the write side.)
+    """
+    from commander_builder import game_changers as gc
+    polluted_cache = tmp_path / "gc.v2.json"
+    polluted_cache.write_text(json.dumps({
+        "cards": [
+            "Banned & Restricted List",      # has & -> filtered
+            "Some sentence: with colon",     # has : -> filtered
+            "Sol Ring", "Demonic Tutor",     # legitimate
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(gc, "CACHE_PATH", polluted_cache)
+    monkeypatch.setattr(gc, "_cache_is_fresh", lambda p: True)
+    out = fetch_game_changers(use_cache=True)
+    assert "Sol Ring" in out
+    assert "Demonic Tutor" in out
+    assert "Banned & Restricted List" not in out
+    assert "Some sentence: with colon" not in out
+
+
 def test_fallback_includes_canonical_high_power_cards():
     """Sanity check the bundled list. Anything missing here would be a
     regression in audit prompt sync."""
