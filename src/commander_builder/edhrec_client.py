@@ -790,13 +790,54 @@ class AverageDeck:
         """Build a Moxfield-shape deck JSON so existing import code can
         consume this without a separate path. Commander cards are routed to
         the [Commander] section by name match (the commander itself in the
-        cards list); everything else lands in [Main]."""
+        cards list); everything else lands in [Main].
+
+        Basic-land handling (design choice 2026-05-30):
+        EDHREC exposes ``num_decks`` ("appears in N decks") for each card but
+        does NOT publish a per-basic count. The prior code used
+        ``max(1, min(40, num_decks))`` which produced decks with up to 40
+        copies of a single popular basic. Instead, we now treat the basics
+        that EDHREC lists as the deck's *basic-land slot mix* and distribute
+        ``max(0, 99 - non_basic_count)`` copies evenly across them (remainder
+        goes to the first-listed basics). When EDHREC lists no basics we
+        leave the deck short of 99 main rather than guessing a color
+        identity — the caller can decide to top up.
+        """
+        BASIC_TYPES = {
+            "forest", "island", "plains", "mountain", "swamp", "wastes",
+        }
         cmdr_name_lc = self.commander_name.lower()
         commanders: dict[str, dict] = {}
         mainboard: dict[str, dict] = {}
+
+        # Pre-pass: count non-basic mainboard entries + collect basics in
+        # the order EDHREC listed them.
+        non_basic_count = 0
+        listed_basics: list[int] = []  # indices into self.cards
+        for i, card in enumerate(self.cards):
+            lc = card.name.lower()
+            if lc == cmdr_name_lc:
+                continue
+            if lc in BASIC_TYPES:
+                listed_basics.append(i)
+            else:
+                non_basic_count += 1
+
+        # Even split of the remaining slots across the listed basics. Every
+        # listed basic gets an explicit quantity (possibly 0 when the
+        # non-basic load already meets/exceeds 99) so the prior 40-cap
+        # behavior never re-emerges via the default.
+        basic_target = max(0, 99 - non_basic_count)
+        basic_qty_by_idx: dict[int, int] = {idx: 0 for idx in listed_basics}
+        if listed_basics and basic_target > 0:
+            n = len(listed_basics)
+            base, remainder = divmod(basic_target, n)
+            for rank, idx in enumerate(listed_basics):
+                basic_qty_by_idx[idx] = base + (1 if rank < remainder else 0)
+
         for i, card in enumerate(self.cards):
             entry = {
-                "quantity": int(card.num_decks) if card.num_decks else 1,
+                "quantity": 1,
                 "card": {
                     "name": card.name,
                     "set": "",
@@ -804,20 +845,12 @@ class AverageDeck:
                 },
             }
             if card.name.lower() == cmdr_name_lc:
-                # Commander goes to its own bucket; quantity is always 1.
                 entry["quantity"] = 1
                 commanders[f"cmdr-{i}"] = entry
             else:
-                # `num_decks` from EDHREC is "appears in N decks", not "use N
-                # copies". For mainboard, use 1 unless name suggests basic
-                # land where multiples are typical.
-                qty = 1
-                # Basics get a generous default; EDHREC average decks
-                # represent basic counts in the deck-count number.
-                lc = card.name.lower()
-                if lc in {"forest", "island", "plains", "mountain", "swamp", "wastes"}:
-                    qty = max(1, min(40, int(card.num_decks) or 1))
-                entry["quantity"] = qty
+                if i in basic_qty_by_idx:
+                    entry["quantity"] = basic_qty_by_idx[i]
+                # Non-basics keep qty=1 (singleton format).
                 mainboard[f"main-{i}"] = entry
         return {
             "name": f"EDHREC Average — {self.commander_name}"
