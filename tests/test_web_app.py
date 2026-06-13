@@ -2632,6 +2632,59 @@ def test_audit_stream_emits_phase_events_in_order(client, monkeypatch):
     assert "proposed_text" in complete
     assert any(a["card"] == "Lotus Cobra" for a in complete["added"])
     assert any(r["card"] == "Cultivate" for r in complete["removed"])
+    # The complete payload carries the diagnosis under the SAME key the
+    # sync endpoint and the UI use (``diagnosis``). The stream used to
+    # mis-name this ``rationale`` so the streamed diagnosis never rendered.
+    assert complete["diagnosis"] == "aggressive dragons"
+    assert "rationale" not in complete
+
+
+def test_audit_stream_complete_warns_when_claude_falls_back_no_key(
+    client, monkeypatch,
+):
+    """Regression: the streaming ``complete`` event must carry the same
+    explicit 'no API key' guidance the sync endpoint returns when Claude
+    is requested but unavailable. The stream path previously only emitted
+    a warning when ``fallback_reason`` was set, so a no-key fallback (the
+    most common case) silently shipped ``warning=null`` to the client."""
+    from commander_builder._advisor_models import (
+        AdvicePhase, AdviceReport, DeckDiagnosis, SwapRecommendation,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def fake_steps(deck_path, bracket, **_kwargs):
+        rep = AdviceReport(
+            deck_filename=deck_path.name,
+            deck_id=None,
+            bracket=bracket,
+            commander_names=["The Ur-Dragon"],
+            diagnosis=DeckDiagnosis(pattern_summary="", weakness_signals=[]),
+            recommendations=[
+                SwapRecommendation(
+                    card="Lotus Cobra", action="add", reason="ramp",
+                    evidence={"source": "edhrec.top_cards"}, name_known=True,
+                ),
+                SwapRecommendation(
+                    card="Cultivate", action="cut", reason="slow",
+                    evidence={}, name_known=True,
+                ),
+            ],
+            # Claude was requested but advise() fell back to heuristic
+            # with no concrete fallback_reason — the exact gap.
+            source="heuristic",
+            fallback_reason=None,
+            timestamp="2026-05-13T12:00:00",
+        )
+        yield AdvicePhase("complete", {"report": rep})
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", fake_steps,
+    )
+    resp = client.get("/api/audit/stream?deck=Alpha&bracket=3&llm=claude")
+    assert resp.status_code == 200
+    complete = dict(_parse_sse(resp.data))["complete"]
+    assert complete["warning"] is not None
+    assert "api key" in complete["warning"].lower()
 
 
 def test_audit_stream_emits_error_on_missing_deck(client, monkeypatch):

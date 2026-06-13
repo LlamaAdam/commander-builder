@@ -187,6 +187,176 @@ def _assess_combos_safe(deck_text: str, bracket: int) -> dict:
         return dict(_EMPTY_COMBO_ASSESSMENT)
 
 
+def _fallback_warning(
+    requested: str,
+    actual_source: str,
+    fallback_reason,
+    byo_key: str,
+) -> "str | None":
+    """The fall-back warning shared by both audit endpoints.
+
+    advise() silently degrades to the EDHREC heuristic when the
+    requested backend can't run (no Claude key, no bracket peers, a
+    network blip). Three branches, in priority order, tell the user
+    exactly why so they can fix it or accept the degraded source:
+      1. a concrete fallback_reason from advise()
+      2. the specific "no API key" guidance (claude requested, no key
+         anywhere) — this branch was MISSING on the SSE path before
+         the two endpoints were unified here
+      3. a generic "requested but unavailable" message
+    Returns None when the effective source matches what was requested.
+    """
+    if actual_source == requested:
+        return None
+    requested_label = _SOURCE_LABEL.get(requested, requested)
+    if fallback_reason:
+        return (
+            f"{requested_label} fell back to EDHREC heuristic. "
+            f"Reason: {fallback_reason}"
+        )
+    if (requested == "claude"
+            and not byo_key
+            and not os.environ.get("ANTHROPIC_API_KEY")):
+        return (
+            "Claude analyst was requested but no API key was provided. "
+            "Open Settings and set your Anthropic API key (sk-ant-…), "
+            "then try again."
+        )
+    return (
+        f"{requested_label} was requested but unavailable — "
+        "falling back to EDHREC heuristic."
+    )
+
+
+def _build_audit_payload(
+    report,
+    *,
+    original: str,
+    deck_id,
+    bracket: int,
+    requested: str,
+    byo_key: str,
+) -> dict:
+    """Assemble the full audit response shared by the sync ``/api/audit``
+    endpoint and the SSE ``/api/audit/stream`` ``complete`` event.
+
+    Single source of truth for proposed-text assembly, pricing, salt
+    annotations, and the fall-back warning. The two endpoints used to
+    carry near-identical copies of this (~160 lines each) that had
+    drifted: the stream path omitted the "no API key" warning branch and
+    mis-named the diagnosis field ``rationale`` (the UI reads
+    ``diagnosis`` on both paths, so the streamed diagnosis never
+    rendered). Both bugs are fixed by routing both endpoints through here.
+    """
+    proposed_text, added, removed, kept = _apply_swaps_to_dck(
+        original, report.recommendations,
+    )
+    # Pad sub-100 source decks with basics mirroring the deck's color
+    # distribution so Forge will load the proposed deck; ``kept`` stays
+    # truthful and ``padded_count`` is surfaced separately.
+    post_swap_main = kept + len(added)
+    proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
+        proposed_text, post_swap_main,
+    )
+    original_total, original_priced = _total_price_for_deck_text(original)
+    proposed_total, proposed_priced = _total_price_for_deck_text(proposed_text)
+    if original_total is not None and proposed_total is not None:
+        price_delta = round(proposed_total - original_total, 2)
+    else:
+        price_delta = None
+    # EDHREC salt list once per audit (cached 7 days). Best-effort:
+    # empty dict on fetch failure → no salt annotations, no warning.
+    try:
+        salt_map = fetch_salt_list()
+    except Exception:  # noqa: BLE001
+        salt_map = {}
+    # Surface ALL recommendations, not just those that landed in
+    # proposed_text after adds==cuts balancing; ``applied`` flags which
+    # are in the Forge-ready text vs loose suggestions. (Live-audit
+    # 2026-05-14: the cut-gate emits zero cuts on sparse EDHREC data,
+    # which previously dropped every add silently.)
+    applied_add_set = {n.lower() for n in added}
+    applied_cut_set = {n.lower() for n in removed}
+    added_payload = [
+        {
+            "card": rec.card,
+            "rationale": rec.reason or "",
+            "match_pct": _match_pct_from_evidence(rec.evidence),
+            "price_usd": (rec.evidence or {}).get("price_usd"),
+            "name_known": getattr(rec, "name_known", True),
+            "source": (rec.evidence or {}).get("source"),
+            "applied": rec.card.lower() in applied_add_set,
+            "salt": salt_map.get(rec.card.lower()),
+        }
+        for rec in report.recommendations
+        if rec.action == "add"
+    ]
+    removed_payload = [
+        {
+            "card": rec.card,
+            "rationale": rec.reason or "",
+            "name_known": getattr(rec, "name_known", True),
+            "applied": rec.card.lower() in applied_cut_set,
+            "salt": salt_map.get(rec.card.lower()),
+        }
+        for rec in report.recommendations
+        if rec.action == "cut"
+    ]
+    unknown_card_count = sum(
+        1 for entry in added_payload + removed_payload
+        if entry["name_known"] is False
+    )
+    actual_source = getattr(report, "source", "heuristic")
+    fallback_reason = getattr(report, "fallback_reason", None)
+    warning = _fallback_warning(
+        requested, actual_source, fallback_reason, byo_key,
+    )
+    return {
+        "deck": deck_id,
+        "bracket": bracket,
+        "proposed_text": proposed_text,
+        "added": added_payload,
+        "removed": removed_payload,
+        "kept_count": kept,
+        # Count quantity-prefixed [Main] lines directly so the headline
+        # matches what Forge will load (not derived from rec-list sizes).
+        "main_count": _count_main_lines(proposed_text),
+        "diagnosis": getattr(report.diagnosis, "pattern_summary", "") or "",
+        "weakness_signals": list(
+            getattr(report.diagnosis, "weakness_signals", []) or []
+        ),
+        "source": actual_source,
+        # Older clients read ``requested_llm``; newer read
+        # ``requested_source``. Both populated for transition.
+        "requested_llm": requested,
+        "requested_source": requested,
+        "warning": warning,
+        "basics_padded": padded_count,
+        "basics_padded_breakdown": padded_breakdown,
+        "unknown_card_count": unknown_card_count,
+        "skipped_for_saturation": list(
+            getattr(report, "skipped_for_saturation", []) or []
+        ),
+        "bracket_peer_ref_count": int(
+            getattr(report, "bracket_peer_ref_count", 0) or 0,
+        ),
+        "original_price_usd": original_total,
+        "proposed_price_usd": proposed_total,
+        "price_delta_usd": price_delta,
+        "n_priced_cards_original": original_priced,
+        "n_priced_cards_proposed": proposed_priced,
+        "average_deck_preview": project_average_deck_preview(
+            getattr(report, "average_deck", None),
+            getattr(report, "edhrec_categories", {}) or {},
+            original,
+        ),
+        "salt_warning": project_salt_warning(original, salt_map, bracket),
+        "protected_cards": read_protected_cards(original),
+        "deck_health": _compute_deck_health_safe(original),
+        "combo_assessment": _assess_combos_safe(original, bracket),
+    }
+
+
 def make_audit_blueprint(deck_dir: Path) -> Blueprint:
     """Build a Flask Blueprint for the audit/advise route group.
 
@@ -287,232 +457,14 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             }), 503
 
         original = path.read_text(encoding="utf-8")
-        proposed_text, added, removed, kept = _apply_swaps_to_dck(
-            original, report.recommendations,
-        )
-        # Backlog item: pad sub-100 source decks. The advisor balances
-        # adds==cuts so any source-deck deficit (e.g. the Goblin deck's
-        # 71 mainboard) is preserved into the proposed deck and Forge
-        # refuses to load it. Top up with basics mirroring the deck's
-        # existing color distribution. `kept` stays truthful (cards
-        # from the source that survived cuts); `padded_count` is
-        # surfaced separately so the UI can show what we synthesized.
-        post_swap_main = kept + len(added)
-        proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
-            proposed_text, post_swap_main,
-        )
-        # Compute the original + proposed deck total prices so the UI
-        # can show "$420 → $537 (+$117)" alongside the diff. Tier-2
-        # backlog item — feeds the cost-evolution chart's per-swap
-        # delta and lets budget-mode users see the cost impact of
-        # their audit at a glance. Best-effort: ``_total_price_for_
-        # deck_text`` returns ``(None, 0)`` when no priced cards are
-        # available (Scryfall down, all-digital-only deck), which
-        # the UI translates to "—" instead of "$0.00."
-        original_total, original_priced = _total_price_for_deck_text(original)
-        proposed_total, proposed_priced = _total_price_for_deck_text(proposed_text)
-        if original_total is not None and proposed_total is not None:
-            price_delta = round(proposed_total - original_total, 2)
-        else:
-            price_delta = None
-        # Surface ALL adds/cuts the advisor produced, not just those
-        # that landed in proposed_text after _apply_swaps_to_dck's
-        # adds==cuts balancing. The ``applied`` flag tells the UI
-        # which entries are in proposed_text (safe to drop into
-        # Forge) vs which are loose recommendations (the user
-        # needs to choose what to swap them in for).
-        #
-        # Live-audit 2026-05-14 surfaced the need: the new heuristic
-        # cut-gate (MIN_EDHREC_SIGNAL_FOR_CUTS) correctly emits zero
-        # cuts when EDHREC's data is sparse, but the previous
-        # ``applied_add_set`` filter dropped EVERY add silently
-        # because min(adds, 0) = 0. Users got "no recommendations"
-        # instead of "here are 8 manabase upgrades, choose what to
-        # cut yourself."
-        # Pull EDHREC's salt list once per audit (cached 7 days)
-        # so we can flag socially-spicy picks. Best-effort: empty
-        # dict on fetch failure → no salt annotations, no warning.
-        try:
-            salt_map = fetch_salt_list()
-        except Exception:  # noqa: BLE001
-            salt_map = {}
-        applied_add_set = {n.lower() for n in added}
-        applied_cut_set = {n.lower() for n in removed}
-        added_payload = [
-            {
-                "card": rec.card,
-                "rationale": rec.reason or "",
-                "match_pct": _match_pct_from_evidence(rec.evidence),
-                "price_usd": (rec.evidence or {}).get("price_usd"),
-                # name_known: True/False/None. Default True for legacy
-                # stubs/recs that predate the validator.
-                "name_known": getattr(rec, "name_known", True),
-                # Per-rec source so the UI can render a distinguishing
-                # badge when match_pct is null (manabase essentials,
-                # vanilla Claude recs). Values mirror evidence.source.
-                "source": (rec.evidence or {}).get("source"),
-                # True when this rec landed in proposed_text;
-                # False = "recommended but no cut to balance against."
-                # UI styles unapplied entries with a muted look + a
-                # "needs manual cut" pill so the user knows the deck
-                # text isn't pre-built for them.
-                "applied": rec.card.lower() in applied_add_set,
-                # EDHREC salt score (0..5) — None when the card
-                # isn't in the top-100 salty list. UI shows a "salt"
-                # pill when ≥ 2.0; low-bracket users can audit-wise
-                # avoid table-talk-problematic picks.
-                "salt": salt_map.get(rec.card.lower()),
-            }
-            for rec in report.recommendations
-            if rec.action == "add"
-        ]
-        removed_payload = [
-            {
-                "card": rec.card,
-                "rationale": rec.reason or "",
-                "name_known": getattr(rec, "name_known", True),
-                "applied": rec.card.lower() in applied_cut_set,
-                # Cutting a salty card is GOOD news at low bracket;
-                # surface the score so the UI can highlight it.
-                "salt": salt_map.get(rec.card.lower()),
-            }
-            for rec in report.recommendations
-            if rec.action == "cut"
-        ]
-        # Hallucination flag: only count cards Scryfall *confirmed* are
-        # fake (False). Skip None (validator couldn't reach Scryfall)
-        # so a network blip never spuriously raises the count.
-        unknown_card_count = sum(
-            1 for entry in added_payload + removed_payload
-            if entry["name_known"] is False
-        )
-        actual_source = getattr(report, "source", "heuristic")
-        fallback_reason = getattr(report, "fallback_reason", None)
-        warning = None
-        requested_label = _SOURCE_LABEL.get(requested, requested)
-        if actual_source != requested:
-            # advise() silently falls back to heuristic when the
-            # requested backend can't run (no Claude API key, no
-            # bracket-peer references found, network blip). Tell the
-            # UI exactly why so the user can fix it or accept the
-            # degraded source instead of guessing.
-            if fallback_reason:
-                warning = (
-                    f"{requested_label} fell back to EDHREC heuristic. "
-                    f"Reason: {fallback_reason}"
-                )
-            elif (requested == "claude"
-                  and not byo_key
-                  and not os.environ.get("ANTHROPIC_API_KEY")):
-                warning = (
-                    "Claude analyst was requested but no API key was "
-                    "provided. Open Settings and set your Anthropic API "
-                    "key (sk-ant-…), then try again."
-                )
-            else:
-                warning = (
-                    f"{requested_label} was requested but unavailable — "
-                    "falling back to EDHREC heuristic."
-                )
-        return jsonify({
-            "deck": deck_id,
-            "bracket": bracket,
-            "proposed_text": proposed_text,
-            "added": added_payload,
-            "removed": removed_payload,
-            "kept_count": kept,
-            # main_count reflects what's ACTUALLY in proposed_text -- the
-            # cards Forge will load. Previously this was computed as
-            # ``kept + len(added_payload) + padded_count`` which counts
-            # every recommendation including ones balancing/protection
-            # dropped, producing a misleading headline (e.g. First Sliver
-            # B3 reported 143 main on a 99-card proposed deck). Count
-            # quantity-prefixed [Main] lines directly to keep the
-            # headline truthful.
-            "main_count": _count_main_lines(proposed_text),
-            "diagnosis": getattr(report.diagnosis, "pattern_summary", ""),
-            "weakness_signals": list(getattr(
-                report.diagnosis, "weakness_signals", [],
-            ) or []),
-            "source": actual_source,
-            # The originally-requested backend. Older clients read
-            # `requested_llm`; new clients can read `requested_source`.
-            # Both populated to the same value for transition.
-            "requested_llm": requested,
-            "requested_source": requested,
-            "warning": warning,
-            # Backlog: padding info so the UI can warn if we synthesized
-            # basic lands to bring a sub-100 source deck up to legal size.
-            "basics_padded": padded_count,
-            "basics_padded_breakdown": padded_breakdown,
-            # Hallucination defense — non-zero on Claude analyst path
-            # when the LLM invented a card name Scryfall doesn't recognize.
-            "unknown_card_count": unknown_card_count,
-            # Adds the saturation guard dropped because the deck already
-            # has enough cards in that role bucket. Each entry:
-            # {card, role, deck_count, threshold}. Lets the UI show
-            # "skipped 3 ramp adds — you already have 13" so a short
-            # list isn't mistaken for the advisor giving up.
-            "skipped_for_saturation": list(
-                getattr(report, "skipped_for_saturation", []) or []
-            ),
-            # Non-zero only when source=claude AND the LLM call shipped
-            # bracket-peer references in the prompt. Lets the UI render
-            # 'Claude analyst (5 peer refs)' so users can tell when
-            # archetype data informed the recommendations vs. just
-            # EDHREC averages.
-            "bracket_peer_ref_count": int(
-                getattr(report, "bracket_peer_ref_count", 0) or 0,
-            ),
-            # Proposed-deck pricing — feeds the cost-evolution view
-            # + lets the UI surface "$X → $Y (Δ)" alongside the diff.
-            # All three fields are nullable: None when no priced
-            # cards were found in the corresponding deck text.
-            "original_price_usd": original_total,
-            "proposed_price_usd": proposed_total,
-            "price_delta_usd": price_delta,
-            "n_priced_cards_original": original_priced,
-            "n_priced_cards_proposed": proposed_priced,
-            # EDHREC bracket-specific sample build — feeds the
-            # audit panel's collapsible "Average deck preview"
-            # section. None when EDHREC has no published average
-            # deck for this commander+bracket or the fetch failed,
-            # so the UI knows to hide the <details> entirely.
-            "average_deck_preview": project_average_deck_preview(
-                getattr(report, "average_deck", None),
-                getattr(report, "edhrec_categories", {}) or {},
-                original,
-            ),
-            # Aggregate salt-score banner — fires above the audit
-            # recommendations when the user's current deck carries
-            # salty picks at a low bracket. Null at B4/B5 (high-
-            # power tables expect salt) or when EDHREC's salt-list
-            # was unreachable. The per-rec ``salt`` annotations on
-            # added/removed entries are unaffected.
-            "salt_warning": project_salt_warning(
-                original, salt_map, bracket,
-            ),
-            # Per-deck protected-cards list from [metadata] Protect=
-            # entries. Surfaced so the UI can badge protected cards
-            # in the cuts list with a 🔒 — the auto-curate path
-            # already strips these, but the audit endpoint produces
-            # advisory suggestions and the user might still want to
-            # see what the advisor flagged.
-            "protected_cards": read_protected_cards(original),
-            # Deck-health tile row signals: MDFC count, spell density,
-            # mana sinks, wincon-specific protection, self-mill
-            # enablement. These surface deck-construction quality
-            # signals the advisor's recommendation engine doesn't
-            # directly act on but the user benefits from seeing
-            # (e.g. "this combo deck has 0 Silence-class protection").
-            # Best-effort: any individual signal that fails returns
-            # its empty shape so the rest of the panel renders.
-            "deck_health": _compute_deck_health_safe(original),
-            # Infinite/win combos detected in the deck + whether they push
-            # it above its declared bracket (WotC: two-card infinite combos
-            # are restricted below B4). `violations` is the actionable set.
-            "combo_assessment": _assess_combos_safe(original, bracket),
-        })
+        return jsonify(_build_audit_payload(
+            report,
+            original=original,
+            deck_id=deck_id,
+            bracket=bracket,
+            requested=requested,
+            byo_key=byo_key,
+        ))
 
     @bp.route("/api/audit/stream")
     def audit_stream_route():
@@ -650,172 +602,19 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                         # window before the (potentially slow) post-assembly
                         # and client streaming below.
                         _end_claude_env_window()
-                        # Re-do the same post-assembly the sync endpoint
-                        # does so the client gets a drop-in payload.
+                        # Drop-in payload identical to the sync endpoint —
+                        # both paths go through _build_audit_payload so the
+                        # warning logic + field names never diverge again.
                         report = phase.data["report"]
                         original = path.read_text(encoding="utf-8")
-                        proposed_text, added, removed, kept = (
-                            _apply_swaps_to_dck(
-                                original, report.recommendations,
-                            )
-                        )
-                        post_swap_main = kept + len(added)
-                        proposed_text, padded_count, padded_breakdown = (
-                            _pad_main_to_99(proposed_text, post_swap_main)
-                        )
-                        # Compute original + proposed deck prices for
-                        # the cost-delta UI. Same logic as the sync
-                        # endpoint — see its matching block for the
-                        # rationale.
-                        (
-                            original_total, original_priced,
-                        ) = _total_price_for_deck_text(original)
-                        (
-                            proposed_total, proposed_priced,
-                        ) = _total_price_for_deck_text(proposed_text)
-                        if (original_total is not None
-                                and proposed_total is not None):
-                            price_delta = round(
-                                proposed_total - original_total, 2,
-                            )
-                        else:
-                            price_delta = None
-                        # Pull EDHREC's salt list once per audit
-                        # (cached 7 days). Best-effort: empty dict on
-                        # fetch failure → no salt annotations.
-                        try:
-                            salt_map = fetch_salt_list()
-                        except Exception:  # noqa: BLE001
-                            salt_map = {}
-                        # Surface ALL recommendations (not just those
-                        # that landed in proposed_text). See the sync
-                        # endpoint's matching block for the rationale —
-                        # the live-audit 2026-05-14 cut-gate fix would
-                        # otherwise silently drop every add when cuts=0.
-                        applied_add_set = {n.lower() for n in added}
-                        applied_cut_set = {n.lower() for n in removed}
-                        added_payload = [
-                            {
-                                "card": rec.card,
-                                "rationale": rec.reason or "",
-                                "match_pct": _match_pct_from_evidence(
-                                    rec.evidence,
-                                ),
-                                "price_usd": (rec.evidence or {}).get(
-                                    "price_usd",
-                                ),
-                                "name_known": getattr(
-                                    rec, "name_known", True,
-                                ),
-                                "source": (rec.evidence or {}).get("source"),
-                                "applied": rec.card.lower() in applied_add_set,
-                                "salt": salt_map.get(rec.card.lower()),
-                            }
-                            for rec in report.recommendations
-                            if rec.action == "add"
-                        ]
-                        removed_payload = [
-                            {
-                                "card": rec.card,
-                                "rationale": rec.reason or "",
-                                "name_known": getattr(
-                                    rec, "name_known", True,
-                                ),
-                                "applied": rec.card.lower() in applied_cut_set,
-                                "salt": salt_map.get(rec.card.lower()),
-                            }
-                            for rec in report.recommendations
-                            if rec.action == "cut"
-                        ]
-                        unknown_card_count = sum(
-                            1 for entry in added_payload + removed_payload
-                            if entry["name_known"] is False
-                        )
-                        actual_source = getattr(report, "source", "heuristic")
-                        fallback_reason = getattr(
-                            report, "fallback_reason", None,
-                        )
-                        warning = None
-                        if actual_source != requested and fallback_reason:
-                            warning = (
-                                f"{_SOURCE_LABEL.get(requested, requested)} "
-                                f"fell back to EDHREC heuristic. "
-                                f"Reason: {fallback_reason}"
-                            )
-                        yield _sse("complete", {
-                            "deck": deck_id,
-                            "bracket": bracket,
-                            "proposed_text": proposed_text,
-                            "added": added_payload,
-                            "removed": removed_payload,
-                            "kept_count": kept,
-                            # Count from proposed_text directly so the
-                            # headline matches what Forge will load --
-                            # see the sync /api/audit endpoint for the
-                            # rationale and the pre-fix bug context.
-                            "main_count": _count_main_lines(proposed_text),
-                            "rationale": (
-                                getattr(report.diagnosis, "pattern_summary", "")
-                                or ""
-                            ),
-                            "weakness_signals": list(getattr(
-                                report.diagnosis, "weakness_signals", [],
-                            ) or []),
-                            "source": actual_source,
-                            "requested_llm": requested,
-                            "requested_source": requested,
-                            "warning": warning,
-                            "basics_padded": padded_count,
-                            "basics_padded_breakdown": padded_breakdown,
-                            "unknown_card_count": unknown_card_count,
-                            "skipped_for_saturation": list(
-                                getattr(
-                                    report, "skipped_for_saturation", [],
-                                ) or []
-                            ),
-                            "bracket_peer_ref_count": int(
-                                getattr(
-                                    report, "bracket_peer_ref_count", 0,
-                                ) or 0,
-                            ),
-                            "original_price_usd": original_total,
-                            "proposed_price_usd": proposed_total,
-                            "price_delta_usd": price_delta,
-                            "n_priced_cards_original": original_priced,
-                            "n_priced_cards_proposed": proposed_priced,
-                            # EDHREC average-deck preview — mirrors the
-                            # sync /api/audit endpoint. None when no
-                            # average deck is available; the UI hides
-                            # the <details> panel accordingly.
-                            "average_deck_preview": project_average_deck_preview(
-                                getattr(report, "average_deck", None),
-                                getattr(report, "edhrec_categories", {}) or {},
-                                original,
-                            ),
-                            # Salt-warning banner — mirrors the sync
-                            # endpoint. None at B4/B5 or when no salt
-                            # data is available.
-                            "salt_warning": project_salt_warning(
-                                original, salt_map, bracket,
-                            ),
-                            # Per-deck protected-cards list from
-                            # [metadata] Protect= entries — same
-                            # surface as the sync endpoint.
-                            "protected_cards": read_protected_cards(
-                                original,
-                            ),
-                            # Deck-health tile signals — mirrors the
-                            # sync endpoint shape so the UI renderer
-                            # is shared.
-                            "deck_health": _compute_deck_health_safe(
-                                original,
-                            ),
-                            # Combo/bracket assessment — mirrors the sync
-                            # endpoint so the UI renderer is shared.
-                            "combo_assessment": _assess_combos_safe(
-                                original, bracket,
-                            ),
-                        })
+                        yield _sse("complete", _build_audit_payload(
+                            report,
+                            original=original,
+                            deck_id=deck_id,
+                            bracket=bracket,
+                            requested=requested,
+                            byo_key=byo_key,
+                        ))
                         continue
                     # Intermediate phases (diagnosis / manabase / primary)
                     # — emit the phase's data dict as-is. The client
