@@ -39,6 +39,10 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 # interleave their set/restore (corrupting each other's env, or one billing
 # the other's key). This lock serializes the env window; heuristic (non-Claude)
 # requests bypass it entirely and run concurrently as before.
+#
+# Single-process only: a threading.Lock cannot protect across gunicorn/uwsgi
+# workers. A multi-worker deployment needs per-request key injection (pass
+# the key down to the Anthropic client) instead of env staging.
 _CLAUDE_ENV_LOCK = threading.Lock()
 
 
@@ -102,7 +106,17 @@ def _resolve_byo_key(header_value: str) -> str:
     """
     header_value = (header_value or "").strip()
     if header_value:
-        return header_value
+        # Validate the header against the same key-shape regex the
+        # Settings PUT path enforces. A garbage value would otherwise be
+        # staged into os.environ and surface (possibly echoed back in an
+        # SDK error message) instead of failing cleanly to the fallback.
+        try:
+            from .. import config_store
+            if config_store._ANTHROPIC_KEY_RE.match(header_value):
+                return header_value
+        except Exception:  # noqa: BLE001 — config must never break an audit
+            pass
+        return ""
     try:
         from .. import config_store
         return (config_store.load_config().get("anthropic_api_key") or "").strip()
@@ -604,13 +618,33 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
 
             # Serialize the Claude env window across requests (same lock as
             # _claude_api_key_env). Acquired manually because the key must
-            # stay set across the whole streaming generator; released in the
-            # finally below (runs on completion, raise, or client disconnect).
+            # stay set while _advise_steps runs its Claude call — but the
+            # window ends as soon as the advisor yields its terminal phase
+            # ("complete" or "error"). Post-assembly (prices, salt fetch)
+            # and streaming the payload to a slow client happen OUTSIDE
+            # the lock, so concurrent Claude requests aren't serialized
+            # behind client read time. The finally is the backstop for
+            # raise / client disconnect mid-advise.
             if use_claude:
                 _CLAUDE_ENV_LOCK.acquire()
             saved_key = os.environ.get("ANTHROPIC_API_KEY")
             if use_claude and byo_key:
                 os.environ["ANTHROPIC_API_KEY"] = byo_key
+            env_window_open = use_claude
+
+            def _end_claude_env_window():
+                """Restore the BYO key + release the lock, exactly once."""
+                nonlocal env_window_open
+                if not env_window_open:
+                    return
+                env_window_open = False
+                if byo_key:
+                    if saved_key is None:
+                        os.environ.pop("ANTHROPIC_API_KEY", None)
+                    else:
+                        os.environ["ANTHROPIC_API_KEY"] = saved_key
+                _CLAUDE_ENV_LOCK.release()
+
             try:
                 for phase in _advise_steps(
                     path, bracket=bracket,
@@ -620,6 +654,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     budget=budget,
                 ):
                     if phase.phase == "error":
+                        _end_claude_env_window()
                         yield _sse("error", {
                             "error": phase.data.get("reason", "unknown"),
                             "detail": phase.data.get("type", "RuntimeError"),
@@ -627,6 +662,10 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                         })
                         return
                     if phase.phase == "complete":
+                        # The advisor is done with Claude — close the env
+                        # window before the (potentially slow) post-assembly
+                        # and client streaming below.
+                        _end_claude_env_window()
                         # Re-do the same post-assembly the sync endpoint
                         # does so the client gets a drop-in payload.
                         report = phase.data["report"]
@@ -809,15 +848,10 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     "detail": f"{type(exc).__name__}: {exc}",
                 })
             finally:
-                # Always restore the BYO Anthropic key + release the env
-                # lock — neither must linger across requests.
-                if use_claude and byo_key:
-                    if saved_key is None:
-                        os.environ.pop("ANTHROPIC_API_KEY", None)
-                    else:
-                        os.environ["ANTHROPIC_API_KEY"] = saved_key
-                if use_claude:
-                    _CLAUDE_ENV_LOCK.release()
+                # Backstop: restore the BYO Anthropic key + release the env
+                # lock if the advisor raised or the client disconnected
+                # mid-advise. No-op when already closed above.
+                _end_claude_env_window()
 
         return Response(
             stream_with_context(event_stream()),

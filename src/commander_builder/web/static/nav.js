@@ -26,7 +26,7 @@
     const node = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) {
       if (k === "class") node.className = v;
-      else if (k === "html") node.innerHTML = v;
+      // No innerHTML escape hatch — see el() in app.js.
       else node.setAttribute(k, v);
     }
     (children || []).forEach((c) => {

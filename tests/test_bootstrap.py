@@ -106,6 +106,121 @@ def test_download_forge_raises_when_no_asset(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# checksum verification (security hardening)
+# --------------------------------------------------------------------------- #
+_PK_BYTES = b"PK\x03\x04"
+_PK_SHA256 = "8dcc7e601606217f3b754766511182a916b17e9a26a94c9d887104eba92e9bb2"
+
+
+def test_download_forge_verifies_matching_digest(tmp_path):
+    release = {"assets": [{
+        "name": "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        "browser_download_url": "https://example/forge.jar",
+        "digest": f"sha256:{_PK_SHA256}",
+    }]}
+    jar = bootstrap.download_forge(
+        forge_dir=tmp_path / "forge",
+        _get_release=lambda: release,
+        _download=lambda url, dest: dest.write_bytes(_PK_BYTES),
+    )
+    assert jar.exists()
+
+
+def test_download_forge_rejects_digest_mismatch(tmp_path):
+    release = {"assets": [{
+        "name": "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        "browser_download_url": "https://example/forge.jar",
+        "digest": "sha256:" + "0" * 64,
+    }]}
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        bootstrap.download_forge(
+            forge_dir=tmp_path / "forge",
+            _get_release=lambda: release,
+            _download=lambda url, dest: dest.write_bytes(_PK_BYTES),
+        )
+    # The bad download must not be left where check_dependencies finds it.
+    assert not list((tmp_path / "forge").glob("*.jar"))
+
+
+def test_download_jre_verifies_sha256_sidecar_asset(tmp_path):
+    archive_name = "OpenJDK17U-jre_x64_windows_hotspot_17.0.11_9.zip"
+    release = {"assets": [
+        {"name": archive_name,
+         "browser_download_url": "https://example/jre.zip"},
+        {"name": f"{archive_name}.sha256.txt",
+         "browser_download_url": "https://example/jre.zip.sha256.txt"},
+    ]}
+
+    def fake_download(url, dest):
+        if url.endswith(".sha256.txt"):
+            dest.write_text(f"{_PK_SHA256}  {archive_name}\n")
+        else:
+            dest.write_bytes(_PK_BYTES)
+
+    archive = bootstrap.download_jre(
+        jre_dir=tmp_path / "jre",
+        system="Windows",
+        machine="AMD64",
+        _get_release=lambda: release,
+        _download=fake_download,
+    )
+    assert archive.exists()
+
+
+def test_download_jre_rejects_sidecar_mismatch(tmp_path):
+    archive_name = "OpenJDK17U-jre_x64_windows_hotspot_17.0.11_9.zip"
+    release = {"assets": [
+        {"name": archive_name,
+         "browser_download_url": "https://example/jre.zip"},
+        {"name": f"{archive_name}.sha256",
+         "browser_download_url": "https://example/jre.zip.sha256"},
+    ]}
+
+    def fake_download(url, dest):
+        if url.endswith(".sha256"):
+            dest.write_text(("0" * 64) + f"  {archive_name}\n")
+        else:
+            dest.write_bytes(_PK_BYTES)
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        bootstrap.download_jre(
+            jre_dir=tmp_path / "jre",
+            system="Windows",
+            machine="AMD64",
+            _get_release=lambda: release,
+            _download=fake_download,
+        )
+
+
+def test_download_warns_but_succeeds_without_published_checksum(tmp_path, capsys):
+    release = {"assets": [{
+        "name": "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
+        "browser_download_url": "https://example/forge.jar",
+    }]}
+    jar = bootstrap.download_forge(
+        forge_dir=tmp_path / "forge",
+        _get_release=lambda: release,
+        _download=lambda url, dest: dest.write_bytes(_PK_BYTES),
+    )
+    assert jar.exists()
+    assert "skipping integrity verification" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# zip-slip guard (security hardening)
+# --------------------------------------------------------------------------- #
+def test_extract_jre_rejects_zip_slip_member(tmp_path):
+    import zipfile
+
+    archive = tmp_path / "jre.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("../evil.txt", "outside")
+    with pytest.raises(RuntimeError, match="zip-slip"):
+        bootstrap.extract_jre(archive, jre_dir=tmp_path / "jre")
+    assert not (tmp_path.parent / "evil.txt").exists()
+
+
+# --------------------------------------------------------------------------- #
 # _pick_jre_asset -- platform JRE selection from a Temurin release (FP-010)
 # --------------------------------------------------------------------------- #
 def test_pick_jre_asset_selects_platform_archive():

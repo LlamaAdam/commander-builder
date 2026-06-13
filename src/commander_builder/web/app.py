@@ -213,6 +213,25 @@ def create_app(
     import secrets as _secrets
     _ASSET_VERSION = _secrets.token_hex(4)
 
+    # Per-process SECRET_KEY: nothing uses sessions/signed cookies today,
+    # but Flask's default is None — any future flash()/CSRF addition
+    # would be silently forgeable without this. Env override keeps it
+    # stable across restarts when an operator needs that.
+    app.config["SECRET_KEY"] = (
+        os.environ.get("COMMANDER_BUILDER_SECRET_KEY")
+        or _secrets.token_hex(32)
+    )
+
+    @app.after_request
+    def _security_headers(response):
+        # Defense-in-depth for the localhost UI (and anyone who opts
+        # into --host 0.0.0.0): no framing, no MIME sniffing, no
+        # referrer leakage.
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
     # Register modular route blueprints. As of the 2026-05-13 tier-3
     # blueprint refactor (issue #3.1), route groups live in
     # ``routes_<group>.py`` modules and are wired in here. The
@@ -281,6 +300,14 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=5000)
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
+
+    # The Werkzeug debugger is arbitrary code execution from the browser.
+    # Refuse the footgun combination outright rather than warn-and-hope.
+    if args.debug and args.host not in ("127.0.0.1", "localhost", "::1"):
+        ap.error(
+            "--debug exposes the Werkzeug debugger (remote code "
+            "execution); it is only allowed with a loopback --host."
+        )
 
     app = create_app(deck_dir=args.deck_dir)
     app.run(host=args.host, port=args.port, debug=args.debug)

@@ -2752,13 +2752,13 @@ def test_audit_llm_claude_passes_use_claude_and_byo_key(client, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     resp = client.get(
         "/api/audit?deck=Alpha&bracket=3&llm=claude",
-        headers={"X-Anthropic-API-Key": "sk-test-byo-12345"},
+        headers={"X-Anthropic-API-Key": "sk-ant-testbyo1234567890"},
     )
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
     assert seen["use_claude"] is True
     # BYO key was injected into env for the call's lifetime.
-    assert seen["api_key_in_env"] == "sk-test-byo-12345"
+    assert seen["api_key_in_env"] == "sk-ant-testbyo1234567890"
     assert body["source"] == "claude"
     assert body["requested_llm"] == "claude"
     assert body["warning"] is None
@@ -2892,14 +2892,28 @@ def test_audit_does_not_leak_byo_key_to_subsequent_call(client, monkeypatch):
 
     r1 = client.get(
         "/api/audit?deck=Alpha&bracket=3&llm=claude",
-        headers={"X-Anthropic-API-Key": "sk-first-call"},
+        headers={"X-Anthropic-API-Key": "sk-ant-firstcall12345678"},
     )
     assert r1.status_code == 200
-    assert seen["api_key_in_env"] == "sk-first-call"
+    assert seen["api_key_in_env"] == "sk-ant-firstcall12345678"
 
     seen.clear()
     r2 = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")
     assert r2.status_code == 200
+    assert seen.get("api_key_in_env") is None
+
+
+def test_audit_rejects_malformed_byo_key_header(client, monkeypatch):
+    """A header value that doesn't match the Anthropic key shape is
+    ignored (never staged into os.environ) — same validation the
+    Settings PUT path enforces."""
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "definitely-not-an-anthropic-key"},
+    )
+    assert resp.status_code == 200
     assert seen.get("api_key_in_env") is None
 
 

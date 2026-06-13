@@ -165,12 +165,19 @@ def make_meta_blueprint(
         msg = (payload.get("message") or "").strip()
         if not msg:
             return jsonify({"error": "message is required"}), 400
-        # Cap fields so a runaway browser doesn't bloat the log.
-        msg = msg[:2000]
-        url = (payload.get("url") or "")[:512]
+        # Cap fields so a runaway browser doesn't bloat the log, and
+        # strip newlines from the single-line fields so a crafted
+        # payload can't forge fake log entries (log injection). The
+        # multi-line stack keeps newlines but gets indented on write so
+        # forged "---" separator lines can't masquerade as entries.
+        def _one_line(value: str) -> str:
+            return value.replace("\r", " ").replace("\n", " ")
+
+        msg = _one_line(msg[:2000])
+        url = _one_line((payload.get("url") or "")[:512])
         stack = (payload.get("stack") or "")[:4000]
-        ua = (payload.get("user_agent") or "")[:256]
-        kind = (payload.get("kind") or "error")[:40]
+        ua = _one_line((payload.get("user_agent") or "")[:256])
+        kind = _one_line((payload.get("kind") or "error")[:40])
         from datetime import datetime as _dt, timezone as _tz
         ts = _dt.now(_tz.utc).isoformat()
         # Append-only; never read from this endpoint.
@@ -181,7 +188,10 @@ def make_meta_blueprint(
                 f.write(f"UA: {ua}\n")
                 f.write(f"MSG: {msg}\n")
                 if stack:
-                    f.write(f"STACK:\n{stack}\n")
+                    indented = "\n".join(
+                        f"    {line}" for line in stack.splitlines()
+                    )
+                    f.write(f"STACK:\n{indented}\n")
                 f.write("\n")
         except OSError as exc:
             return jsonify({
