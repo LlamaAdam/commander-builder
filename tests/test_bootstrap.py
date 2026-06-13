@@ -192,18 +192,20 @@ def test_download_jre_rejects_sidecar_mismatch(tmp_path):
         )
 
 
-def test_download_warns_but_succeeds_without_published_checksum(tmp_path, capsys):
+def test_download_warns_but_succeeds_without_published_checksum(tmp_path, caplog):
+    import logging
     release = {"assets": [{
         "name": "forge-gui-desktop-2.0.12-jar-with-dependencies.jar",
         "browser_download_url": "https://example/forge.jar",
     }]}
-    jar = bootstrap.download_forge(
-        forge_dir=tmp_path / "forge",
-        _get_release=lambda: release,
-        _download=lambda url, dest: dest.write_bytes(_PK_BYTES),
-    )
+    with caplog.at_level(logging.WARNING, logger="commander_builder.bootstrap"):
+        jar = bootstrap.download_forge(
+            forge_dir=tmp_path / "forge",
+            _get_release=lambda: release,
+            _download=lambda url, dest: dest.write_bytes(_PK_BYTES),
+        )
     assert jar.exists()
-    assert "skipping integrity verification" in capsys.readouterr().out
+    assert "skipping integrity verification" in caplog.text
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +220,57 @@ def test_extract_jre_rejects_zip_slip_member(tmp_path):
     with pytest.raises(RuntimeError, match="zip-slip"):
         bootstrap.extract_jre(archive, jre_dir=tmp_path / "jre")
     assert not (tmp_path.parent / "evil.txt").exists()
+
+
+def test_ensure_tar_members_within_rejects_traversal(tmp_path):
+    """The manual tar guard used on Python < 3.12 (where extractall has
+    no filter=) must reject a path-traversal member. Tested directly
+    because on 3.12+ the filter='data' path handles it instead."""
+    import tarfile
+
+    archive = tmp_path / "jre.tar.gz"
+    payload = tmp_path / "payload.txt"
+    payload.write_text("x")
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(payload, arcname="../evil.txt")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with tarfile.open(archive, "r:gz") as tf:
+        with pytest.raises(RuntimeError, match="zip-slip"):
+            bootstrap._ensure_tar_members_within(tf, dest)
+
+
+def test_ensure_tar_members_within_rejects_escaping_symlink(tmp_path):
+    """A member whose own name is safe but whose symlink target escapes
+    dest must also be rejected (filter='data' blocks these on 3.12+)."""
+    import tarfile
+
+    archive = tmp_path / "jre.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        info = tarfile.TarInfo("link")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "../../etc/passwd"
+        tf.addfile(info)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with tarfile.open(archive, "r:gz") as tf:
+        with pytest.raises(RuntimeError, match="link target"):
+            bootstrap._ensure_tar_members_within(tf, dest)
+
+
+def test_ensure_tar_members_within_allows_safe_members(tmp_path):
+    """A normal nested member must pass the guard unharmed."""
+    import tarfile
+
+    archive = tmp_path / "jre.tar.gz"
+    payload = tmp_path / "payload.txt"
+    payload.write_text("x")
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(payload, arcname="jdk-17/bin/java")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with tarfile.open(archive, "r:gz") as tf:
+        bootstrap._ensure_tar_members_within(tf, dest)  # no raise
 
 
 # --------------------------------------------------------------------------- #

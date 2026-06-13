@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 FORGE_RELEASES_API = "https://api.github.com/repos/Card-Forge/forge/releases/latest"
 TEMURIN_RELEASES_API = (
@@ -345,10 +348,11 @@ def _verify_asset_checksum(
     """
     expected = _expected_sha256(release, asset, download)
     if expected is None:
-        print(
-            f"WARN: no published SHA-256 for {asset.get('name')!r}; "
-            "skipping integrity verification.",
-            flush=True,
+        # Library function — emit through logging, not stdout, so it
+        # doesn't pollute the launcher subprocess's output stream.
+        logger.warning(
+            "no published SHA-256 for %r; skipping integrity verification.",
+            asset.get("name"),
         )
         return
     actual = _sha256_of(dest)
@@ -365,9 +369,9 @@ def _verify_asset_checksum(
 def _ensure_zip_members_within(zf, dest: Path) -> None:
     """Zip-slip guard: refuse archive members that would escape ``dest``.
 
-    The tar path gets this via ``filter="data"`` (py3.12+); for zip we
-    validate member targets explicitly as defense-in-depth before
-    extraction.
+    Used for the zip path (and as the manual fallback for tar on
+    Python < 3.12, where ``extractall(filter="data")`` isn't available).
+    Validates member targets explicitly before extraction.
     """
     dest_resolved = dest.resolve()
     for member in zf.infolist():
@@ -376,6 +380,33 @@ def _ensure_zip_members_within(zf, dest: Path) -> None:
             raise RuntimeError(
                 f"unsafe zip member path (zip-slip): {member.filename!r}"
             )
+
+
+def _ensure_tar_members_within(tf, dest: Path) -> None:
+    """Tar zip-slip guard for Python < 3.12, where ``extractall`` has no
+    ``filter=`` argument.
+
+    On 3.12+ the tar path uses ``filter="data"`` which blocks traversal,
+    absolute paths, and unsafe links. This is the manual equivalent for
+    older interpreters in the project's supported range (``>=3.10``):
+    reject any member — including symlink/hardlink targets — that would
+    resolve outside ``dest``.
+    """
+    dest_resolved = dest.resolve()
+    for member in tf.getmembers():
+        target = (dest / member.name).resolve()
+        if not target.is_relative_to(dest_resolved):
+            raise RuntimeError(
+                f"unsafe tar member path (zip-slip): {member.name!r}"
+            )
+        # A link whose own name is safe can still point outside dest.
+        if member.issym() or member.islnk():
+            link_target = (target.parent / member.linkname).resolve()
+            if not link_target.is_relative_to(dest_resolved):
+                raise RuntimeError(
+                    f"unsafe tar link target: {member.name!r} -> "
+                    f"{member.linkname!r}"
+                )
 
 
 def extract_jre(archive: Path, jre_dir: Optional[Path] = None) -> Path:
@@ -406,7 +437,8 @@ def extract_jre(archive: Path, jre_dir: Optional[Path] = None) -> Path:
                 # filter='data' (py3.12+) blocks path-traversal members.
                 try:
                     tf.extractall(tmp_path, filter="data")
-                except TypeError:  # pragma: no cover - older pythons
+                except TypeError:  # Python < 3.12: no filter= arg.
+                    _ensure_tar_members_within(tf, tmp_path)
                     tf.extractall(tmp_path)
         else:
             raise RuntimeError(f"unsupported JRE archive type: {archive.name}")
