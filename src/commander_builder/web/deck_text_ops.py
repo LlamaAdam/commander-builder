@@ -9,6 +9,8 @@ backward compatibility.
 
 from __future__ import annotations
 
+from ..dck_utils import CARD_LINE_RE, parse_card_line
+
 
 def _normalize_pasted_deck(text: str) -> str:
     """Accept either a Forge-format .dck blob or a Moxfield bulk-paste
@@ -182,7 +184,6 @@ def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, i
     is ``{basic_name: count_added}``. If the deck is already at or above
     99 mainboard, returns the input text and an empty breakdown.
     """
-    import re as _re
     if current_main >= 99:
         return text, 0, {}
     deficit = 99 - current_main
@@ -190,7 +191,6 @@ def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, i
     # Count basics currently in [Main] so we mirror the user's distribution.
     counts: dict[str, int] = {b: 0 for b in _BASIC_LANDS}
     in_main = False
-    qty_name_re = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
     for raw in text.splitlines():
         stripped = raw.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
@@ -198,15 +198,12 @@ def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, i
             continue
         if not in_main:
             continue
-        m = qty_name_re.match(stripped)
-        if not m:
+        parsed = parse_card_line(stripped)
+        if parsed is None:
             continue
-        name = m.group(2).strip()
+        qty, name = parsed
         if name in counts:
-            try:
-                counts[name] += int(m.group(1))
-            except (TypeError, ValueError):
-                counts[name] += 1
+            counts[name] += qty
 
     basics_present = {b: c for b, c in counts.items() if c > 0}
     # No basics? Fall back to Wastes (colorless, legal in any color identity).
@@ -298,7 +295,6 @@ def _apply_swaps_to_dck(
     against a 1-Mountain deck, ``removed`` is ``["Mountain"]`` (only
     one instance was actually available to remove).
     """
-    import re as _re
     from collections import Counter as _Counter
 
     add_names = [r.card for r in recommendations if r.action == "add"]
@@ -331,7 +327,6 @@ def _apply_swaps_to_dck(
     in_main = False
     main_kept = 0
     removed: list[str] = []
-    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
 
     def _flush_remaining_adds(target: list[str]) -> None:
         """Append one merged line per still-pending add. Order follows
@@ -365,7 +360,7 @@ def _apply_swaps_to_dck(
             out_lines.append(raw)
             continue
 
-        m = line_pattern.match(stripped)
+        m = CARD_LINE_RE.match(stripped)
         if not m:
             # Lines that don't match the qty/name pattern (rare) pass
             # through unchanged. main_kept is unaffected.

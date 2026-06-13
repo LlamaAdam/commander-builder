@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..dck_utils import CARD_LINE_RE
+
 
 def _build_suggested_adds(deck_path: Path, bracket: int) -> list[dict]:
     """Project ``improvement_advisor.advise()`` recommendations into the
@@ -61,14 +63,12 @@ def _user_deck_card_names(deck_text: str) -> set[str]:
     by stripping the optional edition tail. Section headers, metadata,
     and blank lines are ignored — only quantity-prefixed cards count.
     """
-    import re as _re
-    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
     out: set[str] = set()
     for raw in deck_text.splitlines():
         stripped = raw.strip()
         if not stripped or stripped.startswith("["):
             continue
-        m = line_pattern.match(stripped)
+        m = CARD_LINE_RE.match(stripped)
         if m:
             out.add(m.group(2).strip().lower())
     return out
@@ -201,14 +201,12 @@ def project_salt_warning(
     # Preserve the canonical casing from the user's .dck for display
     # — the salt-list is keyed lowercase but the banner reads better
     # as "Smothering Tithe" than "smothering tithe".
-    import re as _re
-    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
     canonical_by_lower: dict[str, str] = {}
     for raw in user_deck_text.splitlines():
         stripped = raw.strip()
         if not stripped or stripped.startswith("["):
             continue
-        m = line_pattern.match(stripped)
+        m = CARD_LINE_RE.match(stripped)
         if m:
             name = m.group(2).strip()
             canonical_by_lower.setdefault(name.lower(), name)
@@ -261,8 +259,6 @@ def decks_containing_card(deck_dir: Path, card_name: str) -> list[str]:
     / metadata sections are ignored, mirroring the card-section scope
     used elsewhere in this module.
     """
-    import re as _re
-    line_pattern = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
     target = card_name.strip().lower()
     matches: list[str] = []
     for path in deck_dir.glob("*.dck"):
@@ -281,7 +277,7 @@ def decks_containing_card(deck_dir: Path, card_name: str) -> list[str]:
                 continue
             if not in_card_section:
                 continue
-            m = line_pattern.match(s)
+            m = CARD_LINE_RE.match(s)
             if not m:
                 continue
             if m.group(2).strip().lower() == target:

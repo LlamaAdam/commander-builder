@@ -133,6 +133,15 @@ def test_count_main_cards_accepts_uppercase_header():
     assert count_main_cards("[MAIN]\n4 Island\n") == 4
 
 
+def test_count_main_cards_counts_empty_name_degenerate():
+    # "1   |x" matches CARD_LINE_RE but strips to an empty name.
+    # count_main_cards STILL tallies the quantity (documented historical
+    # behavior, and the deliberate counterpart to
+    # test_iter_main_cards_skips_empty_name_degenerates, which drops it).
+    text = "[Main]\n1   |x\n1 Sol Ring\n"
+    assert count_main_cards(text) == 2  # not 1
+
+
 # --- iter_main_cards --------------------------------------------------------
 
 def test_iter_main_cards_yields_qty_name_pairs_in_deck_order():

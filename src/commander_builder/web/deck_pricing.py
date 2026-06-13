@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ..dck_utils import parse_card_line
+
 
 def _total_price_for_deck_text(text: str) -> tuple[Optional[float], int]:
     """Sum Scryfall USD prices across all cards (commander + main)
@@ -28,9 +30,7 @@ def _total_price_for_deck_text(text: str) -> tuple[Optional[float], int]:
     so the UI can show "$X → $Y (Δ +$12.30)" alongside the diff
     list. Tier-2 backlog item from STATUS.md.
     """
-    import re as _re
     from ..scryfall_client import lookup_card
-    line_re = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
     total = 0.0
     n_priced = 0
     in_card_section = False
@@ -46,14 +46,10 @@ def _total_price_for_deck_text(text: str) -> tuple[Optional[float], int]:
             continue
         if not in_card_section:
             continue
-        m = line_re.match(s)
-        if not m:
+        parsed = parse_card_line(s)
+        if parsed is None:
             continue
-        try:
-            qty = int(m.group(1))
-        except (TypeError, ValueError):
-            qty = 1
-        name = m.group(2).strip()
+        qty, name = parsed
         try:
             card = lookup_card(name)
         except Exception:
