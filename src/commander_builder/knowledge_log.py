@@ -36,6 +36,7 @@ plain SQLite file.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -166,13 +167,26 @@ class Iteration:
 
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Context-managed connection with row-factory for column access by name."""
+    """Context-managed connection with row-factory for column access by name.
+
+    Hardened for concurrent local writers (the web app, a CLI run, and
+    parallel A/B pods can all touch the same file): WAL journaling lets
+    readers coexist with a writer, and busy_timeout makes a second writer
+    wait-and-retry instead of failing immediately with "database is
+    locked". Rolls back explicitly on error so a partially applied write
+    never reaches commit.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -189,7 +203,13 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
                (``_migrate_to_v2``, AGENT_BACKLOG #012).
     """
     with _connect(db_path) as conn:
-        conn.executescript(_SCHEMA_SQL)
+        # Per-statement execute, NOT executescript(): executescript()
+        # issues an implicit COMMIT before running, which detaches the
+        # schema from the surrounding transaction and could leave a
+        # v1 -> v2 upgrade half-applied if a later migration step fails.
+        for statement in _SCHEMA_SQL.split(";"):
+            if statement.strip():
+                conn.execute(statement)
         # Run migrations unconditionally — they're each individually
         # idempotent (check-then-add pattern via pragma_table_info),
         # so calling them on a fresh DB just adds the v2 column +
@@ -373,7 +393,6 @@ def migrate_legacy_deck_ids(
 
     Returns a dict with `scanned`, `updated`, `skipped`, and `details`. Pass
     `dry_run=True` to report what would change without writing."""
-    import re
     legacy_re = re.compile(r"\[B[0-9?]\]\.dck$")
     moxfield_re = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
 
@@ -547,9 +566,7 @@ def verdict_breakdown_for_deck(
 # in the client.
 
 
-import re as _re
-
-_MAIN_LINE_RE = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+_MAIN_LINE_RE = re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
 
 
 def _count_main_cards(deck_snapshot: Optional[str]) -> int:
