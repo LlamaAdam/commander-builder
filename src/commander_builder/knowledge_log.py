@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from . import dck_utils
 from .forge_runner import VENDOR_FORGE
 
 DEFAULT_DB_PATH = VENDOR_FORGE.parent.parent / "knowledge_log.sqlite"
@@ -566,7 +567,8 @@ def verdict_breakdown_for_deck(
 # in the client.
 
 
-_MAIN_LINE_RE = re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+# Kept for backwards compatibility; canonical copy lives in dck_utils.
+_MAIN_LINE_RE = dck_utils.CARD_LINE_RE
 
 
 def _count_main_cards(deck_snapshot: Optional[str]) -> int:
@@ -576,26 +578,10 @@ def _count_main_cards(deck_snapshot: Optional[str]) -> int:
     Commander, sideboard, considering sections are excluded — they
     don't change between iterations in a way that's worth surfacing
     on the graph. Returns 0 for None / empty snapshot.
+
+    Thin wrapper over ``dck_utils.count_main_cards``.
     """
-    if not deck_snapshot:
-        return 0
-    total = 0
-    in_main = False
-    for raw in deck_snapshot.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_main = stripped.lower() == "[main]"
-            continue
-        if in_main:
-            m = _MAIN_LINE_RE.match(stripped)
-            if m:
-                try:
-                    total += int(m.group(1))
-                except (TypeError, ValueError):
-                    total += 1
-    return total
+    return dck_utils.count_main_cards(deck_snapshot)
 
 
 def _parse_main_cards(deck_snapshot: Optional[str]) -> dict:
@@ -604,31 +590,10 @@ def _parse_main_cards(deck_snapshot: Optional[str]) -> dict:
     Card names are normalized to their base name (the bit before any `|set|n`
     suffix), so the same card across two snapshots compares equal regardless
     of printing. Quantities are summed. Non-[Main] sections are ignored, to
-    match `_count_main_cards`."""
-    cards: dict = {}
-    if not deck_snapshot:
-        return cards
-    in_main = False
-    for raw in deck_snapshot.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_main = stripped.lower() == "[main]"
-            continue
-        if not in_main:
-            continue
-        m = _MAIN_LINE_RE.match(stripped)
-        if not m:
-            continue
-        try:
-            qty = int(m.group(1))
-        except (TypeError, ValueError):
-            qty = 1
-        name = m.group(2).strip()
-        if name:
-            cards[name] = cards.get(name, 0) + qty
-    return cards
+    match `_count_main_cards`.
+
+    Thin wrapper over ``dck_utils.main_card_quantities``."""
+    return dck_utils.main_card_quantities(deck_snapshot)
 
 
 def audit_card_diff(from_snapshot: Optional[str], to_snapshot: Optional[str]) -> dict:

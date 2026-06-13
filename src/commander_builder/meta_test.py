@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from . import dck_utils
 from .compare_versions import COMPARE_OUT_DIR, ComparisonReport, compare
 from .edhrec_client import (
     fetch_average_deck,
@@ -265,26 +266,12 @@ def _import_reference(deck_json: dict, source: str,
 
 
 def _parse_main_card_names(deck_path: Path) -> list[str]:
-    """Pull just the [Main] card names (without qty / set / cn)."""
+    """Pull just the [Main] card names (without qty / set / cn).
+
+    Thin wrapper over ``dck_utils.main_card_names``."""
     if not deck_path.exists():
         return []
-    out: list[str] = []
-    in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[main]":
-            in_main = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                out.append(m.group(1).strip())
-    return out
+    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
 
 
 def _fetch_edhrec_average_deck(

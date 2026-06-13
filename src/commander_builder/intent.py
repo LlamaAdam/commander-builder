@@ -28,10 +28,11 @@ Callers
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+from . import dck_utils
 
 
 @dataclass
@@ -86,45 +87,17 @@ def _read_deck_text(deck_path: Path) -> str:
 
 
 def _parse_commander_names(deck_text: str) -> list[str]:
-    """Extract card names from the [Commander] section of a .dck file."""
-    names: list[str] = []
-    in_cmd = False
-    for raw in deck_text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[commander]":
-            in_cmd = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_cmd = False
-            continue
-        if in_cmd:
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                names.append(m.group(1).strip())
-    return names
+    """Extract card names from the [Commander] section of a .dck file.
+
+    Thin wrapper over ``dck_utils.section_card_names``."""
+    return dck_utils.section_card_names(deck_text, "Commander")
 
 
 def _parse_main_card_names(deck_text: str) -> list[str]:
-    """Extract card names from the [Main] section of a .dck file."""
-    names: list[str] = []
-    in_main = False
-    for raw in deck_text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[main]":
-            in_main = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                names.append(m.group(1).strip())
-    return names
+    """Extract card names from the [Main] section of a .dck file.
+
+    Thin wrapper over ``dck_utils.main_card_names``."""
+    return dck_utils.main_card_names(deck_text)
 
 
 # ---------------------------------------------------------------------------

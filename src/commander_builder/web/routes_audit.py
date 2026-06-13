@@ -152,27 +152,11 @@ def _count_main_lines(deck_text: str) -> int:
     main_count (e.g. 143 on a deck whose proposed_text was 99
     cards). This helper walks proposed_text once and sums the
     qty prefixes the way Forge actually parses them.
+
+    Thin wrapper over ``dck_utils.count_main_cards``.
     """
-    import re as _re
-    line_pat = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
-    total = 0
-    in_main = False
-    for raw in deck_text.splitlines():
-        s = raw.strip()
-        if not s:
-            continue
-        if s.startswith("[") and s.endswith("]"):
-            in_main = s.lower() == "[main]"
-            continue
-        if not in_main:
-            continue
-        m = line_pat.match(s)
-        if m:
-            try:
-                total += int(m.group(1))
-            except (TypeError, ValueError):
-                total += 1
-    return total
+    from ..dck_utils import count_main_cards
+    return count_main_cards(deck_text)
 
 
 def _compute_deck_health_safe(deck_text: str) -> dict:

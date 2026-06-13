@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from . import dck_utils
 from .edhrec_client import (
     AverageDeck,
     CardEntry,
@@ -207,26 +208,12 @@ def _aggregate_match_history(deck_filename: str, match_dir: Path = MATCH_DIR) ->
 # --- Card-level signals from EDHREC ---------------------------------------
 
 def _read_main_cards(deck_path: Path) -> list[str]:
-    """Pull the [Main] section card names (without qty / set / cn)."""
+    """Pull the [Main] section card names (without qty / set / cn).
+
+    Thin wrapper over ``dck_utils.main_card_names``."""
     if not deck_path.exists():
         return []
-    out: list[str] = []
-    in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[main]":
-            in_main = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                out.append(m.group(1).strip())
-    return out
+    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
 
 
 # Signal-to-roles map + _signals_to_priority_roles + heuristic
