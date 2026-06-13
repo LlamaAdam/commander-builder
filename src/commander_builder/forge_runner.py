@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -411,7 +412,7 @@ class ForgeRunner:
         ]
 
         timeout = timeout_sec or max(MIN_TIMEOUT_SEC, num_games * DEFAULT_TIMEOUT_PER_GAME_SEC)
-        started = datetime.now()
+        started = time.monotonic()
 
         if stream or on_line is not None or abort_check is not None:
             stdout, stderr, returncode, timed_out, error = _run_streaming(
@@ -423,7 +424,7 @@ class ForgeRunner:
                 cmd, timeout, str(self.forge_dir),
             )
 
-        duration = (datetime.now() - started).total_seconds()
+        duration = (time.monotonic() - started)
         return SimResult(
             cmd=cmd,
             returncode=returncode,
@@ -627,7 +628,7 @@ def run_ab_simulation(
 
     a_turns: list[int] = []
     b_turns: list[int] = []
-    started = datetime.now()
+    started = time.monotonic()
     result.status = _AB_STATUS_RUNNING
 
     for i in range(games):
@@ -657,7 +658,7 @@ def run_ab_simulation(
         except Exception as exc:  # noqa: BLE001 — never raise from background
             result.status = _AB_STATUS_FAILED
             result.error = f"{type(exc).__name__}: {exc}"
-            result.duration_sec = (datetime.now() - started).total_seconds()
+            result.duration_sec = (time.monotonic() - started)
             return result
 
         # Seat attribution is unambiguous: we built `order`, and Forge seats
@@ -698,7 +699,7 @@ def run_ab_simulation(
                 result.avg_turns_a = round(sum(a_turns) / len(a_turns), 2)
             if b_turns:
                 result.avg_turns_b = round(sum(b_turns) / len(b_turns), 2)
-            result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+            result.duration_sec = round((time.monotonic() - started), 2)
             return result
 
         # Treat any non-zero exit OR captured (non-timeout) error as a genuine
@@ -708,7 +709,7 @@ def run_ab_simulation(
         if sim.error or (sim.returncode is not None and sim.returncode != 0):
             result.status = _AB_STATUS_FAILED
             result.error = sim.error or f"Forge exited with code {sim.returncode}"
-            result.duration_sec = (datetime.now() - started).total_seconds()
+            result.duration_sec = (time.monotonic() - started)
             return result
 
         parsed = _parse_sim(sim.stdout)
@@ -754,7 +755,7 @@ def run_ab_simulation(
     if b_turns:
         result.avg_turns_b = round(sum(b_turns) / len(b_turns), 2)
     result.status = _AB_STATUS_DONE
-    result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+    result.duration_sec = round((time.monotonic() - started), 2)
     return result
 
 
@@ -843,7 +844,7 @@ def run_gauntlet_simulation(
             return result
 
     win_turns: list[int] = []
-    started = datetime.now()
+    started = time.monotonic()
     result.status = _AB_STATUS_RUNNING
 
     for i in range(games):
@@ -864,7 +865,7 @@ def run_gauntlet_simulation(
         except Exception as exc:  # noqa: BLE001 — never raise from a worker
             result.status = _AB_STATUS_FAILED
             result.error = f"{type(exc).__name__}: {exc}"
-            result.duration_sec = (datetime.now() - started).total_seconds()
+            result.duration_sec = (time.monotonic() - started)
             return result
 
         # TIMEOUT SALVAGE (same policy as run_ab_simulation): credit the
@@ -886,13 +887,13 @@ def run_gauntlet_simulation(
             # (otherwise it's silently reported as 0.0 on the salvage path).
             if win_turns:
                 result.avg_turns_win = round(sum(win_turns) / len(win_turns), 2)
-            result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+            result.duration_sec = round((time.monotonic() - started), 2)
             return result
 
         if sim.error or (sim.returncode is not None and sim.returncode != 0):
             result.status = _AB_STATUS_FAILED
             result.error = sim.error or f"Forge exited with code {sim.returncode}"
-            result.duration_sec = (datetime.now() - started).total_seconds()
+            result.duration_sec = (time.monotonic() - started)
             return result
 
         parsed = _parse_sim(sim.stdout)
@@ -933,7 +934,7 @@ def run_gauntlet_simulation(
     if win_turns:
         result.avg_turns_win = round(sum(win_turns) / len(win_turns), 2)
     result.status = _AB_STATUS_DONE
-    result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+    result.duration_sec = round((time.monotonic() - started), 2)
     return result
 
 
@@ -1152,7 +1153,7 @@ def run_ab_parallel(
     runners = [_runner_for(p) for p in profiles[:parts]]
 
     result.status = _AB_STATUS_RUNNING
-    started = datetime.now()
+    started = time.monotonic()
 
     # One chunk per runner — a dedicated profile each, so no queue/handoff is
     # needed (unlike run_ab_batch, which multiplexes many jobs over few
@@ -1201,7 +1202,7 @@ def run_ab_parallel(
         result.avg_turns_a = round(a_turn_weight / result.wins_a, 2)
     if result.wins_b:
         result.avg_turns_b = round(b_turn_weight / result.wins_b, 2)
-    result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
+    result.duration_sec = round((time.monotonic() - started), 2)
 
     # Status precedence: any genuine failure -> failed (wins from completed
     # chunks are still reported); else all-skipped -> skipped; else done.

@@ -47,11 +47,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from .edhrec_client import (
     AverageDeck,
@@ -120,7 +121,6 @@ def _aggregate_match_history(deck_filename: str, match_dir: Path = MATCH_DIR) ->
 
     # Filter by stem-prefix match — the run_match output filename starts with
     # a sanitized version of the deck filename.
-    import re
     stem = re.sub(r"[^\w-]+", "_", Path(deck_filename).stem).strip("_")
     reports = sorted(
         match_dir.glob(f"{stem}_*.json"),
@@ -210,7 +210,6 @@ def _read_main_cards(deck_path: Path) -> list[str]:
     """Pull the [Main] section card names (without qty / set / cn)."""
     if not deck_path.exists():
         return []
-    import re
     out: list[str] = []
     in_main = False
     for raw in deck_path.read_text(encoding="utf-8").splitlines():
@@ -467,7 +466,7 @@ def _advise_steps(
     claude_model: str = DEFAULT_CLAUDE_MODEL,
     budget: bool = False,
     intent_themes: Optional[list[str]] = None,
-):
+) -> Iterator[AdvicePhase]:
     """Generator version of :func:`advise` — yields ``AdvicePhase``
     events as each stage of the pipeline completes.
 
@@ -568,10 +567,17 @@ def _advise_steps(
             manabase_recs = list(_missing_manabase_recommendations(
                 main_cards, ci_set, tribe=tribe, budget=budget,
             ))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         # Commander lookup failure shouldn't break the audit — emit
-        # an empty manabase event so the UI doesn't hang waiting.
-        pass
+        # an empty manabase event so the UI doesn't hang waiting. But
+        # say so: this phase flags missing shock/fetch lands, and a
+        # silent empty result reads as "manabase is fine".
+        print(
+            f"WARN: manabase phase skipped for {primary_commander!r} "
+            f"({type(exc).__name__}: {exc}); no manabase "
+            "recommendations this audit.",
+            flush=True,
+        )
     yield AdvicePhase("manabase", {
         "recommendations": [asdict(r) for r in manabase_recs],
         "tribe": tribe,
@@ -816,7 +822,6 @@ def _advise_steps(
     deck_id: Optional[str] = None
     try:
         text = deck_path.read_text(encoding="utf-8")
-        import re
         m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
         if m:
             deck_id = m.group(1).strip()

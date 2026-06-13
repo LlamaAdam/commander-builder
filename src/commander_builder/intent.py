@@ -194,7 +194,9 @@ def learn_intent(
             from .scryfall_client import lookup_card as _lookup
             lookup_fn = _lookup
         except Exception:  # noqa: BLE001
-            lookup_fn = lambda name: None  # type: ignore[assignment]
+            def _no_lookup(name: str) -> Optional[dict]:
+                return None
+            lookup_fn = _no_lookup
     if role_fn is None:
         from .staples import classify_role_extended as _role
         role_fn = _role

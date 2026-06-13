@@ -217,8 +217,11 @@ def make_sim_blueprint(
         except Exception as exc:
             try:
                 new_path.unlink()
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                print(
+                    f"WARN: could not remove staged deck {new_path}: "
+                    f"{cleanup_exc}", flush=True,
+                )
             return jsonify({
                 "error": "Forge not available",
                 "detail": f"{type(exc).__name__}: {exc}",
@@ -248,8 +251,11 @@ def make_sim_blueprint(
                     continue
                 try:
                     p.unlink()
-                except OSError:
-                    pass
+                except OSError as cleanup_exc:
+                    print(
+                        f"WARN: could not remove staged deck {p}: "
+                        f"{cleanup_exc}", flush=True,
+                    )
             return jsonify({
                 "error": "compare failed",
                 "detail": f"{type(exc).__name__}: {exc}",
@@ -317,8 +323,14 @@ def make_sim_blueprint(
                 continue
             try:
                 p.unlink()
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                # Stale _proposed_*.dck files are exactly what this
+                # sweep exists to prevent — a silent failure here means
+                # the disk quietly fills with working copies.
+                print(
+                    f"WARN: could not remove staged deck {p}: "
+                    f"{cleanup_exc}", flush=True,
+                )
 
         return jsonify({
             "old_deck": old_path.name,
