@@ -462,6 +462,55 @@ def stats_summary(db_path: Path = DEFAULT_DB_PATH) -> dict:
     return rows
 
 
+# FP-013 gate: promote the project-tuned-LLM spike when the live log holds
+# this many high-confidence curator iterations (see docs/fp013-scope.md).
+FP013_GATE_TARGET = 1000
+FP013_MIN_GAMES = 40
+
+
+def fp013_gate_progress(
+    db_path: Path = DEFAULT_DB_PATH,
+    *,
+    min_games: int = FP013_MIN_GAMES,
+    target: int = FP013_GATE_TARGET,
+) -> dict:
+    """Count high-confidence curator iterations toward the FP-013 gate.
+
+    A row qualifies when it carries the full training triple the
+    fine-tune needs: an ``audit_manifest`` (the question), a decided
+    verdict (the label — kept/reverted/neutral, not pending), and a
+    ``sim_report`` with at least ``min_games`` games (ABResult stores
+    the count as ``games``; compare_versions' ComparisonReport as
+    ``total_games``). Soak rows live outside this DB and never count —
+    they are labels without the question they answered.
+    """
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT sim_report FROM iterations "
+            "WHERE audit_manifest IS NOT NULL "
+            "AND verdict IN ('kept', 'reverted', 'neutral') "
+            "AND sim_report IS NOT NULL"
+        ).fetchall()
+    count = 0
+    for row in rows:
+        try:
+            report = json.loads(row["sim_report"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(report, dict):
+            continue
+        games = report.get("games") or report.get("total_games") or 0
+        if isinstance(games, (int, float)) and games >= min_games:
+            count += 1
+    return {
+        "count": count,
+        "target": target,
+        "min_games": min_games,
+        "pct": round(100.0 * count / target, 1) if target else 0.0,
+    }
+
+
 def pricing_series_for_deck(
     deck_id: str, db_path: Path = DEFAULT_DB_PATH,
 ) -> list[dict]:

@@ -442,9 +442,15 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--deck-dir", type=Path, default=DEFAULT_DECK_DIR,
                    help=f"Directory --deck ids resolve against "
                         f"(default: {DEFAULT_DECK_DIR}).")
-    p.add_argument("--rounds", type=int, required=True,
+    p.add_argument("--rounds", type=int, default=None,
                    help="Number of improve rounds to attempt (>= 1). The "
-                        "loop stops early if a round proposes no changes.")
+                        "loop stops early if a round proposes no changes. "
+                        "Required unless --health is given.")
+    p.add_argument("--health", action="store_true",
+                   help="Report FP-013 gate progress (high-confidence "
+                        "curator iterations in the knowledge_log toward "
+                        "the 1,000 needed to unpark the project-tuned "
+                        "LLM) and exit. Needs no deck or --rounds.")
     p.add_argument("--bracket", type=int, default=None,
                    help="Target bracket (1-5). Default: inferred from the "
                         "deck filename's [B<n>] suffix.")
@@ -500,10 +506,34 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                         "advisory: the win-margin objective remains primary.")
     args = p.parse_args(argv)
 
+    # --health short-circuits: report the FP-013 gate counter and exit.
+    # Every improve run grows this number, so surfacing it here keeps the
+    # gate visible exactly where the data gets generated.
+    if args.health:
+        from .knowledge_log import DEFAULT_DB_PATH, fp013_gate_progress
+        db_path = Path(args.db_path) if args.db_path else DEFAULT_DB_PATH
+        progress = fp013_gate_progress(db_path=db_path)
+        if args.json:
+            print(json.dumps(progress), flush=True)
+        else:
+            print(
+                f"High-confidence curator iterations: "
+                f"{progress['count']} / {progress['target']} "
+                f"({progress['pct']}%) toward FP-013 "
+                f"(>= {progress['min_games']}-game decided verdicts "
+                f"with an audit manifest)",
+                flush=True,
+            )
+        return 0
+
     # Exactly one of {positional path, --deck id} must be supplied.
     if (args.deck_path is None) == (args.deck_id is None):
         print("ERROR: pass either a deck_path positional OR --deck <id>, "
               "not both / neither.", flush=True)
+        return 2
+
+    if args.rounds is None:
+        print("ERROR: --rounds is required (unless --health).", flush=True)
         return 2
 
     if args.rounds < 1:

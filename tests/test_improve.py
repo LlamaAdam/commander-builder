@@ -325,3 +325,54 @@ def test_bandit_strategy_runs_with_injected_arms_and_sim(tmp_path, monkeypatch):
     rc = improve_main([str(deck), "--rounds", "20", "--strategy", "bandit",
                        "--json"])
     assert rc == 0
+
+
+# --- --health: FP-013 gate progress ----------------------------------------
+#
+# The fp013-scope memo asked for a row-count health check that reports
+# "high-confidence curator iterations: N / 1,000 toward FP-013" so the
+# gate's approach is visible. It must run without a deck or --rounds.
+
+
+def _seed_gate_row(db_path):
+    from commander_builder.knowledge_log import (
+        Iteration, init_db, record_iteration,
+    )
+    init_db(db_path)
+    record_iteration(Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        audit_manifest={"added": ["A"], "removed": ["B"]},
+        verdict="kept", sim_report={"games": 40},
+    ), db_path=db_path)
+
+
+def test_main_health_reports_fp013_gate(tmp_path, capsys):
+    db = tmp_path / "kl.sqlite"
+    _seed_gate_row(db)
+    rc = improve_main(["--health", "--db-path", str(db)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 / 1000" in out
+    assert "FP-013" in out
+
+
+def test_main_health_json(tmp_path, capsys):
+    import json as _json
+    db = tmp_path / "kl.sqlite"
+    _seed_gate_row(db)
+    rc = improve_main(["--health", "--db-path", str(db), "--json"])
+    assert rc == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert payload["target"] == 1000
+    assert payload["min_games"] == 40
+
+
+def test_main_still_requires_rounds_without_health(tmp_path, capsys):
+    """Dropping argparse's required=True must not let a normal run
+    proceed without --rounds."""
+    deck = tmp_path / "[USER] X [B3].dck"
+    deck.write_text("[Main]\n", encoding="utf-8")
+    rc = improve_main([str(deck)])
+    assert rc == 2
+    assert "--rounds" in capsys.readouterr().out
