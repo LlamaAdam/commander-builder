@@ -590,6 +590,51 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
     assert received.get("curated") is True  # stub used, real CLI untouched
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(
+    __import__("shutil").which("claude") is None,
+    reason="live curator check needs the `claude` CLI on PATH "
+           "(subscription mode); CI runners don't have it",
+)
+def test_auto_curate_main_live_curator_end_to_end(tmp_path, monkeypatch):
+    """LIVE integration check: auto_curate_main drives the REAL curator
+    (subscription `claude` CLI) end to end and exits 0.
+
+    This deliberately invokes the actual CLI — it exists to prove the
+    subscription-mode call path works, per operator request. Kept out of
+    the fast lane (slow marker) so routine local runs don't spend a
+    subscription call, and skipped where the CLI is absent (Linux CI).
+    Only the advisor is stubbed (no EDHREC/Scryfall network); the
+    curator path is fully real.
+    """
+    # Import proposer FIRST to settle the proposer <-> _proposer_cli
+    # circular import (same ordering note as the stubbed test above).
+    from commander_builder.proposer import auto_propose  # noqa: F401
+    import commander_builder.improvement_advisor as _ia
+    from commander_builder._proposer_cli import auto_curate_main
+
+    def fake_advise(deck_path, bracket, source=None, intent_themes=None, **kw):
+        import types
+        return types.SimpleNamespace(
+            to_manifest=lambda: {"added": [], "removed": []},
+        )
+
+    monkeypatch.setattr(_ia, "advise", fake_advise)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3",
+        "--intent-themes", "tokens,aristocrats",
+        "--dry-run", "--no-log",
+    ])
+    assert rc == 0
+
+
 def test_advise_passes_intent_themes_to_tag_pages(tmp_path, monkeypatch):
     """advise() with intent_themes propagates the slugs to _fetch_tag_pages_lazy.
 
