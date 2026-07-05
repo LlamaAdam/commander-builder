@@ -21,11 +21,17 @@ refactor (tier-3 issue #3.1).
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
+from typing import Optional
 
 from flask import Blueprint, Response, jsonify, render_template, request
 
 from ._image_cache import ALLOWED_SIZES, serve_image
+
+
+# Tunable for tests: how long to back off before retrying a 429.
+_CARD_IMAGE_429_RETRY_DELAY_SEC = 1.5
 
 
 def make_meta_blueprint(
@@ -134,24 +140,54 @@ def make_meta_blueprint(
                 "error": "unsupported size",
                 "detail": f"size must be one of {sorted(ALLOWED_SIZES)}",
             }), 400
-        try:
-            data, content_type = serve_image(name, size)
-        except Exception as exc:  # noqa: BLE001
-            # Scryfall 404 (unknown card) vs. transient failure
-            # (timeout, 5xx) — both surface as fetch errors. urllib's
-            # HTTPError exposes .code; everything else is a 502 from
-            # our perspective.
-            code = getattr(exc, "code", None)
-            if code == 404:
+        # Scryfall 404 (unknown card) vs. transient failure (timeout, 5xx,
+        # 429) — both surface as fetch errors. urllib's HTTPError exposes
+        # .code; everything else is treated as a transient upstream issue.
+        #
+        # Retry ONCE on 429 (rate-limited) with a short backoff; if it
+        # still fails, return 429 + Retry-After to the client rather than
+        # an opaque 502 (audit-panel bursts used to surface as 9-up 502s
+        # when Scryfall throttled them).
+        last_exc: Optional[Exception] = None
+        for attempt in (0, 1):
+            try:
+                data, content_type = serve_image(name, size)
+                break
+            except Exception as exc:  # noqa: BLE001
+                code = getattr(exc, "code", None)
+                if code == 404:
+                    return jsonify({
+                        "error": "card image not found",
+                        "name": name,
+                        "size": size,
+                    }), 404
+                if code == 429 and attempt == 0:
+                    time.sleep(_CARD_IMAGE_429_RETRY_DELAY_SEC)
+                    last_exc = exc
+                    continue
+                if code == 429:
+                    resp = jsonify({
+                        "error": "scryfall rate-limited",
+                        "detail": f"{type(exc).__name__}: {exc}",
+                    })
+                    # 5s is a reasonable client-side backoff hint;
+                    # Scryfall's docs ask for ~50-100ms per request.
+                    resp.headers["Retry-After"] = "5"
+                    return resp, 429
                 return jsonify({
-                    "error": "card image not found",
-                    "name": name,
-                    "size": size,
-                }), 404
+                    "error": "scryfall image fetch failed",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }), 502
+        else:
+            # Loop exhausted without break — only reachable if both
+            # attempts hit 429 (other errors return early above). The
+            # in-loop 429 branch returns; this defends if someone
+            # changes the loop structure later.
+            assert last_exc is not None
             return jsonify({
-                "error": "scryfall image fetch failed",
-                "detail": f"{type(exc).__name__}: {exc}",
-            }), 502
+                "error": "scryfall rate-limited",
+                "detail": f"{type(last_exc).__name__}: {last_exc}",
+            }), 429
         resp = Response(data, mimetype=content_type)
         resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
         return resp

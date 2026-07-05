@@ -1258,3 +1258,49 @@ def test_run_ab_parallel_single_profile_is_serial(tmp_path, monkeypatch):
     )
     assert sizes == [40]
     assert result.games == 40 and result.status == "done"
+
+
+# ---------------------------------------------------------------------------
+# ForgeRunner.locate() — multi-jar selection by parsed semver
+# ---------------------------------------------------------------------------
+
+def test_locate_picks_highest_version_jar_not_lex(tmp_path, monkeypatch):
+    """When several forge-gui-desktop-*.jar files coexist, locate() must
+    pick by parsed version (not lex), and prefer the fat jar within a
+    version. Lex sort puts "2.0.10" before "2.0.12" because "0" < "2",
+    so the prior `sorted(...)[0]` chose the OLDER fat jar."""
+    from commander_builder import forge_runner
+
+    # Stage a vendor/forge dir with several jars, including the off-by-lex pair.
+    fake_forge = tmp_path / "forge"
+    fake_forge.mkdir()
+    (fake_forge / "forge-gui-desktop-2.0.9-jar-with-dependencies.jar").write_bytes(b"x")
+    (fake_forge / "forge-gui-desktop-2.0.10-jar-with-dependencies.jar").write_bytes(b"x")
+    (fake_forge / "forge-gui-desktop-2.0.12-jar-with-dependencies.jar").write_bytes(b"x")
+    (fake_forge / "forge-gui-desktop-2.0.12.jar").write_bytes(b"x")  # thin jar
+
+    fake_jre = tmp_path / "jre" / "bin"
+    fake_jre.mkdir(parents=True)
+    fake_java = fake_jre / "java.exe"
+    fake_java.write_bytes(b"x")
+
+    monkeypatch.setattr(forge_runner, "VENDOR_FORGE", fake_forge)
+    monkeypatch.setattr(forge_runner, "VENDOR_JRE", tmp_path / "jre")
+
+    runner = forge_runner.ForgeRunner.locate()
+    assert runner.forge_jar.name == "forge-gui-desktop-2.0.12-jar-with-dependencies.jar", (
+        f"expected the highest-version FAT jar; got {runner.forge_jar.name!r}"
+    )
+
+
+def test_locate_raises_when_no_jar_present(tmp_path, monkeypatch):
+    from commander_builder import forge_runner
+    empty_forge = tmp_path / "forge"
+    empty_forge.mkdir()
+    fake_jre = tmp_path / "jre" / "bin"
+    fake_jre.mkdir(parents=True)
+    (fake_jre / "java.exe").write_bytes(b"x")
+    monkeypatch.setattr(forge_runner, "VENDOR_FORGE", empty_forge)
+    monkeypatch.setattr(forge_runner, "VENDOR_JRE", tmp_path / "jre")
+    with pytest.raises(FileNotFoundError, match="Forge jar not found"):
+        forge_runner.ForgeRunner.locate()

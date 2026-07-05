@@ -245,13 +245,30 @@ class ForgeRunner:
                         "Java not found. Expected vendor/jre/bin/java[.exe] or `java` on PATH."
                     )
                 java = Path(sys_java)
-        jars = sorted(VENDOR_FORGE.glob("forge-gui-desktop-*.jar"))
-        fat = [j for j in jars if "jar-with-dependencies" in j.name]
-        jar = (fat or jars or [None])[0]
-        if jar is None:
+        # Rank candidates by PARSED version (semver-ish), preferring the
+        # fat ("jar-with-dependencies") jar within a version. Lexicographic
+        # sort would put "2.0.10" before "2.0.12" because "0" < "2" at the
+        # relevant position, so the prior `sorted(...)[0]` picked the
+        # OLDER jar when a user kept both around after an upgrade. Mirrors
+        # the fix already in `detect_forge_version`.
+        candidates: list[tuple[tuple[int, ...], bool, Path]] = []
+        for jar_path in VENDOR_FORGE.glob("forge-gui-desktop-*.jar"):
+            m = _FORGE_JAR_VERSION_RE.search(jar_path.name)
+            if not m:
+                continue
+            try:
+                version_tuple = tuple(int(p) for p in m.group(1).split("."))
+            except ValueError:
+                continue
+            is_fat = "jar-with-dependencies" in jar_path.name
+            candidates.append((version_tuple, is_fat, jar_path))
+        if not candidates:
             raise FileNotFoundError(
                 f"Forge jar not found in {VENDOR_FORGE}. Expected forge-gui-desktop-*.jar."
             )
+        # highest version first; within a version, fat jar first
+        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        jar = candidates[0][2]
         return cls(java_path=java, forge_jar=jar, forge_dir=VENDOR_FORGE)
 
     @classmethod
