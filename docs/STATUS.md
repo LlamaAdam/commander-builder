@@ -8,10 +8,12 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-05-27 (orchestrator landed 4 worklist items onto
-`feature`: game_changers cache-guard bug fix + FP-002 `single_feature_ols`
-+ FP-010 `_pick_jre_asset` + FP-007 `decks_containing_card`; FP-002 still
-reopened under the margin-regression framing)
+**Last updated:** 2026-07-04 (merged stale PRs #9 — 4 known bug fixes —
+and #10 — advisor tribal-bypass — after re-review against the June
+refactor; shipped the streaming-runner follow-up `6156514`:
+`ForgeRunner.run(keep_partial_output=True)` routes timeout-salvage sims
+through the streaming reader so looper-credit attribution actually
+works — salvaged rows no longer read "credited to none")
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
@@ -27,10 +29,26 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** ~1548 passing fast lane (+slow with `--run-slow`), ~167s
-  offline. Zero warnings under `python -W default`.
-- **Branch:** `feature/2026-04-28-session` (130+ commits ahead of
+- **Tests:** 1661 passing fast lane + 466 slow (`--run-slow`), ~168s
+  offline fast lane. Zero warnings under `python -W default`.
+- **Branch:** `feature/2026-04-28-session` (320+ commits ahead of
   `master`, in sync with `origin`).
+
+### 2026-07-04 session — stale PRs merged + looper-credit salvage fixed
+
+- **PRs #9 + #10 merged** after re-review against the June module split
+  (both predated it; `locate()` version-sort still resolved via the
+  `_FORGE_JAR_VERSION_RE` re-export). #9: game_changers chrome-strip +
+  versioned cache, Scryfall 429 retry, `locate()` parsed-version sort,
+  EDHREC basics distribution. #10: advisor tribal-bypass cuts
+  (cache-only Scryfall) + off-theme cut rephrase.
+- **Looper-credit salvage fixed** (`6156514`) — the 4f9252b salvage's
+  active-seat credit was a production no-op: `_run_blocking` loses
+  Forge's buffered stdout on the timeout kill, so `_last_active_seat`
+  never saw a Turn line. `ForgeRunner.run()` gained
+  `keep_partial_output: bool` routing through `_run_streaming` (no
+  terminal echo); both salvage sites in `forge_batch.py` set it. 3 TDD
+  regression tests model the blocking-path stdout loss.
 
 ### 2026-05-21/22 session — FP-003 shipped, A/B attribution fix, FP-002 concluded
 
