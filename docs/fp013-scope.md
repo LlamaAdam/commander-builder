@@ -90,9 +90,21 @@ row count flatter FP-013 readiness — those are the wrong rows.
 
 ## What to do next (small, optional, cheap)
 
-- Add a row-count health-check command (`commander-improve --health` or a
+- ~~Add a row-count health-check command (`commander-improve --health` or a
   small dashboard panel) that reports "high-confidence curator
   iterations: N / 1,000 toward FP-013," so we see the gate approaching.
-  Nice-to-have, not blocking.
-- Sketch `scripts/eval_curator.py` as a stub + interface (no model
-  needed) so the gate's second condition has a place to land.
+  Nice-to-have, not blocking.~~ ✅ **Built 2026-07-04.**
+  `knowledge_log.fp013_gate_progress()` + `commander-improve --health`
+  (`--json` supported). Counts rows with manifest + decided verdict +
+  ≥40-game sim. Honesty note: the live log's 5 decided rows are all
+  10–28-game sims, so the counter correctly reads **0 / 1,000** today —
+  the memo's "~29 live" table row counted manifests, not high-confidence
+  triples.
+- ~~Sketch `scripts/eval_curator.py` as a stub + interface (no model
+  needed) so the gate's second condition has a place to land.~~ ✅
+  **Built 2026-07-04.** `load_holdout()` (same filter as the gate
+  counter, plus deck_snapshot required) + a fully-tested `evaluate()`
+  paired loop with pluggable `Proposer` / `sim_fn` callables; `main()`
+  is a dry-run that reports holdout size + "no candidate proposer
+  configured". Wire the future model in as a `Proposer` and plug
+  `sim_fn` into `run_ab_simulation`.

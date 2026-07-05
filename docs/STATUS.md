@@ -49,6 +49,18 @@ commits on `feature/2026-04-28-session` ahead of `master`.
   `keep_partial_output: bool` routing through `_run_streaming` (no
   terminal echo); both salvage sites in `forge_batch.py` set it. 3 TDD
   regression tests model the blocking-path stdout loss.
+- **FP-013 gate items built** (the fp013-scope memo's two "do next"
+  items): `knowledge_log.fp013_gate_progress()` +
+  `commander-improve --health` report "high-confidence curator
+  iterations: N / 1,000 toward FP-013" (live log reads 0 — the 5
+  decided rows are 10–28-game sims, below the 40-game bar); and
+  `scripts/eval_curator.py` — the paired baseline-vs-candidate eval
+  interface (tested `evaluate()` loop with pluggable proposers/sim;
+  `main()` is a dry-run until a candidate model exists).
+- **Stale plan entries corrected** — FP-007 slices 1–4, FP-010 all
+  five slices, and FP-012 slices A/B1 were already shipped but still
+  listed as "next"/"awaiting go-ahead" in future-plans.md + Parked
+  plans; marked shipped with commit refs.
 
 ### 2026-05-21/22 session — FP-003 shipped, A/B attribution fix, FP-002 concluded
 
@@ -506,14 +518,15 @@ concurrent JVMs (`run_ab_batch`, FP-003).
   margin; advances the base deck on improvement).
 Still parked for the full agent: intent-learning, Bayesian opt, and the
 unattended multi-deck orchestration. North star, not done.
-- **UNPARKED 2026-05-27** for two tractable next slices (gates were met; the
-  "parked" was scope, not a blocker): **Slice A — intent-learning** (reuse
-  `archetype.classify` + `staples.detect_themes` to bias the improve loop +
-  protect signature pieces) and **Slice B1 — Thompson-sampling policy**
-  (pure-stdlib, alongside the shipped ε-greedy/UCB1). **Slice B2 (full GP
-  Bayesian-opt over swap combinations)** stays parked behind a numpy-dependency
-  + sim-cost decision. Designs + decisions in
-  [fp012-next-slices.md](fp012-next-slices.md); awaiting go-ahead to build.
+- ~~**UNPARKED 2026-05-27** for two tractable next slices~~ ✅ **Both
+  SHIPPED** (confirmed 2026-07-04; entry was stale): **Slice A —
+  intent-learning** (`9968c4d` + `e5a9372`: `learn_intent`, auto-protect
+  wincons, themes threaded into the advisor tag_pages soft-bias) and
+  **Slice B1 — Thompson-sampling policy** (`c336822`,
+  `--bandit-policy thompson`), merged via PRs #6/#8. **Slice B2 (full GP
+  Bayesian-opt over swap combinations)** stays parked behind a
+  numpy-dependency + sim-cost decision. Designs in
+  [fp012-next-slices.md](fp012-next-slices.md).
 
 ### FP-013 — Project-tuned LLM (moonshot)
 

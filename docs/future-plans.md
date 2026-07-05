@@ -292,8 +292,12 @@ incrementally.
 
 ## Status
 
-Plan committed; **slice 1 (card reference) is the next concrete build.**
-Tracked as ACTIVE in STATUS.md.
+**Slices 1–4 SHIPPED** (confirmed 2026-07-04; this entry was stale):
+slice 1 card-reference panel (`30def0d` — `/api/card` + topbar Cards
+search), nav shell + `/api/rules` + `/api/library` (merged via
+`dac2ed6`), plus loading/empty/error-state polish and keyboard
+accessibility (`ff8395a`, `e006f7c`, PR #5). Only slice 5 (replays)
+remains, parked on `forge_py` game-state (with FP-001).
 
 ---
 
@@ -359,6 +363,10 @@ images lazy-fetch from Scryfall through the existing cache.
 
 ## Status
 
-Launcher + freeze pipeline + tests done and on `feature`. Producing the actual
-`.exe` is a local `python scripts/build_desktop.py` (deps are heavy); the
-first-run downloader (slice 1) is the next meaningful build.
+**All five slices SHIPPED** (confirmed 2026-07-04; this entry was
+stale): downloader + deck-dir picker + window chrome + JRE extraction
+(merged via `d13db07`), Windows CI build job (`bc4d101`), and the Inno
+Setup installer + `build_installer.py` driver (`8146450`, PR #7).
+Producing the `.exe`/installer remains a local
+`python scripts/build_desktop.py` / `build_installer.py` run (deps are
+heavy); CI builds the artifact on tag.
