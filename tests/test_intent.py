@@ -545,9 +545,15 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
 
     auto_curate_main does a lazy `from .improvement_advisor import advise`
     inside the function body; patching the module attribute is sufficient.
+
+    The curator step (auto_propose) MUST be stubbed too: the real one
+    requires ANTHROPIC_API_KEY or the `claude` CLI on PATH, so without
+    the stub this test failed on Linux CI (neither available) and —
+    worse — silently invoked the real subscription CLI on dev boxes
+    that have it installed.
     """
-    # Trigger full import chain so the module is in sys.modules.
-    from commander_builder.proposer import auto_propose  # noqa: F401
+    from commander_builder.proposer import Proposal
+    import commander_builder._proposer_cli as _pc
     from commander_builder._proposer_cli import auto_curate_main
     import commander_builder.improvement_advisor as _ia
 
@@ -560,7 +566,12 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
             to_manifest=lambda: {"added": [], "removed": []},
         )
 
+    def fake_auto_propose(**kwargs):
+        received["curated"] = True
+        return Proposal()
+
     monkeypatch.setattr(_ia, "advise", fake_advise)
+    monkeypatch.setattr(_pc, "auto_propose", fake_auto_propose)
 
     deck = tmp_path / "[USER] Test [B3].dck"
     deck.write_text(
@@ -576,6 +587,7 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
 
     assert rc == 0
     assert received.get("intent_themes") == ["tokens", "aristocrats"]
+    assert received.get("curated") is True  # stub used, real CLI untouched
 
 
 def test_advise_passes_intent_themes_to_tag_pages(tmp_path, monkeypatch):
