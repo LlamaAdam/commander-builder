@@ -1304,3 +1304,134 @@ def test_locate_raises_when_no_jar_present(tmp_path, monkeypatch):
     monkeypatch.setattr(forge_runner, "VENDOR_JRE", tmp_path / "jre")
     with pytest.raises(FileNotFoundError, match="Forge jar not found"):
         forge_runner.ForgeRunner.locate()
+
+
+# ---------------------------------------------------------------------------
+# keep_partial_output — streaming capture for the timeout-salvage path
+# ---------------------------------------------------------------------------
+#
+# The looper-credit half of the timeout salvage (4f9252b) was a no-op in
+# production: run_ab_simulation / run_gauntlet_simulation called runner.run()
+# without stream/on_line, which routed through _run_blocking
+# (subprocess.run). On a timeout kill the buffered Forge stdout is lost, so
+# _last_active_seat found no Turn line and salvaged rows read "credited to
+# none (no Turn line found)". keep_partial_output=True routes through
+# _run_streaming, which accumulates each line as it arrives, so everything
+# Forge emitted before the kill survives for seat attribution.
+
+
+def _fake_streaming_factory(stdout: str, *, timed_out: bool, calls: dict):
+    def fake_streaming(cmd, timeout, cwd, *, stream=True, on_line=None,
+                       abort_check=None):
+        calls["streaming"] = {"stream": stream}
+        error = f"Timed out after {timeout}s" if timed_out else None
+        rc = None if timed_out else 0
+        return stdout, "", rc, timed_out, error
+    return fake_streaming
+
+
+def _fake_blocking_factory(stdout: str, *, timed_out: bool, calls: dict):
+    def fake_blocking(cmd, timeout, cwd):
+        calls["blocking"] = True
+        error = f"Timed out after {timeout}s" if timed_out else None
+        rc = None if timed_out else 0
+        return stdout, "", rc, timed_out, error
+    return fake_blocking
+
+
+def test_run_keep_partial_output_routes_through_streaming(tmp_path):
+    """keep_partial_output=True must use the streaming reader (without
+    echoing to the terminal) so stdout emitted before a timeout kill
+    survives for downstream parsing."""
+    from commander_builder.forge_runner import ForgeRunner
+
+    calls: dict = {}
+    runner = ForgeRunner(java_path=tmp_path / "java",
+                         forge_jar=tmp_path / "forge.jar",
+                         forge_dir=tmp_path)
+    with patch("commander_builder.forge_runner._run_streaming",
+               side_effect=_fake_streaming_factory(
+                   "streamed output\n", timed_out=False, calls=calls)), \
+         patch("commander_builder.forge_runner._run_blocking",
+               side_effect=_fake_blocking_factory(
+                   "blocked output\n", timed_out=False, calls=calls)):
+        sim = runner.run(
+            ["a.dck", "b.dck", "c.dck", "d.dck"], num_games=1,
+            keep_partial_output=True,
+        )
+
+    assert "blocking" not in calls
+    assert calls["streaming"]["stream"] is False  # no terminal echo
+    assert sim.stdout == "streamed output\n"
+
+
+def test_ab_timeout_salvage_survives_blocking_stdout_loss(tmp_path):
+    """Regression: run_ab_simulation must route runner.run() through the
+    streaming reader. We model the real pathology — the blocking path
+    returns EMPTY stdout on a timeout kill, the streaming path returns the
+    Turn lines — so only the streaming route lets the salvage credit the
+    active seat instead of 'credited to none'."""
+    from commander_builder.forge_runner import (
+        ForgeRunner, run_ab_simulation, _AB_STATUS_DONE,
+    )
+
+    calls: dict = {}
+    turn_stdout = _in_progress_turns(active_seat=1, name="DeckA")
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+
+    runner = ForgeRunner(java_path=tmp_path / "java",
+                         forge_jar=tmp_path / "forge.jar",
+                         forge_dir=tmp_path)
+    with patch("commander_builder.forge_runner._run_streaming",
+               side_effect=_fake_streaming_factory(
+                   turn_stdout, timed_out=True, calls=calls)), \
+         patch("commander_builder.forge_runner._run_blocking",
+               side_effect=_fake_blocking_factory(
+                   "", timed_out=True, calls=calls)):
+        result = run_ab_simulation(
+            deck_a, deck_b, games=2,
+            runner=runner, fillers=["filler1.dck", "filler2.dck"],
+        )
+
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert result.wins_a == 1  # loop credited to active seat 1 == deck_a
+    assert result.wins_b == 0
+    assert "credited to active seat 1" in result.error
+
+
+def test_gauntlet_timeout_salvage_survives_blocking_stdout_loss(tmp_path):
+    """Same regression as above for the gauntlet salvage site: the test
+    deck sits in seat 1 on game 1; the loop must be credited to it as a
+    win rather than falling through to 'credited to none' -> draw."""
+    from commander_builder.forge_runner import (
+        ForgeRunner, run_gauntlet_simulation, _AB_STATUS_DONE,
+    )
+
+    calls: dict = {}
+    turn_stdout = _in_progress_turns(active_seat=1, name="TestDeck")
+    test_deck = tmp_path / "[USER] TestDeck [B3].dck"
+    test_deck.write_text("[Main]\n", encoding="utf-8")
+
+    runner = ForgeRunner(java_path=tmp_path / "java",
+                         forge_jar=tmp_path / "forge.jar",
+                         forge_dir=tmp_path)
+    with patch("commander_builder.forge_runner._run_streaming",
+               side_effect=_fake_streaming_factory(
+                   turn_stdout, timed_out=True, calls=calls)), \
+         patch("commander_builder.forge_runner._run_blocking",
+               side_effect=_fake_blocking_factory(
+                   "", timed_out=True, calls=calls)):
+        result = run_gauntlet_simulation(
+            test_deck, ["g1.dck", "g2.dck", "g3.dck"], games=1,
+            runner=runner,
+        )
+
+    assert result.status == _AB_STATUS_DONE
+    assert result.games == 1
+    assert result.wins == 1  # loop credited to the test deck's seat
+    assert result.draws == 0
+    assert "credited to active seat 1" in result.error

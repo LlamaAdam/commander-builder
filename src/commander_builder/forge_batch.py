@@ -207,6 +207,10 @@ def run_ab_simulation(
                 num_games=1,
                 game_format=game_format,
                 timeout_sec=timeout_per_game or _AB_TIMEOUT_PER_GAME_SEC,
+                # Streaming capture: the timeout salvage below reads
+                # sim.stdout for the last Turn line, which the blocking
+                # path loses when the timed-out process is killed.
+                keep_partial_output=True,
             )
         except Exception as exc:  # noqa: BLE001 — never raise from background
             result.status = _AB_STATUS_FAILED
@@ -417,6 +421,9 @@ def run_gauntlet_simulation(
                 num_games=1,
                 game_format=game_format,
                 timeout_sec=timeout_per_game or _AB_TIMEOUT_PER_GAME_SEC,
+                # Streaming capture — same reason as run_ab_simulation: the
+                # salvage path needs the pre-kill stdout for seat attribution.
+                keep_partial_output=True,
             )
         except Exception as exc:  # noqa: BLE001 — never raise from a worker
             result.status = _AB_STATUS_FAILED

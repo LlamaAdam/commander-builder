@@ -294,6 +294,7 @@ class ForgeRunner:
         stream: bool = False,
         on_line: Optional["Callable[[str], None]"] = None,
         abort_check: Optional["Callable[[str], bool]"] = None,
+        keep_partial_output: bool = False,
     ) -> SimResult:
         """Run one Forge sim. Returns a SimResult with full stdout captured.
 
@@ -312,8 +313,17 @@ class ForgeRunner:
         compare_versions to terminate a pod early when its in-pod margin
         becomes uncatchable. Implies the streaming path.
 
-        When neither `stream` nor `on_line` nor `abort_check` is set, falls
-        back to the battle-tested `subprocess.run` path."""
+        `keep_partial_output=True` routes through the streaming reader
+        (without echoing to the terminal) so stdout emitted before a timeout
+        kill survives in the SimResult. The blocking `subprocess.run` path
+        loses the buffered output when the process is killed, which made the
+        timeout-salvage looper-credit in forge_batch a no-op ("credited to
+        none (no Turn line found)"). Set this whenever the caller inspects
+        stdout after a timeout.
+
+        When none of `stream` / `on_line` / `abort_check` /
+        `keep_partial_output` is set, falls back to the battle-tested
+        `subprocess.run` path."""
         if not deck_filenames:
             raise ValueError("deck_filenames must contain at least 2 decks.")
         if game_format == "commander" and len(deck_filenames) != 4:
@@ -342,7 +352,8 @@ class ForgeRunner:
         timeout = timeout_sec or max(MIN_TIMEOUT_SEC, num_games * DEFAULT_TIMEOUT_PER_GAME_SEC)
         started = time.monotonic()
 
-        if stream or on_line is not None or abort_check is not None:
+        if (stream or on_line is not None or abort_check is not None
+                or keep_partial_output):
             stdout, stderr, returncode, timed_out, error = _run_streaming(
                 cmd, timeout, str(self.forge_dir),
                 stream=stream, on_line=on_line, abort_check=abort_check,
