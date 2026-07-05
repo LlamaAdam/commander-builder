@@ -46,7 +46,7 @@ def test_get_deck_dir_platform_default_when_unconfigured(cfg_file, monkeypatch):
 
 def test_get_deck_dir_windows_default_uses_userprofile(monkeypatch, cfg_file):
     """On Windows (os.name == 'nt'), USERPROFILE drives the default path."""
-    monkeypatch.setattr(config_store.os, "name", "nt")
+    monkeypatch.setattr(config_store, "_is_windows", lambda: True)
     monkeypatch.setenv("USERPROFILE", r"C:\Users\TestUser")
     result = config_store.get_deck_dir(path=cfg_file)
     assert str(result).startswith(r"C:\Users\TestUser")

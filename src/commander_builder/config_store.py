@@ -58,6 +58,13 @@ _DECK_DIR_ENV_VAR = "COMMANDER_BUILDER_DECK_DIR"
 _ANTHROPIC_KEY_RE = re.compile(r"^sk-ant-[A-Za-z0-9_\-]{16,}$")
 
 
+def _is_windows() -> bool:
+    """Platform check with a test seam. Tests patch THIS — patching the
+    global ``os.name`` makes ``pathlib.Path()`` instantiate WindowsPath
+    on POSIX (NotImplementedError), which broke the whole Linux CI run."""
+    return os.name == "nt"
+
+
 def config_path() -> Path:
     """Resolve the active config.json path.
 
@@ -70,7 +77,7 @@ def config_path() -> Path:
     if override:
         return Path(override)
     localappdata = os.environ.get("LOCALAPPDATA")
-    if os.name == "nt" and localappdata:
+    if _is_windows() and localappdata:
         return Path(localappdata) / _DIR_NAME / _FILE_NAME
     return Path.home() / f".{_DIR_NAME}" / _FILE_NAME
 
@@ -232,6 +239,6 @@ def get_deck_dir(path: Optional[Path] = None) -> Path:
         return Path(configured)
 
     # Platform default.
-    user_profile = os.environ.get("USERPROFILE") if os.name == "nt" else None
+    user_profile = os.environ.get("USERPROFILE") if _is_windows() else None
     home = Path(user_profile) if user_profile else Path.home()
     return home / "Documents" / "CommanderBuilder" / "decks"

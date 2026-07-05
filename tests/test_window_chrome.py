@@ -66,7 +66,7 @@ def test_instance_lock_context_manager(tmp_path):
 def test_lock_file_path_uses_localappdata_on_windows(monkeypatch):
     """On Windows, lock file lives under %LOCALAPPDATA%/commander-builder/."""
     monkeypatch.delenv("COMMANDER_BUILDER_LOCK_DIR", raising=False)
-    monkeypatch.setattr(desktop.os, "name", "nt")
+    monkeypatch.setattr(desktop, "_is_windows", lambda: True)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\x\AppData\Local")
     p = desktop._lock_file_path()
     assert "commander-builder" in str(p)
