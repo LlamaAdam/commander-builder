@@ -4,9 +4,13 @@ without an editable install.
 Also defends against the kind of bug we hit on 2026-05-15: a test that
 exercises a CLI path producing knowledge_log side effects without
 passing ``--db-path`` ends up writing rows into the production
-``vendor/knowledge_log.sqlite``. The autouse fixture below redirects
+repo-root ``knowledge_log.sqlite``. The autouse fixture below redirects
 ``knowledge_log.DEFAULT_DB_PATH`` to a per-test temp file so a
-careless test can't leak into production state again.
+careless test can't leak into production state again. The patch is
+effective because ``knowledge_log`` resolves ``db_path=None`` against
+the module attribute at CALL time (``_resolve_db_path``) — consumers
+must never freeze the constant via ``from ... import DEFAULT_DB_PATH``
+at module level or use it as a def-time parameter default.
 
 ## Fast/slow lane split (Tier-3, 2026-05-19)
 
@@ -101,7 +105,18 @@ def _isolate_knowledge_log_default_path(tmp_path, monkeypatch):
     Tests that explicitly pass ``--db-path <somewhere>`` are unaffected
     — the override is only consulted when a caller doesn't supply one.
     Belt-and-suspenders against tests leaking iteration rows into the
-    production ``vendor/knowledge_log.sqlite``.
+    production repo-root ``knowledge_log.sqlite``.
+
+    This only works because ``knowledge_log`` functions default to
+    ``db_path=None`` and resolve it against the module attribute at
+    call time (``_resolve_db_path``). Before 2026-07-19 the constant
+    was baked into def-time defaults (``db_path: Path =
+    DEFAULT_DB_PATH``) and import-time copies (``from .knowledge_log
+    import DEFAULT_DB_PATH`` in doctor/status/export/report/revert_to),
+    so this patch was silently a no-op and e.g. ``run_doctor()`` still
+    init_db'd the production file. ``test_doctor.py::
+    test_run_doctor_does_not_touch_production_knowledge_log`` guards
+    against regressing that.
 
     A targeted leak was caught on 2026-05-15 in
     ``test_auto_curate_main_writes_versioned_file_without_dry_run``,

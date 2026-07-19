@@ -35,8 +35,10 @@ import re
 from .analyst import AnalystConfig, AnalystInput, Verdict, analyze
 from .compare_versions import ComparisonReport, compare
 from .forge_runner import VENDOR_FORGE
+# ``db_path=None`` defaults below defer to knowledge_log's call-time
+# resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
+# production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
-    DEFAULT_DB_PATH,
     Iteration,
     record_iteration,
 )
@@ -93,7 +95,7 @@ def propose_then_iterate(
     parent_iteration_id: Optional[int] = None,
     games_per_pod: int = 10,
     filler_pairs: int = 2,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     analyst_config: Optional[AnalystConfig] = None,
     proposer_config: Optional[ProposerConfig] = None,
 ) -> "IterationResult":
@@ -131,7 +133,7 @@ def run_one_iteration(
     parent_iteration_id: Optional[int] = None,
     games_per_pod: int = 10,
     filler_pairs: int = 2,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     analyst_config: Optional[AnalystConfig] = None,
 ) -> IterationResult:
     """Run one full propose→simulate→analyze cycle for a deck.

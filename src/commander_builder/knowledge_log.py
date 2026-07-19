@@ -47,6 +47,21 @@ from .forge_runner import VENDOR_FORGE
 
 DEFAULT_DB_PATH = VENDOR_FORGE.parent.parent / "knowledge_log.sqlite"
 
+
+def _resolve_db_path(db_path: Optional[Path]) -> Path:
+    """Resolve ``db_path=None`` to the CURRENT ``DEFAULT_DB_PATH``.
+
+    Public functions take ``db_path: Optional[Path] = None`` and route
+    through this helper instead of using ``DEFAULT_DB_PATH`` as a
+    default parameter value. A ``def f(db_path=DEFAULT_DB_PATH)``
+    default is evaluated once at import time, which silently defeats
+    the test-suite's autouse fixture that monkeypatches
+    ``knowledge_log.DEFAULT_DB_PATH`` — every call would still hit the
+    production database. Reading the module attribute here, at call
+    time, makes that patch actually take effect."""
+    return db_path if db_path is not None else DEFAULT_DB_PATH
+
+
 SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
@@ -177,7 +192,7 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
+def init_db(db_path: Optional[Path] = None) -> None:
     """Create the schema if missing, run any pending migrations,
     mark the version. Idempotent — safe to call from every entry
     point (CLIs, web routes, tests).
@@ -188,7 +203,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
       v1 → v2: add ``milestone`` column + partial index
                (``_migrate_to_v2``, AGENT_BACKLOG #012).
     """
-    with _connect(db_path) as conn:
+    with _connect(_resolve_db_path(db_path)) as conn:
         conn.executescript(_SCHEMA_SQL)
         # Run migrations unconditionally — they're each individually
         # idempotent (check-then-add pattern via pragma_table_info),
@@ -209,8 +224,9 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
             )
 
 
-def record_iteration(it: Iteration, db_path: Path = DEFAULT_DB_PATH) -> int:
+def record_iteration(it: Iteration, db_path: Optional[Path] = None) -> int:
     """Insert one Iteration. Returns the new row id. Mutates `it.id`."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     row = it.to_row()
     cols = list(row.keys())
@@ -225,7 +241,7 @@ def record_iteration(it: Iteration, db_path: Path = DEFAULT_DB_PATH) -> int:
 def set_milestone(
     iteration_id: int,
     label: Optional[str],
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> None:
     """Tag (or clear) an iteration with a user-chosen milestone label
     (e.g. ``"baseline"``, ``"PR-ready"``, ``"reference build"``).
@@ -239,6 +255,7 @@ def set_milestone(
     AGENT_BACKLOG #012. Idempotent; no-op on unknown iteration_id
     (matches ``update_verdict``'s fail-quiet contract).
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     normalized: Optional[str]
     if label is None or not label.strip():
@@ -256,12 +273,12 @@ def update_verdict(
     iteration_id: int,
     verdict: str,
     notes: Optional[str] = None,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> None:
     """Mark an iteration's verdict (Phase 2 analyst writes this after sim)."""
     if verdict not in {"kept", "reverted", "neutral", "inconclusive", "pending"}:
         raise ValueError(f"verdict must be one of kept/reverted/neutral/inconclusive/pending, got {verdict!r}")
-    with _connect(db_path) as conn:
+    with _connect(_resolve_db_path(db_path)) as conn:
         conn.execute(
             "UPDATE iterations SET verdict = ?, verdict_notes = ? WHERE id = ?",
             (verdict, notes, iteration_id),
@@ -276,7 +293,7 @@ def update_iteration_sim(
     win_rate_new: Optional[float] = None,
     margin: Optional[int] = None,
     notes: Optional[str] = None,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> None:
     """Fold the A/B-sim outcome into a pending iteration row.
 
@@ -322,11 +339,12 @@ def update_iteration_sim(
         f"UPDATE iterations SET {', '.join(set_clauses)} "
         f"WHERE id = ?"
     )
-    with _connect(db_path) as conn:
+    with _connect(_resolve_db_path(db_path)) as conn:
         conn.execute(sql, params)
 
 
-def get_iteration(iteration_id: int, db_path: Path = DEFAULT_DB_PATH) -> Optional[Iteration]:
+def get_iteration(iteration_id: int, db_path: Optional[Path] = None) -> Optional[Iteration]:
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute("SELECT * FROM iterations WHERE id = ?", (iteration_id,))
@@ -334,9 +352,10 @@ def get_iteration(iteration_id: int, db_path: Path = DEFAULT_DB_PATH) -> Optiona
     return Iteration.from_row(row) if row else None
 
 
-def iterations_for_deck(deck_id: str, db_path: Path = DEFAULT_DB_PATH) -> list[Iteration]:
+def iterations_for_deck(deck_id: str, db_path: Optional[Path] = None) -> list[Iteration]:
     """All iterations of a deck, oldest first. Useful for reconstructing the
     full v1→v2→...→vN chain when training the Phase 3 model."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
@@ -346,9 +365,10 @@ def iterations_for_deck(deck_id: str, db_path: Path = DEFAULT_DB_PATH) -> list[I
         return [Iteration.from_row(r) for r in cur.fetchall()]
 
 
-def recent_iterations(limit: int = 50, db_path: Path = DEFAULT_DB_PATH) -> list[Iteration]:
+def recent_iterations(limit: int = 50, db_path: Optional[Path] = None) -> list[Iteration]:
     """Most recent N iterations across all decks. Sized to fit in one screen
     by default; bump for analytics queries."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
@@ -359,7 +379,7 @@ def recent_iterations(limit: int = 50, db_path: Path = DEFAULT_DB_PATH) -> list[
 
 
 def migrate_legacy_deck_ids(
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     dry_run: bool = False,
 ) -> dict:
     """Walk `iterations` and update rows whose `deck_id` looks like a filename
@@ -377,6 +397,7 @@ def migrate_legacy_deck_ids(
     legacy_re = re.compile(r"\[B[0-9?]\]\.dck$")
     moxfield_re = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
 
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     scanned = 0
     updated = 0
@@ -426,9 +447,10 @@ def migrate_legacy_deck_ids(
     }
 
 
-def stats_summary(db_path: Path = DEFAULT_DB_PATH) -> dict:
+def stats_summary(db_path: Optional[Path] = None) -> dict:
     """Aggregate counts useful as a one-glance sanity check on the log.
     Cheap query — runs every time the loop starts."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         rows = {
@@ -443,7 +465,7 @@ def stats_summary(db_path: Path = DEFAULT_DB_PATH) -> dict:
 
 
 def pricing_series_for_deck(
-    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+    deck_id: str, db_path: Optional[Path] = None,
 ) -> list[dict]:
     """Walk one deck's iterations chronologically and extract the
     pricing snapshots saved on each.
@@ -458,6 +480,7 @@ def pricing_series_for_deck(
     Returns ``[{iteration_id, captured_at, total_price_usd}, ...]``
     in iteration-id order (== chronological).
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     series: list[dict] = []
     with _connect(db_path) as conn:
@@ -489,7 +512,7 @@ def pricing_series_for_deck(
 
 
 def verdict_breakdown_for_deck(
-    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+    deck_id: str, db_path: Optional[Path] = None,
 ) -> dict:
     """Per-audit-version verdict counts for one deck.
 
@@ -503,6 +526,7 @@ def verdict_breakdown_for_deck(
     v3 swaps, 2/3 v4 swaps" so the user can spot which audit prompt
     (or advisor source) is producing landings vs. reverts.
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     out: dict[str, dict[str, int]] = {}
     with _connect(db_path) as conn:
@@ -668,7 +692,7 @@ def _node_price_from_manifest(manifest: Optional[dict]) -> Optional[float]:
 
 
 def iteration_graph_for_deck(
-    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+    deck_id: str, db_path: Optional[Path] = None,
 ) -> dict:
     """Project one deck's iteration chain as a JSON-friendly graph.
 
@@ -691,6 +715,7 @@ def iteration_graph_for_deck(
         side lacks pricing; treating absence as 0 would lie.
       bracket_delta — child.bracket - parent.bracket. Signed int.
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     nodes_by_id: dict[int, dict] = {}
     iterations: list[Iteration] = []

@@ -30,8 +30,10 @@ from pathlib import Path
 from typing import Optional
 
 from .forge_runner import VENDOR_FORGE
+# ``db_path=None`` defaults below defer to knowledge_log's call-time
+# resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
+# production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
-    DEFAULT_DB_PATH,
     Iteration,
     get_iteration,
     iterations_for_deck,
@@ -60,7 +62,7 @@ class RevertResult:
 def revert_to_iteration(
     iteration_id: int,
     deck_path: Optional[Path] = None,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     record_revert: bool = True,
 ) -> RevertResult:
     """Restore the .dck file to the snapshot stored at the given iteration.
@@ -122,7 +124,7 @@ def revert_deck_to_version(
     deck_id: str,
     version: int,
     deck_path: Optional[Path] = None,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     record_revert: bool = True,
 ) -> RevertResult:
     """Revert a specific deck to its Nth recorded iteration. `version` is

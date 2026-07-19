@@ -32,8 +32,10 @@ from pathlib import Path
 from typing import Optional
 
 from .forge_runner import VENDOR_FORGE
+# ``db_path=None`` defaults below defer to knowledge_log's call-time
+# resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
+# production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
-    DEFAULT_DB_PATH,
     iterations_for_deck,
     recent_iterations,
     stats_summary,
@@ -161,7 +163,7 @@ def collect_status(
     pool_dir: Path = POOL_DIR,
     match_dir: Path = MATCH_DIR,
     compare_dir: Path = COMPARE_DIR,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> StatusReport:
     """Gather all status signals into one StatusReport. Pure read — never
     writes anything (other than knowledge_log's idempotent schema-init via
@@ -437,7 +439,7 @@ def _iteration_summary(
 
 def collect_deck_status(
     deck_path: Path,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     meta_dir: Path = META_DIR,
 ) -> DeckStatusReport:
     """Assemble the per-deck dashboard payload. Returns even when the
@@ -609,7 +611,7 @@ def format_deck_text(report: DeckStatusReport, *, use_rich: bool = True) -> str:
 
 def collect_user_decks_summary(
     deck_dir: Path = DECK_DIR,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> list[dict]:
     """One-line summary per `[USER]*.dck`. Sorted by deck name (case-
     insensitive) so the listing is stable across runs."""

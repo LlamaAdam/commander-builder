@@ -33,9 +33,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# ``_resolve_db_path`` (not a from-import of DEFAULT_DB_PATH) so the default
+# database is looked up at call time — a module-level constant copy would
+# bypass the test suite's DEFAULT_DB_PATH isolation patch.
 from .knowledge_log import (
-    DEFAULT_DB_PATH,
     Iteration,
+    _resolve_db_path,
     iterations_for_deck,
     recent_iterations,
     stats_summary,
@@ -55,7 +58,7 @@ def export_knowledge_log(
     out_path: Path,
     deck_id: Optional[str] = None,
     recent: Optional[int] = None,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> dict:
     """Write the log (or a filtered slice) to `out_path` as JSON.
 
@@ -64,6 +67,9 @@ def export_knowledge_log(
 
     Returns the in-memory export dict so callers can pipe / verify without
     re-reading the file."""
+    # Resolved eagerly (rather than passed through as None) because the
+    # payload's ``source_db`` field records the concrete path exported from.
+    db_path = _resolve_db_path(db_path)
     if deck_id:
         rows = iterations_for_deck(deck_id, db_path=db_path)
         scope = f"deck_id={deck_id}"
@@ -96,7 +102,7 @@ def export_knowledge_log(
 
 def import_knowledge_log(
     in_path: Path,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     skip_existing: bool = True,
 ) -> dict:
     """Re-ingest a previously exported log. Useful for restoring backups or

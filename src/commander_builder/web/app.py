@@ -30,7 +30,10 @@ from typing import Optional
 # (build_dashboard, knowledge_log functions, etc.) so they don't
 # need re-importing here.
 from ..forge_runner import detect_forge_version
-from ..knowledge_log import DEFAULT_DB_PATH as _DEFAULT_KLOG_DB
+# Module import (not ``from ..knowledge_log import DEFAULT_DB_PATH``) so the
+# default DB path is read at app-creation time — a from-import would freeze
+# the value at import time and bypass the test suite's isolation patch.
+from .. import knowledge_log as _knowledge_log
 
 # Pure helpers extracted to ``_helpers.py`` as part of the
 # 2026-05-13 blueprint refactor (tier-3 issue #3.1). Re-exported
@@ -152,7 +155,7 @@ def create_app(
 
     if knowledge_db is None:
         env_db = os.environ.get("COMMANDER_BUILDER_KNOWLEDGE_DB")
-        knowledge_db = Path(env_db) if env_db else _DEFAULT_KLOG_DB
+        knowledge_db = Path(env_db) if env_db else _knowledge_log.DEFAULT_DB_PATH
     knowledge_db = Path(knowledge_db)
 
     # Sweep transient propose-swap staging files left over from
