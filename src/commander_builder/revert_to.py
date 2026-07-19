@@ -24,8 +24,10 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -50,13 +52,79 @@ class RevertResult:
     restored_path: Path              # On-disk .dck overwritten with the snapshot
     push_blob: str                   # Moxfield-textarea blob for manual push
     revert_iteration_id: Optional[int] = None  # New row recording this revert
+    # Copy of the pre-revert on-disk file, or None when no backup was needed
+    # (file absent, or already identical to the restored snapshot).
+    backup_path: Optional[Path] = None
     error: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["restored_path"] = str(self.restored_path)
+        d["backup_path"] = str(self.backup_path) if self.backup_path else None
         d.pop("push_blob")  # Not interesting in the structured output.
         return d
+
+
+def _backup_destination(out_path: Path) -> Path:
+    """Pick a free sibling path for the pre-revert backup.
+
+    Shape: ``<stem>.pre-revert-<YYYYMMDD_HHMMSS>.dck.bak`` (timestamp format
+    matches routes_sim's staged-file convention). The ``.bak`` FINAL suffix is
+    load-bearing: every deck-listing consumer (status._count_decks,
+    moxfield_import._existing_moxfield_ids, the web app's deck routes) globs
+    ``*.dck``, so a backup ending in ``.bak`` can never pollute deck listings
+    or get picked up as a playable deck — even though the name still carries
+    ``.dck`` internally so a human can tell what it is and rename it back.
+
+    The timestamp granularity is 1 second, so two reverts in the same second
+    would collide and the second backup would overwrite the first — exactly
+    the data loss this module is trying to prevent. Uniquify with a small
+    counter loop (same idea as moxfield_import._uniquify, but local: pulling
+    that helper across modules just for this would couple the two for no
+    gain)."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = out_path.with_name(f"{out_path.stem}.pre-revert-{ts}.dck.bak")
+    n = 2
+    while candidate.exists():
+        candidate = out_path.with_name(
+            f"{out_path.stem}.pre-revert-{ts}-{n}.dck.bak"
+        )
+        n += 1
+    return candidate
+
+
+def _backup_current_file(out_path: Path, snapshot: str) -> Optional[Path]:
+    """Copy the live deck file aside before it gets overwritten.
+
+    The knowledge log only holds states that went through record_iteration.
+    If the on-disk file was hand-edited (or re-pulled outside the loop), its
+    content exists NOWHERE else — overwriting it in revert_to_iteration would
+    destroy it unrecoverably. Hence: unconditional copy-aside first.
+
+    Returns the backup path, or None when nothing needed saving:
+      - file doesn't exist (nothing to lose), or
+      - current content already equals the snapshot being restored (no
+        information would be lost by overwriting).
+
+    The "already equals" check compares via read_text, not raw bytes, because
+    the restore below goes through write_text — which maps "\\n" to the
+    platform line separator on the way out while read_text's universal-newline
+    mode maps it back. Comparing decoded text is therefore exactly the
+    "would the restore change anything observable?" question. If the file
+    isn't valid UTF-8 at all, we can't answer that question — treat it as
+    different and back it up (erring toward keeping data)."""
+    if not out_path.exists():
+        return None
+    try:
+        if out_path.read_text(encoding="utf-8") == snapshot:
+            return None
+    except (UnicodeDecodeError, OSError):
+        pass  # Unreadable-as-text ≠ safe to discard: fall through and back up.
+    backup = _backup_destination(out_path)
+    # copy2 preserves the original bytes AND mtime — the mtime is a forensic
+    # clue about when the lost-to-the-log edit was actually made.
+    shutil.copy2(out_path, backup)
+    return backup
 
 
 def revert_to_iteration(
@@ -80,6 +148,9 @@ def revert_to_iteration(
 
     out_path = deck_path or (DECK_DIR / target.deck_name)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Save the current file BEFORE overwriting — see _backup_current_file for
+    # why (un-logged on-disk state is otherwise gone forever).
+    backup_path = _backup_current_file(out_path, target.deck_snapshot)
     out_path.write_text(target.deck_snapshot, encoding="utf-8")
 
     blob = dck_to_textarea(out_path)
@@ -117,6 +188,7 @@ def revert_to_iteration(
         restored_path=out_path,
         push_blob=blob,
         revert_iteration_id=revert_id,
+        backup_path=backup_path,
     )
 
 
@@ -180,6 +252,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(f"Reverted to iteration {result.iteration_id}")
     print(f"  Restored: {result.restored_path}")
+    # Always tell the user where their previous state went — the whole point
+    # of the backup is recoverability, and a backup nobody knows about is not
+    # recoverable in practice.
+    if result.backup_path:
+        print(f"  Previous file backed up to: {result.backup_path}")
+    else:
+        print("  No backup needed (previous file was absent or identical to the snapshot)")
     if result.revert_iteration_id:
         print(f"  Revert recorded as iteration #{result.revert_iteration_id}")
     print()
