@@ -165,6 +165,16 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 "error": "deck with this name already exists",
                 "filename": filename,
             }), 409
+        # Stamp Name= from the final filename stem so Forge's deck picker
+        # and every name-keyed pipeline (compare_versions, pool_curator)
+        # can map this file back to itself even when the sanitizer above
+        # rewrote characters the Moxfield name contained (':', emoji, ...).
+        # The pretty name is preserved as DisplayName= for the status CLI;
+        # bare pastes with no Name= get one synthesized from the stem.
+        from ..dck_meta import stamp_name_preserving_display
+        deck_text_out = stamp_name_preserving_display(
+            deck_text_out, target.stem,
+        )
         try:
             # Defensive: a fresh checkout or first-run-after-config-change
             # may not have created the deck dir yet. Create parents so

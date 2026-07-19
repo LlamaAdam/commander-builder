@@ -621,6 +621,167 @@ def test_write_deck_still_skips_pre_metadata_files(tmp_path):
     assert sorted(p.name for p in tmp_path.glob("*.dck")) == ["My Deck [B3].dck"]
 
 
+# --- Name=-from-final-filename-stem stamping -------------------------------
+# Regression tests for the non-ASCII / ':' deck-name break: to_dck stamps the
+# RAW Moxfield name into Name=, but safe_filename strips non-ASCII and
+# substitutes ':' etc., so "Chatterfang: Squirrel Tribal 🐿" landed under a
+# filename whose stem no longer normalized to its own Name= — invisible to
+# every name-keyed consumer (compare_versions pod aggregation, pool_curator
+# matching, and Forge's own picker). Writers now stamp Name= with the FINAL
+# filename stem (dck_meta.stamp_name_preserving_display), keeping the pretty
+# name in DisplayName= for the status CLI.
+
+_UGLY_NAME = "Chatterfang: Squirrel Tribal \U0001f43f"
+
+
+def test_stamp_name_preserving_display_rules():
+    """Unit pin for the shared stamping helper (dck_meta): Name= becomes the
+    stem; the old pretty name moves to DisplayName=; other metadata passes
+    through untouched; degenerate inputs behave sanely."""
+    from commander_builder.dck_meta import stamp_name_preserving_display
+
+    # Pretty name → stem + DisplayName; Moxfield=/Protect= untouched.
+    src = (
+        "[metadata]\nName=Pretty: Name \U0001f43f\nMoxfield=abc\n"
+        "Protect=Sol Ring\n[Main]\n1 Sol Ring\n"
+    )
+    out = stamp_name_preserving_display(src, "[USER] Pretty_ Name [B3]")
+    assert "Name=[USER] Pretty_ Name [B3]\n" in out
+    assert "DisplayName=Pretty: Name \U0001f43f\n" in out
+    assert "Moxfield=abc" in out and "Protect=Sol Ring" in out
+
+    # Name already equals the stem (re-stamp): no DisplayName churn.
+    out2 = stamp_name_preserving_display(out.replace(
+        "DisplayName=Pretty: Name \U0001f43f\n", ""), "[USER] Pretty_ Name [B3]")
+    assert "DisplayName=" not in out2
+
+    # Existing DisplayName wins — never duplicated or clobbered.
+    out3 = stamp_name_preserving_display(out, "[USER] Renamed [B3]")
+    assert out3.count("DisplayName=") == 1
+    assert "DisplayName=Pretty: Name \U0001f43f" in out3
+    assert "Name=[USER] Renamed [B3]\n" in out3
+
+    # No Name= at all (bare paste): synthesized from the stem, nothing to
+    # preserve.
+    out4 = stamp_name_preserving_display("[Main]\n1 Sol Ring\n", "Stem")
+    assert "Name=Stem" in out4 and "DisplayName=" not in out4
+
+
+def test_import_deck_stamps_name_from_final_filename_stem(tmp_path, monkeypatch):
+    """(a) Non-ASCII + ':' deck name: the written file's Name= must equal
+    its own filename stem, and log_parser._normalize must agree whether it
+    starts from the filename or from the Name= field."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.log_parser import _normalize
+
+    decks = {"pid-1": _deck_json(name=_UGLY_NAME, pid="pid-1")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    # ':' → '_', emoji stripped, [USER]/[B3] wrapping from deck_destination.
+    assert p.name == "[USER] Chatterfang_ Squirrel Tribal [B3].dck"
+
+    text = p.read_text(encoding="utf-8")
+    import re as _re
+    name_val = _re.search(r"^Name=(.+)$", text, _re.MULTILINE).group(1)
+    assert name_val == p.stem
+    # The invariant every name-keyed pipeline relies on.
+    assert _normalize(p.name) == _normalize(name_val)
+    # Pretty name preserved for display surfaces.
+    assert f"DisplayName={_UGLY_NAME}" in text
+
+
+def test_reimport_nonascii_name_still_classified_same(tmp_path, monkeypatch):
+    """(b) The stamp must not disturb Moxfield= metadata: a re-import of the
+    same publicId is still classified 'same' — overwrite in place, no
+    numbered duplicate."""
+    from commander_builder import moxfield_import as mi
+
+    decks = {"pid-1": _deck_json(name=_UGLY_NAME, pid="pid-1")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert "Moxfield=pid-1" in p1.read_text(encoding="utf-8")
+
+    decks["pid-1"] = _deck_json(
+        name=_UGLY_NAME, pid="pid-1", main_card="Arcane Signet",
+    )
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    assert p2 == p1  # 'same' verdict: overwrote in place
+    text = p1.read_text(encoding="utf-8")
+    assert "Moxfield=pid-1" in text  # id metadata intact after stamping
+    assert "Arcane Signet" in text
+    assert sorted(q.name for q in tmp_path.glob("*.dck")) == [p1.name]
+
+
+def test_reimport_preserves_protect_and_stamped_name(tmp_path, monkeypatch):
+    """The 6ccf3f0 overwrite path (merge Protect=) composes with the stamp:
+    the merged re-import keeps Protect= AND ends up Name=stem again."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.web._helpers import read_protected_cards
+
+    decks = {"pid-1": _deck_json(name=_UGLY_NAME, pid="pid-1")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    text = p1.read_text(encoding="utf-8")
+    p1.write_text(
+        text.replace("Moxfield=pid-1", "Moxfield=pid-1\nProtect=Sol Ring"),
+        encoding="utf-8",
+    )
+
+    decks["pid-1"] = _deck_json(
+        name=_UGLY_NAME, pid="pid-1", main_card="Arcane Signet",
+    )
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert p2 == p1
+    merged = p1.read_text(encoding="utf-8")
+    assert read_protected_cards(merged) == ["Sol Ring"]
+    import re as _re
+    assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p1.stem
+
+
+def test_write_deck_stamps_name_including_uniquify_counter(tmp_path):
+    """Harvest path: the stamp uses the FINAL stem — after _uniquify — so a
+    collision-renamed deck's Name= carries the '(2)' counter Forge reports."""
+    from commander_builder.moxfield_import import _write_deck
+    import re as _re
+
+    first = _write_deck(_deck_json(name=_UGLY_NAME, pid="pid-1"), 3, tmp_path)
+    assert first is not None
+    text1 = first.read_text(encoding="utf-8")
+    assert _re.search(r"^Name=(.+)$", text1, _re.MULTILINE).group(1) == first.stem
+
+    # A DIFFERENT deck colliding on the sanitized name gets uniquified —
+    # and its Name= must match the uniquified stem, not the original.
+    other = _write_deck(
+        _deck_json(name=_UGLY_NAME, pid="pid-2", main_card="Counterspell"),
+        3, tmp_path,
+    )
+    assert other is not None and "(2)" in other.stem
+    text2 = other.read_text(encoding="utf-8")
+    assert _re.search(r"^Name=(.+)$", text2, _re.MULTILINE).group(1) == other.stem
+
+
+def test_bulk_import_stamps_name_from_stem(tmp_path, monkeypatch):
+    """Bulk path writes the same stamped shape as import_deck."""
+    from commander_builder import moxfield_import as mi
+    import re as _re
+
+    monkeypatch.setattr(
+        mi, "fetch_deck",
+        lambda pid: _deck_json(name=_UGLY_NAME, pid=pid),
+    )
+    result = mi.bulk_import(["pid-1"], out_dir=tmp_path, is_user=True)
+    assert result.success_count == 1
+    p = Path(result.successes[0]["path"])
+    text = p.read_text(encoding="utf-8")
+    assert _re.search(r"^Name=(.+)$", text, _re.MULTILINE).group(1) == p.stem
+    assert f"DisplayName={_UGLY_NAME}" in text
+    assert "Moxfield=pid-1" in text
+
+
 def test_harvest_loop_sleeps_on_fetch_failure(tmp_path, monkeypatch):
     """Politeness regression: the per-fetch sleep must fire on the FAILURE
     path too — previously a fetch exception skipped straight to the next

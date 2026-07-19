@@ -606,20 +606,6 @@ class ABResult:
         return asdict(self)
 
 
-def _ab_deck_name_for_match(deck_path: Path) -> str:
-    """Normalize a deck path to the name Forge writes into Match Result
-    lines. The runner accepts filename-style decks (e.g.
-    ``[USER] Goblin [B4].dck``) but the parser keys on the deck's
-    internal Name= field, which strips the [USER] prefix and the
-    `.dck`/[B<n>] suffix. log_parser._normalize encodes that mapping —
-    reuse it so the test fakes and the production path stay aligned."""
-    # Imported lazily to avoid a module-level cycle (log_parser depends
-    # on nothing in forge_runner, but downstream callers may have
-    # patched things at import time).
-    from .log_parser import _normalize
-    return _normalize(deck_path.stem)
-
-
 def run_ab_simulation(
     deck_a_path: Path,
     deck_b_path: Path,

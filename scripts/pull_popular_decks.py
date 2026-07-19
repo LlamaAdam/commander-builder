@@ -20,6 +20,7 @@ import argparse
 import re
 from pathlib import Path
 
+from commander_builder.dck_meta import stamp_name_preserving_display
 from commander_builder.forge_runner import VENDOR_FORGE
 from commander_builder.moxfield_import import (
     find_top_liked_deck_for_commander, to_dck,
@@ -88,7 +89,14 @@ def main(argv=None) -> int:
             failed += 1
             continue
         out = args.out / f"[USER] {short(cmd)} POP [B{br}].dck"
-        out.write_text(to_dck(dj), encoding="utf-8")
+        # Name= must match the filename stem or Forge/win-attribution can't
+        # map the deck back to this file (to_dck stamps the raw Moxfield
+        # name; the POP filename never matches it). Same invariant as the
+        # library importers — see dck_meta.
+        out.write_text(
+            stamp_name_preserving_display(to_dck(dj), out.stem),
+            encoding="utf-8",
+        )
         made += 1
         print(f"    + {out.name}  (moxfield: {dj.get('name')!r})")
     print(f"\npulled {made} popular deck(s), {failed} missing -> {args.out}")

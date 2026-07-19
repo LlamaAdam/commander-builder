@@ -1338,6 +1338,43 @@ def test_import_deck_via_moxfield_url(client, deck_dir, monkeypatch):
     assert "Moxfield Test Deck" in body["filename"]
 
 
+def test_import_deck_route_stamps_name_from_filename_stem(
+    client, deck_dir, monkeypatch,
+):
+    """Regression: the web import route sanitizes ':' etc. out of the
+    filename but used to leave to_dck's raw Moxfield name in Name= —
+    breaking Forge's picker and every name-keyed pipeline for such decks.
+    The written file must carry Name=<stem>, with the pretty name kept in
+    DisplayName= (the display-decision pin for the web import path)."""
+    import re as _re
+    fake_json = {
+        "name": "Chatterfang: Squirrel Tribal \U0001f43f",
+        "publicId": "abc123",
+        "boards": {
+            "commanders": {"cards": {"k1": {
+                "quantity": 1, "card": {"name": "Chatterfang, Squirrel General"},
+            }}},
+            "mainboard": {"cards": {"k2": {
+                "quantity": 1, "card": {"name": "Sol Ring"},
+            }}},
+        },
+    }
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda public_id: fake_json,
+    )
+    resp = client.post("/api/import_deck", json={
+        "moxfield_url": "https://moxfield.com/decks/abc123", "bracket": 3,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    fn = resp.get_json()["filename"]
+    path = deck_dir / fn
+    text = path.read_text(encoding="utf-8")
+    name_val = _re.search(r"^Name=(.+)$", text, _re.MULTILINE).group(1)
+    assert name_val == path.stem
+    assert "DisplayName=Chatterfang: Squirrel Tribal \U0001f43f" in text
+
+
 def test_import_deck_502_when_moxfield_fails(client, monkeypatch):
     def boom(public_id):
         raise RuntimeError("network down")

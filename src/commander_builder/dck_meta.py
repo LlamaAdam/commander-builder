@@ -49,6 +49,13 @@ _NAME_LINE = re.compile(r"^Name=.+$", re.MULTILINE)
 # synthesize a Name= line right below it when the deck has none.
 _METADATA_HEADER = re.compile(r"\[metadata\][^\n]*(?:\n|$)", re.IGNORECASE)
 
+# `DisplayName=` metadata line — the human-facing deck name, preserved when
+# `Name=` gets overwritten with the filename stem (see
+# ``stamp_name_preserving_display``). Forge ignores unknown metadata keys
+# (verified precedent: `Moxfield=` / `Protect=` load identically), so this
+# travels with the file without affecting sims.
+_DISPLAY_NAME_LINE = re.compile(r"^DisplayName=.+$", re.MULTILINE)
+
 
 def rewrite_name(dck_text: str, new_name: str) -> str:
     """Return ``dck_text`` with its ``[metadata] Name=`` set to ``new_name``.
@@ -76,6 +83,50 @@ def rewrite_name(dck_text: str, new_name: str) -> str:
             head += "\n"
         return head + f"Name={new_name}\n" + dck_text[m.end():]
     return f"[metadata]\nName={new_name}\n\n" + dck_text
+
+
+def stamp_name_preserving_display(dck_text: str, stem: str) -> str:
+    """Set ``Name=`` to the final filename ``stem``, keeping the pretty name.
+
+    WHY — ``to_dck`` renders ``Name=<raw Moxfield name>``, but
+    ``safe_filename`` (and the web route's sanitizer) strips non-ASCII and
+    substitutes characters like ``:``. A deck named
+    "Chatterfang: Squirrel Tribal 🐿" therefore lands under a filename whose
+    stem no longer normalizes to its own ``Name=``, breaking every
+    name-keyed consumer at once: compare_versions pod aggregation,
+    pool_curator candidate matching, and Forge's own deck picker (which
+    locates the deck by the ``Name=`` it displays for the filename we pass).
+    Stamping ``Name=<final stem>`` at write time holds the module invariant
+    (``_normalize(stem) == _normalize(Name=)``) for EVERY importable name.
+
+    The original pretty name is not thrown away: it moves to a
+    ``DisplayName=`` line right below ``Name=`` so display surfaces
+    (``status._parse_dck_metadata``) can keep showing the user's chosen
+    name instead of the bracketed filename stem. Rules:
+
+    - No prior ``Name=`` (bare paste) → one is synthesized from the stem
+      and there is no pretty name to preserve.
+    - Prior ``Name=`` already equals the stem (re-stamp) → nothing to do.
+    - A ``DisplayName=`` already present wins — never duplicated or
+      clobbered, so user edits to it survive re-imports of copied files.
+
+    Everything else (``Moxfield=``, ``Protect=``, card sections) passes
+    through byte-identical — same-id re-import classification and pet-card
+    locks are untouched by design.
+    """
+    m = _NAME_LINE.search(dck_text)
+    # ``m.group(0)`` is the whole "Name=<value>" line; slice off the key so
+    # deck names containing "=" survive intact.
+    old_name = m.group(0)[len("Name="):].strip() if m else ""
+    out = rewrite_name(dck_text, stem)
+    if not old_name or old_name == stem or _DISPLAY_NAME_LINE.search(out):
+        return out
+    # Insert DisplayName= directly after the (just-rewritten) Name= line —
+    # plain string splicing, not re.sub, so a pretty name containing group
+    # references (``\1``, ``\g<...>``) is inserted literally.
+    nm = _NAME_LINE.search(out)
+    assert nm is not None  # rewrite_name guarantees a Name= line exists
+    return out[: nm.end()] + f"\nDisplayName={old_name}" + out[nm.end():]
 
 
 def rewrite_name_to_stem(path: Path) -> str:

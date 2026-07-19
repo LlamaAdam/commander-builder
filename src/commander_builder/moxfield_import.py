@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from .dck_meta import stamp_name_preserving_display
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DECK_OUT_DIR = REPO_ROOT / "vendor" / "forge" / "userdata" / "decks" / "commander"
 API_BASE = "https://api2.moxfield.com/v3/decks/all"
@@ -585,6 +587,13 @@ def import_deck(
         # A DIFFERENT deck (or one we can't identify) owns this filename —
         # never clobber it; write under a uniquified name.
         out_path = _uniquify(out_path)
+    # Stamp Name= from the FINAL filename stem (after any _uniquify), so
+    # every name-keyed consumer (Forge's picker, compare_versions,
+    # pool_curator) agrees with the file on disk even when safe_filename
+    # mangled the pretty Moxfield name. The pretty name survives as
+    # DisplayName= for the status CLI. Must run AFTER _merge_local_metadata
+    # so a re-import stamps the merged text, not a soon-discarded render.
+    dck = stamp_name_preserving_display(dck, out_path.stem)
     out_path.write_text(dck, encoding="utf-8")
 
     boards = deck_json.get("boards", {})
@@ -754,6 +763,11 @@ def _write_deck(deck_json: dict, bracket: int, out_dir: Path) -> Optional[Path]:
         return None
     if verdict == "collision":
         out_path = _uniquify(out_path)
+    # Same Name=-from-final-stem stamping as import_deck — pool decks are
+    # exactly the ones pool_curator matches by name, so the invariant
+    # matters most here. (Stamp after _uniquify: the counter is part of
+    # the stem Forge reports.)
+    dck = stamp_name_preserving_display(dck, out_path.stem)
     out_path.write_text(dck, encoding="utf-8")
     boards = deck_json.get("boards", {})
     cmdr_count = sum(c.get("quantity", 0) for c in boards.get("commanders", {}).get("cards", {}).values())
@@ -951,7 +965,10 @@ def bulk_import(
                 # duplicates and silently skipped the import.
                 dest = _uniquify(dest)
 
-            dck = to_dck(deck_json)
+            # Stamp Name= from the FINAL destination stem (post-_uniquify)
+            # — see import_deck. Without it, a bulk-imported deck with a
+            # non-ASCII/':' name is invisible to every name-keyed pipeline.
+            dck = stamp_name_preserving_display(to_dck(deck_json), dest.stem)
             dest.write_text(dck, encoding="utf-8")
             seen_in_batch.add(deck_id)
             result.successes.append({

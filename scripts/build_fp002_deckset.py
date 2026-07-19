@@ -29,6 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from commander_builder.dck_meta import stamp_name_preserving_display
 from commander_builder.forge_runner import VENDOR_FORGE
 from commander_builder.moxfield_import import (
     find_top_liked_deck_for_commander, to_dck,
@@ -152,7 +153,13 @@ def main(argv=None) -> int:
                 print("    no popular deck found -> SKIP commander", flush=True)
                 failed += 1
                 continue
-            base.write_text(to_dck(dj), encoding="utf-8")
+            # Stamp Name= from the FP2 filename stem — the gauntlet's win
+            # attribution is name-keyed, and to_dck's raw Moxfield name
+            # never matches "[USER] <short> FP2 [Bn]" (see dck_meta).
+            base.write_text(
+                stamp_name_preserving_display(to_dck(dj), base.stem),
+                encoding="utf-8",
+            )
             made_base += 1
             print(f"    + {base.name}  (moxfield: {dj.get('name')!r})", flush=True)
 
