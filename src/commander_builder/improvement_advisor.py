@@ -396,6 +396,7 @@ def advise(
     claude_model: str = DEFAULT_CLAUDE_MODEL,
     budget: bool = False,
     intent_themes: Optional[list[str]] = None,
+    api_key: Optional[str] = None,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck.
 
@@ -421,6 +422,14 @@ def advise(
     ``use_claude=True`` is preserved as a legacy alias for
     ``source="claude"`` so existing callers don't break.
 
+    ``api_key`` (optional) is an explicit per-call Anthropic key used
+    ONLY by the Claude backend. ``None`` (default) means "use the
+    process credential" (``ANTHROPIC_API_KEY`` in the env, typically
+    loaded from the credentials file) — identical to prior behavior.
+    The web layer passes its BYO key here so a threaded server never
+    has to stage per-request secrets in the process-global
+    ``os.environ`` (which raced across concurrent requests).
+
     Implementation note: this synchronous entry point collects all
     phases from ``_advise_steps()`` and assembles the final report.
     Callers that want to render partial progress (e.g. the streaming
@@ -434,6 +443,7 @@ def advise(
         deck_dir=deck_dir, match_dir=match_dir,
         claude_model=claude_model, budget=budget,
         intent_themes=intent_themes,
+        api_key=api_key,
     ):
         if phase.phase == "complete":
             final_report = phase.data.get("report")
@@ -467,6 +477,7 @@ def _advise_steps(
     claude_model: str = DEFAULT_CLAUDE_MODEL,
     budget: bool = False,
     intent_themes: Optional[list[str]] = None,
+    api_key: Optional[str] = None,
 ):
     """Generator version of :func:`advise` — yields ``AdvicePhase``
     events as each stage of the pipeline completes.
@@ -758,10 +769,14 @@ def _advise_steps(
         except Exception:  # noqa: BLE001
             peer_summary = None
         try:
+            # api_key threads the (optional) per-request BYO key straight
+            # to the Anthropic client constructor — see advise()'s
+            # docstring. None → the advisor reads the process env as before.
             recs, rationale_override = _claude_swap_recommendations(
                 deck_path.name, bracket, main_cards, diagnosis, page,
                 model=claude_model,
                 bracket_peers_summary=peer_summary,
+                api_key=api_key,
             )
             if peer_summary:
                 bracket_peer_ref_count = int(

@@ -179,6 +179,25 @@ def load_credentials(
         # the credentials file has the right key.
         if os.environ.get(key):
             continue
+        # DELIBERATE: the file's keys are exported into the process-global
+        # os.environ. Many call sites (analyst.claude_verdict,
+        # proposer.claude_propose, doctor's key check, the advisor's env
+        # fallback) read os.environ.get("ANTHROPIC_API_KEY") as the
+        # deployment-level credential, so removing the export would ripple
+        # through every SDK constructor and its tests for no security gain
+        # in-process. The actual hazard of a global export is INHERITANCE
+        # BY SUBPROCESSES, and that is neutralized at the launch sites
+        # instead:
+        #   - Forge JVM launches (forge_runner / verify_forge) pass
+        #     env=scrubbed_child_env(), which drops ANTHROPIC_API_KEY /
+        #     ANTHROPIC_AUTH_TOKEN — a card-game JVM must never hold an
+        #     Anthropic credential.
+        #   - `claude` CLI launches (proposer._curator_complete_via_cli)
+        #     drop every ANTHROPIC_* var so the CLI always uses the
+        #     logged-in SUBSCRIPTION, never flips to per-token API billing
+        #     by inheriting a key (project invariant).
+        # Any NEW subprocess launch site must make the same choice
+        # explicitly rather than inherit os.environ wholesale.
         os.environ[key] = value
         applied[key] = value
 

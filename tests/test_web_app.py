@@ -218,35 +218,21 @@ def test_resolve_traversal_attempt_blocked(deck_dir):
     assert _resolve_deck_path(deck_dir, None, sneaky) is None
 
 
-def test_claude_api_key_env_sets_and_restores(monkeypatch):
-    """The BYO-key context manager stages the key into os.environ and
-    always restores it — including on exception and when there was no
-    prior key (pops it back out) — so a concurrent request can't inherit
-    a transiently-set key."""
-    import os
-    from commander_builder.web.routes_audit import _claude_api_key_env
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-
-    # No prior key -> set inside, popped back out after.
-    with _claude_api_key_env(True, "sk-byo"):
-        assert os.environ["ANTHROPIC_API_KEY"] == "sk-byo"
-    assert "ANTHROPIC_API_KEY" not in os.environ
-
-    # Restores even when the body raises.
-    with pytest.raises(RuntimeError):
-        with _claude_api_key_env(True, "sk-byo"):
-            raise RuntimeError("boom")
-    assert "ANTHROPIC_API_KEY" not in os.environ
-
-    # Prior key is restored to its original value.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-original")
-    with _claude_api_key_env(True, "sk-byo"):
-        assert os.environ["ANTHROPIC_API_KEY"] == "sk-byo"
-    assert os.environ["ANTHROPIC_API_KEY"] == "sk-original"
-
-    # Non-Claude path is a no-op (doesn't touch env).
-    with _claude_api_key_env(False, "sk-byo"):
-        assert os.environ["ANTHROPIC_API_KEY"] == "sk-original"
+def test_routes_audit_has_no_env_staging_machinery():
+    """2026-07-19 BYO-key rework: the env-staging context manager and
+    its lock are GONE — the key is threaded as an explicit advise()
+    parameter instead. Guard against the old pattern creeping back in
+    (any per-request os.environ write in the web layer is a thread race
+    on Flask's threaded dev server)."""
+    from commander_builder.web import routes_audit
+    assert not hasattr(routes_audit, "_claude_api_key_env")
+    assert not hasattr(routes_audit, "_CLAUDE_ENV_LOCK")
+    # No os.environ WRITES anywhere in the module source (reads are fine —
+    # the fallback-warning branch legitimately checks key presence).
+    import inspect
+    src = inspect.getsource(routes_audit)
+    assert "os.environ[" not in src
+    assert "environ.pop" not in src
 
 
 def test_resolve_explicit_path_non_dck_inside_dir_blocked(deck_dir):
@@ -2903,15 +2889,64 @@ def test_audit_stream_no_buffering_headers(client, monkeypatch):
     assert resp.headers.get("X-Accel-Buffering") == "no"
 
 
+def test_audit_stream_byo_key_threaded_not_staged_in_env(client, monkeypatch):
+    """Streaming BYO-key path of the 2026-07-19 rework: the key must
+    arrive at ``_advise_steps`` as the explicit ``api_key`` kwarg and
+    ``os.environ`` must be untouched for the WHOLE generator lifetime.
+    The old implementation held the env mutation (plus a global lock)
+    across the entire SSE stream — the widest cross-request race window
+    in the app."""
+    import os as _os
+    from commander_builder._advisor_models import (
+        AdvicePhase, AdviceReport, DeckDiagnosis,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    seen = {}
+
+    def fake_steps(deck_path, bracket, **kwargs):
+        seen["api_key_param"] = kwargs.get("api_key")
+        # Captured MID-STREAM, while the generator is live — exactly
+        # the window the old env staging held the mutation open for.
+        seen["api_key_in_env"] = _os.environ.get("ANTHROPIC_API_KEY")
+        yield AdvicePhase("complete", {
+            "report": AdviceReport(
+                deck_filename=deck_path.name,
+                deck_id=None, bracket=bracket,
+                commander_names=["X"],
+                diagnosis=DeckDiagnosis(),
+                recommendations=[],
+                source="claude", timestamp="2026-07-19",
+            ),
+        })
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", fake_steps,
+    )
+    resp = client.get(
+        "/api/audit/stream?deck=Alpha&bracket=3&source=claude",
+        headers={"X-Anthropic-API-Key": "sk-stream-byo"},
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.data)
+    assert [e[0] for e in events] == ["complete"]
+    assert seen["api_key_param"] == "sk-stream-byo"
+    assert seen["api_key_in_env"] is None  # never staged in env
+    assert "ANTHROPIC_API_KEY" not in _os.environ  # nothing lingers
+
+
 def _stub_advise_capturing(monkeypatch, source="heuristic", fallback_reason=None):
-    """Stub advise() and capture how it was invoked + what the env
-    looked like at call time. Returns the seen-args dict."""
+    """Stub advise() and capture how it was invoked — including the
+    explicit api_key parameter AND what os.environ looked like at call
+    time (which must be UNTOUCHED by the route; the 2026-07-19 rework
+    threads the BYO key as a parameter instead of staging it in env).
+    Returns the seen-args dict."""
     from types import SimpleNamespace
     seen = {}
 
     def fake(deck_path, bracket, **kwargs):
         import os as _os
         seen["use_claude"] = kwargs.get("use_claude", False)
+        seen["api_key_param"] = kwargs.get("api_key")
         seen["api_key_in_env"] = _os.environ.get("ANTHROPIC_API_KEY")
         return SimpleNamespace(
             recommendations=[
@@ -2957,12 +2992,15 @@ def test_audit_llm_claude_passes_use_claude_and_byo_key(client, monkeypatch):
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
     assert seen["use_claude"] is True
-    # BYO key was injected into env for the call's lifetime.
-    assert seen["api_key_in_env"] == "sk-test-byo-12345"
+    # BYO key rides the explicit api_key parameter...
+    assert seen["api_key_param"] == "sk-test-byo-12345"
+    # ...and is NEVER staged in the process env, even mid-request —
+    # env staging raced across concurrent threaded requests.
+    assert seen["api_key_in_env"] is None
     assert body["source"] == "claude"
     assert body["requested_llm"] == "claude"
     assert body["warning"] is None
-    # Env restored after the request — key must not linger.
+    # Nothing lingers after the request either.
     import os as _os
     assert "ANTHROPIC_API_KEY" not in _os.environ
 
@@ -3095,18 +3133,20 @@ def test_audit_does_not_leak_byo_key_to_subsequent_call(client, monkeypatch):
         headers={"X-Anthropic-API-Key": "sk-first-call"},
     )
     assert r1.status_code == 200
-    assert seen["api_key_in_env"] == "sk-first-call"
+    assert seen["api_key_param"] == "sk-first-call"
+    assert seen["api_key_in_env"] is None  # never staged in env
 
     seen.clear()
     r2 = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")
     assert r2.status_code == 200
+    assert seen.get("api_key_param") is None
     assert seen.get("api_key_in_env") is None
 
 
 def test_audit_uses_config_key_when_no_header(client, monkeypatch, tmp_path):
     """FP-011 unification: with no X-Anthropic-API-Key header, the audit
     resolves the BYO key from config.json (what the Settings panel
-    writes) and injects it into env for the call's lifetime."""
+    writes) and threads it as the explicit api_key parameter."""
     from commander_builder import config_store
     cfg = tmp_path / "config.json"
     monkeypatch.setenv("COMMANDER_BUILDER_CONFIG", str(cfg))
@@ -3117,8 +3157,9 @@ def test_audit_uses_config_key_when_no_header(client, monkeypatch, tmp_path):
     resp = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")  # no header
     assert resp.status_code == 200, resp.get_json()
     assert seen["use_claude"] is True
-    assert seen["api_key_in_env"] == "sk-ant-fromconfig1234567"
-    # Restored afterward — the config key must not linger in the process.
+    assert seen["api_key_param"] == "sk-ant-fromconfig1234567"
+    # Never staged in env — mid-request or after.
+    assert seen["api_key_in_env"] is None
     import os as _os
     assert "ANTHROPIC_API_KEY" not in _os.environ
 
@@ -3137,7 +3178,7 @@ def test_audit_header_key_overrides_config(client, monkeypatch, tmp_path):
         headers={"X-Anthropic-API-Key": "sk-ant-fromheader9999999"},
     )
     assert resp.status_code == 200, resp.get_json()
-    assert seen["api_key_in_env"] == "sk-ant-fromheader9999999"
+    assert seen["api_key_param"] == "sk-ant-fromheader9999999"
 
 
 # ---------------------------------------------------------------------------

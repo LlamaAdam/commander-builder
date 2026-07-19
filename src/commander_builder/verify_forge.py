@@ -87,11 +87,16 @@ def find_java() -> tuple[Optional[str], Optional[str]]:
         return None, None
     try:
         # `java -version` prints to stderr.
+        # env scrub: no JVM we spawn should inherit the Anthropic
+        # credential _secrets.load_credentials() may have exported —
+        # see forge_runner.scrubbed_child_env() for the rationale.
+        from .forge_runner import scrubbed_child_env
         result = subprocess.run(
             [java, "-version"],
             capture_output=True,
             text=True,
             timeout=10,
+            env=scrubbed_child_env(),
         )
         version = (result.stderr or result.stdout).strip().splitlines()[0]
         return java, version
@@ -274,12 +279,16 @@ def run_sim(
     timed_out = False
 
     try:
+        # env scrub: the Forge JVM must never inherit the Anthropic
+        # credential — see forge_runner.scrubbed_child_env().
+        from .forge_runner import scrubbed_child_env
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=MATCH_TIMEOUT_SEC,
             cwd=str(jar.parent),
+            env=scrubbed_child_env(),
         )
         stdout_path.write_text(proc.stdout, encoding="utf-8")
         stderr_path.write_text(proc.stderr, encoding="utf-8")

@@ -16,6 +16,7 @@ from commander_builder.forge_runner import (
     _run_blocking,
     _run_streaming,
     detect_forge_version,
+    scrubbed_child_env,
 )
 
 
@@ -116,6 +117,56 @@ def test_run_streaming_handles_popen_failure(monkeypatch):
     assert rc is None
     assert error is not None
     assert "java not found" in error
+
+
+# --- Anthropic credential scrubbing (2026-07-19) --------------------------
+#
+# _secrets.load_credentials() exports ANTHROPIC_API_KEY into os.environ, and
+# subprocesses inherit the parent env by default — so without an explicit
+# env= scrub every Forge JVM would silently hold a live Anthropic credential.
+# These tests pin the scrub on both launch paths.
+
+def test_scrubbed_child_env_drops_anthropic_credentials(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-inherit")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-should-not-inherit")
+    monkeypatch.setenv("SOME_HARMLESS_VAR", "keep-me")
+    env = scrubbed_child_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    # Everything else is inherited — Forge needs PATH/JAVA_HOME/etc.
+    assert env["SOME_HARMLESS_VAR"] == "keep-me"
+
+
+def test_run_blocking_env_excludes_anthropic_key(monkeypatch):
+    """The blocking Forge launch must pass an env= that excludes
+    ANTHROPIC_API_KEY even when the parent process holds one."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-must-not-reach-jvm")
+    fake_proc = MagicMock(stdout="", stderr="", returncode=0)
+    with patch(
+        "commander_builder.forge_runner.subprocess.run",
+        return_value=fake_proc,
+    ) as run_mock:
+        _run_blocking(["fake-java"], timeout=10, cwd="/tmp")
+    env = run_mock.call_args.kwargs.get("env")
+    assert env is not None, "Forge launch must pass an explicit env="
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_run_streaming_env_excludes_anthropic_key(monkeypatch):
+    """Same guarantee on the streaming (Popen) Forge launch path."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-must-not-reach-jvm")
+    fake_proc = MagicMock()
+    fake_proc.stdout = iter(["line\n"])
+    fake_proc.stderr = iter([])
+    fake_proc.wait = MagicMock(return_value=0)
+    with patch(
+        "commander_builder.forge_runner.subprocess.Popen",
+        return_value=fake_proc,
+    ) as popen_mock:
+        _run_streaming(["fake-java"], timeout=10, cwd="/tmp", stream=False)
+    env = popen_mock.call_args.kwargs.get("env")
+    assert env is not None, "Forge launch must pass an explicit env="
+    assert "ANTHROPIC_API_KEY" not in env
 
 
 # --- SimResult sanity ------------------------------------------------------

@@ -81,9 +81,20 @@ def _claude_swap_recommendations(
     edhrec_page: CommanderPage,
     model: str = DEFAULT_CLAUDE_MODEL,
     bracket_peers_summary: Optional[dict] = None,
+    api_key: Optional[str] = None,
 ) -> tuple[list[SwapRecommendation], str]:
     """LLM-aided variant. Falls back via NotImplementedError when no
     API key or SDK — caller catches and degrades to heuristic.
+
+    ``api_key`` (optional) is an EXPLICIT per-call Anthropic key,
+    threaded down from the web layer's BYO-key header/config. None
+    means "use the process credential" (``ANTHROPIC_API_KEY`` from
+    the shell env or the credentials file) exactly as before. The
+    explicit parameter exists so a threaded server can serve two
+    concurrent requests with two different keys WITHOUT mutating the
+    process-global ``os.environ`` — the old stage-key-in-env dance
+    let concurrent requests read each other's keys (or wipe one
+    mid-API-call on restore). Never write this value into os.environ.
 
     ``model`` lets callers pick a tier (haiku for cheap, sonnet for
     default quality, opus for deepest reasoning). The default tracks
@@ -100,7 +111,12 @@ def _claude_swap_recommendations(
     the request (~$0.01 extra on Sonnet) but produces materially
     better recommendations than EDHREC-only context.
     """
-    if "ANTHROPIC_API_KEY" not in os.environ:
+    # Resolve the effective key: explicit per-call key wins; else fall
+    # back to the process env (shell / credentials-file). Resolved ONCE
+    # here and passed straight to the client constructor — never staged
+    # through os.environ, so concurrent calls can't cross-bill.
+    effective_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not effective_key:
         raise NotImplementedError("claude advisor requires ANTHROPIC_API_KEY")
     try:
         from anthropic import Anthropic
@@ -135,7 +151,7 @@ def _claude_swap_recommendations(
         user_payload["bracket_peer_references"] = bracket_peers_summary
     user_message = json.dumps(user_payload, indent=2)
 
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = Anthropic(api_key=effective_key)
     response = client.messages.create(
         model=model,
         max_tokens=2048,

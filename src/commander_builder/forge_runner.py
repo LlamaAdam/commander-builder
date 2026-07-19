@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import shutil
@@ -57,6 +58,29 @@ FORGE_STALE_AGE_DAYS = 90
 _FORGE_JAR_VERSION_RE = re.compile(
     r"forge-gui-desktop-(\d+(?:\.\d+)+)",
 )
+
+# Anthropic credential vars that must NEVER reach a child process spawned
+# here. `_secrets.load_credentials()` exports ANTHROPIC_API_KEY into
+# os.environ for the SDK's benefit, and subprocesses inherit the parent env
+# by default — meaning every Forge JVM would silently hold a live Anthropic
+# credential. A card-game simulator has no business with that key (least
+# privilege; a JVM crash dump or Forge log must never be able to contain
+# it). The subscription-billing invariant for the `claude` CLI (never
+# inherit ANTHROPIC_API_KEY or it flips from subscription to API billing)
+# is enforced separately at its own launch site in proposer.py.
+_ANTHROPIC_CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def scrubbed_child_env() -> dict[str, str]:
+    """Copy of os.environ with Anthropic credential vars removed.
+
+    Passed as ``env=`` to every Forge JVM launch (blocking + streaming
+    paths, and verify_forge's probes). Everything else is inherited
+    unchanged — Forge needs PATH/JAVA_HOME/LOCALAPPDATA etc."""
+    return {
+        k: v for k, v in os.environ.items()
+        if k not in _ANTHROPIC_CREDENTIAL_VARS
+    }
 
 
 def _utcnow(tz=timezone.utc):
@@ -185,6 +209,9 @@ def _run_blocking(
             cwd=cwd,
             encoding="utf-8",
             errors="replace",
+            # Never hand the Forge JVM an Anthropic credential — see
+            # scrubbed_child_env() for the least-privilege rationale.
+            env=scrubbed_child_env(),
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
@@ -240,6 +267,9 @@ def _run_streaming(
             encoding="utf-8",
             errors="replace",
             bufsize=1,  # line-buffered
+            # Never hand the Forge JVM an Anthropic credential — see
+            # scrubbed_child_env() for the least-privilege rationale.
+            env=scrubbed_child_env(),
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
