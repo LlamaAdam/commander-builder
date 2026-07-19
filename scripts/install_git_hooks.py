@@ -38,18 +38,17 @@ HOOK_BODY = """#!/bin/sh
 
 # Run the secret scanner on every staged text file. The scanner exits
 # non-zero on findings; git will abort the commit.
+#
+# The scanner enumerates staged files ITSELF (--staged uses
+# `git diff --cached --name-only --diff-filter=ACM -z`, NUL-separated).
+# A previous version of this hook did the enumeration in shell and
+# piped it through unquoted `xargs`, which word-split filenames with
+# spaces/brackets — "[USER] My Deck [B3].dck" became four bogus paths
+# that the scanner then skipped as missing, i.e. the file was SILENTLY
+# never scanned. Keeping the file list inside Python (argv never
+# transits a shell) closes that hole for every legal filename.
 
-set -e
-
-# Collect staged files (Added/Copied/Modified, not Deleted).
-staged_files=$(git diff --cached --name-only --diff-filter=ACM)
-
-if [ -z "$staged_files" ]; then
-    exit 0
-fi
-
-# Invoke the scanner. Pipe to xargs to handle long file lists safely.
-echo "$staged_files" | xargs python scripts/pre_commit_secret_scan.py
+exec python scripts/pre_commit_secret_scan.py --staged
 """
 
 

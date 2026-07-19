@@ -10,6 +10,15 @@ Usage
 
     python scripts/pre_commit_secret_scan.py path1 path2 ...
     python scripts/pre_commit_secret_scan.py --baseline .secrets-baseline path1 ...
+    python scripts/pre_commit_secret_scan.py --staged   # enumerate staged files itself
+    python scripts/pre_commit_secret_scan.py --all      # every git-tracked file (CI)
+
+``--staged`` / ``--all`` ask git for the file list with ``-z`` (NUL
+separators), so filenames containing spaces, brackets, or even newlines
+are scanned correctly. Shell hooks should prefer ``--staged`` over
+piping ``git diff --name-only`` through ``xargs``: the unquoted pipe
+word-splits names like ``[USER] My Deck [B3].dck`` into fragments that
+then look like missing files and were silently skipped.
 
 Acceptance
 ----------
@@ -18,8 +27,11 @@ Acceptance
   tokens (>=32 chars), and private-key armor headers.
 - Does NOT false-positive on the project's documentation placeholders
   (``sk-ant-...``, ``sk-ant-api03-...``, ``Bearer YOUR_TOKEN_HERE``).
+  Placeholder detection is applied to the MATCHED TOKEN only — a real
+  high-entropy key is flagged even when the surrounding line contains
+  words like ``EXAMPLE`` or a trailing ``...`` in a comment.
 - Supports a baseline file (one fingerprint per line, format
-  ``<path>:<line>:<pattern>``) for known false positives.
+  ``<path>:<pattern>:<token-sha256-prefix>``) for known false positives.
 - Supports inline opt-out via ``# pragma: secret-scan-allow`` on the
   offending line (for deliberate test fixtures).
 - Skips binary files and a built-in skip list (``*.zip``, ``*.lock``,
@@ -32,7 +44,9 @@ Pattern updates land in ``_PATTERNS`` below; tests in
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,11 +66,22 @@ from typing import Iterable, List, Optional, Sequence, Set
 # Real-world rotation horror stories almost always come from explicit
 # `KEY=value` shapes; that's the surface we hit hardest.
 
+# Markers that identify a matched TOKEN as a documentation placeholder.
+#
+# SECURITY: these are matched against the token the secret regex
+# captured, NOT the whole line. An earlier version skipped any LINE
+# containing a marker, which meant a real key committed as
+#   ANTHROPIC_API_KEY=sk-ant-<90 real chars>  # replaces the EXAMPLE key
+# sailed through — the attacker (or an unlucky comment) controls the
+# rest of the line, so nothing outside the token itself can be trusted
+# to suppress a finding. A token that is literally
+# ``sk-ant-api03-YOUR_KEY_HERE_PADDED...`` is a placeholder; a real
+# high-entropy token on a line that merely mentions EXAMPLE is not.
 _PLACEHOLDER_MARKERS = (
-    "...",          # sk-ant-api03-...
-    "YOUR_",        # YOUR_TOKEN_HERE
-    "REPLACE",      # REPLACE_ME
-    "EXAMPLE",      # EXAMPLE_KEY
+    "...",          # Bearer abc...xyz  (only Bearer's charset allows '.')
+    "YOUR_",        # sk-ant-api03-YOUR_KEY_HERE_...
+    "REPLACE",      # ghp_REPLACE_ME_...
+    "EXAMPLE",      # AKIAEXAMPLE... / sk-...EXAMPLE...
     "<token>",
     "<your",
 )
@@ -127,25 +152,44 @@ class Finding:
     line: int
     pattern: str
     snippet: str
+    # The exact token the regex captured. Carried so the baseline
+    # fingerprint can be content-based (see ``fingerprint``) — findings
+    # stay allowlisted when unrelated edits shift line numbers.
+    token: str
 
     def render(self) -> str:
         return f"  {self.path}:{self.line} [{self.pattern}] {self.snippet}"
 
 
 def fingerprint(finding: Finding) -> str:
-    """Stable identifier for the baseline file."""
+    """Stable identifier for the baseline file.
 
-    return f"{finding.path}:{finding.line}:{finding.pattern}"
+    Content-based: ``<path>:<pattern>:<sha256(token)[:12]>``. The old
+    format embedded the line number, which meant ANY edit above a
+    baselined line silently invalidated the allowlist entry (and the
+    next commit failed on a long-accepted false positive). Hashing the
+    token instead of embedding it keeps the baseline free of secret-
+    shaped strings while remaining stable across reflows. 12 hex chars
+    (48 bits) is plenty to avoid collisions within one repo's baseline.
+    """
+
+    digest = hashlib.sha256(finding.token.encode("utf-8")).hexdigest()[:12]
+    return f"{finding.path}:{finding.pattern}:{digest}"
 
 
 # ---------------------------------------------------------------------------
 # Scan
 # ---------------------------------------------------------------------------
 
-def _has_placeholder_marker(line: str) -> bool:
-    """``True`` if the line looks like a documentation placeholder."""
+def _token_is_placeholder(token: str) -> bool:
+    """``True`` if the matched token itself is a documentation placeholder.
 
-    return any(marker in line for marker in _PLACEHOLDER_MARKERS)
+    Deliberately inspects ONLY the token, not the surrounding line:
+    everything else on the line (comments, prose) is attacker- or
+    accident-controllable and must not be able to suppress a real key.
+    """
+
+    return any(marker in token for marker in _PLACEHOLDER_MARKERS)
 
 
 def _is_inline_allowed(line: str) -> bool:
@@ -184,19 +228,31 @@ def scan_text(
     findings: List[Finding] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         if _is_inline_allowed(line):
-            continue
-        if _has_placeholder_marker(line):
-            # Skip lines that are clearly documentation placeholders.
-            # The placeholder check applies even when the regex would
-            # otherwise fire — favors avoiding doc false positives.
+            # The explicit pragma is a per-line contract, so it stays a
+            # line-level check (unlike the placeholder heuristic below).
             continue
         for label, regex in _PATTERNS:
             for match in regex.finditer(line):
+                # Run the secret regexes FIRST, then apply the
+                # placeholder test to the matched token only. The old
+                # order (whole-line placeholder check before any regex)
+                # let a real key commit cleanly whenever the same line
+                # happened to contain '...' or 'EXAMPLE' etc.
+                #
+                # For patterns with a capture group (bearer_token) the
+                # token is the group, not the full match — "Bearer " is
+                # scaffolding, not token content.
+                token = (
+                    match.group(1) if match.re.groups else match.group(0)
+                )
+                if _token_is_placeholder(token):
+                    continue
                 f = Finding(
                     path=name,
                     line=lineno,
                     pattern=label,
                     snippet=_snippet_for(line, match.span()),
+                    token=token,
                 )
                 if fingerprint(f) in allowlist:
                     continue
@@ -222,9 +278,22 @@ def _is_binary(data: bytes) -> bool:
 
 
 def scan_path(path: Path, allowlist: Set[str]) -> List[Finding]:
-    """Scan one file by path. Missing / binary / skip-listed files yield []."""
+    """Scan one file by path. Missing / binary / skip-listed files yield [].
+
+    A missing path prints a WARNING instead of failing: deleted files
+    can legitimately reach us (git hooks invoked with a raw file list,
+    ``git commit -a`` after ``git rm``), but in a hook context a path
+    that silently scans as "clean" because it doesn't exist is exactly
+    how the xargs word-splitting bug hid files from the scanner — so
+    we never skip silently.
+    """
 
     if not path.exists():
+        sys.stderr.write(
+            f"secret-scan WARNING: path not found, skipping: {path}\n"
+            "  (expected for deleted files; anything else may mean the "
+            "hook mangled a filename — spaces/brackets need -z/--staged)\n"
+        )
         return []
     if _should_skip_path(path):
         return []
@@ -241,7 +310,11 @@ def scan_path(path: Path, allowlist: Set[str]) -> List[Finding]:
             text = data.decode("latin-1")
         except UnicodeDecodeError:
             return []
-    return scan_text(str(path), text, allowlist)
+    # Report with forward slashes regardless of OS: fingerprints embed
+    # this name, and a baseline written on Windows (backslashes) would
+    # silently fail to match the same finding in Linux CI. Git itself
+    # always emits forward-slash paths, so posix is the stable form.
+    return scan_text(path.as_posix(), text, allowlist)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +324,8 @@ def scan_path(path: Path, allowlist: Set[str]) -> List[Finding]:
 def load_allowlist(path: Path) -> Set[str]:
     """Read a baseline file. Missing file → empty set.
 
-    Format: one fingerprint per line, ``<path>:<line>:<pattern>``.
+    Format: one fingerprint per line,
+    ``<path>:<pattern>:<token-sha256-prefix>`` (see ``fingerprint``).
     Comment lines starting with ``#`` and blank lines are ignored.
     """
 
@@ -270,6 +344,63 @@ def load_allowlist(path: Path) -> Set[str]:
 
 
 # ---------------------------------------------------------------------------
+# Git file enumeration (--staged / --all)
+# ---------------------------------------------------------------------------
+
+def _git_list_files(args: Sequence[str]) -> List[Path]:
+    """Run a git command that lists NUL-separated paths; return Paths.
+
+    NUL separation (``-z``) is the whole point: it is the only output
+    mode where git neither quotes nor escapes, so names with spaces,
+    brackets, or newlines round-trip exactly. Paths come back relative
+    to the repo root, which is also the cwd in every context that uses
+    these modes (git runs hooks from the top level; CI runs from the
+    checkout root).
+    """
+
+    proc = subprocess.run(
+        list(args),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise SystemExit(
+            f"secret-scan: git enumeration failed ({' '.join(args)}): {stderr}"
+        )
+    # surrogateescape: git emits raw filename bytes; this keeps even
+    # non-UTF-8 names round-trippable instead of crashing the hook.
+    out = proc.stdout.decode("utf-8", errors="surrogateescape")
+    return [Path(p) for p in out.split("\0") if p]
+
+
+def _staged_files() -> List[Path]:
+    """Staged (Added/Copied/Modified) files, space-safe.
+
+    ``--diff-filter=ACM`` excludes deletions up front, so any path we
+    then fail to find on disk genuinely deserves scan_path's warning.
+    """
+
+    return _git_list_files(
+        [
+            "git", "diff", "--cached", "--name-only",
+            "--diff-filter=ACM", "-z",
+        ]
+    )
+
+
+def _all_tracked_files() -> List[Path]:
+    """Every git-tracked file — the CI full-tree sweep.
+
+    ``git ls-files`` (not a filesystem walk) so untracked local junk,
+    virtualenvs, and .gitignore'd scratch files can't make CI flaky:
+    only content that would actually ship in the repo is scanned.
+    """
+
+    return _git_list_files(["git", "ls-files", "-z"])
+
+
+# ---------------------------------------------------------------------------
 # CLI entry
 # ---------------------------------------------------------------------------
 
@@ -285,9 +416,32 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".secrets-baseline"),
         help=(
-            "Path to an allowlist file (one '<path>:<line>:<pattern>' "
-            "fingerprint per line; '#' for comments). Defaults to "
-            "'.secrets-baseline' in the repo root."
+            "Path to an allowlist file (one "
+            "'<path>:<pattern>:<token-sha256-prefix>' fingerprint per "
+            "line; '#' for comments). Defaults to '.secrets-baseline' "
+            "in the repo root."
+        ),
+    )
+    # Enumeration modes. Mutually exclusive with each other; either one
+    # replaces the positional file list so the shell never has to relay
+    # filenames (the word-splitting bug lived in that relay).
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--staged",
+        action="store_true",
+        help=(
+            "Enumerate staged files via 'git diff --cached --name-only "
+            "--diff-filter=ACM -z' instead of taking paths on the "
+            "command line. Space/bracket/newline-safe; use this from "
+            "shell hooks."
+        ),
+    )
+    mode.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Scan every git-tracked file ('git ls-files -z'). Used by "
+            "CI to cover contributors without local hooks."
         ),
     )
     parser.add_argument(
@@ -303,10 +457,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if (args.staged or args.all) and args.paths:
+        # Refuse the ambiguous combination rather than guessing which
+        # list the caller meant.
+        parser.error("--staged/--all cannot be combined with explicit paths")
+
     allowlist = load_allowlist(args.baseline)
 
+    if args.staged:
+        paths = _staged_files()
+    elif args.all:
+        paths = _all_tracked_files()
+    else:
+        paths = list(args.paths)
+
     all_findings: List[Finding] = []
-    for p in args.paths:
+    for p in paths:
         all_findings.extend(scan_path(p, allowlist))
 
     if not all_findings:

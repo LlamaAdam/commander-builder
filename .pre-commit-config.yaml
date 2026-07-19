@@ -25,4 +25,8 @@ repos:
         # so devs can override here without editing the script.
         exclude: '\.(zip|gz|tar|whl|pyc|so|dll|exe|jar|class|png|jpg|jpeg|gif|webp|ico|pdf|lock|min\.js|min\.css|woff2?|ttf)$'
         # The hook receives staged file paths; pre-commit handles staging.
+        # Space-safety: pre-commit execs the entry with filenames as
+        # separate argv elements (no shell word-splitting), so names
+        # with spaces/brackets like "[USER] My Deck [B3].dck" arrive
+        # intact — unlike the old shell-hook `echo | xargs` pipeline.
         pass_filenames: true
