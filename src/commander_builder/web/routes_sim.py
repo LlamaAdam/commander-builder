@@ -326,12 +326,25 @@ def make_sim_blueprint(
             "pods_completed": len(report.pods),
             "pods_planned": report.pods_planned or len(report.pods),
             "stopped_early": bool(report.stopped_early),
+            # Pod-failure telemetry ("no silent failures"): crashed /
+            # dead-timed-out pods are EXCLUDED from total_games by
+            # compare(); tell the UI so a verdict built on fewer games
+            # than requested isn't presented as a full-strength result.
+            # getattr defaults keep this endpoint working with report
+            # doubles (tests fake compare() with SimpleNamespace) and any
+            # pre-fix report shape that lacks the failure fields.
+            "failed_pods": getattr(report, "failed_pods", 0),
+            "timed_out_pods": getattr(report, "timed_out_pods", 0),
+            "excluded_games": getattr(report, "excluded_games", 0),
+            "pod_failures": getattr(report, "pod_failures", []),
             # Sprint 1C telemetry: per-pod intra-pod abort summary so
             # the UI can show "Pod 2 stopped at game 3/5 (decisive)".
             "pod_summaries": [
                 {
                     "pod_index": p.get("pod_index", i + 1),
                     "intra_pod_aborted": bool(p.get("intra_pod_aborted")),
+                    "pod_failed": bool(p.get("pod_failed")),
+                    "failure_reason": p.get("failure_reason"),
                     "games_actually_played": int(
                         p.get("games_actually_played") or 0
                     ),

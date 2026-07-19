@@ -158,23 +158,59 @@ def run_one_iteration(
     )
 
     # Step 6: verdict.
-    verdict = analyze(
-        AnalystInput(
-            deck_name=deck_filename,
-            bracket=bracket,
-            audit_manifest=audit_manifest,
-            sim_report=cmp_report.to_dict(),
-        ),
-        config=analyst_config,
-    )
+    #
+    # Guard ("no silent failures"): if every pod failed — JVM crash,
+    # timeout with nothing salvageable — compare() returns total_games=0.
+    # The old code divided by max(1, total - draws) and recorded
+    # win_rate_old=0.0 / win_rate_new=0.0, a FABRICATED "empirical
+    # neutral" that poisoned the knowledge log as if 0-0 had actually
+    # been observed at the table. Refuse to render an empirical verdict
+    # on zero attributed games: record the row as 'pending' (the same
+    # label _proposer_sim._verdict_from_ab uses for skipped/failed sims)
+    # with NULL win rates, so the iteration can be re-run later and no
+    # analyst/LLM wastes a call on an empty sim.
+    decisive = cmp_report.total_games - cmp_report.draws
+    if cmp_report.total_games == 0:
+        reason = (
+            f"sim produced no attributed games "
+            f"({cmp_report.failed_pods}/{cmp_report.pods_planned or len(cmp_report.pods)} "
+            f"pod(s) failed, {cmp_report.excluded_games} unattributed game(s) "
+            f"discarded) — no empirical verdict recorded"
+        )
+        print(f"WARNING: {reason}", flush=True)
+        verdict = Verdict(
+            label="pending",
+            confidence=0.0,
+            reasoning=reason,
+            lessons=[],
+            source="harness",
+        )
+        win_rate_old = None
+        win_rate_new = None
+        margin = None
+    else:
+        verdict = analyze(
+            AnalystInput(
+                deck_name=deck_filename,
+                bracket=bracket,
+                audit_manifest=audit_manifest,
+                sim_report=cmp_report.to_dict(),
+            ),
+            config=analyst_config,
+        )
+        # Draws are excluded from the denominator. If every attributed
+        # game drew there is no decisive sample — record NULL win rates
+        # rather than a fake 0.0/0.0 (the old max(1, ...) clamp did
+        # exactly that).
+        win_rate_old = (
+            round(cmp_report.old_stats.wins / decisive, 3) if decisive > 0 else None
+        )
+        win_rate_new = (
+            round(cmp_report.new_stats.wins / decisive, 3) if decisive > 0 else None
+        )
+        margin = cmp_report.new_stats.wins - cmp_report.old_stats.wins
 
     # Step 7: persist.
-    win_rate_old = (
-        cmp_report.old_stats.wins / max(1, cmp_report.total_games - cmp_report.draws)
-    )
-    win_rate_new = (
-        cmp_report.new_stats.wins / max(1, cmp_report.total_games - cmp_report.draws)
-    )
     snapshot_text = new_path.read_text(encoding="utf-8") if new_path.exists() else None
     # Use the Moxfield publicId from the .dck metadata as the durable deck_id.
     # Falls back to the filename if the deck pre-dates the Moxfield= metadata
@@ -192,9 +228,9 @@ def run_one_iteration(
             sim_report=cmp_report.to_dict(),
             verdict=verdict.label,
             verdict_notes=verdict.reasoning,
-            win_rate_old=round(win_rate_old, 3),
-            win_rate_new=round(win_rate_new, 3),
-            margin=cmp_report.new_stats.wins - cmp_report.old_stats.wins,
+            win_rate_old=win_rate_old,
+            win_rate_new=win_rate_new,
+            margin=margin,
             deck_snapshot=snapshot_text,
         ),
         db_path=db_path,
@@ -204,6 +240,10 @@ def run_one_iteration(
         "kept": "continue",
         "reverted": "revert",
         "neutral": "stop",  # User decides; loop pauses by default.
+        # Sim failed outright (zero attributed games) — nothing empirical
+        # happened, so the only sane move is to stop and let the user
+        # investigate/re-run. Continuing would iterate on unverified data.
+        "pending": "stop",
     }[verdict.label]
 
     return IterationResult(

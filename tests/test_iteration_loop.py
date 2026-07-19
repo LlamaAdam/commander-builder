@@ -268,3 +268,49 @@ def test_run_one_iteration_writes_deck_snapshot_blob(tmp_path, staged_decks, mon
     assert fetched.deck_snapshot is not None
     assert "NewCard" in fetched.deck_snapshot
     assert "Moxfield=stable-public-id" in fetched.deck_snapshot
+
+
+def test_run_one_iteration_refuses_verdict_on_zero_attributed_games(
+    tmp_path, staged_decks, monkeypatch, capsys,
+):
+    """The bug: a fully-failed sim (every pod crashed/timed out → 0
+    attributed games) recorded win_rate_old=0.0 / win_rate_new=0.0 via the
+    max(1, ...) clamp — a fabricated 'empirical neutral' in the knowledge
+    log. It must instead land as 'pending' (the failed-sim label
+    _proposer_sim._verdict_from_ab uses) with NULL win rates, and the
+    analyst must not even be consulted."""
+    canned = _make_canned_comparison(old_wins=0, new_wins=0, draws=0, total=0)
+    canned.failed_pods = 2
+    canned.pods_planned = 2
+    canned.excluded_games = 7
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare", lambda **kw: canned,
+    )
+
+    # The analyst has no business rendering a verdict on an empty sim —
+    # fail the test if it's called.
+    def _no_analyst(*a, **kw):
+        raise AssertionError("analyze() must not be called on 0 attributed games")
+    monkeypatch.setattr("commander_builder.iteration_loop.analyze", _no_analyst)
+
+    db = tmp_path / "kl.sqlite"
+    result = run_one_iteration(
+        deck_filename=staged_decks["v1"],
+        new_deck_filename=staged_decks["v2"],
+        bracket=3,
+        audit_manifest={"added": ["NewCard"], "removed": ["OldCard"]},
+        db_path=db,
+    )
+
+    assert result.verdict.label == "pending"
+    assert result.next_action == "stop"
+
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    assert fetched.verdict == "pending"
+    # NULL, not a fake 0.0/0.0 empirical neutral.
+    assert fetched.win_rate_old is None
+    assert fetched.win_rate_new is None
+    assert fetched.margin is None
+    assert "no attributed games" in (fetched.verdict_notes or "")
+    # Loud warning on the console.
+    assert "WARNING" in capsys.readouterr().out

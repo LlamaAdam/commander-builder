@@ -116,6 +116,25 @@ class ComparisonReport:
     # length is what actually ran.
     stopped_early: bool = False
     pods_planned: int = 0
+    # Pod-failure telemetry ("no silent failures"). A pod whose JVM
+    # crashed at startup, or that timed out with nothing attributable,
+    # is EXCLUDED from total_games / win aggregation — folding its
+    # unattributed games in would dilute both versions' win rates
+    # toward zero with no warning. These fields let downstream
+    # consumers (iteration_loop, web dashboard, _format_summary) see
+    # that the verdict rests on fewer games than were requested.
+    #   failed_pods       — pods excluded entirely (crash / dead timeout)
+    #   timed_out_pods    — pods that hit the watchdog but whose finished
+    #                       games WERE salvaged and counted (truncated,
+    #                       not discarded)
+    #   excluded_games    — per-game results observed in failed pods that
+    #                       we threw away because no winner was attributable
+    #   pod_failures      — one dict per failed pod: index, decks, reason,
+    #                       returncode, timed_out, unattributed_games
+    failed_pods: int = 0
+    timed_out_pods: int = 0
+    excluded_games: int = 0
+    pod_failures: list[dict] = field(default_factory=list)
 
     @property
     def winner(self) -> str:
@@ -420,6 +439,33 @@ def _synthesize_match_result(state: dict) -> str:
     return "Match Result: " + " ".join(parts) + "\n"
 
 
+def _salvage_wins_from_stdout(stdout: str) -> dict:
+    """Post-hoc scan of a killed pod's stdout for per-game winner lines.
+
+    Returns the same ``state`` shape ``_make_pod_abort_check`` builds, so
+    ``_synthesize_match_result`` can consume it. Used on the TIMEOUT path
+    (and by ``run_match``): when the watchdog kills Forge before the
+    trailing ``Match Result:`` summary, ``log_parser.parse()`` still
+    counts every streamed ``Game Result:`` line into ``games_completed``
+    but leaves ``deck_results`` EMPTY — those N finished games would then
+    enter the totals with 0 wins for every seat and silently dilute win
+    rates. Re-scanning stdout recovers the per-game winners that Forge
+    already told us about, exactly like the intra-pod-abort path does
+    with its incrementally-built state.
+    """
+    state: dict = {"wins_by_seat_name": {}, "games_seen": 0}
+    for line in stdout.splitlines():
+        m = _PER_GAME_WIN_RE.match(line.strip())
+        if not m:
+            continue
+        seat = int(m.group(2))
+        name = m.group(3).strip()
+        key = (seat, name)
+        state["wins_by_seat_name"][key] = state["wins_by_seat_name"].get(key, 0) + 1
+        state["games_seen"] += 1
+    return state
+
+
 def _run_one_pod(
     runner: ForgeRunner,
     pod: list[str],
@@ -466,17 +512,58 @@ def _run_one_pod(
         )
     stdout = result.stdout
     pod_aborted = bool(abort_state and abort_state.get("aborted"))
+    timeout_salvaged = False
     if pod_aborted and "Match Result:" not in stdout:
         # The abort killed Forge before its trailing summary fired.
         # Stitch in a synthetic one so log_parser can attribute wins.
         stdout = stdout + _synthesize_match_result(abort_state)
+    elif result.timed_out and "Match Result:" not in stdout:
+        # TIMEOUT path — mirror the abort path above. The watchdog killed
+        # Forge before the trailing summary, but any game that DID finish
+        # already printed its "Game Result: ... has won!" line. Without
+        # synthesis those N games would land in totals as games_completed=N
+        # with deck_results=[] — 0 wins for both versions, silently
+        # diluting the comparison. Salvage what actually finished.
+        salvaged = _salvage_wins_from_stdout(stdout)
+        if salvaged["wins_by_seat_name"]:
+            stdout = stdout + _synthesize_match_result(salvaged)
+            timeout_salvaged = True
     parsed = parse(stdout)
     ma = analyze(stdout)
+
+    # Failure classification ("no silent failures"). SimResult never
+    # raises — it CARRIES the failure in error/returncode/timed_out and
+    # it is on us, the consumer, to inspect them. Rules:
+    #   - error without timeout        → subprocess never ran / blew up
+    #   - nonzero exit (not our abort  → JVM crashed on its own; a real
+    #     kill, not a timeout)           crash is not salvageable data
+    #     (same policy as forge_runner's A/B path: don't rescue crashes)
+    #   - timed out with NOTHING       → pod hung before any game
+    #     attributable                   finished; nothing to count
+    # A nonzero returncode caused by OUR intra-pod-abort kill is expected
+    # and is NOT a failure — the synthesized Match Result covers it.
+    pod_failed = False
+    failure_reason: Optional[str] = None
+    if result.error and not result.timed_out:
+        pod_failed = True
+        failure_reason = result.error
+    elif (
+        result.returncode not in (0, None)
+        and not pod_aborted
+        and not result.timed_out
+    ):
+        pod_failed = True
+        failure_reason = f"Forge exited with code {result.returncode}"
+    elif result.timed_out and not parsed.deck_results:
+        pod_failed = True
+        failure_reason = result.error or "timed out with no attributable game results"
+
     print(
         f"--- Pod {pod_index + 1}/{total_pods} done in "
         f"{result.duration_sec:.1f}s"
         + (f" (intra-pod abort, {abort_state['games_seen']}/{games_per_pod} games)"
            if pod_aborted else "")
+        + (f" (FAILED: {failure_reason})" if pod_failed else "")
         + " ---",
         flush=True,
     )
@@ -486,7 +573,14 @@ def _run_one_pod(
         "duration_sec": round(result.duration_sec, 1),
         "returncode": result.returncode,
         "timed_out": result.timed_out,
+        "error": result.error,
         "intra_pod_aborted": pod_aborted,
+        # Failure surface for the aggregator + persisted report: the
+        # aggregator uses pod_failed to EXCLUDE this pod's games, and the
+        # JSON keeps the reason so a post-mortem doesn't need the console.
+        "pod_failed": pod_failed,
+        "failure_reason": failure_reason,
+        "timeout_salvaged": timeout_salvaged,
         "games_actually_played": (
             abort_state["games_seen"] if abort_state else games_per_pod
         ),
@@ -602,6 +696,44 @@ def compare(
         ma = pr.pop("_analyzed")
         pr["pod_index"] = pr["pod_index"] + 1   # display is 1-based
         completed_pods[pr["pod_index"] - 1] = pr
+        if pr["pod_failed"]:
+            # No silent failures: a crashed or dead-timed-out pod must not
+            # contribute to total_games. parse() counts per-game lines into
+            # games_completed even when no Match Result attributed a winner
+            # (deck_results=[] → draws property reads 0), so folding the pod
+            # in would add N games with 0 wins for BOTH versions — silently
+            # dragging both win rates toward zero. Exclude it, record the
+            # failure on the report, and warn loudly.
+            report.failed_pods += 1
+            report.excluded_games += parsed.games_completed
+            report.pod_failures.append({
+                "pod_index": pr["pod_index"],
+                "pod": pr["pod"],
+                "reason": pr["failure_reason"],
+                "returncode": pr["returncode"],
+                "timed_out": pr["timed_out"],
+                "unattributed_games": parsed.games_completed,
+            })
+            print(
+                f"WARNING: pod {pr['pod_index']}/{len(pods)} FAILED and is "
+                f"EXCLUDED from the comparison: {pr['failure_reason']} "
+                f"({parsed.games_completed} unattributed game(s) discarded).",
+                flush=True,
+            )
+            return
+        if pr["timed_out"]:
+            # The pod hit the watchdog but finished games WERE attributed
+            # (either a synthesized Match Result or Forge's own trailing
+            # line made it out). Those results are real — count them — but
+            # flag the truncation so the verdict isn't mistaken for a
+            # full-length run.
+            report.timed_out_pods += 1
+            print(
+                f"WARNING: pod {pr['pod_index']}/{len(pods)} TIMED OUT "
+                f"mid-run; salvaged {parsed.games_completed} finished "
+                f"game(s) of {games_per_pod} requested.",
+                flush=True,
+            )
         report.total_games += parsed.games_completed
         report.draws += parsed.draws
         _aggregate_pod(
@@ -687,6 +819,18 @@ def compare(
         if lost_turns[target]:
             stats.avg_turns_when_lost = round(sum(lost_turns[target]) / len(lost_turns[target]), 1)
 
+    # Surface pod failures one more time at the end — per-pod warnings can
+    # scroll away under parallel pod output, and this is the last thing the
+    # user reads before the verdict line.
+    if report.failed_pods:
+        print(
+            f"\nWARNING: {report.failed_pods}/{report.pods_planned or len(report.pods)} "
+            f"pod(s) failed and were excluded "
+            f"({report.excluded_games} unattributed game(s) discarded). "
+            f"The verdict is based on {report.total_games} attributed game(s) only.",
+            flush=True,
+        )
+
     # Persist.
     out_dir.mkdir(parents=True, exist_ok=True)
     old_stem = re.sub(r"[^\w-]+", "_", Path(old_deck).stem).strip("_") or "old"
@@ -708,6 +852,16 @@ def _format_summary(report: ComparisonReport) -> str:
         f"Head-to-head: OLD {report.old_stats.wins} - {report.new_stats.wins} NEW  "
         f"(winner: {report.winner.upper()}, margin {report.margin})"
     )
+    # Failure telemetry belongs right under the verdict line — a verdict
+    # built on half the requested pods reads very differently.
+    if report.failed_pods or report.timed_out_pods:
+        lines.append(
+            f"!! {report.failed_pods} failed pod(s) EXCLUDED "
+            f"({report.excluded_games} unattributed game(s) discarded), "
+            f"{report.timed_out_pods} timed-out pod(s) truncated."
+        )
+        for f in report.pod_failures:
+            lines.append(f"!!   pod {f['pod_index']}: {f['reason']}")
     lines.append("")
     lines.append("Per-version detail:")
     for label, stats in [("old", report.old_stats), ("new", report.new_stats)]:

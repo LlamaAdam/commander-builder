@@ -1090,3 +1090,223 @@ def test_compare_attributes_wins_from_snapshot_decks_internal_names(
     # because 'My Deck' normalized to neither 'My Deck v1' nor 'My Deck v2'.
     assert report.old_stats.wins == 2
     assert report.new_stats.wins == 1
+
+
+# ---------------------------------------------------------------------------
+# Pod-failure surfacing — crashed / timed-out pods must not dilute stats
+# ---------------------------------------------------------------------------
+
+def test_salvage_wins_from_stdout_parses_per_game_lines():
+    """Post-hoc salvage must recover the same per-game winner tallies the
+    streaming abort-check would have accumulated."""
+    from commander_builder.compare_versions import (
+        _salvage_wins_from_stdout,
+        _synthesize_match_result,
+    )
+    from commander_builder.log_parser import parse
+
+    stdout = (
+        "Turn: Turn 3 (Ai(1)-Old)\n"
+        "Game Result: Game 1 ended in 60000 ms. Ai(2)-New has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(1)-Old has won!\n"
+        "Game Result: Game 3 ended in 60000 ms. Ai(2)-New has won!\n"
+    )
+    state = _salvage_wins_from_stdout(stdout)
+    assert state["games_seen"] == 3
+    line = _synthesize_match_result(state)
+    parsed = parse(line)
+    by_name = {dr.name: dr.wins for dr in parsed.deck_results}
+    assert by_name == {"Old": 1, "New": 2}
+
+
+def test_compare_excludes_crashed_pod_and_flags_report(
+    tmp_path, monkeypatch, capsys,
+):
+    """A pod whose JVM died at startup (nonzero rc, no games) used to
+    contribute 0 games with no warning; a pod that crashed mid-run with
+    per-game lines but no Match Result silently DILUTED win rates. Both
+    must now be excluded and surfaced."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    good_stdout = _make_pod_stdout(2, 0)
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            if "Filler0 [B3].dck" in pod:
+                return SimResult(
+                    cmd=["x"], returncode=0, duration_sec=1.0,
+                    stdout=good_stdout, stderr="", timed_out=False, error=None,
+                )
+            # Pod 2: JVM crash — nonzero rc, nothing usable on stdout.
+            return SimResult(
+                cmd=["x"], returncode=1, duration_sec=0.1,
+                stdout="", stderr="java.lang.NoClassDefFoundError",
+                timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+        early_stop=False,
+    )
+
+    # Only the healthy pod's games count.
+    assert report.total_games == 2
+    assert report.old_stats.wins == 2
+    assert report.new_stats.wins == 0
+    # The failure is flagged everywhere a consumer might look.
+    assert report.failed_pods == 1
+    assert len(report.pod_failures) == 1
+    assert report.pod_failures[0]["reason"] == "Forge exited with code 1"
+    # The failed pod still appears in the pods list (post-mortem data)
+    # with its failure flag set.
+    assert len(report.pods) == 2
+    failed_entries = [p for p in report.pods if p["pod_failed"]]
+    assert len(failed_entries) == 1
+    assert failed_entries[0]["failure_reason"] == "Forge exited with code 1"
+    # to_dict carries the new fields for the web dashboard / analyst.
+    d = report.to_dict()
+    assert d["failed_pods"] == 1
+    assert d["pod_failures"][0]["returncode"] == 1
+    # Loud warning on the console.
+    out = capsys.readouterr().out
+    assert "FAILED" in out and "EXCLUDED" in out
+
+
+def test_compare_crashed_pod_partial_games_not_counted_as_dilution(
+    tmp_path, monkeypatch,
+):
+    """The exact dilution vector from the bug report: a killed pod streamed
+    N per-game winner lines but no trailing Match Result. parse() yields
+    games_completed=N with deck_results=[] — pre-fix those N games entered
+    total_games with 0 wins for both sides. Crashes are NOT salvaged
+    (consistent with forge_runner's A/B policy) so the games must be
+    excluded entirely."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=1)
+    partial = (
+        "Game Result: Game 1 ended in 60000 ms. Ai(2)-New has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(2)-New has won!\n"
+    )
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=137, duration_sec=5.0,
+                stdout=partial, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+    )
+    # Pre-fix: total_games == 2 with 0 wins each (silent dilution).
+    assert report.total_games == 0
+    assert report.failed_pods == 1
+    assert report.excluded_games == 2
+    assert report.pod_failures[0]["unattributed_games"] == 2
+
+
+def test_compare_timeout_salvages_partial_games_via_synthesis(
+    tmp_path, monkeypatch, capsys,
+):
+    """A timed-out pod that streamed per-game winner lines but was killed
+    before the trailing Match Result gets a synthesized one (same as the
+    intra-pod abort path): the finished games are attributed and counted,
+    the truncation is flagged, and nothing is booked as a phantom loss."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=1)
+    partial = (
+        "Game Result: Game 1 ended in 60000 ms. Ai(2)-New has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(1)-Old has won!\n"
+    )
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=None, duration_sec=600.0,
+                stdout=partial, stderr="", timed_out=True,
+                error="Timed out after 600s",
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+    )
+    # Pre-fix: total_games == 2 with 0 wins for both sides. Post-fix the
+    # two finished games are attributed 1-1 via the synthesized summary.
+    assert report.failed_pods == 0
+    assert report.timed_out_pods == 1
+    assert report.old_stats.wins == 1
+    assert report.new_stats.wins == 1
+    assert report.total_games == 2
+    assert report.pods[0]["timeout_salvaged"] is True
+    out = capsys.readouterr().out
+    assert "TIMED OUT" in out
+
+
+def test_compare_timeout_with_nothing_salvageable_is_excluded(
+    tmp_path, monkeypatch, capsys,
+):
+    """A pod that hung before ANY game finished (no per-game winner lines)
+    has nothing to salvage: it is a failed pod, excluded and warned."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=1)
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=None, duration_sec=600.0,
+                stdout="Turn: Turn 12 (Ai(1)-Old)\n", stderr="",
+                timed_out=True, error="Timed out after 600s",
+            )
+
+    report = cv.compare(
+        old_deck="[USER] Old [B3].dck",
+        new_deck="[USER] New [B3].dck",
+        bracket=3, games_per_pod=5, filler_pairs=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+    )
+    assert report.total_games == 0
+    assert report.failed_pods == 1
+    assert report.timed_out_pods == 0
+    assert report.pod_failures[0]["timed_out"] is True
+    assert "Timed out" in report.pod_failures[0]["reason"]
+    out = capsys.readouterr().out
+    assert "FAILED" in out and "EXCLUDED" in out
+
+
+def test_format_summary_surfaces_pod_failures():
+    r = ComparisonReport(
+        old_deck="old.dck", new_deck="new.dck", bracket=3, timestamp="x",
+        mode="pod", games_per_pod=10, total_games=10, draws=0,
+        old_stats=VersionStats(deck_filename="old.dck", wins=6),
+        new_stats=VersionStats(deck_filename="new.dck", wins=4),
+        failed_pods=1, excluded_games=3,
+        pod_failures=[{
+            "pod_index": 2, "pod": ["a", "b", "c", "d"],
+            "reason": "Forge exited with code 1",
+            "returncode": 1, "timed_out": False, "unattributed_games": 3,
+        }],
+    )
+    s = _format_summary(r)
+    assert "1 failed pod(s) EXCLUDED" in s
+    assert "Forge exited with code 1" in s
