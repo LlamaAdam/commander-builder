@@ -1027,6 +1027,17 @@ def apply_proposal_to_deck(
         proposed_text, post_swap_main,
     )
 
+    # _apply_swaps_to_dck deliberately passes the [metadata] section
+    # through untouched, so at this point the v2 text still carries the
+    # SOURCE deck's Name=. Forge reports Name= (not the filename) in its
+    # Match Result lines, so a stale Name= makes the old and new decks
+    # indistinguishable to every name-keyed consumer (compare_versions,
+    # pool_curator, the Forge deck picker). Stamp the output file's own
+    # stem so log_parser._normalize maps results back to THIS file — the
+    # invariant is documented in dck_meta.
+    from .dck_meta import rewrite_name
+    proposed_text = rewrite_name(proposed_text, out_path.stem)
+
     # Record what actually happened so the CLI summary + iteration
     # log can distinguish "Claude wanted X" from "the new .dck has Y".
     proposal.applied_adds = list(applied_adds)

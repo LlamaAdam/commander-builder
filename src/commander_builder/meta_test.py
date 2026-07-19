@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Optional
 
 from .compare_versions import COMPARE_OUT_DIR, ComparisonReport, compare
+from .dck_meta import rewrite_name
 from .edhrec_client import (
     fetch_average_deck,
     fetch_commander_page,
@@ -251,6 +252,16 @@ def _import_reference(deck_json: dict, source: str,
     name = deck_json.get("name", "Unknown Reference")
     text = to_dck(deck_json)
     out_path = _ref_destination(source, name, bracket, base=deck_dir)
+    # to_dck stamps the deck's Moxfield/EDHREC display name into Name=, but
+    # the file lands as "[REF] <source-tag> <safe-name> [Bn].dck" —
+    # log_parser._normalize never strips the "[REF] <tag>" prefix, so the
+    # normalized filename could never equal the normalized Name= and the
+    # reference scored 0 wins in every meta-test compare (silently
+    # flattering the user deck). Rewrite Name= to the filename stem so both
+    # sides normalize identically (invariant documented in dck_meta). The
+    # ReferenceDeck record below keeps the human-readable ``name`` for
+    # display; only the on-disk metadata changes.
+    text = rewrite_name(text, out_path.stem)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
     main_cards = _parse_main_card_names(out_path)

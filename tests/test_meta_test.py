@@ -29,6 +29,49 @@ def test_ref_destination_unknown_bracket(tmp_path):
     assert "[B?]" in p.name
 
 
+# --- _import_reference — Name= alignment (regression) ----------------------
+
+def test_import_reference_rewrites_name_to_ref_filename_stem(tmp_path):
+    """Regression: ``to_dck`` stamps the raw Moxfield/EDHREC deck name into
+    Name= while the file lands as ``[REF] <tag> <name> [Bn].dck``.
+    ``log_parser._normalize`` never strips the '[REF] <tag>' prefix, so the
+    normalized filename could never equal the normalized Name= — Forge's
+    Match Result wins for the reference were attributed to nobody, every
+    reference scored 0, and meta-test systematically flattered the user
+    deck. The importer must stamp the on-disk Name= to the filename stem."""
+    import re
+
+    from commander_builder.log_parser import _normalize
+    from commander_builder.meta_test import _import_reference
+
+    deck_json = {
+        "name": "Cool Reference Deck", "publicId": "mx-9", "bracket": 3,
+        "boards": {
+            "commanders": {"cards": {
+                "k1": {"quantity": 1, "card": {"name": "Hakbal"}},
+            }},
+            "mainboard": {"cards": {
+                "k2": {"quantity": 1, "card": {"name": "Sol Ring"}},
+            }},
+        },
+    }
+    ref = _import_reference(deck_json, "moxfield_top_likes", deck_dir=tmp_path)
+    path = tmp_path / ref.deck_filename
+    text = path.read_text(encoding="utf-8")
+
+    m = re.search(r"^Name=(.+)$", text, re.MULTILINE)
+    assert m, "reference deck must carry a Name= line"
+    # Forge reports Name=; compare_versions queries by filename. The two
+    # must normalize identically or the reference's wins vanish.
+    assert m.group(1) == path.stem
+    assert _normalize(m.group(1)) == _normalize(path.stem)
+    assert len(re.findall(r"^Name=", text, re.MULTILINE)) == 1
+    # Display name (used in the report header) keeps the human label.
+    assert ref.name == "Cool Reference Deck"
+    # Card content unaffected by the rewrite.
+    assert "Sol Ring" in text
+
+
 # --- _parse_main_card_names ------------------------------------------------
 
 def test_parse_main_card_names_strips_qty_and_set(tmp_path):

@@ -989,3 +989,104 @@ def test_compare_single_pod_skips_threadpool(tmp_path, monkeypatch):
     assert len(report.pods) == 1
     assert report.old_stats.wins == 2
     assert report.new_stats.wins == 0
+
+
+# ---------------------------------------------------------------------------
+# End-to-end Name= alignment — snapshot writer -> Forge names -> attribution
+# ---------------------------------------------------------------------------
+
+def test_compare_attributes_wins_from_snapshot_decks_internal_names(
+    tmp_path, monkeypatch,
+):
+    """Regression for the snapshot-Name= misattribution.
+
+    Real Forge reports each seat's [metadata] Name= field in its Match
+    Result lines — NOT the filename. snapshot() used to be a plain copy,
+    so '[USER] My Deck v1 [B3].dck' and '... v2 ...' both reported the
+    SOURCE deck's 'Name=My Deck'; _aggregate_pod (which keys on the
+    normalized filenames 'My Deck v1' / 'My Deck v2') matched neither and
+    every snapshot A/B scored 0-0.
+
+    This test drives the REAL snapshot writer, then fakes only the Forge
+    boundary: the fake runner reads each pod deck's Name= from disk (as
+    Forge would) and reports those names. With the plain-copy writer the
+    assertions below read 0-0; with the Name=-stamping writer the wins
+    land on the correct versions.
+    """
+    import re as _re
+
+    from commander_builder import compare_versions as cv
+    from commander_builder.forge_runner import SimResult
+    from commander_builder.snapshot_deck import snapshot
+
+    deck_dir = tmp_path / "decks" / "commander"
+    deck_dir.mkdir(parents=True)
+    src = deck_dir / "[USER] My Deck [B3].dck"
+    # Name= as moxfield_import writes it: the RAW deck name, not the stem.
+    src.write_text(
+        "[metadata]\nName=My Deck\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+    for f in ("Filler0 [B3].dck", "Filler1 [B3].dck"):
+        p = deck_dir / f
+        p.write_text(
+            f"[metadata]\nName={p.stem}\n[Commander]\n1 X\n[Main]\n1 Forest\n",
+            encoding="utf-8",
+        )
+
+    # Stage v1/v2 through the real writer under test.
+    v1 = snapshot("[USER] My Deck [B3].dck", "v1", base=deck_dir)
+    v2 = snapshot("[USER] My Deck [B3].dck", "v2", base=deck_dir)
+    assert v1.name == "[USER] My Deck v1 [B3].dck"
+    assert v2.name == "[USER] My Deck v2 [B3].dck"
+
+    monkeypatch.setattr(cv, "DECK_DIR", deck_dir)
+    monkeypatch.setattr(
+        cv, "_load_pool",
+        lambda bracket: ["Filler0 [B3].dck", "Filler1 [B3].dck"],
+    )
+
+    def _name_of(deck_filename: str) -> str:
+        """What Forge would report for this seat: the internal Name=."""
+        text = (deck_dir / deck_filename).read_text(encoding="utf-8")
+        m = _re.search(r"^Name=(.+)$", text, _re.MULTILINE)
+        assert m, f"{deck_filename} has no Name= line"
+        return m.group(1)
+
+    class FakeRunner:
+        """Replays a fixed 2-1-0-0 pod using the decks' INTERNAL names."""
+
+        def run(self, pod, num_games=0, **kwargs):
+            names = [_name_of(f) for f in pod]
+            wins = [2, 1, 0, 0]
+            match = " ".join(
+                f"Ai({i + 1})-{n}: {w}"
+                for i, (n, w) in enumerate(zip(names, wins))
+            )
+            games = "".join(
+                f"Game Result: Game ended in 60000 ms. "
+                f"Ai({i + 1})-{n} has won!\n"
+                for i, (n, w) in enumerate(zip(names, wins))
+                for _ in range(w)
+            )
+            return SimResult(
+                cmd=["fake"], returncode=0, duration_sec=0.01,
+                stdout=f"Match Result: {match}\n{games}",
+                stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck=v1.name,
+        new_deck=v2.name,
+        bracket=3,
+        games_per_pod=3,
+        filler_pairs=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False,
+    )
+
+    # Seat 1 (v1) won 2, seat 2 (v2) won 1. Pre-fix both stats read 0
+    # because 'My Deck' normalized to neither 'My Deck v1' nor 'My Deck v2'.
+    assert report.old_stats.wins == 2
+    assert report.new_stats.wins == 1

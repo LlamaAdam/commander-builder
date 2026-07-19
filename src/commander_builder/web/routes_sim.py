@@ -152,24 +152,12 @@ def make_sim_blueprint(
         # report 'Name=Hakbal of the Surging Soul' in Forge's Match
         # Result lines and log_parser can't attribute wins to either
         # side — every game looks like a tie regardless of who won.
-        import re as _re_meta
+        # The rewrite logic itself lives in dck_meta (shared with the
+        # snapshot / proposer / meta_test deck writers, which hit the
+        # same misattribution).
+        from ..dck_meta import rewrite_name
         staged_name = f"{bare_stem}_proposed_{ts}"
-        if _re_meta.search(r"^Name=.+$", new_text, flags=_re_meta.MULTILINE):
-            new_text_staged = _re_meta.sub(
-                r"^Name=.+$", f"Name={staged_name}", new_text,
-                count=1, flags=_re_meta.MULTILINE,
-            )
-        else:
-            # No metadata Name line — synthesize one at the top.
-            if "[metadata]" in new_text.lower():
-                new_text_staged = _re_meta.sub(
-                    r"(\[metadata\][^\n]*\n)", rf"\1Name={staged_name}\n",
-                    new_text, count=1, flags=_re_meta.IGNORECASE,
-                )
-            else:
-                new_text_staged = (
-                    f"[metadata]\nName={staged_name}\n\n" + new_text
-                )
+        new_text_staged = rewrite_name(new_text, staged_name)
 
         # When mode='1v1' the format is `constructed`, but the user's
         # decks are commander-format (have a [Commander] section).
@@ -196,11 +184,7 @@ def make_sim_blueprint(
             # Ensure the old deck's metadata Name= is also distinct
             # so log_parser can split wins between old + new.
             old_staged_name = f"{bare_stem}_converted_{ts}"
-            if _re_meta.search(r"^Name=.+$", old_text, flags=_re_meta.MULTILINE):
-                old_text = _re_meta.sub(
-                    r"^Name=.+$", f"Name={old_staged_name}", old_text,
-                    count=1, flags=_re_meta.MULTILINE,
-                )
+            old_text = rewrite_name(old_text, old_staged_name)
             old_text = _to_constructed_format(old_text)
             old_converted_path = stage_dir / f"{old_staged_name}.dck"
             try:

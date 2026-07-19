@@ -1259,6 +1259,44 @@ def test_apply_proposal_bumps_version_in_filename(tmp_path):
     assert out.name == "[USER] Foo v2 [B3].dck"
 
 
+def test_apply_proposal_rewrites_name_to_new_stem(tmp_path):
+    """Regression: ``_apply_swaps_to_dck`` deliberately preserves the
+    [metadata] section, so the v2 deck used to keep the v1 deck's Name=.
+    Forge then emitted the SAME ``Ai(N)-<Name>`` token for both sides of
+    an A/B sim, and any name-keyed attribution (compare_versions,
+    pool_curator) either credited nobody or piled both decks' wins onto
+    one side. The output must carry its OWN filename stem as Name= so
+    ``log_parser._normalize`` maps results back to the right file."""
+    import re
+
+    from commander_builder.log_parser import _normalize
+
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck", ["Sol Ring", "OldCard A"],
+    )
+    proposal = Proposal(
+        adds=["NewCard"], cuts=["OldCard A"], rationale="x",
+        source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    new_text = out.read_text(encoding="utf-8")
+
+    old_name = re.search(
+        r"^Name=(.+)$", src.read_text(encoding="utf-8"), re.MULTILINE,
+    ).group(1)
+    m = re.search(r"^Name=(.+)$", new_text, re.MULTILINE)
+    assert m, "v2 deck must carry a Name= line"
+    new_name = m.group(1)
+    # The old bug: new_name == old_name ('Test'). The fix: the v2 deck is
+    # named after its own file, distinct from the source.
+    assert new_name != old_name
+    assert _normalize(new_name) == _normalize(out.stem) == "Foo v2"
+    # Only Name= changes — the rest of the metadata section survives so
+    # resolve_deck_id can still read the Moxfield= id from the v2 file.
+    assert "Moxfield=abc" in new_text
+    assert len(re.findall(r"^Name=", new_text, re.MULTILINE)) == 1
+
+
 def test_apply_proposal_increments_existing_version(tmp_path):
     src = _make_dck(tmp_path, "[USER] Foo v3 [B3].dck", ["Sol Ring"])
     proposal = Proposal(adds=["NewCard"], cuts=[], rationale="x")
