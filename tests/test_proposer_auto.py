@@ -3469,3 +3469,258 @@ def test_auto_curate_main_batch_no_hint_when_single_deck(
     assert rc == 0
     err = capsys.readouterr().err
     assert "tip:" not in err
+
+
+# ---------------------------------------------------------------------------
+# Batch argv rewriting is flag-AWARE (adversarial-review 2026-07-19)
+# ---------------------------------------------------------------------------
+#
+# The original _build_per_deck_argv dropped "the positional deck token"
+# by dropping the first bare token ending in .dck — but flag VALUES can
+# end in .dck too (--sim-fillers "PodA.dck,PodB.dck" is the documented
+# value shape; --protect-from list.dck is a plausible filename). The
+# rewriter ate the value, leaving a dangling flag that argparse then fed
+# the next unrelated token (or errored on). And because argparse errors
+# raise SystemExit (BaseException, not Exception), that error blew
+# through the per-deck isolation boundary and killed the whole
+# overnight batch. These tests pin both fixes.
+
+
+def _capture_per_deck_argv_build(monkeypatch):
+    """Stub _process_one_deck to capture its (batch_argv, value_flags)
+    inputs without running the pipeline. Returns the capture list;
+    each entry is the fully rebuilt per-deck argv, computed with the
+    REAL _build_per_deck_argv so the assertion covers the production
+    rewrite against the production parser's flag set."""
+    import commander_builder._proposer_cli as cli
+
+    built: list[list[str]] = []
+
+    def fake_process(deck_path, batch_argv, force, value_flags):
+        built.append(
+            cli._build_per_deck_argv(deck_path, batch_argv, value_flags),
+        )
+        return {"deck": str(deck_path), "status": "ok", "rc": 0, "result": {}}
+
+    monkeypatch.setattr(cli, "_process_one_deck", fake_process)
+    return built
+
+
+def test_batch_argv_keeps_dck_flag_values(tmp_path, monkeypatch, capsys):
+    """--sim-fillers "PodA.dck,PodB.dck" and --protect-from list.dck are
+    flag VALUES, not the deck positional — the rewriter must copy them
+    through verbatim and still substitute the per-deck path up front."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+    protect_file = tmp_path / "list.dck"
+    protect_file.write_text("Some Unrelated Card\n", encoding="utf-8")
+
+    built = _capture_per_deck_argv_build(monkeypatch)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--sim-fillers", "PodA.dck,PodB.dck",
+        "--protect-from", str(protect_file),
+    ])
+    assert rc == 0
+    assert len(built) == 1
+    argv = built[0]
+    # The per-deck path is the (only) positional, substituted up front.
+    assert argv[0] == str(deck)
+    # Both value-taking flags kept their values, adjacent as passed.
+    assert argv[argv.index("--sim-fillers") + 1] == "PodA.dck,PodB.dck"
+    assert argv[argv.index("--protect-from") + 1] == str(protect_file)
+    # Batch-only flags were stripped.
+    assert "--batch" not in argv
+    assert str(tmp_path / "[USER]*.dck") not in argv
+
+
+def test_batch_argv_inline_equals_dck_value_safe(tmp_path, monkeypatch, capsys):
+    """The one-token '--flag=value.dck' form carries its value inline;
+    the rewriter must pass it through as a single untouched token."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+
+    built = _capture_per_deck_argv_build(monkeypatch)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--sim-fillers=PodA.dck,PodB.dck",
+    ])
+    assert rc == 0
+    argv = built[0]
+    assert argv[0] == str(deck)
+    assert "--sim-fillers=PodA.dck,PodB.dck" in argv
+
+
+def test_batch_with_dck_flag_values_runs_end_to_end(
+    tmp_path, monkeypatch, capsys,
+):
+    """Full-pipeline regression: pre-fix, --protect-from list.dck lost
+    its value to the positional-stripper, argparse choked on the
+    dangling flag, and the SystemExit killed the batch. Now the batch
+    completes with every deck ok."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    for n in ["A", "B"]:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+    protect_file = tmp_path / "list.dck"
+    protect_file.write_text("Some Unrelated Card\n", encoding="utf-8")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--protect-from", str(protect_file),
+        "--sim-fillers", "PodA.dck,PodB.dck",
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    deck_records = [r for r in records if "deck" in r]
+    assert len(deck_records) == 2
+    assert all(r["status"] == "ok" for r in deck_records)
+    assert records[-1]["batch_summary"]["failed"] == 0
+
+
+def test_value_taking_flags_derived_from_parser():
+    """_value_taking_flags keys off nargs: store_true-style actions
+    (nargs == 0) take no value; plain store / append actions do."""
+    import argparse
+
+    from commander_builder._proposer_cli import _value_taking_flags
+
+    p = argparse.ArgumentParser()
+    p.add_argument("positional")
+    p.add_argument("--takes-value")
+    p.add_argument("--appends", action="append")
+    p.add_argument("--boolean", action="store_true")
+    flags = _value_taking_flags(p)
+    assert "--takes-value" in flags
+    assert "--appends" in flags
+    assert "--boolean" not in flags
+    assert "positional" not in flags
+
+
+# ---------------------------------------------------------------------------
+# SystemExit isolation at the per-deck boundary
+# ---------------------------------------------------------------------------
+
+
+def _force_bad_argv_for(monkeypatch, marker: str):
+    """Wrap the real _build_per_deck_argv so decks whose filename
+    contains ``marker`` get an argv argparse rejects (unknown flag).
+    This is the cleanest way to reproduce a per-deck-only parse
+    failure: the batch-level parse of the same flags already
+    succeeded, so a naturally occurring bad per-deck argv requires a
+    rewriter bug — which the flag-aware rewrite just fixed."""
+    import commander_builder._proposer_cli as cli
+
+    real_build = cli._build_per_deck_argv
+
+    def evil_build(deck_path, batch_argv, value_flags):
+        argv = real_build(deck_path, batch_argv, value_flags)
+        if marker in deck_path.name:
+            argv = [*argv, "--definitely-not-a-real-flag"]
+        return argv
+
+    monkeypatch.setattr(cli, "_build_per_deck_argv", evil_build)
+
+
+def test_batch_systemexit_recorded_and_batch_continues(
+    tmp_path, monkeypatch, capsys,
+):
+    """A deck whose per-deck argv makes argparse exit must be recorded
+    as an error for THAT deck (with argparse's stderr message in the
+    record) while the batch continues to the next deck. Pre-fix the
+    SystemExit sailed past `except Exception` and aborted everything."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    _write_minimal_deck(tmp_path / "[USER] Bad [B3].dck", "Bad")
+    _write_minimal_deck(tmp_path / "[USER] Good [B3].dck", "Good")
+    _force_bad_argv_for(monkeypatch, "Bad")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+    ])
+    assert rc == 0  # mixed outcome: Good succeeded
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    by_stem = {Path(r["deck"]).stem: r for r in records if "deck" in r}
+    bad = by_stem["[USER] Bad [B3]"]
+    assert bad["status"] == "error"
+    assert "SystemExit" in bad["exception"]
+    # argparse's actual error text (written to stderr pre-exit) is
+    # captured into the record so overnight logs are actionable.
+    assert "--definitely-not-a-real-flag" in bad["exception"]
+    good = by_stem["[USER] Good [B3]"]
+    assert good["status"] == "ok"
+    summary = records[-1]["batch_summary"]
+    assert summary["failed"] == 1
+    assert summary["succeeded"] == 1
+
+
+def test_batch_parallel_systemexit_isolated_and_proxies_restored(
+    tmp_path, monkeypatch, capsys,
+):
+    """Same isolation under parallel dispatch, plus: the thread-local
+    stdout/stderr proxies installed for the pool are restored by the
+    outer finally even when a worker's deck died via SystemExit."""
+    import sys as _sys
+
+    from commander_builder._proposer_cli import _ThreadLocalStdoutProxy
+
+    _setup_batch_env(tmp_path, monkeypatch)
+    _write_minimal_deck(tmp_path / "[USER] Bad [B3].dck", "Bad")
+    _write_minimal_deck(tmp_path / "[USER] Good [B3].dck", "Good")
+    _force_bad_argv_for(monkeypatch, "Bad")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--parallelism", "2",
+    ])
+    assert rc == 0
+    # Proxies swapped back — a leaked proxy would silently reroute all
+    # later stdout/stderr through batch thread-local dispatch.
+    assert not isinstance(_sys.stdout, _ThreadLocalStdoutProxy)
+    assert not isinstance(_sys.stderr, _ThreadLocalStdoutProxy)
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    by_stem = {Path(r["deck"]).stem: r for r in records if "deck" in r}
+    assert by_stem["[USER] Bad [B3]"]["status"] == "error"
+    assert "SystemExit" in by_stem["[USER] Bad [B3]"]["exception"]
+    assert by_stem["[USER] Good [B3]"]["status"] == "ok"
+
+
+def test_process_one_deck_keyboard_interrupt_propagates(
+    tmp_path, monkeypatch,
+):
+    """The SystemExit catch is deliberately narrow: KeyboardInterrupt
+    (also BaseException) must still escape the per-deck boundary so
+    Ctrl-C actually stops an overnight batch instead of being logged
+    as N per-deck 'errors'."""
+    import commander_builder._proposer_cli as cli
+
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+
+    def raise_interrupt(argv):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli, "auto_curate_main", raise_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        cli._process_one_deck(deck, ["--bracket", "3"], False, frozenset())

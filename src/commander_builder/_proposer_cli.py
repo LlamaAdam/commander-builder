@@ -554,7 +554,37 @@ def _resolve_batch_glob(pattern: str) -> list[Path]:
     return matched
 
 
-def _build_per_deck_argv(deck_path: Path, batch_argv: list[str]) -> list[str]:
+def _value_taking_flags(parser) -> frozenset[str]:
+    """Return every option string of ``parser`` that consumes a
+    following value token (``--flag value`` form).
+
+    Derived from ``parser._actions`` instead of a hardcoded list so a
+    newly added flag can never silently rot the batch argv rewriter
+    (the original hardcode-free motivation: ``_build_per_deck_argv``
+    must know which flags take values to avoid mistaking a flag's
+    VALUE for the deck positional). ``_actions`` is argparse's
+    stable-in-practice internal — every action added via
+    ``add_argument`` lands there with its ``option_strings`` and
+    ``nargs`` intact.
+
+    ``nargs == 0`` covers store_true/store_false/count/help — flags
+    that consume NO value. Everything else (nargs None = exactly one
+    value, and any explicit nargs) consumes at least the next token,
+    which is all the rewriter needs to know.
+    """
+    flags: set[str] = set()
+    for action in parser._actions:
+        if not action.option_strings:
+            continue  # positional (deck_path) — not a flag
+        if action.nargs == 0:
+            continue  # store_true-style: no value token follows
+        flags.update(action.option_strings)
+    return frozenset(flags)
+
+
+def _build_per_deck_argv(
+    deck_path: Path, batch_argv: list[str], value_flags: frozenset[str],
+) -> list[str]:
     """Construct the argv for a single-deck recursive call by stripping
     batch-only flags from the batch invocation and substituting the
     resolved deck path.
@@ -563,6 +593,16 @@ def _build_per_deck_argv(deck_path: Path, batch_argv: list[str]) -> list[str]:
     every other flag intact (--bracket, --mode, --run-sim, --max-adds,
     --max-cuts, --source, --model, --dry-run, --no-log, --db-path,
     --protect*, --sim-*).
+
+    ``value_flags`` (from :func:`_value_taking_flags`) makes the walk
+    flag-AWARE: when a flag that takes a value appears in the
+    ``--flag value`` two-token form, the value token is copied through
+    verbatim rather than being considered as a positional candidate.
+    Without this, flag values that happen to end in ``.dck`` — e.g.
+    ``--sim-fillers "PodA.dck,PodB.dck"`` (the documented value shape)
+    or ``--protect-from list.dck`` — were stripped as "the positional
+    deck token", leaving a dangling flag that argparse then fed the
+    NEXT unrelated token (or errored on).
     """
     out: list[str] = []
     i = 0
@@ -578,9 +618,23 @@ def _build_per_deck_argv(deck_path: Path, batch_argv: list[str]) -> list[str]:
         if tok == "--force":
             i += 1
             continue
-        # Existing positional? In batch mode the user shouldn't have
-        # passed one (we validated above), but defensively skip it.
-        if not tok.startswith("-") and not saw_positional and tok.lower().endswith(".dck"):
+        if tok.startswith("-") and tok != "-":
+            # Flag token. The '--flag=value' one-token form carries its
+            # value inline, so copying the single token is always safe.
+            # The '--flag value' two-token form must copy BOTH tokens
+            # here so the value is never examined by the positional
+            # check below (a value ending in .dck is NOT the deck).
+            out.append(tok)
+            if "=" not in tok and tok in value_flags and i + 1 < len(batch_argv):
+                out.append(batch_argv[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        # Non-flag token: the batch invocation's own positional? In
+        # batch mode the user shouldn't have passed one (we validated
+        # above), but defensively skip the first .dck-looking token.
+        if not saw_positional and tok.lower().endswith(".dck"):
             saw_positional = True
             i += 1
             continue
@@ -603,13 +657,21 @@ _BATCH_THREAD_LOCAL = __import__("threading").local()
 
 
 class _ThreadLocalStdoutProxy:
-    """sys.stdout proxy that dispatches to a per-thread buffer when set."""
+    """sys.stdout proxy that dispatches to a per-thread buffer when set.
 
-    def __init__(self, default):
+    ``attr`` names the thread-local slot to consult, so the same class
+    doubles as the sys.stderr proxy (slot "errbuf") — parallel workers
+    need stderr captured per-thread too, because argparse writes its
+    parse-error message to stderr before raising SystemExit and the
+    per-deck failure record wants that message.
+    """
+
+    def __init__(self, default, attr: str = "buf"):
         self._default = default
+        self._attr = attr
 
     def _target(self):
-        return getattr(_BATCH_THREAD_LOCAL, "buf", None) or self._default
+        return getattr(_BATCH_THREAD_LOCAL, self._attr, None) or self._default
 
     def write(self, s):
         return self._target().write(s)
@@ -623,6 +685,7 @@ class _ThreadLocalStdoutProxy:
 
 def _process_one_deck(
     deck_path: Path, batch_argv: list[str], force: bool,
+    value_flags: frozenset[str],
 ) -> dict:
     """Run the per-deck pipeline once and return the NDJSON record.
 
@@ -631,6 +694,10 @@ def _process_one_deck(
     ``contextlib.redirect_stdout`` for the sequential path where
     sys.stdout isn't proxied. Both paths produce the same record
     shape, so callers don't care which was used.
+
+    ``value_flags`` comes from :func:`_value_taking_flags` on the batch
+    parser and is threaded through to :func:`_build_per_deck_argv` so
+    the argv rewrite is flag-aware.
 
     Returns one of three record shapes:
       ``{deck, status: 'skipped', reason}`` — already-versioned and
@@ -651,24 +718,48 @@ def _process_one_deck(
             "reason": "already-versioned (use --force to re-curate)",
         }
 
-    per_deck_argv = _build_per_deck_argv(deck_path, batch_argv)
+    per_deck_argv = _build_per_deck_argv(deck_path, batch_argv, value_flags)
     buf = _io.StringIO()
+    # stderr is captured alongside stdout so that when argparse rejects
+    # a per-deck argv (it prints the error to stderr, then raises
+    # SystemExit) the failure record can carry the actual message.
+    errbuf = _io.StringIO()
     is_thread_local_stdout = isinstance(_sys.stdout, _ThreadLocalStdoutProxy)
     try:
         if is_thread_local_stdout:
-            # Parallel path: set this thread's per-thread buffer so
-            # the proxy routes writes here. ``auto_curate_main``'s
+            # Parallel path: set this thread's per-thread buffers so
+            # the proxies route writes here. ``auto_curate_main``'s
             # print() calls land in ``buf``, isolated from sibling
-            # workers' writes.
+            # workers' writes; stderr writes land in ``errbuf``.
             _BATCH_THREAD_LOCAL.buf = buf
+            _BATCH_THREAD_LOCAL.errbuf = errbuf
             try:
                 rc = auto_curate_main(per_deck_argv)
             finally:
                 _BATCH_THREAD_LOCAL.buf = None
+                _BATCH_THREAD_LOCAL.errbuf = None
         else:
-            # Sequential path: redirect_stdout is safe (single thread).
-            with _ctx.redirect_stdout(buf):
+            # Sequential path: redirect_* is safe (single thread).
+            with _ctx.redirect_stdout(buf), _ctx.redirect_stderr(errbuf):
                 rc = auto_curate_main(per_deck_argv)
+    except SystemExit as exc:
+        # argparse errors exit via SystemExit, which inherits
+        # BaseException — the ``except Exception`` isolation clause
+        # below never sees it, so pre-fix one deck's parse error
+        # aborted the entire overnight batch. Convert it to a recorded
+        # per-deck failure like any other error. Deliberately narrow:
+        # KeyboardInterrupt (also BaseException) must still propagate
+        # so Ctrl-C actually stops the batch.
+        err_text = errbuf.getvalue().strip()
+        return {
+            "deck": str(deck_path),
+            "status": "error",
+            "rc": None,
+            "exception": (
+                f"SystemExit(code={exc.code})"
+                + (f": {err_text}" if err_text else "")
+            ),
+        }
     except Exception as exc:  # noqa: BLE001 -- per-deck isolation
         return {
             "deck": str(deck_path),
@@ -676,6 +767,17 @@ def _process_one_deck(
             "rc": None,
             "exception": f"{type(exc).__name__}: {exc}",
         }
+    finally:
+        # Replay captured stderr onto the real stream so warnings the
+        # pipeline emitted stay visible — the capture exists only so a
+        # SystemExit record can include argparse's message, not to
+        # swallow diagnostics. By the time this runs, the sequential
+        # redirect has exited and the parallel thread-local slot is
+        # cleared, so ``_sys.stderr`` resolves to the real stream.
+        _captured_err = errbuf.getvalue()
+        if _captured_err:
+            _sys.stderr.write(_captured_err)
+            _sys.stderr.flush()
 
     raw = buf.getvalue().strip()
     try:
@@ -748,6 +850,14 @@ def _run_batch(args, parser, batch_argv: list[str]) -> int:
             flush=True,
         )
 
+    # Derive the value-taking flag set ONCE from the live parser (the
+    # same object that parsed the batch argv) so the per-deck argv
+    # rewrite can't mistake a flag's value for the deck positional.
+    # Deriving here — rather than hardcoding flag names inside
+    # _build_per_deck_argv — means a future add_argument() call is
+    # automatically covered.
+    value_flags = _value_taking_flags(parser)
+
     n_skipped = 0
     n_failed = 0
     n_succeeded = 0
@@ -767,7 +877,9 @@ def _run_batch(args, parser, batch_argv: list[str]) -> int:
         # ordering contract (records emit in glob order) for users
         # who haven't opted into parallelism.
         for deck_path in paths:
-            record = _process_one_deck(deck_path, batch_argv, args.force)
+            record = _process_one_deck(
+                deck_path, batch_argv, args.force, value_flags,
+            )
             _tally(record)
             print(json.dumps(record), flush=True)
     else:
@@ -782,17 +894,25 @@ def _run_batch(args, parser, batch_argv: list[str]) -> int:
         # would land in a worker's thread-local buffer if a worker
         # accidentally ran on the coordinator thread.
         real_stdout = _sys.stdout
+        real_stderr = _sys.stderr
 
         def _emit(record: dict) -> None:
             with emit_lock:
                 real_stdout.write(json.dumps(record) + "\n")
                 real_stdout.flush()
 
-        # Install the thread-local stdout proxy for the duration of
-        # the pool. Workers will set _BATCH_THREAD_LOCAL.buf inside
-        # _process_one_deck so their auto_curate_main writes land in
-        # per-thread buffers instead of corrupting each other.
+        # Install the thread-local stdout/stderr proxies for the
+        # duration of the pool. Workers will set _BATCH_THREAD_LOCAL
+        # .buf / .errbuf inside _process_one_deck so their
+        # auto_curate_main writes land in per-thread buffers instead
+        # of corrupting each other. stderr is proxied for the same
+        # reason stdout is, plus one more: argparse writes its
+        # parse-error message to stderr right before raising
+        # SystemExit, and the per-deck failure record includes that
+        # message — only possible when the worker's stderr is
+        # per-thread capturable.
         _sys.stdout = _ThreadLocalStdoutProxy(real_stdout)
+        _sys.stderr = _ThreadLocalStdoutProxy(real_stderr, attr="errbuf")
         try:
             # ThreadPoolExecutor over the deck paths. Workers block on
             # the Forge subprocess (when --run-sim is on) and on the
@@ -806,6 +926,7 @@ def _run_batch(args, parser, batch_argv: list[str]) -> int:
                 futures = [
                     pool.submit(
                         _process_one_deck, deck_path, batch_argv, args.force,
+                        value_flags,
                     )
                     for deck_path in paths
                 ]
@@ -815,6 +936,7 @@ def _run_batch(args, parser, batch_argv: list[str]) -> int:
                     _emit(record)
         finally:
             _sys.stdout = real_stdout
+            _sys.stderr = real_stderr
 
     summary = {
         "batch_summary": {
