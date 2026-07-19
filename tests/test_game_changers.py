@@ -122,6 +122,21 @@ def test_is_game_changer_lookup(monkeypatch):
     assert is_game_changer("Sol Ring") is False
 
 
+def test_is_game_changer_is_case_insensitive(monkeypatch):
+    """Every other card-name membership check in the codebase folds case
+    (deck files / user input / EDHREC disagree on capitalization); the GC
+    lookup must too — an exact-case check silently returned False for
+    e.g. 'smothering tithe'."""
+    monkeypatch.setattr(
+        "commander_builder.game_changers.load_game_changers",
+        lambda **kw: {"Cyclonic Rift", "Smothering Tithe"},
+    )
+    assert is_game_changer("cyclonic rift") is True
+    assert is_game_changer("SMOTHERING TITHE") is True
+    assert is_game_changer("CyClOnIc RiFt") is True
+    assert is_game_changer("sol ring") is False
+
+
 def test_failed_scrape_is_not_cached(tmp_path, monkeypatch):
     """A failed/empty WotC scrape must degrade to the fallback WITHOUT
     persisting the cache -- otherwise the fallback-only list would look

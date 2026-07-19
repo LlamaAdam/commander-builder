@@ -99,6 +99,45 @@ def test_extract_features_includes_deck_composition_features():
     assert row.features["dh_basic_lands"] == 10.0  # 5 Forest + 5 Island
 
 
+def test_extract_features_tolerates_explicit_null_stats():
+    """ComparisonReport legitimately persists None for undefined stats (e.g.
+    avg_turns_when_won when a version never won a game). The key EXISTS with
+    value null, so ``.get(key, 0)`` returns None — and ``float(None)`` used to
+    raise TypeError and kill build_dataset for the whole iteration list.
+    Nulls must degrade to the default (0.0), not crash."""
+    it = _it(1, "abc", sim_report={
+        "total_games": 4, "draws": 0,
+        # old won all 4 games → its turns_when_lost is null; new never won
+        # → its turns_when_won / ending_life are null.
+        "old_stats": {"wins": 4, "avg_ending_life": 21.0,
+                      "avg_turns_when_lost": None},
+        "new_stats": {"wins": 0, "avg_ending_life": None,
+                      "avg_turns_when_won": None},
+    })
+    row = extract_features(it)
+    assert row is not None
+    assert row.features["old_avg_turns_when_lost"] == 0.0
+    assert row.features["new_avg_turns_when_won"] == 0.0
+    assert row.features["new_avg_ending_life"] == 0.0
+    # Non-null values still pass through untouched.
+    assert row.features["old_avg_ending_life"] == 21.0
+
+
+def test_build_dataset_survives_a_null_stat_row():
+    """One iteration with null stats must not discard the whole dataset —
+    the exact blast radius of the pre-fix TypeError."""
+    its = [
+        _it(1, "abc", sim_report={
+            "total_games": 2, "draws": 0,
+            "old_stats": {"wins": 2, "avg_turns_when_won": None},
+            "new_stats": {"wins": 0, "avg_turns_when_won": None},
+        }),
+        _it(2, "def"),
+    ]
+    rows = build_dataset(its)
+    assert len(rows) == 2
+
+
 def test_extract_features_skips_pending_verdict():
     assert extract_features(_it(1, "abc", verdict="pending")) is None
 

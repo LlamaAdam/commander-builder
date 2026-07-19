@@ -730,6 +730,30 @@ def test_heuristic_respects_add_and_cut_limits():
     assert len(cuts) == 4
 
 
+def test_heuristic_cut_selection_is_deterministic_beyond_limit():
+    """With more cut candidates than ``cut_limit``, WHICH cards get
+    recommended must not depend on set iteration order (which varies per
+    process under hash randomization — unreproducible advisor runs). Cuts
+    are unscored (pure EDHREC absence), so the pinned order is plain name
+    sort: lexicographically-first candidates claim the limited slots.
+
+    Cross-process nondeterminism can't be exercised inside one pytest
+    process, so this pins the deterministic contract instead: a fixed
+    candidate pool larger than the limit yields an exact, name-ordered
+    cut list, identical across repeated calls."""
+    deck = {f"Off-{i}" for i in range(20)}   # 20 candidates, limit 4
+    page = _fake_edhrec_page(
+        top=[(f"Top-{i}", 80.0) for i in range(55)],  # clears cut floor
+        synergy=[],
+    )
+    first = _heuristic_swap_recommendations(deck, page, add_limit=3, cut_limit=4)
+    second = _heuristic_swap_recommendations(deck, page, add_limit=3, cut_limit=4)
+    cuts = [r.card for r in first if r.action == "cut"]
+    # Name-sorted head of the candidate pool ("Off-1" < "Off-10" < "Off-2").
+    assert cuts == ["Off-0", "Off-1", "Off-10", "Off-11"]
+    assert cuts == [r.card for r in second if r.action == "cut"]
+
+
 def test_heuristic_add_limit_does_not_trim_supplemental_buckets():
     """The 2026-05-15 split-pool refactor: ``add_limit`` only caps
     core EDHREC-page buckets (high_synergy / top_cards /
@@ -1019,6 +1043,54 @@ def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     # Universal staples not cut.
     assert "Sol Ring" not in cuts
     assert "Forest" not in cuts
+
+
+def test_advise_degrades_gracefully_when_edhrec_raises_urlerror(
+    tmp_path, monkeypatch,
+):
+    """Documented contract: mid-pipeline network blips fall back to the
+    heuristic — a URLError (DNS down, connection refused) inside the lazy
+    EDHREC fetch must NOT propagate out of the advise generator and kill
+    the single-deck CLI with a traceback.
+
+    Deliberately does NOT stub ``improvement_advisor.fetch_commander_page``
+    (the usual fixture pattern): the point is to drive the REAL
+    fetch_commander_page end-to-end with its HTTP layer raising URLError,
+    pinning that the 5c7b3d6 except-OSError narrowing still catches it
+    (URLError IS an OSError subclass) and degrades to a None page →
+    empty-recommendation report instead of an exception."""
+    import urllib.error
+    import commander_builder.edhrec_client as ec
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal of the Surging Soul [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring", "Forest", "Old Card"],
+    )
+
+    # Point the EDHREC cache at an empty dir so a fresh on-disk page from a
+    # previous run can't satisfy the fetch before the network layer runs.
+    monkeypatch.setattr(ec, "CACHE_DIR", tmp_path / "edhrec-cache")
+    monkeypatch.setattr(ec, "REQUEST_SLEEP_SEC", 0)
+    # URLError is retryable, so the retry loop's backoff sleeps would fire
+    # 3 times — neutralize them to keep the test instant.
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    def _dns_down(url):
+        raise urllib.error.URLError("getaddrinfo failed")
+    monkeypatch.setattr(ec, "_http_get_text", _dns_down)
+
+    # Must not raise. The heuristic gets a None EDHREC page and produces a
+    # valid (possibly recommendation-free) report.
+    report = advise(deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir)
+    assert report.source == "heuristic"
+    # No EDHREC signal → no EDHREC-sourced adds/cuts snuck through.
+    assert not [r for r in report.recommendations
+                if str(r.evidence.get("source", "")).startswith("edhrec.")]
 
 
 def test_advise_strips_off_color_adds_via_color_identity_filter(tmp_path, monkeypatch):

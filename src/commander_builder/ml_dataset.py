@@ -94,6 +94,20 @@ class FeatureRow:
         return asdict(self)
 
 
+def _num(d: dict, key: str, default: float = 0.0) -> float:
+    """``float(d.get(key, default))`` that also treats an EXPLICIT None as
+    missing.
+
+    ComparisonReport legitimately emits null for stats that have no defined
+    value — e.g. ``avg_turns_when_won`` when a version never won a single
+    game. ``d.get(key, default)`` returns that None (the key EXISTS), and
+    ``float(None)`` raises TypeError — which used to kill build_dataset for
+    the whole iteration list on the first such row. Folding None into the
+    default here keeps one sparse stat from discarding the entire dataset."""
+    v = d.get(key, default)
+    return float(default if v is None else v)
+
+
 def extract_features(it: Iteration) -> Optional[FeatureRow]:
     """Turn one Iteration into a FeatureRow.
 
@@ -141,16 +155,18 @@ def extract_features(it: Iteration) -> Optional[FeatureRow]:
         "win_rate_old": win_rate_old,
         "win_rate_new": win_rate_new,
         "win_rate_delta": win_rate_new - win_rate_old,
-        "old_avg_ending_life": float(old.get("avg_ending_life", 0)),
-        "new_avg_ending_life": float(new.get("avg_ending_life", 0)),
-        "old_avg_damage_taken": float(old.get("avg_damage_taken", 0)),
-        "new_avg_damage_taken": float(new.get("avg_damage_taken", 0)),
-        "old_avg_turns_when_won": float(old.get("avg_turns_when_won", 0)),
-        "new_avg_turns_when_won": float(new.get("avg_turns_when_won", 0)),
-        "old_avg_turns_when_lost": float(old.get("avg_turns_when_lost", 0)),
-        "new_avg_turns_when_lost": float(new.get("avg_turns_when_lost", 0)),
-        "old_eliminations": float(old.get("eliminations", 0)),
-        "new_eliminations": float(new.get("eliminations", 0)),
+        # All per-version stats go through _num: any of them can be an
+        # explicit null in the persisted sim_report (see _num's docstring).
+        "old_avg_ending_life": _num(old, "avg_ending_life"),
+        "new_avg_ending_life": _num(new, "avg_ending_life"),
+        "old_avg_damage_taken": _num(old, "avg_damage_taken"),
+        "new_avg_damage_taken": _num(new, "avg_damage_taken"),
+        "old_avg_turns_when_won": _num(old, "avg_turns_when_won"),
+        "new_avg_turns_when_won": _num(new, "avg_turns_when_won"),
+        "old_avg_turns_when_lost": _num(old, "avg_turns_when_lost"),
+        "new_avg_turns_when_lost": _num(new, "avg_turns_when_lost"),
+        "old_eliminations": _num(old, "eliminations"),
+        "new_eliminations": _num(new, "eliminations"),
         "cards_added": float(cards_added),
         "cards_removed": float(cards_removed),
         "swap_size": float(cards_added + cards_removed),
