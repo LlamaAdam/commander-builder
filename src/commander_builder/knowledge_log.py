@@ -365,6 +365,22 @@ def iterations_for_deck(deck_id: str, db_path: Optional[Path] = None) -> list[It
         return [Iteration.from_row(r) for r in cur.fetchall()]
 
 
+def all_iterations(db_path: Optional[Path] = None) -> list[Iteration]:
+    """Every iteration in the log, oldest first (id ASC).
+
+    Added for the export/import path: the full export previously faked
+    "all" through ``recent_iterations(limit=10_000)``, which silently
+    dropped everything past 10k rows while still reporting success.
+    Rows are a few KB each, so even a very large personal log is only
+    tens of MB — there is no memory reason for a cap. "All" means all.
+    """
+    db_path = _resolve_db_path(db_path)
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute("SELECT * FROM iterations ORDER BY id ASC")
+        return [Iteration.from_row(r) for r in cur.fetchall()]
+
+
 def recent_iterations(limit: int = 50, db_path: Optional[Path] = None) -> list[Iteration]:
     """Most recent N iterations across all decks. Sized to fit in one screen
     by default; bump for analytics queries."""
