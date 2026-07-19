@@ -8,10 +8,9 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-05-27 (orchestrator landed 4 worklist items onto
-`feature`: game_changers cache-guard bug fix + FP-002 `single_feature_ols`
-+ FP-010 `_pick_jre_asset` + FP-007 `decks_containing_card`; FP-002 still
-reopened under the margin-regression framing)
+**Last updated:** 2026-07-19 (adversarial-review fix branch
+`fix/adversarial-review-2026-07-19` created — 16 fix commits, unmerged;
+see *State of the tree* below)
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
@@ -27,10 +26,22 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** ~1548 passing fast lane (+slow with `--run-slow`), ~167s
-  offline. Zero warnings under `python -W default`.
+- **Tests:** 1719 passing fast lane / 146 skipped (+slow with
+  `--run-slow`), ~90s offline. Zero warnings under `python -W default`.
 - **Branch:** `feature/2026-04-28-session` (130+ commits ahead of
   `master`, in sync with `origin`).
+
+**Unmerged fix branch (2026-07-19):** `fix/adversarial-review-2026-07-19`
+(worktree at `C:\dev\cb-review-fixes`) carries 16 commits from an
+adversarial review, pending merge. Most important by theme: `Name=`/
+filename win-attribution invariant (new `dck_meta.py`, all deck writers);
+pod-failure surfacing in compare/run_match/iteration_loop (no more
+silently diluted stats); proposer legality guards (cuts/singleton/99-card
+invariant); shared robust LLM-JSON extractor (`_llm_json.py`, loud errors
+instead of misleading fallbacks); BYO-key threading + `ANTHROPIC_API_KEY`
+scrubbed from subprocess env + token-level secret scanner in CI; same-id
+re-import overwrite with bracket-aware name uniquify + pre-revert
+backups. See CHANGELOG 2026-07-19 for the full 16-commit list.
 
 ### 2026-05-21/22 session — FP-003 shipped, A/B attribution fix, FP-002 concluded
 
@@ -123,6 +134,9 @@ documented at `tests/fixtures/real_oracles.py`.
 ---
 
 ## Open backlog (ranked)
+
+- License is TBD — repo is effectively all-rights-reserved until one is
+  chosen.
 
 ### Active — promoted from Parked plans (2026-05-22)
 

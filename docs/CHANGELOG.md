@@ -6,6 +6,51 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-19 — adversarial-review fix branch (16 commits, UNMERGED)
+
+Lives on `fix/adversarial-review-2026-07-19` (worktree
+`C:\dev\cb-review-fixes`), pending merge to `feature`. One bullet per
+commit, oldest first. Fast lane: 1719 passed / 146 skipped (~90s).
+
+#### Fixed
+
+- **`fix(sim)`** (`f74913a`): rewrite `Name=` to the filename stem in the
+  snapshot / proposer-apply / meta-test deck writers — new `dck_meta.py`
+  holds the filename↔`Name=` win-attribution invariant; original name
+  preserved as `DisplayName=`.
+- **`fix(sim)`** (`1ae44f9`): surface pod failures in
+  compare/run_match/iteration_loop instead of silently diluting stats.
+- **`fix(tests)`** (`4dc4f2e`): knowledge_log DB path resolves at call
+  time so the test isolation fixture actually isolates.
+- **`fix(proposer)`** (`8d5f5e0`): validate cuts/adds against the real
+  decklist (singleton + exactly-99 mainboard invariant); never write an
+  illegal deck.
+- **`fix(llm)`** (`543bc2f`): shared robust JSON extractor
+  (`_llm_json.py`); garbage/truncated LLM replies raise loud
+  `LLMJsonError`s instead of misleading fallbacks.
+- **`fix(secrets)`** (`3fcde0a`): thread the BYO key explicitly; scrub
+  `ANTHROPIC_API_KEY` from subprocess env.
+- **`fix(security)`** (`b617678`): token-level placeholder check in the
+  secret scanner; space-safe pre-commit hook; scanner runs in CI.
+- **`fix(cli)`** (`304e4c8`): flag-aware batch argv rewriting (safe with
+  `.dck` flag values); `SystemExit` no longer aborts the batch.
+- **`fix(edhrec)`** (`5c7b3d6`): never cache empty parses; warn loudly on
+  challenge pages.
+- **`fix(import)`** (`6ccf3f0`): same-id re-import overwrites in place;
+  name collisions uniquify inside the bracket tag.
+- **`fix(revert)`** (`a3660fb`): back up the live deck (and print the
+  backup path) before overwriting it.
+- **`fix(export)`** (`99e8b53`): content-identity dedupe on
+  knowledge-log import; no silent export truncation (10k cap removed).
+- **`fix(web)`** (`7693136`): uid-suffix staged sim filenames to prevent
+  same-second clobber races.
+- **`fix(subprocess)`** (`a465d4e`): UTF-8 decoding everywhere
+  Forge/CLI output is read.
+- **`fix(misc)`** (`45d1d36`): None-safe ML features; deterministic
+  cuts; URLError degradation; case-folded game-changer lookup.
+- **`fix(import)`** (`4c79068`): stamp `Name=` from the final filename
+  stem; drop the dead A/B name matcher.
+
 ### 2026-05-27 — FP-002/007/008-009/010 slices landed (4 review branches merged)
 
 Built in parallel isolated worktrees, reviewed (green fast lane + scope audit +
