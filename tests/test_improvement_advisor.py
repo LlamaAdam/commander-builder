@@ -1291,6 +1291,55 @@ def test_advise_uses_claude_when_wired(tmp_path, monkeypatch):
     assert "test rationale" in report.diagnosis.pattern_summary
 
 
+def test_advise_claude_tolerates_prose_then_fenced_json(tmp_path, monkeypatch):
+    """Regression: the advisor's old startswith-``` strip choked on a
+    response with prose BEFORE the fence, so a perfectly recoverable
+    reply silently degraded to the heuristic. Now the shared _llm_json
+    extractor recovers it and the report stays source='claude'."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(deck_dir, "[USER] X [B3].dck",
+                     commanders=["Hakbal"], main=["Sol Ring", "Old"])
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+
+    fenced_with_prose = (
+        "Here is my analysis of the deck:\n```json\n"
+        + json.dumps({
+            "rationale": "fenced rationale",
+            "added": ["Fenced Pick"],
+            "removed": ["Old"],
+        })
+        + "\n```"
+    )
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _Msg(fenced_with_prose)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+    report = advise(deck, bracket=3, use_claude=True,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    assert report.source == "claude"  # did NOT fall back to heuristic
+    assert "Fenced Pick" in {r.card for r in report.recommendations}
+
+
 # --- _validate_card_names — hallucination defense for Claude analyst -------
 
 def test_validate_marks_known_cards_true(monkeypatch):

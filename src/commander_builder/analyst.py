@@ -34,6 +34,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
+from ._llm_json import extract_json_object
+
 
 # --- Inputs and outputs ----------------------------------------------------
 
@@ -93,16 +95,44 @@ def analyze(input_: AnalystInput, config: Optional[AnalystConfig] = None) -> Ver
         return heuristic
 
     # Heuristic is uncertain; try the configured LLM backends in order.
+    #
+    # Two distinct failure modes, handled differently ON PURPOSE:
+    #
+    #   NotImplementedError  — backend not wired (no key / SDK / daemon).
+    #                          Expected in many configs; quiet fall-through.
+    #   any other Exception  — backend IS wired but the call failed:
+    #                          unparseable/truncated model output
+    #                          (LLMJsonError), API/network errors, SDK
+    #                          surprises. Previously these escaped and
+    #                          crashed the whole iteration loop mid-run.
+    #                          Now: log LOUDLY (an operator must see that
+    #                          a paid backend is misbehaving) and degrade
+    #                          to the heuristic verdict so the pipeline
+    #                          keeps moving on empirical data.
     if config.use_ollama:
         try:
             return ollama_verdict(input_, config)
         except NotImplementedError:
             pass  # Fall through to Claude or back to heuristic.
+        except Exception as exc:  # noqa: BLE001 — see contract above
+            print(
+                f"WARNING: ollama_verdict failed "
+                f"({type(exc).__name__}: {exc}); "
+                f"falling back to claude/heuristic verdict.",
+                flush=True,
+            )
     if config.use_claude:
         try:
             return claude_verdict(input_, config)
         except NotImplementedError:
             pass
+        except Exception as exc:  # noqa: BLE001 — see contract above
+            print(
+                f"WARNING: claude_verdict failed "
+                f"({type(exc).__name__}: {exc}); "
+                f"falling back to heuristic verdict.",
+                flush=True,
+            )
 
     # No LLM available — return the (low-confidence) heuristic anyway. Caller
     # decides whether to flag for manual review.
@@ -225,30 +255,19 @@ restatements of the numbers.
 
 
 def _parse_verdict_payload(text: str, backend: str) -> dict:
-    """Tolerantly recover a verdict JSON object from possibly-fenced or
-    prose-prefixed model output.
+    """Recover a verdict JSON object from possibly-fenced or
+    prose-prefixed model output via the shared ``_llm_json`` extractor.
 
-    Raises ``NotImplementedError`` (not ``JSONDecodeError``) when nothing
-    parseable is found, so ``analyze()`` — which only catches
-    NotImplementedError — degrades cleanly to the heuristic verdict instead
-    of crashing the whole pipeline on a malformed LLM response."""
-    import re as _re
-    s = (text or "").strip()
-    if s.startswith("```"):
-        s = _re.sub(r"^```[a-zA-Z0-9]*\n?", "", s)
-        s = _re.sub(r"\n?```$", "", s).strip()
-    try:
-        return json.loads(s)
-    except json.JSONDecodeError:
-        pass
-    m = _re.search(r"\{.*\}", s, _re.DOTALL)  # first balanced-ish object
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    raise NotImplementedError(
-        f"{backend}: could not parse a JSON verdict from model output")
+    Raises ``LLMJsonError`` (NOT NotImplementedError) on garbage or
+    truncated output. The distinction matters: NotImplementedError means
+    "backend not wired" and ``analyze()`` falls through SILENTLY; a
+    parse failure means the backend IS wired but returned junk — that
+    must surface as a LOUD warning in ``analyze()`` (which catches it
+    and degrades to the heuristic) rather than being indistinguishable
+    from a missing API key. The old in-house fence-strip + greedy-regex
+    fallback lived here; it's now the shared extractor so all LLM parse
+    sites behave identically."""
+    return extract_json_object(text, context=backend)
 
 
 def _safe_confidence(value: object) -> float:

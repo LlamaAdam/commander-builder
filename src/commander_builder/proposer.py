@@ -55,6 +55,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ._llm_json import LLMJsonError, extract_json_object, try_extract_json_object
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = REPO_ROOT / "prompts"
 
@@ -118,7 +120,25 @@ def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> P
     Order: Claude (if enabled) -> Ollama (if enabled) -> Manual fallback.
     Manual is the safety net because it's the only path guaranteed to work
     without external deps. If you set `use_claude=True` but the SDK isn't
-    installed, the call falls back to manual rather than crashing the loop."""
+    installed, the call falls back to manual rather than crashing the loop.
+
+    Fallback contract — three failure classes, handled differently:
+
+      NotImplementedError  — backend not wired (no key / SDK / daemon).
+                             Expected; quiet fall-through.
+      LLMJsonError         — backend responded but with garbage/truncated
+                             JSON. RE-RAISED, never swallowed: falling
+                             through used to end in manual_propose's
+                             ``FileNotFoundError: No manifest at ...``,
+                             which masked the real failure behind a
+                             misleading message. A garbage response is a
+                             loud error the caller must report as a
+                             failed proposal.
+      any other Exception  — backend genuinely unavailable at runtime
+                             (API outage, rate limit, network). WARN and
+                             fall through; manual is a sane degradation
+                             here because the LLM never answered at all.
+    """
     config = config or ProposerConfig()
 
     if config.use_claude:
@@ -126,6 +146,8 @@ def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> P
             return claude_propose(input_, config)
         except NotImplementedError:
             pass  # Fall through to next backend.
+        except LLMJsonError:
+            raise  # Garbage response — surface it; see contract above.
         except Exception as exc:  # noqa: BLE001
             print(f"  WARN: claude_propose failed ({type(exc).__name__}); "
                   f"falling back to ollama/manual.")
@@ -134,6 +156,8 @@ def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> P
             return ollama_propose(input_, config)
         except NotImplementedError:
             pass
+        except LLMJsonError:
+            raise  # Same rule as Claude: garbage output is a loud error.
         except Exception as exc:  # noqa: BLE001
             print(f"  WARN: ollama_propose failed ({type(exc).__name__}); "
                   f"falling back to manual.")
@@ -237,16 +261,22 @@ def claude_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     if not text.strip():
         raise RuntimeError("claude_propose: empty response from API")
 
-    # Tolerate Claude wrapping JSON in code fences despite the instruction.
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```", 2)
-        cleaned = cleaned[1] if len(cleaned) > 1 else text
-        # Strip optional language tag like ```json
-        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
-        cleaned = cleaned.rsplit("```", 1)[0].strip()
-
-    manifest = json.loads(cleaned)
+    # Shared robust extractor (see _llm_json): handles fenced JSON, prose
+    # preamble/trailer, and braces-in-strings. The old in-house strip only
+    # fired when the response STARTED with ``` — a reply like
+    # "Looking at this deck...\n```json\n{...}\n```" threw JSONDecodeError,
+    # which propose()'s broad except turned into a misleading
+    # manual_propose FileNotFoundError. On genuinely unparseable output
+    # this raises LLMJsonError carrying the model + response head/tail so
+    # the failure is diagnosable from the log alone; propose() re-raises
+    # it instead of falling back.
+    manifest = extract_json_object(
+        text,
+        context=(
+            f"claude_propose (model={config.claude_model}, "
+            f"response {len(text)} chars)"
+        ),
+    )
     return ProposerOutput(
         added=list(manifest.get("added", []) or []),
         removed=list(manifest.get("removed", []) or []),
@@ -309,7 +339,18 @@ def ollama_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     text = payload.get("response", "")
     if not text:
         raise RuntimeError("ollama_propose: empty response from daemon")
-    manifest = json.loads(text)
+    # format:"json" makes Ollama emit syntactically valid JSON, but small
+    # local models still occasionally wrap it or truncate. Same shared
+    # extractor + same loud-failure contract as claude_propose: a garbage
+    # response raises LLMJsonError, which propose() re-raises instead of
+    # burying it under manual_propose's "No manifest" error.
+    manifest = extract_json_object(
+        text,
+        context=(
+            f"ollama_propose (model={config.ollama_model}, "
+            f"response {len(text)} chars)"
+        ),
+    )
     return ProposerOutput(
         added=list(manifest.get("added", []) or []),
         removed=list(manifest.get("removed", []) or []),
@@ -489,87 +530,18 @@ No code fences. No markdown. Just the raw JSON object.
 def _extract_curator_json(text: str) -> Optional[dict]:
     """Pull the curator's JSON object out of a Claude response.
 
-    The system prompt asks for a raw JSON object but real responses
-    sometimes have:
-      - Prose preamble ("Looking at this deck, I think...")
-      - Markdown code fences (```json ... ```)
-      - Trailing prose after the object
-      - Multiple ``{...}`` blocks if the curator includes an example
-        in its rationale
-
-    Strategy: try ``json.loads(text)`` first (covers the happy path
-    where the response IS just JSON). If that fails, locate the first
-    ``{`` and find its matching ``}`` by counting braces (handles
-    nested objects inside ``rationale`` strings). If parsing that
-    substring also fails, return None so the caller surfaces a
-    diagnostic.
-
-    Strings inside JSON can legally contain ``{`` and ``}``, so a
-    naive find-last-} approach mis-parses. The brace-counter respects
-    string context (skips braces inside double-quoted runs).
+    Back-compat wrapper: the robust layered extractor (whole-text parse,
+    fence strip, string-aware brace counting) was born here and has been
+    PROMOTED to the shared ``_llm_json`` module so every LLM parse site
+    (claude_propose, ollama_propose, analyst verdicts, the Claude
+    advisor) uses one implementation instead of divergent hand-rolled
+    strips. This name + its Optional contract stay because tests and
+    external callers import it from ``commander_builder.proposer``, and
+    ``auto_propose`` deliberately wants the None-return so it can raise
+    its own RuntimeError (which the auto-curate CLI catches and reports
+    as a failed proposal, exit code 3).
     """
-    cleaned = text.strip()
-
-    # Path 1: try the whole response as JSON. Common case under the
-    # strict prompt.
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    # Path 2: strip markdown code fences if present, then retry.
-    if "```" in cleaned:
-        fenced = cleaned.split("```", 2)
-        if len(fenced) >= 2:
-            inner = fenced[1]
-            # Strip optional language tag like ```json
-            inner = inner.split("\n", 1)[1] if "\n" in inner else inner
-            inner = inner.rsplit("```", 1)[0].strip()
-            try:
-                return json.loads(inner)
-            except json.JSONDecodeError:
-                pass
-
-    # Path 3: find the first balanced ``{...}`` block in the text.
-    # Walks character-by-character respecting string context so a
-    # ``{`` inside a JSON string doesn't confuse the counter.
-    start = cleaned.find("{")
-    while start != -1:
-        depth = 0
-        in_string = False
-        escape = False
-        end = -1
-        for i in range(start, len(cleaned)):
-            ch = cleaned[i]
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end != -1:
-            candidate = cleaned[start:end + 1]
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
-        # That block didn't parse — search for the next ``{`` and try
-        # again. Handles "prose with { in it } then the real JSON".
-        start = cleaned.find("{", start + 1)
-
-    return None
+    return try_extract_json_object(text)
 
 
 def _claude_cli_available() -> bool:

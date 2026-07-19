@@ -246,25 +246,102 @@ def test_claude_verdict_tolerates_code_fenced_json(monkeypatch):
     assert v.label == "kept" and v.confidence == 0.8
 
 
-def test_claude_verdict_unparseable_degrades_via_notimplemented(monkeypatch):
-    """Non-JSON prose => NotImplementedError so analyze() falls back."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
-
+def _mock_claude_sdk(monkeypatch, text: str):
+    """Install a fake `anthropic` module whose client returns `text`."""
     class FakeClient:
         def __init__(self, **kw): pass
         @property
         def messages(self):
             class M:
                 def create(self, **kw):
-                    return _fake_anthropic_response("I think this looks fine!")
+                    return _fake_anthropic_response(text)
             return M()
 
     import sys, types
     fake_module = types.ModuleType("anthropic")
     fake_module.Anthropic = FakeClient
     monkeypatch.setitem(sys.modules, "anthropic", fake_module)
-    with pytest.raises(NotImplementedError):
+
+
+def test_claude_verdict_unparseable_raises_llm_json_error(monkeypatch):
+    """Non-JSON prose => LLMJsonError (NOT NotImplementedError).
+
+    The distinction is deliberate: NotImplementedError means "backend
+    not wired" (silent fall-through in analyze()); a parse failure means
+    the backend responded with garbage, which analyze() catches with a
+    LOUD warning before degrading to the heuristic."""
+    from commander_builder._llm_json import LLMJsonError
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(monkeypatch, "I think this looks fine!")
+    with pytest.raises(LLMJsonError, match="claude_verdict"):
         claude_verdict(_input(), AnalystConfig())
+
+
+def test_claude_verdict_parses_prose_then_fenced_json(monkeypatch):
+    """Prose preamble BEFORE a ```json fence must still parse — the old
+    startswith-``` strip missed this shape entirely."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(
+        monkeypatch,
+        'Looking at this sim, here is my verdict:\n```json\n'
+        '{"label": "kept", "confidence": 0.8, "reasoning": "x", "lessons": []}'
+        '\n```\nLet me know if you need more detail.',
+    )
+    v = claude_verdict(_input(), AnalystConfig())
+    assert v.label == "kept" and v.confidence == 0.8
+
+
+def test_claude_verdict_truncated_json_raises_llm_json_error(monkeypatch):
+    """max_tokens truncation (object never closes) => specific LLMJsonError
+    quoting the response, not a crash or a silent NotImplementedError."""
+    from commander_builder._llm_json import LLMJsonError
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(
+        monkeypatch, '{"label": "kept", "confidence": 0.8, "reasoning": "the new'
+    )
+    with pytest.raises(LLMJsonError, match="truncated"):
+        claude_verdict(_input(), AnalystConfig())
+
+
+def test_analyze_degrades_to_heuristic_on_garbage_claude_response(
+        monkeypatch, capsys):
+    """Wired Claude backend returns unparseable prose: analyze() must NOT
+    crash the iteration loop — it warns loudly and returns the heuristic
+    verdict. (Previously the router only caught NotImplementedError, so
+    any parse failure escaped and killed the whole run.)"""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(monkeypatch, "Sorry, I cannot produce JSON today.")
+
+    # Noise band: heuristic confidence is low → router escalates to claude.
+    v = analyze(
+        _input(old_wins=5, new_wins=6, draws=0, total=11),
+        config=AnalystConfig(use_claude=True),
+    )
+    assert v.source == "heuristic"
+    assert v.label == "neutral"
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.out
+    assert "claude_verdict failed" in captured.out
+
+
+def test_analyze_degrades_to_heuristic_on_claude_api_error(
+        monkeypatch, capsys):
+    """A wired backend that errors at call time (rate limit, outage) must
+    also degrade to the heuristic with a loud warning, not crash."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+
+    def boom(input_, config):
+        raise RuntimeError("simulated API outage")
+    monkeypatch.setattr("commander_builder.analyst.claude_verdict", boom)
+
+    v = analyze(
+        _input(old_wins=5, new_wins=6, draws=0, total=11),
+        config=AnalystConfig(use_claude=True),
+    )
+    assert v.source == "heuristic"
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.out
+    assert "simulated API outage" in captured.out
 
 
 def test_claude_verdict_non_numeric_confidence_defaults(monkeypatch):

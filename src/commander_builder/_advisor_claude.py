@@ -19,6 +19,7 @@ from dataclasses import asdict
 from typing import Optional
 
 from ._advisor_models import DeckDiagnosis, SwapRecommendation
+from ._llm_json import extract_json_object
 from .edhrec_client import CommanderPage
 
 
@@ -148,14 +149,19 @@ def _claude_swap_recommendations(
     if not text.strip():
         raise RuntimeError("claude advisor: empty response")
 
-    # Tolerate code-fence wrapping despite the instruction.
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```", 2)[1] if "```" in cleaned else cleaned
-        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
-        cleaned = cleaned.rsplit("```", 1)[0].strip()
-
-    parsed = json.loads(cleaned)
+    # Shared robust extractor (see _llm_json): handles fenced JSON even
+    # after a prose preamble, prose trailers, and braces-in-strings — the
+    # old startswith-``` strip here missed all of those and let a bare
+    # JSONDecodeError escape. On unparseable/truncated output this raises
+    # LLMJsonError with the response head/tail; the advise() dispatcher's
+    # broad except catches it, prints a loud WARN naming the exception,
+    # and degrades to the heuristic advisor (that degradation IS the
+    # advise() contract — unlike propose(), there's a real heuristic
+    # fallback here, not a misleading file-not-found).
+    parsed = extract_json_object(
+        text,
+        context=f"claude advisor (model={model}, response {len(text)} chars)",
+    )
     rationale = str(parsed.get("rationale", ""))
     recs: list[SwapRecommendation] = []
     for name in parsed.get("added", []) or []:
