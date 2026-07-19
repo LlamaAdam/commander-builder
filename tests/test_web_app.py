@@ -1547,10 +1547,12 @@ def test_apply_swaps_cut_to_zero_removes_line():
     assert kept == 1
 
 
-def test_apply_swaps_three_cuts_two_in_line_drops_line():
-    """If the user asks for 3 cuts but only 2 exist, drop the 2 that
-    exist and leave the 3rd unmatched. ``removed`` reports only what
-    actually came out."""
+def test_apply_swaps_three_cuts_two_in_line_drops_third_pair():
+    """If the user asks for 3 cuts but only 2 copies exist, the first
+    two pairs apply and the THIRD PAIR (cut + its paired add) drops as
+    a unit. Pre-2026-07-19 the unmatched 3rd cut was silently skipped
+    while its paired add still landed, GROWING the mainboard by one —
+    the oversized-deck corruption bug."""
     from commander_builder.web.app import _apply_swaps_to_dck
     from types import SimpleNamespace
     original = "[Main]\n2 Mountain\n1 Sol Ring\n"
@@ -1565,16 +1567,23 @@ def test_apply_swaps_three_cuts_two_in_line_drops_line():
         SimpleNamespace(card="B", action="add", reason="", evidence={}),
         SimpleNamespace(card="C", action="add", reason="", evidence={}),
     ]
-    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
     # All 2 Mountains removed, line gone.
     assert "Mountain" not in new_text
-    # removed reports only 2 (matches what actually happened); 3rd cut
-    # was unmatched and silently dropped.
     assert removed == ["Mountain", "Mountain"]
-    # All 3 adds appended.
+    # Only the 2 funded adds land; C's paired cut had no copy left.
+    assert added == ["A", "B"]
     assert "1 A" in new_text
     assert "1 B" in new_text
-    assert "1 C" in new_text
+    assert "1 C" not in new_text
+    # Mainboard size preserved: 3 - 2 + 2 = 3.
+    from commander_builder.web._helpers import _count_main_cards
+    assert _count_main_cards(new_text) == 3
+    # The dropped pair is reported, not silent.
+    assert report["dropped_unmatched_cut"] == [{"cut": "Mountain", "add": "C"}]
 
 
 def test_apply_swaps_cuts_across_multiple_lines_for_same_name():
@@ -1624,17 +1633,19 @@ def test_apply_swaps_preserves_edition_codes_on_partial_cut():
 
 
 # ---------------------------------------------------------------------------
-# Quantity-aware adds (TIER-1.1 fix) -- previously, an add for a card
-# already in the deck appended a brand-new ``1 <Name>`` line instead of
-# incrementing the existing ``<qty> <Name>|EDITION`` line. Two adds of
-# the same card produced two separate ``1 <Name>`` lines instead of one
-# ``2 <Name>`` line. Forge tolerates duplicates but the resulting .dck
-# is harder to read and confuses downstream tooling that groups by line.
+# Quantity-aware adds (TIER-1.1 fix, tightened 2026-07-19) -- BASIC LAND
+# adds for a card already in the deck increment the existing line
+# (preserving the |SET|CN tail) instead of appending a stale duplicate,
+# and duplicate basic adds collapse to one merged line. NON-basic adds
+# for a card already in [Main] are REJECTED (with their paired cut) —
+# incrementing them wrote singleton violations like ``2 Rhystic Study``.
 # ---------------------------------------------------------------------------
 
-def test_apply_swaps_add_merges_into_existing_line(monkeypatch):
-    """Add for a card already in [Main] bumps that line's quantity
-    (preserving the edition tail) instead of appending a duplicate."""
+def test_apply_swaps_duplicate_nonbasic_add_pair_dropped(monkeypatch):
+    """An add for a NON-basic already in [Main] is a singleton
+    violation — pre-2026-07-19 this incremented the existing line to
+    ``2 Sol Ring``. Now the whole (cut, add) pair drops and is
+    reported, leaving the deck untouched and legal."""
     monkeypatch.setattr(
         "commander_builder.scryfall_client.lookup_card",
         lambda name, **kw: None,
@@ -1648,18 +1659,20 @@ def test_apply_swaps_add_merges_into_existing_line(monkeypatch):
         SimpleNamespace(card="Sol Ring", action="add",
                         reason="", evidence={}),
     ]
-    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
-    assert "2 Sol Ring|CLB|871" in new_text
-    sol_ring_lines = [
-        line for line in new_text.splitlines()
-        if "Sol Ring" in line
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    # No qty-2 line, no swap applied at all — the pair dropped as a unit.
+    assert "1 Sol Ring|CLB|871" in new_text
+    assert "2 Sol Ring" not in new_text
+    assert "1 Cultivate" in new_text
+    assert added == []
+    assert removed == []
+    assert kept == 2
+    assert report["dropped_duplicate_add"] == [
+        {"cut": "Cultivate", "add": "Sol Ring"},
     ]
-    assert len(sol_ring_lines) == 1
-    assert added == ["Sol Ring"]
-    assert removed == ["Cultivate"]
-    # ``kept`` counts surviving originals (post-cut, pre-add). Sol Ring
-    # was the lone survivor; the merge bump is tallied via len(added).
-    assert kept == 1
 
 
 def test_apply_swaps_duplicate_adds_collapse_to_one_line(monkeypatch):
@@ -1695,9 +1708,11 @@ def test_apply_swaps_duplicate_adds_collapse_to_one_line(monkeypatch):
 
 
 def test_apply_swaps_add_merges_after_partial_cut_same_card(monkeypatch):
-    """Cut decrements + add for the same name net out on the existing
-    line (keeping the edition tail) rather than producing a stale
-    decremented line plus a fresh ``1 <Name>`` line."""
+    """Basic-land cut decrements + add for the same name net out on
+    the existing line (keeping the edition tail) rather than producing
+    a stale decremented line plus a fresh ``1 <Name>`` line. The
+    NON-basic add (Sol Ring already in [Main]) drops with its paired
+    cut instead of bumping to an illegal ``2 Sol Ring``."""
     monkeypatch.setattr(
         "commander_builder.scryfall_client.lookup_card",
         lambda name, **kw: None,
@@ -1715,24 +1730,30 @@ def test_apply_swaps_add_merges_after_partial_cut_same_card(monkeypatch):
         SimpleNamespace(card="Mountain", action="add",
                         reason="", evidence={}),
     ]
-    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
-    # 5 - 2 + 1 = 4; edition tail kept verbatim.
-    assert "4 Mountain|EXP|123" in new_text
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    # Pair 1 (cut Mountain, add Sol Ring) dropped: Sol Ring is a
+    # non-basic already in the deck. Pair 2 (cut Mountain, add
+    # Mountain) applies and nets out: 5 - 1 + 1 = 5.
+    assert "5 Mountain|EXP|123" in new_text
     mountain_lines = [
         line for line in new_text.splitlines()
         if "Mountain" in line
     ]
     assert len(mountain_lines) == 1
-    # Sol Ring also bumped on its own line (1 + 1 = 2).
-    assert "2 Sol Ring" in new_text
-    sol_ring_lines = [
-        line for line in new_text.splitlines()
-        if "Sol Ring" in line
+    # Sol Ring stays a singleton.
+    assert "1 Sol Ring" in new_text
+    assert "2 Sol Ring" not in new_text
+    assert report["dropped_duplicate_add"] == [
+        {"cut": "Mountain", "add": "Sol Ring"},
     ]
-    assert len(sol_ring_lines) == 1
-    # Post-cut survivors: 3 Mountain + 1 Sol Ring = 4. The merge bumps
-    # (1 Mountain + 1 Sol Ring) are tallied via len(added) downstream.
-    assert kept == 4
+    assert added == ["Mountain"]
+    assert removed == ["Mountain"]
+    # Post-cut survivors: 4 Mountain + 1 Sol Ring = 5. The Mountain
+    # merge bump is tallied via len(added) downstream.
+    assert kept == 5
 
 
 def test_apply_swaps_add_hits_first_matching_line_when_multiple_printings(monkeypatch):
@@ -1759,6 +1780,172 @@ def test_apply_swaps_add_hits_first_matching_line_when_multiple_printings(monkey
     new_text, _added, _removed, _kept = _apply_swaps_to_dck(original, recs)
     assert "2 Mountain|CLB|871" in new_text
     assert "1 Mountain|EXP|123" in new_text
+
+
+# ---------------------------------------------------------------------------
+# Decklist validation of swap pairs (2026-07-19 fix) -- cuts must match
+# an actual [Main] card and adds must not violate the singleton rule or
+# duplicate the commander. An invalid half drops the WHOLE (cut, add)
+# pair so the mainboard size is preserved no matter what the LLM sent.
+# ---------------------------------------------------------------------------
+
+def test_apply_swaps_hallucinated_cut_drops_paired_add():
+    """A cut for a card not in the deck at all (LLM hallucination)
+    drops its paired add too — pre-fix the add landed anyway and the
+    deck grew past 99."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from commander_builder.web._helpers import _count_main_cards
+    from types import SimpleNamespace
+    original = "[Main]\n1 Sol Ring\n1 Cultivate\n1 Brainstorm\n"
+    recs = [
+        SimpleNamespace(card="Imaginary Card", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert added == []
+    assert removed == []
+    assert "Lotus Cobra" not in new_text
+    # Deck size unchanged — the whole pair dropped.
+    assert _count_main_cards(new_text) == 3
+    assert report["dropped_unmatched_cut"] == [
+        {"cut": "Imaginary Card", "add": "Lotus Cobra"},
+    ]
+
+
+def test_apply_swaps_dfc_full_name_cut_matches_front_face_line():
+    """Proposal says ``Malakir Rebirth // Malakir Mire`` (Scryfall's
+    full DFC name); the .dck line carries only the front face — the
+    cut must still match instead of dropping the pair."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Malakir Rebirth\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Malakir Rebirth // Malakir Mire",
+                        action="cut", reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert "Malakir Rebirth" not in new_text
+    assert "1 Lotus Cobra" in new_text
+    # ``removed`` reports the caller's requested spelling.
+    assert removed == ["Malakir Rebirth // Malakir Mire"]
+    assert report["dropped_unmatched_cut"] == []
+
+
+def test_apply_swaps_dfc_front_face_cut_matches_full_name_line():
+    """Mirror direction: proposal names the front face only, the .dck
+    line carries the full ``A // B`` form."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Malakir Rebirth // Malakir Mire\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Malakir Rebirth", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert "Malakir" not in new_text
+    assert "1 Lotus Cobra" in new_text
+    assert removed == ["Malakir Rebirth"]
+    assert report["dropped_unmatched_cut"] == []
+
+
+def test_apply_swaps_add_matching_commander_dropped():
+    """An add that names the [Commander] card drops with its paired
+    cut — the commander already occupies the command zone and a [Main]
+    copy would be illegal."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = (
+        "[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n1 Sol Ring\n1 Cultivate\n"
+    )
+    recs = [
+        SimpleNamespace(card="Cultivate", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Krenko, Mob Boss", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert added == []
+    assert removed == []
+    assert "1 Cultivate" in new_text
+    # Commander section untouched, and no [Main] copy appeared.
+    assert new_text.count("Krenko, Mob Boss") == 1
+    assert report["dropped_commander_add"] == [
+        {"cut": "Cultivate", "add": "Krenko, Mob Boss"},
+    ]
+
+
+def test_apply_swaps_double_cut_of_singleton_drops_second_pair():
+    """Two cuts of a quantity-1 card: the first pair applies, the
+    second finds no copy left and drops with its paired add. Pre-fix
+    the second add landed unfunded and oversized the deck."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from commander_builder.web._helpers import _count_main_cards
+    from types import SimpleNamespace
+    original = "[Main]\n1 Sol Ring\n1 Cultivate\n1 Brainstorm\n"
+    recs = [
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Tireless Tracker", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert removed == ["Sol Ring"]
+    assert added == ["Lotus Cobra"]
+    assert "Tireless Tracker" not in new_text
+    # 3 - 1 + 1 = 3: size preserved.
+    assert _count_main_cards(new_text) == 3
+    assert report["dropped_unmatched_cut"] == [
+        {"cut": "Sol Ring", "add": "Tireless Tracker"},
+    ]
+
+
+def test_apply_swaps_basic_land_add_still_increments_existing_line():
+    """Basic lands are exempt from the duplicate-add rejection — a
+    Mountain add on a deck already running Mountains is a legitimate
+    quantity bump, not a singleton violation."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n5 Mountain|EXP|123\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, _ = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert "6 Mountain|EXP|123" in new_text
+    assert added == ["Mountain"]
+    assert removed == ["Sol Ring"]
+    assert report["dropped_duplicate_add"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1999,6 +2186,19 @@ def test_pad_main_to_99_skips_quantities_in_other_sections():
     # sideboard must be ignored.
     assert "Mountain" not in breakdown
     assert breakdown == {"Forest": 34}
+
+
+def test_pad_main_to_99_reports_zero_when_no_main_header():
+    """No [Main] header → nowhere to splice pad lines → NOTHING is
+    inserted. The pre-2026-07-19 return reported the computed deficit
+    as padded anyway, so callers believed 89 basics landed when zero
+    did and their post-swap size math went wrong."""
+    from commander_builder.web.app import _pad_main_to_99
+    text = "[metadata]\nName=X\n[Commander]\n1 Cmdr\n"
+    out, padded, breakdown = _pad_main_to_99(text, current_main=10)
+    assert out == text
+    assert padded == 0
+    assert breakdown == {}
 
 
 def test_format_added_line_falls_back_when_set_missing(monkeypatch):

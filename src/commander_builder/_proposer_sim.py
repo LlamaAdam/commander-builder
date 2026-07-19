@@ -361,6 +361,13 @@ def _log_auto_curate_iteration(
         "dropped_for_protection": list(proposal.dropped_for_protection),
         "dropped_for_color_identity": list(proposal.dropped_for_color_identity),
         "dropped_for_balance": list(proposal.dropped_for_balance),
+        # Pair-drops from apply-time decklist validation — each entry
+        # is {"cut": ..., "add": ...}. Persisted so iteration analysis
+        # can spot proposals the LLM built against a stale/imagined
+        # decklist (high pair-drop counts = curator quality signal).
+        "dropped_unmatched_cut": list(proposal.dropped_unmatched_cut),
+        "dropped_duplicate_add": list(proposal.dropped_duplicate_add),
+        "dropped_commander_add": list(proposal.dropped_commander_add),
         "padded_count": proposal.padded_count,
         "padded_breakdown": dict(proposal.padded_breakdown),
         "requested_adds": list(proposal.adds),

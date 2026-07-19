@@ -1497,6 +1497,144 @@ def test_apply_proposal_records_applied_fields_on_dry_run(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Decklist validation + the never-write-a-non-99-mainboard guard
+# (2026-07-19 fix). Cuts that match nothing in [Main] used to be
+# silently skipped while their paired adds still landed, writing
+# 100-card mainboards Forge rejects (or silently mis-sims).
+# ---------------------------------------------------------------------------
+
+def _count_main(text: str) -> int:
+    from commander_builder.web._helpers import _count_main_cards
+    return _count_main_cards(text)
+
+
+def test_apply_proposal_drops_unmatched_cut_pair_and_stays_legal(tmp_path):
+    """A hallucinated cut (card not in the deck) drops its paired add
+    too, is reported under dropped_unmatched_cut, and the written deck
+    still lands at exactly 99 mainboard."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate", "Brainstorm", "Filler"],
+    )
+    proposal = Proposal(
+        adds=["Lotus Cobra"],
+        cuts=["Card That Does Not Exist"],
+        rationale="x", source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    # Neither half of the invalid pair landed.
+    assert "1 Lotus Cobra" not in text
+    assert proposal.applied_adds == []
+    assert proposal.applied_cuts == []
+    # Reported under exactly one reason — not silently lost, not
+    # misfiled under balance.
+    assert proposal.dropped_unmatched_cut == [
+        {"cut": "Card That Does Not Exist", "add": "Lotus Cobra"},
+    ]
+    assert proposal.dropped_for_balance == []
+    # The written deck is legal: padding topped the 4-card fixture up
+    # to exactly 99.
+    assert _count_main(text) == 99
+
+
+def test_apply_proposal_guard_refuses_to_write_non_99_mainboard(tmp_path):
+    """Last-resort invariant: if the swap/pad pipeline somehow ends at
+    != 99 mainboard (here: an over-sized 100-card source that padding
+    can only top UP, never trim), apply_proposal_to_deck raises instead
+    of writing a deck Forge would reject."""
+    import pytest
+
+    # 100 distinct main cards — swaps preserve size, padding is a
+    # no-op above 99, so the output would be a 100-card mainboard.
+    main_cards = [f"Card {i}" for i in range(99)] + ["Sol Ring"]
+    src = _make_dck(tmp_path, "[USER] Fat [B3].dck", main_cards)
+    proposal = Proposal(
+        adds=["Lotus Cobra"], cuts=["Sol Ring"], rationale="x",
+    )
+    with pytest.raises(RuntimeError, match="not 99"):
+        apply_proposal_to_deck(src, proposal)
+    # And nothing landed on disk.
+    assert not (tmp_path / "[USER] Fat v2 [B3].dck").exists()
+
+
+def test_apply_proposal_duplicate_add_pair_dropped_and_reported(tmp_path):
+    """An add for a non-basic already in [Main] would write an illegal
+    ``2 <Name>`` line — the pair drops and lands under
+    dropped_duplicate_add."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate", "Brainstorm"],
+    )
+    proposal = Proposal(
+        adds=["Sol Ring"], cuts=["Cultivate"], rationale="x",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    assert "2 Sol Ring" not in text
+    assert "1 Sol Ring" in text
+    # The cut half didn't apply either — Cultivate survives.
+    assert "1 Cultivate" in text
+    assert proposal.dropped_duplicate_add == [
+        {"cut": "Cultivate", "add": "Sol Ring"},
+    ]
+    assert _count_main(text) == 99
+
+
+def test_apply_proposal_commander_add_pair_dropped_and_reported(tmp_path):
+    """An add naming the [Commander] card drops with its paired cut
+    and lands under dropped_commander_add."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate"],
+    )
+    proposal = Proposal(
+        adds=["Test Commander"], cuts=["Cultivate"], rationale="x",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    assert "1 Cultivate" in text
+    # Commander appears only in the [Commander] section.
+    assert text.count("Test Commander") == 1
+    assert proposal.dropped_commander_add == [
+        {"cut": "Cultivate", "add": "Test Commander"},
+    ]
+    assert _count_main(text) == 99
+
+
+def test_apply_proposal_protected_cut_reported_under_single_reason(tmp_path):
+    """Regression for the double-report bug: a protected cut stripped
+    inside apply_proposal_to_deck used to ALSO land in
+    dropped_for_balance (it was 'requested but not applied'). Each
+    dropped swap must appear under exactly one reason."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate", "Brainstorm"],
+    )
+    text = src.read_text(encoding="utf-8")
+    text = text.replace("Moxfield=abc\n", "Moxfield=abc\nProtect=Sol Ring\n")
+    src.write_text(text, encoding="utf-8")
+
+    proposal = Proposal(
+        adds=["Lotus Cobra", "Tireless Tracker"],
+        cuts=["Sol Ring", "Cultivate"],
+        rationale="x", source="claude-auto",
+    )
+    apply_proposal_to_deck(src, proposal)
+
+    # Sol Ring: protection only. Tireless Tracker: balance surplus
+    # only (after Sol Ring was stripped, 2 adds vs 1 cut).
+    assert proposal.dropped_for_protection == ["Sol Ring"]
+    assert "Sol Ring" not in proposal.dropped_for_balance
+    assert proposal.dropped_for_balance == ["Tireless Tracker"]
+    assert proposal.applied_adds == ["Lotus Cobra"]
+    assert proposal.applied_cuts == ["Cultivate"]
+
+
+# ---------------------------------------------------------------------------
 # auto_curate_main — the commander-auto-curate CLI entry point
 # ---------------------------------------------------------------------------
 

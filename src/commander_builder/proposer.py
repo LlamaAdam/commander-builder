@@ -402,6 +402,25 @@ class Proposal:
     applied_adds: list[str] = field(default_factory=list)
     applied_cuts: list[str] = field(default_factory=list)
     dropped_for_balance: list[str] = field(default_factory=list)
+    # Swap PAIRS dropped by apply-time decklist validation (2026-07-19
+    # fix). Each entry is ``{"cut": <name>, "add": <name>}`` — the pair
+    # is dropped as a unit so adds == cuts stays true and the written
+    # deck keeps a legal 99-card mainboard. Reasons:
+    #   dropped_unmatched_cut  -- the cut matched no [Main] card (LLM
+    #                             hallucination, DFC naming drift the
+    #                             matcher couldn't bridge, or an earlier
+    #                             cut consumed the last copy).
+    #   dropped_duplicate_add  -- the add is a non-basic already in
+    #                             [Main]; applying it would write an
+    #                             illegal ``2 <Name>`` singleton
+    #                             violation.
+    #   dropped_commander_add  -- the add names the [Commander] card.
+    # Every dropped swap appears under EXACTLY ONE reason field —
+    # protected cuts live only in dropped_for_protection, balance
+    # surplus only in dropped_for_balance, validated pairs here.
+    dropped_unmatched_cut: list[dict] = field(default_factory=list)
+    dropped_duplicate_add: list[dict] = field(default_factory=list)
+    dropped_commander_add: list[dict] = field(default_factory=list)
     padded_count: int = 0
     padded_breakdown: dict = field(default_factory=dict)
 
@@ -958,12 +977,24 @@ def apply_proposal_to_deck(
          so the iteration log records what Claude wanted but didn't
          apply.
 
-      2. If the SOURCE deck was already short of 99 mainboard (some
+      2. Each surviving (cut, add) pair is validated against the
+         actual decklist (see ``_apply_swaps_to_dck``): unmatched
+         cuts, singleton-violating adds, and adds naming the
+         commander drop the WHOLE pair, reported on
+         ``proposal.dropped_unmatched_cut`` /
+         ``dropped_duplicate_add`` / ``dropped_commander_add``.
+
+      3. If the SOURCE deck was already short of 99 mainboard (some
          imports land at 71-95), the proposed deck inherits the
          deficit and gets padded with basics matching the deck's
          existing color distribution. Padded count + breakdown
          surface on ``proposal.padded_count`` /
          ``proposal.padded_breakdown``.
+
+      4. Last resort: the final mainboard is re-counted from the
+         proposed text and the write is REFUSED (RuntimeError) if it
+         isn't exactly 99 — a corrupt deck on disk poisons every
+         downstream sim/iteration, so failing loudly beats writing.
 
     This mirrors the invariants the web UI's /api/audit endpoint
     already enforces. The two flows are now in sync -- same balancing,
@@ -1015,8 +1046,13 @@ def apply_proposal_to_deck(
     ]
 
     text = src_path.read_text(encoding="utf-8")
+    # drop_report collects the per-reason swap drops the helper's
+    # decklist validation produced (unmatched cuts, singleton-violating
+    # adds, commander adds, balance surplus) so each dropped swap can
+    # be surfaced under exactly one reason below.
+    drop_report: dict = {}
     proposed_text, applied_adds, applied_cuts, kept_count = _apply_swaps_to_dck(
-        text, recs,
+        text, recs, drop_report=drop_report,
     )
 
     # Pad the proposed deck to 99 mainboard if it's short. The audit
@@ -1040,19 +1076,51 @@ def apply_proposal_to_deck(
 
     # Record what actually happened so the CLI summary + iteration
     # log can distinguish "Claude wanted X" from "the new .dck has Y".
+    # Reason buckets come straight from the helper's drop_report so
+    # each dropped swap appears under EXACTLY ONE reason. (The old
+    # "everything requested minus everything applied" computation
+    # double-reported protected cuts: they landed in
+    # dropped_for_protection above AND in dropped_for_balance here.)
     proposal.applied_adds = list(applied_adds)
     proposal.applied_cuts = list(applied_cuts)
-    applied_add_set = {a.lower() for a in applied_adds}
-    applied_cut_set = {c.lower() for c in applied_cuts}
-    proposal.dropped_for_balance = (
-        [a for a in proposal.adds if a.lower() not in applied_add_set]
-        + [c for c in proposal.cuts if c.lower() not in applied_cut_set]
+    proposal.dropped_for_balance = list(
+        drop_report.get("dropped_for_balance", []),
+    )
+    proposal.dropped_unmatched_cut = list(
+        drop_report.get("dropped_unmatched_cut", []),
+    )
+    proposal.dropped_duplicate_add = list(
+        drop_report.get("dropped_duplicate_add", []),
+    )
+    proposal.dropped_commander_add = list(
+        drop_report.get("dropped_commander_add", []),
     )
     proposal.padded_count = padded_count
     proposal.padded_breakdown = dict(padded_breakdown)
 
     if dry_run:
         return out_path
+
+    # HARD GUARD — last-resort invariant before anything touches disk.
+    # Everything above (pair validation, balancing, padding) should
+    # have produced exactly 99 mainboard cards for a Commander deck;
+    # if it didn't (over-sized source deck, missing [Main] header, a
+    # future regression in the swap/pad pipeline), writing the file
+    # would hand Forge a deck it rejects — or worse, silently mis-sims
+    # — and every downstream iteration builds on the corrupt list.
+    # Refuse loudly instead.
+    from .web._helpers import _count_main_cards
+    final_main = _count_main_cards(proposed_text)
+    if final_main != 99:
+        raise RuntimeError(
+            f"refusing to write {out_path.name}: proposed mainboard has "
+            f"{final_main} cards, not 99. The swap/padding pipeline "
+            "should have produced a legal Commander mainboard — this "
+            "deck would be rejected (or silently mis-simmed) by Forge. "
+            f"Source deck: {src_path.name}; adds applied: "
+            f"{len(applied_adds)}; cuts applied: {len(applied_cuts)}; "
+            f"basics padded: {padded_count}."
+        )
 
     out_path.write_text(proposed_text, encoding="utf-8")
     return out_path

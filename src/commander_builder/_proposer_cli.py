@@ -443,6 +443,24 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
               f"(adds/cuts unbalanced): {len(proposal.dropped_for_balance)}")
         for c in proposal.dropped_for_balance:
             print(f"  ~ {c}")
+    # Pair-drops from apply-time decklist validation. Each entry is a
+    # {"cut": ..., "add": ...} dict — the pair was dropped as a unit so
+    # the deck stays at a legal 99 mainboard (see apply_proposal_to_deck).
+    if proposal.dropped_unmatched_cut:
+        print(f"Dropped swap pairs (cut not found in decklist): "
+              f"{len(proposal.dropped_unmatched_cut)}")
+        for pair in proposal.dropped_unmatched_cut:
+            print(f"  ~ -{pair['cut']} / +{pair['add']}")
+    if proposal.dropped_duplicate_add:
+        print(f"Dropped swap pairs (add already in deck, singleton rule): "
+              f"{len(proposal.dropped_duplicate_add)}")
+        for pair in proposal.dropped_duplicate_add:
+            print(f"  ~ -{pair['cut']} / +{pair['add']}")
+    if proposal.dropped_commander_add:
+        print(f"Dropped swap pairs (add is the commander): "
+              f"{len(proposal.dropped_commander_add)}")
+        for pair in proposal.dropped_commander_add:
+            print(f"  ~ -{pair['cut']} / +{pair['add']}")
     if proposal.padded_count:
         breakdown_str = ", ".join(
             f"{n}x {b}" for b, n in proposal.padded_breakdown.items()
