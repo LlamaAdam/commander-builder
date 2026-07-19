@@ -149,13 +149,23 @@ def test_list_decks_hides_proposed_working_copies(user_deck_dir):
     """Transient _proposed_<timestamp> files staged by propose_swap
     should never appear in the sidebar — neither in user_only mode
     nor in the unfiltered listing."""
-    # Plant a leftover proposed working copy.
+    # Plant a leftover proposed working copy in the PRE-uid name shape
+    # (staged by builds before the same-second-collision fix)...
     leftover = user_deck_dir / "[USER] Hakbal [B3]_proposed_20260428_134828.dck"
     leftover.write_text("[Main]\n1 Forest\n", encoding="utf-8")
+    # ...and one in the CURRENT shape (timestamp + 8-hex per-request
+    # uid). Both must stay hidden.
+    leftover_uid = (
+        user_deck_dir
+        / "[USER] Hakbal [B3]_proposed_20260428_134828_deadbeef.dck"
+    )
+    leftover_uid.write_text("[Main]\n1 Forest\n", encoding="utf-8")
     user_only = {d["id"] for d in _list_decks(user_deck_dir)}
     all_mode = {d["id"] for d in _list_decks(user_deck_dir, user_only=False)}
     assert "[USER] Hakbal [B3]_proposed_20260428_134828" not in user_only
     assert "[USER] Hakbal [B3]_proposed_20260428_134828" not in all_mode
+    assert "[USER] Hakbal [B3]_proposed_20260428_134828_deadbeef" not in user_only
+    assert "[USER] Hakbal [B3]_proposed_20260428_134828_deadbeef" not in all_mode
 
 
 def test_decks_endpoint_filters_to_user_default(user_deck_dir, monkeypatch):
@@ -2035,7 +2045,9 @@ def test_cleanup_stale_staged_files_deletes_old_proposed_files(tmp_path):
     constructed = tmp_path / "userdata" / "decks" / "constructed"
     constructed.mkdir()
 
-    # Old proposed file (should be deleted).
+    # Old proposed file, PRE-uid name shape (should be deleted —
+    # leftovers staged by builds before the same-second-collision fix
+    # must still match the sweep pattern).
     old_proposed = deck_dir / "Foo_proposed_20260101_120000.dck"
     old_proposed.write_text("stale\n", encoding="utf-8")
     # Backdate it so the age check fires.
@@ -2047,14 +2059,28 @@ def test_cleanup_stale_staged_files_deletes_old_proposed_files(tmp_path):
     old_converted.write_text("stale\n", encoding="utf-8")
     os.utime(old_converted, (past, past))
 
+    # CURRENT name shape: routes_sim appends an 8-hex per-request uid
+    # after the timestamp. The sweep must match these too or every
+    # interrupted run would orphan its staging files forever.
+    old_proposed_uid = deck_dir / "Foo_proposed_20260101_120000_a1b2c3d4.dck"
+    old_proposed_uid.write_text("stale\n", encoding="utf-8")
+    os.utime(old_proposed_uid, (past, past))
+    old_converted_uid = (
+        constructed / "Bar_converted_20260101_120000_a1b2c3d4.dck"
+    )
+    old_converted_uid.write_text("stale\n", encoding="utf-8")
+    os.utime(old_converted_uid, (past, past))
+
     # User deck (should NOT be touched).
     user_deck = deck_dir / "[USER] Real Deck [B3].dck"
     user_deck.write_text("real\n", encoding="utf-8")
 
     deleted = _cleanup_stale_staged_files(deck_dir)
-    assert deleted == 2
+    assert deleted == 4
     assert not old_proposed.exists()
     assert not old_converted.exists()
+    assert not old_proposed_uid.exists()
+    assert not old_converted_uid.exists()
     assert user_deck.exists()
 
 
@@ -3627,6 +3653,114 @@ def test_propose_swap_pod_mode_does_not_convert_format(client, monkeypatch):
     assert "[Commander]" in captured["new_text"]
     # And does NOT inject Deck Type=constructed.
     assert "Deck Type=constructed" not in captured["new_text"]
+
+
+def test_propose_swap_same_second_requests_stage_distinct_paths(
+    client, monkeypatch,
+):
+    """Two propose_swap requests staged within the SAME second must
+    produce DIFFERENT staged file paths.
+
+    The staged names carry a strftime("%Y%m%d_%H%M%S") timestamp —
+    1-second granularity. Before the per-request uid suffix, two A/B
+    sims on the same deck started in the same second built IDENTICAL
+    paths: request B's write_text clobbered the file request A's Forge
+    JVM was mid-reading, and A's cleanup unlink deleted the file B
+    still needed (FileNotFound / '0 games played').
+
+    Freeze datetime.now() so both requests see the exact same
+    timestamp — the worst case — and pin that the paths still differ.
+    routes_sim does `from datetime import datetime as _dt` inside the
+    handler, so patching the datetime module's `datetime` attribute is
+    picked up per-request (module-level `from` imports elsewhere keep
+    their original binding and are unaffected).
+    """
+    import datetime as _dtmod
+
+    class _FrozenDT(_dtmod.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 19, 12, 0, 0)
+
+    monkeypatch.setattr(_dtmod, "datetime", _FrozenDT)
+
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    # 1v1 mode stages BOTH a _proposed_ and a _converted_ file — cover
+    # the whole collision class in one run.
+    body = {
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
+    }
+    resp_a = client.post("/api/propose_swap", json=body)
+    assert resp_a.status_code == 200
+    first_new = captured["new_deck"]
+    first_old = captured["old_deck"]
+    resp_b = client.post("/api/propose_swap", json=body)
+    assert resp_b.status_code == 200
+    second_new = captured["new_deck"]
+    second_old = captured["old_deck"]
+
+    frozen_ts = "20260719_120000"
+    # Sanity: the frozen clock actually took — both runs share the
+    # exact same timestamp component, so ONLY the uid can differ.
+    for name in (first_new, second_new):
+        assert f"_proposed_{frozen_ts}_" in name, name
+    for name in (first_old, second_old):
+        assert f"_converted_{frozen_ts}_" in name, name
+    # The actual collision pin: identical second, distinct paths.
+    assert first_new != second_new, (
+        "same-second propose_swap requests staged the SAME proposed "
+        f"path ({first_new!r}) — concurrent A/B sims would clobber "
+        "each other's staged decks"
+    )
+    assert first_old != second_old, (
+        "same-second propose_swap requests staged the SAME converted "
+        f"path ({first_old!r})"
+    )
+
+
+def test_propose_swap_staged_name_metadata_equals_filename_stem(
+    client, monkeypatch,
+):
+    """Win attribution requires `_normalize(<filename stem>) ==
+    _normalize(<Name= field>)` (see dck_meta's module docstring):
+    Forge reports the Name= field, compare_versions queries by
+    filename. Assert the RELATIONSHIP (Name == stem) rather than a
+    literal so the pin survives changes to the uniquifier shape —
+    the uid suffix lives on both sides, which is exactly what keeps
+    attribution consistent.
+    """
+    import re as _re
+    from commander_builder.log_parser import _normalize
+
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
+    })
+    assert resp.status_code == 200
+    for deck_key, text_key in (
+        ("new_deck", "new_text"),
+        ("old_deck", "old_text"),
+    ):
+        stem = Path(captured[deck_key]).stem
+        m = _re.search(r"^Name=(.+)$", captured[text_key], _re.MULTILINE)
+        assert m, f"{text_key} has no Name= metadata"
+        assert m.group(1) == stem, (
+            f"{deck_key}: staged Name= ({m.group(1)!r}) != filename "
+            f"stem ({stem!r}) — log_parser can't attribute wins"
+        )
+        # And the normalized forms agree — the exact key match win
+        # attribution runs on.
+        assert _normalize(captured[deck_key]) == _normalize(m.group(1))
 
 
 def test_compare_iterations_handles_added_cards(seeded_client):

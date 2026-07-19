@@ -69,7 +69,14 @@ def _cleanup_stale_staged_files(
     import time as _time
     if not deck_dir.exists():
         return 0
-    pattern = _re.compile(r"_(proposed|converted)_\d{8}_\d{6}\.dck$")
+    # Staged names are `<stem>_proposed_<ts>_<uid8>.dck` — the trailing
+    # 8-hex uid is routes_sim's per-request uniquifier (prevents
+    # same-second clobber races between concurrent A/B sims). The uid
+    # group is OPTIONAL so leftovers staged by pre-uid builds (bare
+    # `_proposed_<ts>.dck`) still get swept instead of orphaned.
+    pattern = _re.compile(
+        r"_(proposed|converted)_\d{8}_\d{6}(_[0-9a-f]{8})?\.dck$"
+    )
     now = _time.time()
     deleted = 0
     # Sweep the commander folder + the parallel constructed folder
@@ -114,7 +121,12 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
         if user_only and not p.stem.startswith("[USER]"):
             continue
         # Skip transient propose-swap working copies regardless of mode.
-        if _re.search(r"_(proposed|converted)_\d{8}_\d{6}$", p.stem):
+        # The optional trailing 8-hex uid matches routes_sim's per-request
+        # uniquifier (same-second collision fix); the bare-timestamp form
+        # is kept so leftovers from pre-uid builds stay hidden too.
+        if _re.search(
+            r"_(proposed|converted)_\d{8}_\d{6}(_[0-9a-f]{8})?$", p.stem,
+        ):
             continue
         display = _re.sub(r"^\[USER\]\s*", "", p.stem)
         out.append({

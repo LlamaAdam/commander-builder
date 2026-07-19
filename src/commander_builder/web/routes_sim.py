@@ -135,7 +135,21 @@ def make_sim_blueprint(
         #   mystery. Strip the [USER]/[REF] prefix because Forge's CLI
         #   loader also chokes on filenames starting with `[`.
         from datetime import datetime as _dt
+        from uuid import uuid4
         ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        # The timestamp alone has 1-SECOND granularity, and Flask serves
+        # propose_swap concurrently (threaded, same process). Two A/B
+        # sims on the same deck started within the same second would
+        # build IDENTICAL staged paths: request B's write_text clobbers
+        # the file request A's Forge JVM is mid-reading (wrong deck gets
+        # simmed), and A's cleanup unlink deletes the file B's Forge
+        # still needs (FileNotFound / "0 games played"). Append a short
+        # random component to make every request's staged names unique.
+        # uuid4 — NOT os.getpid(): concurrent requests share one process,
+        # so the pid is identical exactly when it would need to differ.
+        # The timestamp stays because it's human-friendly for triaging
+        # leftover staged files (and the stale-file sweep keys on it).
+        uid = uuid4().hex[:8]
         bare_stem = old_path.stem
         for _prefix in ("[USER] ", "[REF] "):
             if bare_stem.startswith(_prefix):
@@ -146,7 +160,14 @@ def make_sim_blueprint(
             stage_dir.mkdir(parents=True, exist_ok=True)
         else:
             stage_dir = old_path.parent
-        new_path = stage_dir / f"{bare_stem}_proposed_{ts}.dck"
+        # Build the filename FROM staged_name (single source of truth)
+        # so the Name= metadata below can never drift from the stem —
+        # log_parser._normalize must map both to the same key for win
+        # attribution to work. _normalize strips only the [USER] prefix,
+        # the [B<n>] suffix and the .dck extension, so the _{ts}_{uid}
+        # suffix survives identically on both sides of the comparison.
+        staged_name = f"{bare_stem}_proposed_{ts}_{uid}"
+        new_path = stage_dir / f"{staged_name}.dck"
         # Rewrite the [metadata] Name= field so Forge displays this
         # deck distinctly from the original. Without this both decks
         # report 'Name=Hakbal of the Surging Soul' in Forge's Match
@@ -156,7 +177,6 @@ def make_sim_blueprint(
         # snapshot / proposer / meta_test deck writers, which hit the
         # same misattribution).
         from ..dck_meta import rewrite_name
-        staged_name = f"{bare_stem}_proposed_{ts}"
         new_text_staged = rewrite_name(new_text, staged_name)
 
         # When mode='1v1' the format is `constructed`, but the user's
@@ -175,15 +195,19 @@ def make_sim_blueprint(
 
         # The OLD deck file is the unchanged user deck — also has a
         # [Commander] section, also needs conversion for 1v1. Stage
-        # a sibling _converted_<timestamp>.dck holding the converted
+        # a sibling _converted_<timestamp>_<uid>.dck holding the converted
         # text so we don't mutate the user's actual deck file.
         old_converted_path: Optional[Path] = None
         old_for_compare = old_path.name
         if mode == "1v1":
             old_text = old_path.read_text(encoding="utf-8")
             # Ensure the old deck's metadata Name= is also distinct
-            # so log_parser can split wins between old + new.
-            old_staged_name = f"{bare_stem}_converted_{ts}"
+            # so log_parser can split wins between old + new. Reuse the
+            # same per-request uid — the _proposed_/_converted_ infix
+            # already separates the two sides within a request, and one
+            # uid per request makes "which files belong together" obvious
+            # when triaging leftovers.
+            old_staged_name = f"{bare_stem}_converted_{ts}_{uid}"
             old_text = rewrite_name(old_text, old_staged_name)
             old_text = _to_constructed_format(old_text)
             old_converted_path = stage_dir / f"{old_staged_name}.dck"
