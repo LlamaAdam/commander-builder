@@ -433,6 +433,49 @@ def _parse_commander_page(commander_name: str, slug: str, html: str) -> Commande
     return page
 
 
+def _page_has_card_signal(page: CommanderPage) -> bool:
+    """True when the parse extracted at least one card from ANY section.
+
+    Why this exists: an HTTP 200 is NOT proof we got real EDHREC data.
+    CDN bot-challenge pages, redirect interstitials, and site schema
+    changes all come back 200 with HTML that has no usable
+    ``__NEXT_DATA__`` card lists. ``_parse_commander_page`` deliberately
+    degrades to an empty page in that case (its schema-tolerance
+    contract), so the CALLER must decide whether the result is worth
+    caching. Writing an empty parse to the 24h disk cache poisons every
+    advisor/audit run for that commander (or tag) within the TTL —
+    zero EDHREC signal, no error, no retry, recommendations quietly
+    degrade. Mirrors the ``if salt_map:`` guard in ``fetch_salt_list``.
+
+    ``deck_count`` / ``average_deck_url`` alone do NOT count as signal:
+    the recommendation pipeline consumes cards, so a page with metadata
+    but zero cards would still starve every run that hits the cache.
+    """
+    return bool(
+        page.top_cards
+        or page.high_synergy_cards
+        or page.new_cards
+        or page.category_lists
+    )
+
+
+def _warn_empty_parse(kind: str, ident: str) -> None:
+    """One LOUD, grep-able line when a 200-OK fetch parsed to nothing.
+
+    Kept as a helper so the commander-page and tag-page paths emit an
+    identical message shape — operators grep server logs for
+    ``[edhrec] WARNING`` to distinguish "EDHREC was down" from "EDHREC
+    answered but served us a challenge page".
+    """
+    print(
+        f"[edhrec] WARNING: {kind} {ident!r} fetched OK but contained no "
+        "card data — EDHREC returned a page with no usable __NEXT_DATA__ "
+        "(possibly a bot-challenge page, redirect interstitial, or schema "
+        "change). Result NOT cached; will retry next run.",
+        flush=True,
+    )
+
+
 # Recognized "top" page slugs: time windows + card types. EDHREC serves
 # each at json.edhrec.com/pages/top/<slug>.json.
 TOP_WINDOWS = ("year", "month", "week")  # year == "Past 2 Years"
@@ -469,7 +512,17 @@ def fetch_top_cards(
     try:
         raw = _http_get_text_with_retry(url)
         payload = json.loads(raw)
-    except Exception:  # noqa: BLE001 — degrade to empty on any failure
+    except (OSError, ValueError) as exc:
+        # OSError covers HTTPError/URLError/TimeoutError (all real
+        # network failures); ValueError covers JSONDecodeError (CDN
+        # served non-JSON, e.g. a challenge page). Anything else is a
+        # programming error and should propagate, not be silently
+        # converted into "no top cards".
+        print(
+            f"[edhrec] WARNING: top-cards fetch failed for {slug!r} "
+            f"({exc!r}) — continuing without trending signal",
+            flush=True,
+        )
         return []
 
     buckets: dict[str, list[CardEntry]] = {}
@@ -485,6 +538,19 @@ def fetch_top_cards(
             cards.append(c)
     # /top "inclusion" is a raw deck count, not a %, so rank by num_decks.
     cards.sort(key=lambda c: c.num_decks, reverse=True)
+
+    # Valid JSON but zero recognizable cards = schema change (or a bad
+    # slug). The ``if cache and cards`` guard below already refuses to
+    # cache the empty parse; warn so the degradation isn't silent.
+    # (Bespoke message rather than _warn_empty_parse — this is the JSON
+    # API, so "no __NEXT_DATA__" would be the wrong diagnosis.)
+    if not cards:
+        print(
+            f"[edhrec] WARNING: top-cards page {slug!r} fetched OK but "
+            "contained no recognizable cardlists — bad slug or JSON "
+            "schema change. Result NOT cached; will retry next run.",
+            flush=True,
+        )
 
     if cache and cards:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -550,9 +616,31 @@ def fetch_commander_page(
         if exc.code == 404:
             return None
         return None
-    except Exception:
+    except OSError as exc:
+        # URLError and TimeoutError are both OSError subclasses, so this
+        # single clause covers every network-level failure urllib can
+        # raise (DNS, connection refused, TLS, socket timeout) WITHOUT
+        # also swallowing genuine bugs — the old blanket
+        # ``except Exception`` silently converted e.g. a parser-adjacent
+        # TypeError into "EDHREC unavailable". Programming errors now
+        # propagate; network errors still degrade gracefully, but loudly
+        # enough (exception repr) to be diagnosable from the server log.
+        print(
+            f"[edhrec] WARNING: commander-page fetch failed for {slug!r} "
+            f"({exc!r}) — continuing without EDHREC signal",
+            flush=True,
+        )
         return None
     page = _parse_commander_page(commander_or_slug, slug, html)
+    # Cache-poisoning guard: only cache a parse that actually carries
+    # card signal. A 200-OK challenge page / interstitial / schema-shift
+    # parses to an EMPTY CommanderPage; caching that would silently
+    # starve every run for this commander for the next 24h. Return the
+    # empty page uncached instead (callers already handle empty pages),
+    # so the next run retries the fetch.
+    if not _page_has_card_signal(page):
+        _warn_empty_parse("commander page", slug)
+        return page
     if cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(page.to_json(), encoding="utf-8")
@@ -636,12 +724,25 @@ def fetch_salt_list(
     time.sleep(REQUEST_SLEEP_SEC)
     try:
         html = _http_get_text_with_retry(url)
-    except Exception:  # noqa: BLE001
+    except OSError as exc:
+        # OSError covers HTTPError/URLError/TimeoutError — every real
+        # network failure — without swallowing programming errors like
+        # the old blanket ``except Exception`` did.
+        print(
+            f"[edhrec] WARNING: salt-list fetch failed ({exc!r}) — "
+            "continuing without salt scores",
+            flush=True,
+        )
         return {}
 
     try:
         next_data = _extract_next_data(html)
     except ValueError:
+        # 200-OK but no __NEXT_DATA__ → challenge page / interstitial /
+        # schema change. Nothing is cached on this path (the write below
+        # is guarded by ``if salt_map``), so the next run retries — but
+        # say so loudly instead of silently returning no salt signal.
+        _warn_empty_parse("salt list", "top/salt")
         return {}
 
     # Walk the blob looking for a section with cards carrying a
@@ -673,6 +774,13 @@ def fetch_salt_list(
             for v in node:
                 _walk(v)
     _walk(next_data)
+
+    # A present-but-saltless blob means the page schema shifted (the
+    # ``label: "Salt Score: X"`` annotation moved/renamed). Warn so the
+    # operator notices; the guard below already skips the cache write,
+    # so the next run retries.
+    if not salt_map:
+        _warn_empty_parse("salt list", "top/salt")
 
     if cache and salt_map:
         try:
@@ -733,7 +841,16 @@ def fetch_tag_page(
         if exc.code == 404:
             return None
         return None
-    except Exception:
+    except OSError as exc:
+        # Same narrowing rationale as fetch_commander_page: OSError
+        # covers URLError/TimeoutError (network-level failures) while
+        # letting programming errors propagate instead of masquerading
+        # as "EDHREC unavailable".
+        print(
+            f"[edhrec] WARNING: tag-page fetch failed for {safe_slug!r} "
+            f"({exc!r}) — continuing without tag signal",
+            flush=True,
+        )
         return None
     # Reuse the commander-page parser — tag pages have the same
     # __NEXT_DATA__ shape. The ``commander_name`` field on the
@@ -745,6 +862,13 @@ def fetch_tag_page(
         slug=safe_slug,
         html=html,
     )
+    # Same cache-poisoning guard as fetch_commander_page: a 200-OK
+    # challenge page parses to an empty CommanderPage; caching it would
+    # zero out this tag's signal for the next 24h. Return it uncached so
+    # the next run retries.
+    if not _page_has_card_signal(page):
+        _warn_empty_parse("tag page", safe_slug)
+        return page
     if cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(page.to_json(), encoding="utf-8")
@@ -940,12 +1064,24 @@ def fetch_average_deck(
         if exc.code == 404:
             return None
         return None
-    except Exception:
+    except OSError as exc:
+        # Same narrowing as the other fetchers: OSError covers
+        # URLError/TimeoutError; programming errors propagate.
+        print(
+            f"[edhrec] WARNING: average-deck fetch failed for {url!r} "
+            f"({exc!r}) — continuing without average-deck signal",
+            flush=True,
+        )
         return None
 
+    # Nothing below caches an empty result (both early returns skip the
+    # cache write), so a challenge page here can't poison the cache —
+    # but warn anyway so "no average deck" is distinguishable from
+    # "EDHREC served us an interstitial" in the logs.
     try:
         next_data = _extract_next_data(html)
     except ValueError:
+        _warn_empty_parse("average-deck page", cache_key)
         return None
 
     cards = _walk_for_average_deck_cards(next_data)
