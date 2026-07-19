@@ -216,6 +216,63 @@ def test_bulk_import_deduplicates_within_same_batch(tmp_path, monkeypatch):
     assert result.duplicate_count == 1
 
 
+def test_bulk_import_same_id_across_runs_is_duplicate(tmp_path, monkeypatch):
+    """Re-running bulk_import over a URL already imported (same recorded
+    Moxfield= publicId on disk) reports a duplicate — correct dedupe, file
+    untouched."""
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda deck_id: _stub_deck_json("MyDeck", deck_id),
+    )
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.time.sleep", lambda s: None,
+    )
+
+    urls = ["https://moxfield.com/decks/abc"]
+    r1 = bulk_import(urls, out_dir=tmp_path, is_user=True)
+    assert r1.success_count == 1
+    written = Path(r1.successes[0]["path"])
+    before = written.read_text(encoding="utf-8")
+
+    r2 = bulk_import(urls, out_dir=tmp_path, is_user=True)
+    assert r2.success_count == 0
+    assert r2.duplicate_count == 1
+    assert r2.duplicates[0]["reason"] == "same Moxfield deck already on disk"
+    assert written.read_text(encoding="utf-8") == before
+    # No numbered copy appeared either.
+    assert len(list(tmp_path.glob("*.dck"))) == 1
+
+
+def test_bulk_import_different_deck_name_collision_uniquified(
+    tmp_path, monkeypatch,
+):
+    """Two DIFFERENT decks whose names sanitize to the same filename: the
+    second must be IMPORTED under a uniquified name (old code misreported
+    it as 'file already on disk' and silently skipped it). The uniquified
+    name keeps the ` [B<n>].dck` suffix shape the bracket filters key on."""
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda deck_id: _stub_deck_json("MyDeck", deck_id),
+    )
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.time.sleep", lambda s: None,
+    )
+
+    urls = [
+        "https://moxfield.com/decks/id-one",
+        "https://moxfield.com/decks/id-two",  # different deck, same name
+    ]
+    result = bulk_import(urls, out_dir=tmp_path, is_user=True)
+
+    assert result.success_count == 2
+    assert result.duplicate_count == 0
+    names = sorted(p.name for p in tmp_path.glob("*.dck"))
+    assert names == [
+        "[USER] MyDeck (2) [B3].dck",
+        "[USER] MyDeck [B3].dck",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------

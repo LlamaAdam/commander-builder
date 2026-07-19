@@ -132,7 +132,8 @@ commander-snapshot "[USER] My Deck [B3].dck" --version v1
 #    (b) Open a Claude session, paste prompts/moxfield_audit_v3.md.
 #        The audit modifies your Moxfield deck and emits audit_manifest.json.
 
-# 4. Re-pull the post-audit deck (overwrites the local file)
+# 4. Re-pull the post-audit deck (same Moxfield id → overwrites the local
+#    file in place; local Protect= lines are preserved)
 commander-import --user https://moxfield.com/decks/<id>
 
 # 5. Snapshot v2 and run head-to-head A/B (see commands above)

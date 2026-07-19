@@ -9,7 +9,8 @@ distinct v1/v2 .dck files on disk:
     2. Run the Moxfield audit (separate Claude session with the v3 prompt)
        — the audit modifies the live Moxfield deck in place.
 
-    3. Re-pull the post-audit deck via moxfield_import (overwrites the local file)
+    3. Re-pull the post-audit deck via moxfield_import (same Moxfield id →
+       overwrites the local file in place, preserving local Protect= lines)
        python -m commander_builder.moxfield_import --user https://moxfield.com/decks/<id>
 
     4. After the audit: snapshot v2

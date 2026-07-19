@@ -449,25 +449,108 @@ def deck_destination(
     return base / f"{prefix}{safe_filename(deck_name)}{bracket_suffix}.dck"
 
 
+
+# Trailing ` [B<n>]` / ` [B?]` bracket tag on a deck filename STEM. _uniquify
+# must insert its counter BEFORE this tag: every bracket-aware consumer
+# (status._count_decks, _existing_moxfield_ids, the orchestrator's deck
+# filters) matches on the ` [B<n>].dck` filename SUFFIX, so a name like
+# `Foo [B3] (2).dck` would be invisible to all of them.
+_BRACKET_TAG_STEM = re.compile(r"^(?P<base>.+)(?P<tag> \[B[1-5?]\])$")
+
+
 def _uniquify(path: Path) -> Path:
-    """Return `path` if free, else append ` (2)`, ` (3)`, ... before the suffix.
+    """Return `path` if free, else insert ` (2)`, ` (3)`, ... into the name.
 
     Sanitization (NON_ASCII strip, INVALID_FN substitution) can collapse two
     distinct deck names onto the same filename — e.g. "Blue Farm 🐮" and
     "Blue Farm" both flatten to `Blue Farm [B5].dck`. Without this, the second
-    write silently overwrites the first."""
+    write silently overwrites the first.
+
+    The counter goes BEFORE any trailing ` [B<n>]` bracket tag
+    (`Foo (2) [B3].dck`, never `Foo [B3] (2).dck`) so uniquified decks keep
+    the `[B<n>].dck` suffix shape that every bracket filter keys on."""
     if not path.exists():
         return path
     stem, suffix = path.stem, path.suffix
+    m = _BRACKET_TAG_STEM.match(stem)
+    base, tag = (m.group("base"), m.group("tag")) if m else (stem, "")
     parent = path.parent
     for n in range(2, 100):
-        candidate = parent / f"{stem} ({n}){suffix}"
+        candidate = parent / f"{base} ({n}){tag}{suffix}"
         if not candidate.exists():
             return candidate
     # Pathological: 99 collisions on the same sanitized name. Refuse rather
     # than silently overwrite — this is exactly the bug `_uniquify` exists to
     # prevent.
     raise RuntimeError(f"_uniquify exhausted suffixes for {path}")
+
+
+def _read_moxfield_id(path: Path) -> Optional[str]:
+    """Best-effort read of the `Moxfield=` publicId recorded in a .dck.
+
+    None when the file is unreadable or predates the publicId-in-metadata
+    patch — callers must treat that as "identity unknown", not "different"."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = _MOXFIELD_META.search(text)
+    return m.group(1).strip() if m else None
+
+
+def _classify_destination(dest: Path, public_id: str) -> str:
+    """Classify an import destination against the deck about to be written.
+
+    Every import path used to decide on `dest.exists()` alone, which
+    conflated two opposite situations: a re-pull of the SAME deck (should
+    overwrite or dedupe-skip) and a DIFFERENT deck whose name sanitizes to
+    the same filename (should get a uniquified name, never be dropped).
+    The recorded `Moxfield=` publicId disambiguates. Returns:
+
+      "free"      — nothing on disk; write normally.
+      "same"      — dest records the SAME publicId: it IS this deck.
+      "collision" — dest records a DIFFERENT publicId: two distinct decks
+                    collapsed onto one sanitized filename.
+      "unknown"   — can't tell: dest predates Moxfield= metadata, or the
+                    incoming deck has no publicId. Callers keep their old
+                    conservative exists() behavior for this case.
+    """
+    if not dest.exists():
+        return "free"
+    if not public_id:
+        return "unknown"
+    existing = _read_moxfield_id(dest)
+    if existing is None:
+        return "unknown"
+    return "same" if existing == public_id else "collision"
+
+
+# User-authored metadata lines. `Protect=` is the one metadata key written
+# locally (pet-card locks for the proposer — see web/_helpers.read_protected_cards),
+# never present in the Moxfield payload, so a fresh to_dck render drops it.
+_PROTECT_META = re.compile(r"^Protect=.*$", re.MULTILINE)
+
+
+def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
+    """Carry user-authored `[metadata]` lines from the on-disk deck into a
+    freshly rendered import.
+
+    `to_dck` only regenerates `Name=`/`Moxfield=`; a plain same-id overwrite
+    would silently wipe the user's `Protect=` pet-card locks. Re-insert them
+    right after the metadata block (before the first card section header)."""
+    protects = _PROTECT_META.findall(old_text)
+    if not protects:
+        return fresh_dck
+    lines = fresh_dck.splitlines()
+    # First section header AFTER [metadata] (i.e. [Commander] or [Main]) —
+    # protect lines must stay inside the metadata block to be parseable.
+    insert_at = len(lines)
+    for i, ln in enumerate(lines):
+        if i > 0 and ln.startswith("["):
+            insert_at = i
+            break
+    lines[insert_at:insert_at] = protects
+    return "\n".join(lines) + "\n"
 
 
 def import_deck(
@@ -487,7 +570,21 @@ def import_deck(
     dck = to_dck(deck_json)
     out_path = deck_destination(deck_json.get("name", deck_id), bracket, out_dir, is_user)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path = _uniquify(out_path)
+    verdict = _classify_destination(out_path, deck_json.get("publicId", ""))
+    if verdict == "same":
+        # Documented re-pull semantics (README audit-cycle step 4,
+        # snapshot_deck docstring): re-importing the SAME Moxfield deck
+        # overwrites the local file in place. Uniquifying here — the old
+        # behavior — broke the audit A/B twice over: the v2 snapshot copied
+        # the untouched v1 file (deck compared against itself), and the
+        # "(2)" name fell outside the `[B<n>].dck` suffix the bracket
+        # filters key on. Carry over local-only metadata (Protect=) that a
+        # plain re-render would drop.
+        dck = _merge_local_metadata(out_path.read_text(encoding="utf-8"), dck)
+    elif verdict in ("collision", "unknown"):
+        # A DIFFERENT deck (or one we can't identify) owns this filename —
+        # never clobber it; write under a uniquified name.
+        out_path = _uniquify(out_path)
     out_path.write_text(dck, encoding="utf-8")
 
     boards = deck_json.get("boards", {})
@@ -556,10 +653,16 @@ def import_by_bracket(
             seen.add(pid)
             try:
                 deck_json = fetch_deck(pid)
-                time.sleep(FETCH_SLEEP_SEC)
             except Exception as exc:
                 print(f"  ERROR fetching {pid}: {type(exc).__name__}: {exc}")
                 continue
+            finally:
+                # Politeness delay on BOTH paths. It used to sit after
+                # fetch_deck inside the try, so a fetch exception moved on
+                # to the next entry with zero delay — hammering Moxfield
+                # exactly when it was erroring/rate-limiting. `finally`
+                # runs even through the `continue` above.
+                time.sleep(FETCH_SLEEP_SEC)
             if cutoff and not _within_window(deck_json, cutoff):
                 continue
             actual = resolve_bracket(deck_json)
@@ -623,24 +726,34 @@ def harvest_bracket(
 def _write_deck(deck_json: dict, bracket: int, out_dir: Path) -> Optional[Path]:
     """Write a fetched deck JSON to disk and report counts.
 
-    Returns None if a deck with this exact destination filename already exists
-    (treated as a dup of a pre-publicId-metadata deck). Returns the new path
-    otherwise. `_uniquify` only fires on genuine name collisions across
-    different decks — not on re-fetches of the same deck."""
+    Returns None when the deck is already on disk (same recorded Moxfield
+    publicId, or an unidentifiable pre-metadata file under the same name —
+    correct harvest dedupe either way). Returns the new path otherwise.
+    `_uniquify` only fires on genuine name collisions: a DIFFERENT publicId
+    under the same sanitized filename. The old exists()-before-_uniquify
+    check silently dropped those distinct decks as "already on disk"."""
     fmt = (deck_json.get("format") or "").lower()
     if fmt and fmt != "commander":
         print(f"  WARN: deck format is '{fmt}', not 'commander'. Importing anyway.")
     dck = to_dck(deck_json)
     out_path = deck_destination(deck_json.get("name", "deck"), bracket, out_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.exists():
+    verdict = _classify_destination(out_path, deck_json.get("publicId", ""))
+    if verdict == "same":
+        # Same Moxfield deck already harvested — skip is the correct dedupe
+        # for the bulk pool (unlike import_deck's user re-pull, nothing here
+        # implies "give me the fresh version").
+        print(f"  SKIP {out_path.name} (same Moxfield deck already on disk)")
+        return None
+    if verdict == "unknown":
         # Existing deck without Moxfield= metadata. Skip rather than
         # re-write, since we can't tell if it's actually the same deck.
         # The skip is safe because the user already has a deck under that name
         # at that bracket — close enough for the curator's purposes.
         print(f"  SKIP {out_path.name} (already on disk)")
         return None
-    out_path = _uniquify(out_path)
+    if verdict == "collision":
+        out_path = _uniquify(out_path)
     out_path.write_text(dck, encoding="utf-8")
     boards = deck_json.get("boards", {})
     cmdr_count = sum(c.get("quantity", 0) for c in boards.get("commanders", {}).get("cards", {}).values())
@@ -815,15 +928,28 @@ def bulk_import(
                 deck_json.get("name", deck_id),
                 bracket, out_dir, is_user=is_user,
             )
-            if dest.exists():
+            verdict = _classify_destination(dest, deck_json.get("publicId", ""))
+            if verdict in ("same", "unknown"):
+                # "same": this exact Moxfield deck is already on disk —
+                # re-pasting a URL is a no-op, per the module contract.
+                # "unknown": a pre-Moxfield=-metadata file owns the name;
+                # can't verify identity, so keep the old conservative skip.
                 result.duplicates.append({
                     "url": url,
                     "deck_id": deck_id,
                     "existing_path": str(dest),
-                    "reason": "file already on disk",
+                    "reason": (
+                        "same Moxfield deck already on disk"
+                        if verdict == "same" else "file already on disk"
+                    ),
                 })
                 seen_in_batch.add(deck_id)
                 continue
+            if verdict == "collision":
+                # A DIFFERENT deck's name sanitized to the same filename —
+                # the old bare exists() check misreported these as
+                # duplicates and silently skipped the import.
+                dest = _uniquify(dest)
 
             dck = to_dck(deck_json)
             dest.write_text(dck, encoding="utf-8")

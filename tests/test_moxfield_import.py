@@ -467,3 +467,183 @@ def test_find_top_liked_decks_dedupes_duplicate_public_ids(monkeypatch):
     out = find_top_liked_decks_for_commander("Hakbal", n=5)
     pids = [d["publicId"] for d in out]
     assert pids == ["abc", "xyz"]  # second "abc" dropped
+
+
+# --- same-id re-import overwrite + name-collision uniquify -----------------
+# Regression tests for the adversarial-review import-workflow fixes:
+#   1. Re-importing the SAME Moxfield deck must overwrite in place (the
+#      documented audit-cycle re-pull semantics), preserving local-only
+#      metadata (Protect=).
+#   2. A DIFFERENT deck whose name sanitizes to the same filename must get
+#      a uniquified name that KEEPS the ` [B<n>].dck` suffix shape, so it
+#      stays visible to every bracket-suffix filter.
+
+def _deck_json(name="My Deck", pid="pid-1", bracket=3, main_card="Sol Ring"):
+    """Minimal Moxfield-shape payload for the import paths."""
+    return {
+        "name": name,
+        "publicId": pid,
+        "bracket": bracket,
+        "format": "commander",
+        "boards": {
+            "commanders": {"cards": {"c": {
+                "quantity": 1, "card": {"name": "Atraxa, Praetors' Voice"}}}},
+            "mainboard": {"cards": {"m": {
+                "quantity": 1, "card": {"name": main_card}}}},
+        },
+    }
+
+
+def test_reimport_same_id_overwrites_in_place(tmp_path, monkeypatch):
+    """Audit-cycle step 4: re-pulling the same deck must update the SAME
+    file — no '(2)' copy, content refreshed. (The old behavior uniquified,
+    so the v2 snapshot copied the untouched v1 file and the A/B compared
+    a deck against itself.)"""
+    from commander_builder import moxfield_import as mi
+
+    decks = {"pid-1": _deck_json(main_card="Sol Ring")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert p1.name == "[USER] My Deck [B3].dck"
+    assert "Sol Ring" in p1.read_text(encoding="utf-8")
+
+    # The audit edited the deck on Moxfield; re-pull it.
+    decks["pid-1"] = _deck_json(main_card="Arcane Signet")
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    assert p2 == p1
+    text = p1.read_text(encoding="utf-8")
+    assert "Arcane Signet" in text
+    assert "Sol Ring" not in text
+    # No numbered duplicate appeared.
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == [p1.name]
+
+
+def test_reimport_preserves_local_protect_lines(tmp_path, monkeypatch):
+    """User-authored [metadata] Protect= lines are local-only (never in the
+    Moxfield payload) — a same-id overwrite must carry them over, and they
+    must remain parseable by the real reader."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.web._helpers import read_protected_cards
+
+    decks = {"pid-1": _deck_json()}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    # User locks two pet cards in the .dck metadata.
+    text = p1.read_text(encoding="utf-8")
+    text = text.replace(
+        "Moxfield=pid-1",
+        "Moxfield=pid-1\nProtect=Sol Ring\nProtect=Krenko, Mob Boss",
+    )
+    p1.write_text(text, encoding="utf-8")
+
+    decks["pid-1"] = _deck_json(main_card="Arcane Signet")
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    assert p2 == p1
+    merged = p1.read_text(encoding="utf-8")
+    assert "Arcane Signet" in merged  # fresh content landed
+    # Protect= survived AND still parses through the real reader.
+    assert read_protected_cards(merged) == ["Sol Ring", "Krenko, Mob Boss"]
+
+
+def test_import_different_deck_with_colliding_name_uniquifies(tmp_path, monkeypatch):
+    """Two DIFFERENT Moxfield decks whose names sanitize to the same
+    filename: the second import must land under a uniquified name that
+    still ends in ` [B<n>].dck` — verified against the ACTUAL bracket
+    filters (status._count_decks, _existing_moxfield_ids)."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.status import _count_decks
+
+    decks = {
+        "pid-1": _deck_json(pid="pid-1"),
+        "pid-2": _deck_json(pid="pid-2", main_card="Counterspell"),
+    }
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    p2 = mi.import_deck("pid-2", out_dir=tmp_path, is_user=True)
+
+    assert p1 != p2
+    # Counter BEFORE the bracket tag, keeping the [B3].dck suffix shape.
+    assert p2.name == "[USER] My Deck (2) [B3].dck"
+    assert p1.read_text(encoding="utf-8") != p2.read_text(encoding="utf-8")
+
+    # Both decks visible to the real bracket-suffix consumers.
+    counts = _count_decks(tmp_path)
+    assert counts[3]["user"] == 2
+    assert mi._existing_moxfield_ids(tmp_path, 3) == {"pid-1", "pid-2"}
+
+
+def test_uniquify_inserts_counter_before_bracket_tag(tmp_path):
+    """_uniquify keeps the ` [B<n>].dck` suffix intact; the counter goes
+    before the bracket tag. (` [B?]` is covered by the regex too, but a
+    literal `?` is not a legal Windows filename, so no on-disk case here.)"""
+    p = tmp_path / "[USER] My Deck [B3].dck"
+    p.write_text("x")
+    out = _uniquify(p)
+    assert out.name == "[USER] My Deck (2) [B3].dck"
+    out.write_text("y")
+    assert _uniquify(p).name == "[USER] My Deck (3) [B3].dck"
+
+
+def test_write_deck_same_id_skips_different_id_uniquifies(tmp_path):
+    """Harvest write path (_write_deck): same recorded Moxfield id → skip
+    (correct pool dedupe); DIFFERENT id under the same sanitized name →
+    written under a uniquified name instead of being silently dropped."""
+    from commander_builder.moxfield_import import _write_deck
+
+    first = _write_deck(_deck_json(pid="pid-1"), 3, tmp_path)
+    assert first is not None and first.name == "My Deck [B3].dck"
+
+    # Re-harvest of the SAME deck: dedupe-skip, file untouched.
+    before = first.read_text(encoding="utf-8")
+    assert _write_deck(_deck_json(pid="pid-1", main_card="Brainstorm"), 3, tmp_path) is None
+    assert first.read_text(encoding="utf-8") == before
+
+    # A DIFFERENT deck colliding on the name: must be written, uniquified.
+    other = _write_deck(_deck_json(pid="pid-2", main_card="Counterspell"), 3, tmp_path)
+    assert other is not None
+    assert other.name == "My Deck (2) [B3].dck"
+
+
+def test_write_deck_still_skips_pre_metadata_files(tmp_path):
+    """A name-owning file WITHOUT Moxfield= metadata is unidentifiable —
+    keep the conservative legacy skip (don't overwrite, don't duplicate)."""
+    from commander_builder.moxfield_import import _write_deck
+
+    legacy = tmp_path / "My Deck [B3].dck"
+    legacy.write_text("[metadata]\nName=My Deck\n[Main]\n1 Sol Ring\n", encoding="utf-8")
+    assert _write_deck(_deck_json(pid="pid-1"), 3, tmp_path) is None
+    assert "Sol Ring" in legacy.read_text(encoding="utf-8")
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == ["My Deck [B3].dck"]
+
+
+def test_harvest_loop_sleeps_on_fetch_failure(tmp_path, monkeypatch):
+    """Politeness regression: the per-fetch sleep must fire on the FAILURE
+    path too — previously a fetch exception skipped straight to the next
+    entry with zero delay, hammering Moxfield exactly when it was erroring."""
+    from commander_builder import moxfield_import as mi
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(mi.time, "sleep", lambda s: sleeps.append(s))
+
+    def fake_search(bracket, page_size=20, page=1, sort_type="updated", since_iso=None):
+        if page == 1:
+            return [{"publicId": "bad-1"}, {"publicId": "good-1"}]
+        return []
+
+    def fake_fetch(pid):
+        if pid == "bad-1":
+            raise OSError("simulated 429")
+        return _deck_json(name=f"Deck {pid}", pid=pid)
+
+    monkeypatch.setattr(mi, "search_decks", fake_search)
+    monkeypatch.setattr(mi, "fetch_deck", fake_fetch)
+
+    written = mi.import_by_bracket(3, count=1, out_dir=tmp_path)
+    assert len(written) == 1
+    # One sleep per fetch ATTEMPT: the failed bad-1 fetch AND the good one.
+    assert len(sleeps) == 2
