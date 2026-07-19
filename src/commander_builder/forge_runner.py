@@ -83,6 +83,31 @@ def scrubbed_child_env() -> dict[str, str]:
     }
 
 
+def coerce_output_text(data: "str | bytes | None") -> str:
+    """Normalize a captured subprocess stream to ``str``.
+
+    With ``encoding=`` set on ``subprocess.run``, a CompletedProcess always
+    carries str streams — but ``TimeoutExpired.stdout``/``.stderr`` are NOT
+    guaranteed to be: CPython's POSIX implementation re-raises the timeout
+    with the raw *bytes* read so far (the text decode happens only on the
+    successful CompletedProcess path), and both attributes are None when
+    nothing was captured before the kill. Downstream consumers
+    (``Path.write_text``, the log_parser regexes over ``SimResult.stdout``)
+    hard-require str, so every timeout handler funnels through here:
+
+      - None  -> ""  (nothing captured)
+      - bytes -> UTF-8 decode with replacement — Forge emits UTF-8 (deck
+        names carry emoji/non-Latin characters in practice), and replacement
+        keeps a partial capture usable instead of raising mid-error-path
+      - str   -> unchanged
+    """
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
+
+
 def _utcnow(tz=timezone.utc):
     """Indirection so tests can pin "now" deterministically."""
     return datetime.now(tz)
@@ -218,8 +243,12 @@ def _run_blocking(
         returncode = proc.returncode
     except subprocess.TimeoutExpired as exc:
         timed_out = True
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        # exc.stdout/.stderr can be bytes (POSIX re-raises the raw pipe
+        # contents) or None even though encoding= was set above — normalize
+        # so SimResult.stdout is always the str the parsers expect. See
+        # coerce_output_text for the full rationale.
+        stdout = coerce_output_text(exc.stdout)
+        stderr = coerce_output_text(exc.stderr)
         error = f"Timed out after {timeout}s"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"

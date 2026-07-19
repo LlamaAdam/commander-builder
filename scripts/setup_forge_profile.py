@@ -42,6 +42,12 @@ def _junction(link: Path, target: Path) -> None:
     res = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],
         capture_output=True, text=True,
+        # text=True alone decodes with the locale codec (cp1252) in STRICT
+        # mode; a localized cmd.exe message or a non-cp1252 byte in the
+        # (user-controlled) link/target paths echoed back would raise
+        # UnicodeDecodeError here instead of surfacing the mklink error.
+        # UTF-8+replace matches every other launch site in the project.
+        encoding="utf-8", errors="replace",
     )
     if res.returncode != 0:
         raise RuntimeError(f"mklink failed for {link} -> {target}: {res.stderr.strip()}")

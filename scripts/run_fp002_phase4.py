@@ -39,7 +39,12 @@ def main(argv=None) -> int:
         "--inbox", args.inbox,
     ]
     print("[fp002-phase4] " + " ".join(cmd), flush=True)
-    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    # errors="replace" matters alongside encoding="utf-8": the default is
+    # STRICT, so a single mojibake byte in the child's output (deck names
+    # with emoji/non-Latin characters reach margin_analysis output) would
+    # raise UnicodeDecodeError inside subprocess.run and lose the whole run.
+    res = subprocess.run(cmd, capture_output=True, text=True,
+                         encoding="utf-8", errors="replace")
 
     ts = _dt.datetime.now().strftime("%Y-%m-%d-%H%M")
     out_path = REPO / "docs" / f"fp002-phase4-results-{ts}.txt"

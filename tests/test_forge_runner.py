@@ -15,6 +15,7 @@ from commander_builder.forge_runner import (
     SimResult,
     _run_blocking,
     _run_streaming,
+    coerce_output_text,
     detect_forge_version,
     scrubbed_child_env,
 )
@@ -43,6 +44,35 @@ def test_run_blocking_handles_timeout(monkeypatch):
     assert timed_out is True
     assert stdout == "partial"
     assert "Timed out" in error
+
+
+def test_run_blocking_timeout_with_bytes_stdout_yields_str(monkeypatch):
+    """TimeoutExpired.stdout is BYTES on POSIX even when encoding= was set
+    (CPython re-raises the raw pipe contents; the text decode only happens
+    on the CompletedProcess path). SimResult.stdout flows into log_parser's
+    regexes which require str — so the handler must decode defensively."""
+    import subprocess
+    def raise_timeout(*a, **kw):
+        # \xf0 alone is invalid UTF-8 — exercises errors="replace" too.
+        raise subprocess.TimeoutExpired(
+            cmd="fake", timeout=10, output=b"partial \xf0 bytes", stderr=b"e",
+        )
+    monkeypatch.setattr("commander_builder.forge_runner.subprocess.run", raise_timeout)
+    stdout, stderr, rc, timed_out, error = _run_blocking(
+        ["fake"], timeout=10, cwd="/tmp",
+    )
+    assert timed_out is True
+    assert isinstance(stdout, str) and isinstance(stderr, str)
+    assert "partial" in stdout and "�" in stdout
+    assert stderr == "e"
+
+
+def test_coerce_output_text_normalizes_all_shapes():
+    assert coerce_output_text(None) == ""
+    assert coerce_output_text("already str") == "already str"
+    assert coerce_output_text(b"ok bytes") == "ok bytes"
+    # Invalid UTF-8 degrades to U+FFFD instead of raising.
+    assert coerce_output_text(b"bad \xf0 byte") == "bad � byte"
 
 
 def test_run_streaming_drains_stdout_via_callback(monkeypatch):
