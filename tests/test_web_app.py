@@ -692,9 +692,13 @@ def test_patch_verdict_rejects_unknown_value(seeded_client):
 
 
 def test_patch_verdict_rejects_missing_body(seeded_client):
-    """Empty body → 400, not a crash."""
+    """Empty body → 400, not a crash. Content type is sent (the
+    app-wide mutation gate would otherwise 415 before the route ran)."""
     iteration_id = _first_iteration_id(seeded_client)
-    resp = seeded_client.patch(f"/api/iterations/{iteration_id}/verdict")
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/verdict",
+        content_type="application/json",
+    )
     assert resp.status_code == 400
 
 
@@ -1184,14 +1188,21 @@ def test_deck_text_put_400_on_empty(client):
 
 def test_deck_text_delete_removes(client, deck_dir):
     assert (deck_dir / "Alpha.dck").exists()
-    resp = client.delete("/api/deck_text?deck=Alpha")
+    # Bodyless DELETE still needs the JSON content type: the app-wide
+    # mutation gate requires it on every mutating method (matches the
+    # header app.js now sends on its delete fetch).
+    resp = client.delete(
+        "/api/deck_text?deck=Alpha", content_type="application/json",
+    )
     assert resp.status_code == 200
     assert resp.get_json()["deleted"] is True
     assert not (deck_dir / "Alpha.dck").exists()
 
 
 def test_deck_text_delete_404(client):
-    resp = client.delete("/api/deck_text?deck=Ghost")
+    resp = client.delete(
+        "/api/deck_text?deck=Ghost", content_type="application/json",
+    )
     assert resp.status_code == 404
 
 
@@ -5158,3 +5169,194 @@ def test_audit_diff_route_404_on_unknown_iteration(diff_client):
     assert resp.status_code == 404
     assert "999999" in resp.get_json()["error"]
 
+
+
+# ---------------------------------------------------------------------------
+# Cross-origin mutation gate (2026-07-19 adversarial review, item 1)
+# ---------------------------------------------------------------------------
+# Mutating endpoints used get_json(force=True), which parses text/plain
+# bodies — making every POST a CORS "simple request" that any web page
+# could fire at localhost without a preflight. The app-level
+# before_request hook now 415s any mutating request that doesn't carry
+# Content-Type: application/json.
+
+def test_mutation_gate_415_on_text_plain_post(client):
+    resp = client.post(
+        "/api/log_error",
+        data='{"message": "smuggled as text/plain"}',
+        content_type="text/plain",
+    )
+    assert resp.status_code == 415
+    body = resp.get_json()
+    assert "application/json" in body["error"]
+
+
+def test_mutation_gate_415_on_form_encoded_post(client):
+    # HTML-form content types are also "simple" cross-origin requests;
+    # the gate rejects them the same way.
+    resp = client.post("/api/import_deck", data="x=1",
+                       content_type="application/x-www-form-urlencoded")
+    assert resp.status_code == 415
+
+
+def test_mutation_gate_allows_json_post(client):
+    """A proper JSON POST passes the gate and reaches the route."""
+    resp = client.post("/api/log_error", json={"message": "real error"})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+
+
+def test_mutation_gate_allows_charset_suffix(client):
+    """``application/json; charset=utf-8`` must pass — request.mimetype
+    strips parameters, so the charset suffix doesn't trip the gate."""
+    resp = client.post(
+        "/api/log_error",
+        data=json.dumps({"message": "charset ok"}),
+        content_type="application/json; charset=utf-8",
+    )
+    assert resp.status_code == 200
+
+
+def test_mutation_gate_leaves_get_untouched(client):
+    """GETs (CORS-readable but side-effect free) are not gated."""
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
+
+
+def test_mutation_gate_covers_put(client):
+    resp = client.put(
+        "/api/deck_text?deck=Alpha",
+        data="text=evil", content_type="application/x-www-form-urlencoded",
+    )
+    assert resp.status_code == 415
+
+
+# ---------------------------------------------------------------------------
+# import_deck bracket validation (item 2)
+# ---------------------------------------------------------------------------
+# bracket is baked into the filename as "[B<n>]"; downstream
+# _bracket_from_filename only understands 1..5 so a "[B9]" file would
+# silently break bracket resolution forever.
+
+def test_import_deck_400_on_bracket_out_of_range_high(client, deck_dir):
+    resp = client.post("/api/import_deck", json={
+        "name": "Bad Bracket", "paste_text": "1 Sol Ring\n", "bracket": 9,
+    })
+    assert resp.status_code == 400
+    assert "1..5" in resp.get_json()["error"]
+    # Nothing was written.
+    assert not list(deck_dir.glob("*Bad Bracket*"))
+
+
+def test_import_deck_400_on_bracket_negative(client, deck_dir):
+    resp = client.post("/api/import_deck", json={
+        "name": "Neg Bracket", "paste_text": "1 Sol Ring\n", "bracket": -1,
+    })
+    assert resp.status_code == 400
+    assert not list(deck_dir.glob("*Neg Bracket*"))
+
+
+def test_import_deck_400_on_non_integer_bracket(client):
+    resp = client.post("/api/import_deck", json={
+        "name": "Str Bracket", "paste_text": "1 Sol Ring\n", "bracket": "abc",
+    })
+    assert resp.status_code == 400
+
+
+def test_import_deck_valid_bracket_still_works(client, deck_dir):
+    resp = client.post("/api/import_deck", json={
+        "name": "Good Bracket", "paste_text": "1 Sol Ring\n", "bracket": 3,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert "[B3]" in resp.get_json()["filename"]
+
+
+def test_import_deck_missing_bracket_defaults_to_3(client, deck_dir):
+    """Absent bracket means "not specified" and keeps the historical
+    default of 3 — only explicitly-provided bad values 400."""
+    resp = client.post("/api/import_deck", json={
+        "name": "Default Bracket", "paste_text": "1 Sol Ring\n",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert "[B3]" in resp.get_json()["filename"]
+
+
+def test_deck_audit_400_on_out_of_range_bracket(client):
+    """GET routes accepting ?bracket= now validate the range too."""
+    resp = client.get("/api/deck_audit?deck=Alpha&bracket=9")
+    assert resp.status_code == 400
+    resp = client.get("/api/dashboard?deck=Alpha&bracket=-1")
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Game-changer count case consistency (item 3)
+# ---------------------------------------------------------------------------
+
+def test_deck_audit_and_dashboard_gc_counts_agree_on_mixed_case(
+    client, deck_dir, monkeypatch,
+):
+    """deck_audit used exact-case GC membership while the dashboard's
+    bracket tile lower-cased both sides — the two counts disagreed for
+    any deck line whose casing differed from the GC list's canonical
+    form. Both are case-folded now; displayed names keep the deck
+    line's original casing."""
+    (deck_dir / "MixedCase.dck").write_text(
+        "[metadata]\nName=MixedCase\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n1 RHYSTIC STUDY\n1 Forest\n1 Cultivate\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "commander_builder.game_changers.load_game_changers",
+        lambda **kw: {"Rhystic Study"},
+    )
+    audit = client.get("/api/deck_audit?deck=MixedCase").get_json()
+    dash = client.get("/api/dashboard?deck=MixedCase").get_json()
+
+    # The audit surfaces the card despite the deck line's odd casing,
+    # and the displayed name preserves that original casing.
+    assert audit["in_deck_game_changers"] == ["RHYSTIC STUDY"]
+    # Banner list, banner count, and bracket tile all agree.
+    assert dash["legality"]["in_deck_game_changers"] == ["RHYSTIC STUDY"]
+    assert dash["legality"]["n_game_changers"] == 1
+    assert dash["stat_tiles"]["n_game_changers"] == 1
+    assert len(audit["in_deck_game_changers"]) == \
+        dash["legality"]["n_game_changers"]
+
+
+# ---------------------------------------------------------------------------
+# log_error size cap (item 4)
+# ---------------------------------------------------------------------------
+
+def test_log_error_stops_writing_past_cap(client, deck_dir, monkeypatch):
+    """Past the size cap the endpoint returns 200 with logged:false and
+    the file stops growing — best-effort sink, never errors the client
+    (a browser error handler must not see its own sink fail)."""
+    log_path = deck_dir.parent.parent / "_js_errors.log"
+    # The log lives in a directory shared across tests in this session;
+    # start clean so the tiny monkeypatched cap is meaningful.
+    if log_path.exists():
+        log_path.unlink()
+    monkeypatch.setattr(
+        "commander_builder.web.routes_meta._JS_ERROR_LOG_MAX_BYTES", 64,
+    )
+    # First write lands (file empty → under cap) and pushes size past 64.
+    resp = client.post("/api/log_error", json={
+        "message": "x" * 100,
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    size_after_first = log_path.stat().st_size
+    assert size_after_first >= 64
+
+    # Second write is refused: still 200, logged:false, file unchanged.
+    resp = client.post("/api/log_error", json={
+        "message": "y" * 100,
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["logged"] is False
+    assert body["reason"] == "log full"
+    assert log_path.stat().st_size == size_after_first

@@ -220,6 +220,38 @@ def create_app(
     app.config["DECK_DIR"] = deck_dir
     app.config["KNOWLEDGE_DB"] = knowledge_db
 
+    # --- Cross-origin mutation gate (2026-07-19 adversarial review) ---
+    # Every mutating endpoint used ``request.get_json(force=True)``,
+    # which happily parses a ``text/plain`` body as JSON. A text/plain
+    # POST is a CORS "simple request" — the browser sends it cross-
+    # origin WITHOUT a preflight, so any web page the user visits could
+    # drive this localhost server (start hours-long Forge sims, write
+    # decks, spam logs) via plain ``fetch()`` or DNS rebinding. The
+    # browser can't read the response, but the side effects land anyway.
+    #
+    # Requiring ``Content-Type: application/json`` on every mutating
+    # method makes such requests "non-simple": the browser sends an
+    # OPTIONS preflight first, we never answer it with CORS-allow
+    # headers, and the browser refuses to send the actual request.
+    # DELETE/PUT/PATCH are already non-simple methods, but they're
+    # gated too for defense-in-depth and a uniform contract.
+    #
+    # ``request.mimetype`` is the media type with any parameters
+    # (e.g. ``; charset=utf-8``) already stripped and lowercased, so
+    # charset-suffixed headers pass the check.
+    from flask import jsonify as _jsonify, request as _request
+
+    @app.before_request
+    def _require_json_for_mutations():
+        if _request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return None
+        if _request.mimetype != "application/json":
+            return _jsonify({
+                "error": "Content-Type must be application/json",
+                "received": _request.mimetype or None,
+            }), 415
+        return None
+
     # Cache-buster: a fresh token per process boot so static assets
     # are never served from a stale browser cache after a restart.
     # Without this, app.js / app.css edits ship to GitHub but the

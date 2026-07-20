@@ -2584,7 +2584,14 @@ async function deleteDeck() {
   try {
     const resp = await fetch(
       `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
-      { method: "DELETE" },
+      {
+        // No body, but the server's cross-origin mutation gate requires
+        // Content-Type: application/json on EVERY mutating method (it
+        // forces a CORS preflight so foreign pages can't drive this
+        // localhost API); a bare DELETE would now 415.
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+      },
     );
     if (!resp.ok) {
       flashStatus(`Delete failed: ${resp.status}`);

@@ -74,9 +74,12 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             })
 
         if request.method == "PUT":
-            try:
-                payload = request.get_json(force=True) or {}
-            except Exception:
+            # silent=True (not force=True): the app-level before_request
+            # gate already guarantees Content-Type: application/json for
+            # mutating methods, so parsing honors the header; a malformed
+            # body surfaces as None -> 400 rather than an exception.
+            payload = request.get_json(silent=True)
+            if payload is None:
                 return jsonify({"error": "expected JSON body"}), 400
             new_text = payload.get("text") or ""
             if not new_text.strip():
@@ -106,18 +109,38 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         Filename is derived from ``name`` with a ``[USER]`` prefix and
         ``[B?]`` suffix so the deck shows up in the user-only sidebar.
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         name = (payload.get("name") or "").strip()
         url = (payload.get("moxfield_url") or "").strip()
         paste = (payload.get("paste_text") or "").strip()
-        try:
-            bracket = int(payload.get("bracket") or 3)
-        except (TypeError, ValueError):
+        # Bracket must be a valid Commander bracket (1..5). The value
+        # is baked into the filename as a "[B<n>]" suffix, and
+        # ``_bracket_from_filename`` downstream only recognizes
+        # single-digit 1..5 — an unvalidated "[B9]" (or "[B-1]")
+        # filename would silently break bracket resolution for the
+        # deck's whole lifetime. Absent/empty means "not specified"
+        # and defaults to 3 (Upgraded); an explicitly-provided bad
+        # value is a client error and gets a 400.
+        bracket_raw = payload.get("bracket")
+        if bracket_raw in (None, ""):
             bracket = 3
+        else:
+            try:
+                bracket = int(bracket_raw)
+            except (TypeError, ValueError):
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
+            if bracket not in (1, 2, 3, 4, 5):
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
 
         if not url and not paste:
             return jsonify({
@@ -214,9 +237,11 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         outcomes tell the UI what to render. 400 only on bad input.
         502 when EVERY url failed (likely network down).
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         urls = payload.get("urls")
@@ -285,9 +310,11 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             })
 
         # PUT — update / clear the Moxfield URL.
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         url = (payload.get("moxfield_url") or "").strip()
@@ -428,10 +455,23 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
-        try:
-            bracket_raw = request.args.get("bracket")
-            bracket = int(bracket_raw) if bracket_raw else None
-        except ValueError:
+        # Explicitly-provided brackets must be a real Commander bracket
+        # (1..5) — silently falling back to the filename on garbage hid
+        # client bugs and made the warnings below reflect a bracket the
+        # caller never asked about. Absent means "use the filename".
+        bracket_raw = request.args.get("bracket")
+        if bracket_raw:
+            try:
+                bracket = int(bracket_raw)
+            except ValueError:
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
+            if bracket not in (1, 2, 3, 4, 5):
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
+        else:
             bracket = None
         # Default to the deck filename's [B?] suffix.
         if bracket is None:
@@ -469,8 +509,15 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             if m:
                 names.append(m.group(1).strip())
 
-        # Cross-reference Game Changers list.
-        present_gc = sorted({n for n in names if n in gc_set})
+        # Cross-reference Game Changers list. Case-folded membership:
+        # the GC list ships canonical casing but deck files are user-
+        # or importer-authored ("Rhystic study" happens), and
+        # deck_dashboard._count_game_changers already lower-cases —
+        # exact-case matching here made the audit count disagree with
+        # the dashboard tile for the same deck. Displayed names keep
+        # the deck line's original casing.
+        gc_lc = {g.lower() for g in gc_set}
+        present_gc = sorted({n for n in names if n.lower() in gc_lc})
 
         # Banned-in-Commander list. We use commander_builder.doctor's
         # check if available, else hand-roll a small core list.

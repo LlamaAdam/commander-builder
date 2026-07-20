@@ -209,6 +209,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be int"}), 400
+        # Range check for parity with the other bracket-accepting
+        # routes — an out-of-range bracket (9, -1) would steer the
+        # advisor's bracket-targeted suggestions into nonsense.
+        if bracket is not None and bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be 1..5"}), 400
         # Filename bracket is the default when not overridden.
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3
@@ -535,6 +540,9 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be int"}), 400
+        # Range check for parity with the other bracket-accepting routes.
+        if bracket is not None and bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be 1..5"}), 400
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3
 
@@ -814,6 +822,9 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             bracket_raw = request.args.get("bracket")
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
+            return jsonify({"error": "bracket must be an integer 1..5"}), 400
+        # Enforce the range the error message above already promises.
+        if bracket is not None and bracket not in (1, 2, 3, 4, 5):
             return jsonify({"error": "bracket must be an integer 1..5"}), 400
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3

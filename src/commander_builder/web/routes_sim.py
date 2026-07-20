@@ -75,9 +75,11 @@ def make_sim_blueprint(
         Forge availability is required. If ForgeRunner.locate() fails
         (no JRE, no vendor/forge, etc) the endpoint returns 503.
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         deck_id = payload.get("deck")
@@ -94,6 +96,11 @@ def make_sim_blueprint(
             bracket = int(payload.get("bracket", 3))
         except (TypeError, ValueError):
             return jsonify({"error": "bracket must be int"}), 400
+        # Range check to match save_iteration: an out-of-range bracket
+        # would propagate into compare()'s filler-deck selection and
+        # produce a nonsense A/B baseline instead of failing fast.
+        if bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be 1..5"}), 400
         # Default to pod (4-player commander with shared filler
         # opposition) because that's the honest commander signal —
         # 1v1 reduces commander to a duel and misses politics /
@@ -403,9 +410,11 @@ def make_sim_blueprint(
         Returns ``{"id": <new row id>, "stats": <stats_summary>}`` so the
         UI can show "Saved iteration #N — knowledge_log now has X rows."
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         deck_id = (payload.get("deck_id") or "").strip()
