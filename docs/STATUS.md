@@ -9,7 +9,7 @@
 > conventions live in [docs/architecture.md](architecture.md).
 
 **Last updated:** 2026-07-20 (adversarial-review fix branch
-`fix/adversarial-review-2026-07-19` — 31 fix commits across two review
+`fix/adversarial-review-2026-07-19` — 39 commits across three review
 rounds, unmerged; see *State of the tree* below)
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
@@ -26,7 +26,7 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** 1814 passing fast lane / 146 skipped (+slow with
+- **Tests:** 1838 passing fast lane / 147 skipped (+slow with
   `--run-slow`), ~90s offline. Zero warnings under `python -W default`.
 - **Branch:** `feature/2026-04-28-session` (130+ commits ahead of
   `master`, in sync with `origin`).

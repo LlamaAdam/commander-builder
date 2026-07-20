@@ -6,6 +6,34 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-20 — adversarial-review round 3 (5 commits, UNMERGED)
+
+Third pass: an audit of round 2's own commits plus a completeness check
+that no finding from either round was dropped (none was). Fast lane
+after this round: 1838 passed / 147 skipped. One bullet per commit,
+oldest first.
+
+#### Fixed
+
+- **`fix(import)`** (`10ece14`): same-id matching respects the
+  `[USER]`/pool role boundary — a deck harvested into the opponent pool
+  no longer blocks importing a `[USER]` copy; bracket drift renames the
+  file (with `Name=` restamp) so `_bracket_from_filename` stays truthful.
+- **`fix(verdict)`** (`69ab9a5`): sim warnings speak decisive-vs-total
+  units (fillers win ~half of 4-player pod games); `commander-improve`
+  default sim-games 25 → 45 so the 20-decisive verdict gate is actually
+  reachable; post-sim note reports actual decisive shortfalls.
+- **`fix(stats)`** (`bd63da8`): win-rate columns are head-to-head
+  decisive in all four writers, for real this time; schema docstring
+  carries a dated three-era convention history; cross-writer identity
+  test now includes filler wins (fails against the old code).
+- **`fix(misc)`** (`11001dc`): absorbed-pod seat-balance telemetry +
+  note; meta-test aggregate seat line instead of per-reference spam;
+  FP2 v2-rename fallback restamps `Name=`; `[CONTROL]` calibration
+  leftovers excluded from pool-curation candidates; real-log evidence
+  recorded that Forge cap-stops never mark survivors "has lost".
+- **`docs`** (`23b7ea8`): round-2 catalog (listed here for completeness).
+
 ### 2026-07-20 — adversarial-review round 2 (14 commits, UNMERGED)
 
 Second review pass over the same branch: an audit of round 1's own
