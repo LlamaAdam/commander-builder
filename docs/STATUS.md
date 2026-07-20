@@ -8,9 +8,9 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-19 (adversarial-review fix branch
-`fix/adversarial-review-2026-07-19` created — 16 fix commits, unmerged;
-see *State of the tree* below)
+**Last updated:** 2026-07-20 (adversarial-review fix branch
+`fix/adversarial-review-2026-07-19` — 31 fix commits across two review
+rounds, unmerged; see *State of the tree* below)
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
@@ -26,7 +26,7 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** 1719 passing fast lane / 146 skipped (+slow with
+- **Tests:** 1814 passing fast lane / 146 skipped (+slow with
   `--run-slow`), ~90s offline. Zero warnings under `python -W default`.
 - **Branch:** `feature/2026-04-28-session` (130+ commits ahead of
   `master`, in sync with `origin`).

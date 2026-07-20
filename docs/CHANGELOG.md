@@ -6,6 +6,65 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-20 — adversarial-review round 2 (14 commits, UNMERGED)
+
+Second review pass over the same branch: an audit of round 1's own
+16 commits plus deeper sweeps of previously light areas. Same branch/
+worktree as below. Fast lane after this round: 1814 passed / 146
+skipped (~95s). One bullet per commit, oldest first.
+
+#### Fixed
+
+- **`fix(revert)`** (`e0708cf`): restamp `Name=` when revert restores a
+  historical snapshot — closes a regression round 1's own `f74913a` made
+  deterministic; dck_meta empty-`Name=` and `DisplayName=` re-import
+  hardening.
+- **`fix(verdict)`** (`1cec8d4`): `save_iteration` accepts
+  `inconclusive` (the web UI's default below 20 decisive games no longer
+  400s); `commander-improve` default sim-games 5 → 25 so it can actually
+  advance; loud sub-threshold warnings; JS margin/verdict rendering.
+- **`fix(sim)`** (`e2e5b87`): compare pods alternate head-to-head seat
+  order by pod index (meta-test alternates per reference) — removes the
+  systematic seat-1 first-player bias toward the old deck.
+- **`fix(curator)`** (`bf700ba`): preflight blame isolation (rotated
+  fillers + one-retry exoneration — one bad deck can no longer zero the
+  candidate pool); per-deck confirm-action accounting; typed
+  `InsufficientSurvivorsError` instead of an uncaught traceback.
+- **`fix(analyzer)`** (`d356132`): parse Forge's `Game Outcome: ... has
+  lost <reason>` lines — commander-damage/poison/mill eliminations at
+  positive life are now excluded from turn-cap draw resolution; run_match
+  draws no longer inflate `avg_turns_when_lost`.
+- **`fix(stats)`** (`611feff`): one win-rate convention (wins/decisive)
+  across all four knowledge_log writers; meta-test totals include
+  filler wins; `run_ab_parallel` turn averages weighted by real sample
+  counts; every report shape carries a `draw_policy` label.
+- **`fix(import)`** (`fc54986`): same-id re-import matching scans
+  uniquified siblings — re-pulls of collision-renamed decks overwrite in
+  place instead of minting duplicates.
+- **`fix(web)`** (`c5e7af6`): JSON content-type gate on all mutating
+  endpoints (closes the no-preflight cross-origin/DNS-rebinding vector);
+  bracket validation everywhere; game-changer case-fold consistency;
+  5 MB error-log cap; image-cache slug hashing.
+- **`fix(ui)`** (`13f16de`): stale-response guards in `selectDeck` and
+  the bracket-override handler; deck-size pill copy for >100-card decks;
+  iteration-graph forked chains stack instead of overlapping.
+- **`fix(soak)`** (`6d1c3cb`): `merge_soak --to-knowledge-log` is
+  idempotent (content-identity dedupe) and skips gauntlet-schema rows
+  instead of folding them as bogus 0-0 iterations.
+- **`fix(degrade)`** (`6f89c6c`): `http.client.HTTPException` joins the
+  EDHREC retry/degrade path; deck-health signals return None (rendered
+  "unavailable") on Scryfall outage instead of misleading zeros.
+- **`fix(parallel)`** (`bac47c1`): early-stop keeps draining in-flight
+  pods so paid-for games are absorbed; `forge_log_tail` replaced with an
+  honest marker under shared-profile parallel dispatch.
+- **`fix(misc)`** (`6689566`): nine low-severity fixes — null-rationale
+  render crash, draw saturation-vs-target invariant, Skyclave Cleric
+  MDFC, evidence-score clamping, filler-pair duplication warning,
+  `_is_decisive` docstring, soak_throughput div-zero/`--force`, batch
+  SystemExit(0) status, honest name-based archetype classification.
+- **`fix(guards)`** (`5a3266f`): dry-run honors the 99-card guard;
+  Moxfield drift check detects commander swaps.
+
 ### 2026-07-19 — adversarial-review fix branch (16 commits, UNMERGED)
 
 Lives on `fix/adversarial-review-2026-07-19` (worktree
