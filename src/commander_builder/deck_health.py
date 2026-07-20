@@ -122,8 +122,11 @@ _MDFC_LANDS = frozenset(c.lower() for c in [
 # (Keeping the comment + entry shape so a future maintainer can see
 # the curation reasoning rather than wondering why X is missing.)
 _MDFC_LANDS = frozenset(name for name in _MDFC_LANDS if name not in {
+    # NOTE: "skyclave cleric" must NOT be filtered here — it IS a ZNR
+    # MDFC (back face: Skyclave Basilica, per the entry comment above);
+    # it was wrongly listed among the not-MDFC placeholders.
     "felidar retreat", "cleansing wildfire", "murasa rootgrazer",
-    "skyclave cleric", "mishra's foundry", "plaza of heroes",
+    "mishra's foundry", "plaza of heroes",
     "urza's sylex", "mishra, lost to phyrexia", "minas tirith",
     "glasspool mimic",  # mimic IS MDFC, but back face is land --
                          # leave it since real Commander play uses it

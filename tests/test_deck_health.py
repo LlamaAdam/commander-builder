@@ -89,6 +89,24 @@ def test_count_mdfc_lands_finds_known_mdfcs():
     assert "Sol Ring" not in result["cards"]
 
 
+def test_count_mdfc_lands_includes_skyclave_cleric():
+    """Skyclave Cleric IS a ZNR MDFC (back face: Skyclave Basilica).
+
+    Regression: it was wrongly listed in the not-MDFC filter set inside
+    deck_health.py, so decks running it under-counted their MDFC land
+    equivalents. True non-MDFCs from the same curation pass (Felidar
+    Retreat) must stay excluded.
+    """
+    deck = (
+        "[Main]\n"
+        "1 Skyclave Cleric\n"
+        "1 Felidar Retreat\n"   # genuinely not an MDFC — stays filtered
+    )
+    result = deck_health.count_mdfc_lands(deck)
+    assert result["count"] == 1
+    assert result["cards"] == ["Skyclave Cleric"]
+
+
 def test_count_mdfc_lands_zero_when_none_present():
     """Deck with no MDFCs returns count=0 and empty card list."""
     deck = "[Main]\n1 Sol Ring\n1 Cultivate\n27 Mountain\n"

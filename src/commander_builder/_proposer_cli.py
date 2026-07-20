@@ -768,7 +768,29 @@ def _process_one_deck(
         # per-deck failure like any other error. Deliberately narrow:
         # KeyboardInterrupt (also BaseException) must still propagate
         # so Ctrl-C actually stops the batch.
+        #
+        # code 0 / None is a SUCCESSFUL exit (e.g. ``--help`` sneaking
+        # into the per-deck argv makes argparse print usage and raise
+        # SystemExit(0)) — recording it as status "error" made the
+        # batch summary count a clean exit as a failure. Record it as
+        # "ok" with rc 0 and a note; ``_tally`` reads status "ok" as
+        # succeeded, everything else (bar "skipped") as failed.
+        if exc.code in (0, None):
+            return {
+                "deck": str(deck_path),
+                "status": "ok",
+                "rc": 0,
+                "result": {},
+                "note": "pipeline exited early via SystemExit(0) "
+                        "(e.g. --help); no per-deck JSON payload",
+            }
+        # Trim the embedded stderr to a cap: the full text is already
+        # replayed verbatim to the real stderr in the ``finally`` block
+        # below, so the record only needs enough to identify the error
+        # without bloating the NDJSON stream.
         err_text = errbuf.getvalue().strip()
+        if len(err_text) > 1000:
+            err_text = err_text[:1000] + " …[truncated; full text on stderr]"
         return {
             "deck": str(deck_path),
             "status": "error",

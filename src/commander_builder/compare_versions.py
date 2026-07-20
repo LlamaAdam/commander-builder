@@ -270,6 +270,21 @@ def _pick_filler_pairs(
         )
     pairs: list[list[str]] = []
     n = len(candidates)
+    # The stride-2 modulo walk below yields n//2 distinct pairs on an
+    # even-sized pool; on an odd pool the wrap lands on shifted offsets
+    # each lap, so every adjacent (cyclic) pair is eventually produced —
+    # n distinct pairs. Beyond that the walk repeats pairs verbatim.
+    # Duplicated filler pairs are harmless (they just re-run the same
+    # matchup) but they silently reduce opponent diversity, so warn —
+    # behavior itself is unchanged.
+    distinct_pairs = n if n % 2 else n // 2
+    if num_pairs > distinct_pairs:
+        print(
+            f"WARNING: requested {num_pairs} filler pairs but only "
+            f"{distinct_pairs} distinct pair(s) exist in the B{bracket} "
+            f"pool ({n} candidates); some pairs will repeat.",
+            flush=True,
+        )
     for i in range(num_pairs):
         # Stride spreads pair selection. With n=6, num_pairs=2: pairs are
         # (0,1) and (2,3). With n=4, num_pairs=2: pairs are (0,1) and (2,3).
@@ -347,7 +362,11 @@ def _is_decisive(
     locked in and we can stop running pods.
 
     Examples (games_remaining=10):
-      old=10 new=0 → margin 10, can't be caught → decisive (True)
+      old=11 new=0 → margin 11 > 10 remaining, can't even be tied →
+                     decisive (True)
+      old=10 new=0 → margin 10: ten straight new-wins ends 10-10, a
+                     tie — the winner can still change, so NOT
+                     decisive (False)
       old=6  new=4 → margin 2, could swing 10 → not decisive (False)
       old=8  new=2 → margin 6, max swing 10 → not decisive (the
                      remaining games could go 10-0 for new, ending

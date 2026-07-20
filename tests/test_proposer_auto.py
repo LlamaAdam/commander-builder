@@ -3745,6 +3745,59 @@ def test_batch_parallel_systemexit_isolated_and_proxies_restored(
     assert by_stem["[USER] Good [B3]"]["status"] == "ok"
 
 
+@pytest.mark.parametrize("exit_code", [0, None])
+def test_process_one_deck_systemexit_zero_is_not_an_error(
+    tmp_path, monkeypatch, exit_code,
+):
+    """SystemExit with code 0/None is a SUCCESSFUL early exit (e.g.
+    ``--help`` sneaking into the per-deck argv makes argparse print
+    usage and raise SystemExit(0)). Recording it as status 'error' made
+    the batch summary count a clean exit as a failure."""
+    import commander_builder._proposer_cli as cli
+
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+
+    def exit_cleanly(argv):
+        raise SystemExit(exit_code)
+
+    monkeypatch.setattr(cli, "auto_curate_main", exit_cleanly)
+    record = cli._process_one_deck(deck, ["--bracket", "3"], False, frozenset())
+    assert record["status"] == "ok"
+    assert record["rc"] == 0
+    # The note explains why there's no per-deck JSON payload.
+    assert "SystemExit" in record.get("note", "")
+
+
+def test_process_one_deck_systemexit_stderr_capped_but_replayed(
+    tmp_path, monkeypatch, capsys,
+):
+    """The captured stderr is replayed VERBATIM to the real stderr (so
+    diagnostics stay visible) while the copy embedded in the failure
+    record is trimmed to a cap — pre-fix the full text landed in BOTH
+    places, bloating the NDJSON stream."""
+    import sys as _sys
+
+    import commander_builder._proposer_cli as cli
+
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+    huge = "x" * 5000
+
+    def exit_noisily(argv):
+        _sys.stderr.write(huge)
+        raise SystemExit(2)
+
+    monkeypatch.setattr(cli, "auto_curate_main", exit_noisily)
+    record = cli._process_one_deck(deck, ["--bracket", "3"], False, frozenset())
+    assert record["status"] == "error"
+    # Record copy: capped (1000 chars + truncation marker + prefix).
+    assert len(record["exception"]) < 1200
+    assert "truncated" in record["exception"]
+    # Real stderr: the full text was replayed untrimmed.
+    assert huge in capsys.readouterr().err
+
+
 def test_process_one_deck_keyboard_interrupt_propagates(
     tmp_path, monkeypatch,
 ):

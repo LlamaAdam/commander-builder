@@ -118,7 +118,10 @@ def render_iteration(it: Iteration, position: int, total: int) -> str:
     lines.append("")
 
     # Rationale.
-    rationale = (it.audit_manifest or {}).get("rationale", "").strip()
+    # `or ""` (not a .get default): a manifest with an explicit JSON null
+    # ({"rationale": null}) makes .get return None despite the default, and
+    # None.strip() would kill the whole history render for one bad row.
+    rationale = ((it.audit_manifest or {}).get("rationale") or "").strip()
     if rationale:
         lines.append(f"**Rationale**: {rationale}")
         lines.append("")
