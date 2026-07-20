@@ -186,6 +186,13 @@ async function selectDeck(deckId, li, opts) {
       fetchJSON(`/api/dashboard?deck=${encodeURIComponent(deckId)}`),
       fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
     ]);
+    // Stale-response guard: if the user clicked another deck while
+    // these fetches were in flight, drop this (slower) result instead
+    // of overwriting the newer deck's dashboard. Without this, every
+    // later action (audit / propose / save-iteration keys off
+    // _activeDeckId) would operate on deck B while the user LOOKS at
+    // deck A's data. Same check the audit auto-kick below already does.
+    if (_activeDeckId !== deckId) return;
     renderDashboard(data, iters.iterations || []);
     // Auto-kick a fast heuristic audit so the user sees recs
     // immediately instead of hunting for the "Run audit" button.
@@ -207,6 +214,9 @@ async function selectDeck(deckId, li, opts) {
       loadAdvise("heuristic");
     }
   } catch (e) {
+    // Same stale guard on the error path — a late failure for a deck
+    // the user already left must not blank the deck they're viewing.
+    if (_activeDeckId !== deckId) return;
     dash.innerHTML = `<p class="empty-state">Error loading: ${e.message}</p>`;
   } finally {
     const badge = document.getElementById("_soft-refresh-badge");
@@ -2295,10 +2305,19 @@ function legalityBanner(legality, data) {
   if (legality.deck_size_ok === false) {
     const total = legality.deck_total ?? "?";
     const target = legality.deck_target ?? 100;
-    wrap.appendChild(el(
-      "span", { class: "pill bad" },
-      `Deck is ${total}/${target} — needs ${target - total} more`,
-    ));
+    // Branch the copy on the sign of the shortfall: an oversized deck
+    // must not read "needs -2 more". NaN (unknown total) falls through
+    // to the bare count.
+    const diff = typeof total === "number" ? target - total : NaN;
+    let sizeMsg;
+    if (diff > 0) {
+      sizeMsg = `Deck is ${total}/${target} — needs ${diff} more`;
+    } else if (diff < 0) {
+      sizeMsg = `Deck is ${total}/${target} — over by ${-diff}`;
+    } else {
+      sizeMsg = `Deck is ${total}/${target}`;
+    }
+    wrap.appendChild(el("span", { class: "pill bad" }, sizeMsg));
   }
   // Game Changers pill.
   const gcCount = legality.n_game_changers || 0;
@@ -2465,17 +2484,24 @@ function bracketTile(t) {
   sel.addEventListener("change", async (ev) => {
     const newBracket = ev.target.value;
     if (!_activeDeckId) return;
+    // Pin the deck this reload was kicked off for so a deck switch
+    // mid-fetch doesn't let the stale response (or its error toast)
+    // overwrite the newly selected deck's dashboard — same guard as
+    // selectDeck.
+    const deckId = _activeDeckId;
     const dash = $("dashboard");
     dash.innerHTML = '<p class="empty-state">Reloading with bracket ' + newBracket + '…</p>';
     try {
       const [data, iters] = await Promise.all([
         fetchJSON(
-          `/api/dashboard?deck=${encodeURIComponent(_activeDeckId)}&bracket=${newBracket}`,
+          `/api/dashboard?deck=${encodeURIComponent(deckId)}&bracket=${newBracket}`,
         ),
-        fetchJSON(`/api/iterations?deck=${encodeURIComponent(_activeDeckId)}`),
+        fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
       ]);
+      if (_activeDeckId !== deckId) return;
       renderDashboard(data, iters.iterations || []);
     } catch (e) {
+      if (_activeDeckId !== deckId) return;
       dash.innerHTML = `<p class="empty-state">Error: ${e.message}</p>`;
     }
   });

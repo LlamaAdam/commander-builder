@@ -56,7 +56,10 @@ function renderIterationGraph(data) {
   for (const e of edges) parentMap.set(e.to_id, e.from_id);
 
   // Walk forward from each chain root (no parent) until the chain ends.
-  // Roots get assigned a row; children inherit their parent's row.
+  // Roots get assigned a row; the first child inherits its parent's
+  // row, and each ADDITIONAL child of the same parent (a fork) is
+  // bumped down to the next free row in its column so siblings never
+  // render on top of each other.
   const rowOf = new Map();
   const componentRoots = [];
   for (const n of nodes) {
@@ -65,35 +68,51 @@ function renderIterationGraph(data) {
       rowOf.set(n.id, componentRoots.length - 1);
     }
   }
-  // BFS from each root assigning row + column. col is the depth from
-  // the root; we sort by iteration_n within the row to keep the
-  // chronological order intact.
   const colOf = new Map();
+  // Occupied (col,row) grid cells, keyed "col,row". Consulted when a
+  // fork would place two siblings at the same coordinates.
+  const occupied = new Set();
   for (const rootId of componentRoots) {
     colOf.set(rootId, 0);
+    occupied.add(`0,${rowOf.get(rootId)}`);
   }
-  // Propagate row/col by walking edges in input order. The edges list
-  // is already id-ordered so chains advance one hop at a time.
+  // Propagate row/col by walking edges in input order. The backend
+  // emits edges child-id-ordered (parents always precede their
+  // children), so one pass suffices and — since Set/Map iteration and
+  // the edge order are both stable — the layout is deterministic.
+  // A bumped child's own descendants follow its row automatically:
+  // their edges read the child's (already bumped) row here.
   for (const e of edges) {
     if (rowOf.has(e.from_id) && !rowOf.has(e.to_id)) {
-      rowOf.set(e.to_id, rowOf.get(e.from_id));
-      colOf.set(e.to_id, (colOf.get(e.from_id) || 0) + 1);
+      const col = (colOf.get(e.from_id) || 0) + 1;
+      let row = rowOf.get(e.from_id);
+      while (occupied.has(`${col},${row}`)) row += 1;
+      rowOf.set(e.to_id, row);
+      colOf.set(e.to_id, col);
+      occupied.add(`${col},${row}`);
     }
   }
   // Orphans we didn't catch (no parent + no chain root entry) drop to
   // a final row so they still render.
   for (const n of nodes) {
     if (!rowOf.has(n.id)) {
-      rowOf.set(n.id, componentRoots.length);
+      let row = componentRoots.length;
+      while (occupied.has(`0,${row}`)) row += 1;
+      rowOf.set(n.id, row);
       colOf.set(n.id, 0);
+      occupied.add(`0,${row}`);
       componentRoots.push(n.id);
     }
   }
 
-  // Compute SVG dimensions.
+  // Compute SVG dimensions. Height keys off the MAX row index (not the
+  // count of distinct rows) so fork-bumped rows can't overflow the
+  // viewBox even if a row index ends up unused.
   let maxCol = 0;
   for (const c of colOf.values()) if (c > maxCol) maxCol = c;
-  const rowCount = new Set(rowOf.values()).size;
+  let maxRow = 0;
+  for (const r of rowOf.values()) if (r > maxRow) maxRow = r;
+  const rowCount = maxRow + 1;
   const width =
     _GRAPH_PAD * 2 + (maxCol + 1) * _GRAPH_NODE_W + maxCol * _GRAPH_NODE_GAP_X;
   const height =
