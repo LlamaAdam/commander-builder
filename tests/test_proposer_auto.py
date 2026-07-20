@@ -2478,8 +2478,9 @@ def test_verdict_from_ab_pending_when_sim_did_not_complete():
 
 
 def test_ab_to_iteration_fields_includes_win_rates(tmp_path):
-    """Win rates are wins/total, rounded to 4 decimals (matches the
-    knowledge_log column precision). Margin is wins_b - wins_a."""
+    """Win rates are wins/DECISIVE (2026-07-19 convention: decisive =
+    wins_a + wins_b, the same denominator _verdict_from_ab gates on),
+    rounded to 4 decimals. Margin is wins_b - wins_a."""
     from commander_builder.proposer import _ab_to_iteration_fields
     from commander_builder.forge_runner import ABResult
     ab = ABResult(wins_a=2, wins_b=3, games=5, status="done",
@@ -2489,6 +2490,20 @@ def test_ab_to_iteration_fields_includes_win_rates(tmp_path):
     assert fields["win_rate_new"] == 0.6
     assert fields["margin"] == 1
     assert fields["sim_report"]["wins_b"] == 3
+
+
+def test_ab_to_iteration_fields_excludes_filler_and_draw_games():
+    """The old wins/games denominator counted filler-won and unresolved-
+    draw games the head-to-head pair can never win, deflating both rates
+    vs the other knowledge_log writers. decisive = wins_a + wins_b."""
+    from commander_builder.proposer import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    # 20 games: A won 8, B won 10, and 2 went to fillers/unresolved draws.
+    ab = ABResult(wins_a=8, wins_b=10, games=20, status="done")
+    fields = _ab_to_iteration_fields(ab)
+    assert fields["win_rate_old"] == round(8 / 18, 4)
+    assert fields["win_rate_new"] == round(10 / 18, 4)
+    assert fields["margin"] == 2
 
 
 def test_ab_to_iteration_fields_omits_rates_when_zero_games():
@@ -2504,6 +2519,19 @@ def test_ab_to_iteration_fields_omits_rates_when_zero_games():
     assert "win_rate_new" not in fields
     assert "margin" not in fields
     assert fields["sim_report"]["status"] == "skipped"
+
+
+def test_ab_to_iteration_fields_null_rates_when_no_decisive_games():
+    """Sim ran (games > 0) but every game drew or went to a filler:
+    decisive == 0 -> win_rate keys omitted (columns stay NULL), while
+    margin=0 is still a real observation and is recorded."""
+    from commander_builder.proposer import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=0, wins_b=0, games=5, status="done")
+    fields = _ab_to_iteration_fields(ab)
+    assert "win_rate_old" not in fields
+    assert "win_rate_new" not in fields
+    assert fields["margin"] == 0
 
 
 def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):

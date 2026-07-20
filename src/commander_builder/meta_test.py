@@ -141,6 +141,11 @@ class MetaTestReport:
     comparisons: list[dict] = field(default_factory=list)    # ComparisonReport.to_dict()
     card_diff: CardDiffReport = field(default_factory=CardDiffReport)
     user_record: dict = field(default_factory=dict)          # aggregate W/L/D vs all refs
+    # Draw-policy label (2026-07-19): the underlying compare() pods count
+    # turn-cap draws as plain draws (never resolved to a life leader, unlike
+    # forge_runner's A/B harness). Label only — lets downstream analysis
+    # tell the two report populations apart; no behavior change.
+    draw_policy: str = "plain_draw"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -532,6 +537,12 @@ def run_meta_test(
     user_w = 0
     user_l = 0
     user_d = 0
+    # True games-played total. user_w + user_l + user_d misses games a
+    # FILLER seat won (user lost those too, but they're not new_stats
+    # wins) — a "20-game" run used to report 'over 11 games'. Sum the
+    # attributed totals from each comparison instead and surface the
+    # filler-won remainder explicitly so the arithmetic is transparent.
+    games_total = 0
     for ref_idx, r in enumerate(refs):
         print(f"\n--- Comparing user vs {r.source}: {r.name} ---", flush=True)
         cmp_report = compare(
@@ -559,6 +570,9 @@ def run_meta_test(
         user_w += cmp_report.old_stats.wins
         user_l += cmp_report.new_stats.wins
         user_d += cmp_report.draws
+        # total_games counts every ATTRIBUTED game (failed pods already
+        # excluded by compare()), including games a filler seat won.
+        games_total += cmp_report.total_games
 
     # Diff the user deck against the references.
     user_main = _parse_main_card_names(user_path)
@@ -575,7 +589,13 @@ def run_meta_test(
             "user_wins": user_w,
             "user_losses": user_l,
             "draws": user_d,
-            "total_games": user_w + user_l + user_d,
+            # Games a filler seat won: real games the user played (and
+            # lost the race in) that aren't user W/L/D. max(0, ...) guards
+            # a malformed comparison stub whose totals undercount.
+            "filler_wins": max(0, games_total - (user_w + user_l + user_d)),
+            # Honest total (2026-07-19): ALL attributed games played, not
+            # just the W+L+D subset — a 20-game run reports 20, not 11.
+            "total_games": games_total,
             "win_rate": user_w / max(1, user_w + user_l) if (user_w + user_l) else 0.0,
         },
     )
@@ -606,10 +626,16 @@ def format_report_text(report: MetaTestReport) -> str:
         lines.append(f"  - [{r.source}] {r.name}  ({len(r.main_cards)} main cards){bracket_note}")
     lines.append("")
     rec = report.user_record
+    # ``filler_wins`` arrived with the honest-total fix (2026-07-19);
+    # .get() keeps this renderer working on reports persisted before it.
+    filler_wins = rec.get("filler_wins", 0)
+    filler_note = (
+        f" ({filler_wins} won by filler seats)" if filler_wins else ""
+    )
     lines.append(
         f"Aggregate record across all references: "
         f"{rec['user_wins']}W / {rec['user_losses']}L / {rec['draws']}D "
-        f"over {rec['total_games']} games "
+        f"over {rec['total_games']} games{filler_note} "
         f"(win rate: {rec['win_rate']:.0%} of decisive)"
     )
     lines.append("")

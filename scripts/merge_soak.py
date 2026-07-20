@@ -96,7 +96,7 @@ def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> int:
     carried into each row's audit_manifest so the machines stay
     distinguishable while all counting toward one dataset."""
     from commander_builder.knowledge_log import (
-        DEFAULT_DB_PATH, Iteration, record_iteration,
+        DEFAULT_DB_PATH, Iteration, decisive_win_rate, record_iteration,
     )
     from commander_builder.web._helpers import _bracket_from_filename
 
@@ -108,6 +108,12 @@ def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> int:
         wa = r.get("wins_a") or 0
         wb = r.get("wins_b") or 0
         g = r.get("games") or 0
+        # Win-rate convention (2026-07-19, knowledge_log schema docstring):
+        # wins / DECISIVE games. For AB-shaped soak rows the attributed-
+        # winner count is wa + wb (games includes filler-won / unresolved-
+        # draw games) — same denominator _ab_to_iteration_fields uses, so
+        # soak-fold rows stay comparable with every other writer's rows.
+        decisive = wa + wb
         delta = wb - wa
         verdict = ("kept" if delta >= margin
                    else "reverted" if delta <= -margin else "neutral")
@@ -122,8 +128,8 @@ def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> int:
                             "games": g},
             sim_report={"wins_a": wa, "wins_b": wb, "games": g},
             verdict=verdict,
-            win_rate_old=round(wa / g, 4) if g else None,
-            win_rate_new=round(wb / g, 4) if g else None,
+            win_rate_old=decisive_win_rate(wa, decisive),
+            win_rate_new=decisive_win_rate(wb, decisive),
             margin=delta,
         )
         record_iteration(it, db_path=db)

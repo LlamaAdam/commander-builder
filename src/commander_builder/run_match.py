@@ -74,6 +74,11 @@ class MatchupReport:
     timed_out_pods: int = 0
     excluded_games: int = 0
     pod_failures: list[dict] = field(default_factory=list)
+    # Draw-policy label (2026-07-19): turn-cap draws are counted in
+    # ``draws`` as plain draws — never resolved to a surviving life leader
+    # the way forge_runner's A/B harness does ('resolve_survivor_leader').
+    # Label only, for downstream analysis; no behavior change.
+    draw_policy: str = "plain_draw"
 
     @property
     def win_rate(self) -> float:

@@ -214,6 +214,10 @@ def test_to_dict_includes_winner_and_margin():
     d = r.to_dict()
     assert d["winner"] == "new"
     assert d["margin"] == 2
+    # Draw-policy label (2026-07-19): compare() counts turn-cap draws as
+    # plain draws; downstream analysis uses this to separate compare-shaped
+    # reports from the A/B harness's 'resolve_survivor_leader' shape.
+    assert d["draw_policy"] == "plain_draw"
 
 
 def test_to_json_round_trips():

@@ -40,6 +40,7 @@ from .forge_runner import VENDOR_FORGE
 # production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
     Iteration,
+    decisive_win_rate,
     record_iteration,
 )
 from .proposer import ProposerConfig, ProposerInput, propose
@@ -203,13 +204,12 @@ def run_one_iteration(
         # Draws are excluded from the denominator. If every attributed
         # game drew there is no decisive sample — record NULL win rates
         # rather than a fake 0.0/0.0 (the old max(1, ...) clamp did
-        # exactly that).
-        win_rate_old = (
-            round(cmp_report.old_stats.wins / decisive, 3) if decisive > 0 else None
-        )
-        win_rate_new = (
-            round(cmp_report.new_stats.wins / decisive, 3) if decisive > 0 else None
-        )
+        # exactly that). decisive_win_rate (2026-07-19) is the shared
+        # convention helper ALL knowledge_log win-rate writers route
+        # through — same denominator rule, same rounding — so the columns
+        # stay comparable across writers.
+        win_rate_old = decisive_win_rate(cmp_report.old_stats.wins, decisive)
+        win_rate_new = decisive_win_rate(cmp_report.new_stats.wins, decisive)
         margin = cmp_report.new_stats.wins - cmp_report.old_stats.wins
 
     # Step 7: persist.

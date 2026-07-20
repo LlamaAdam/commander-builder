@@ -84,21 +84,36 @@ def _ab_to_iteration_fields(ab_result) -> dict:
     """Extract win_rate_old / win_rate_new / margin / sim_report from
     an ABResult into the shape ``update_iteration_sim`` expects.
 
-    Win rates are computed as wins/total_games (ignoring draws since
-    Forge's AI rarely produces them). When the sim was skipped or
-    games=0, win rates are None -- caller passes None to
-    ``update_iteration_sim`` which preserves existing column values.
+    Win-rate convention (2026-07-19, see knowledge_log's schema docstring):
+    wins / DECISIVE games, where decisive = wins_a + wins_b -- the same
+    denominator ``_verdict_from_ab`` gates on. The old wins/games denominator
+    counted filler-won and unresolved-draw games the head-to-head pair can
+    never "win", deflating both rates relative to the other knowledge_log
+    writers (iteration_loop, save_iteration) and making the columns
+    incomparable across runs.
+
+    When decisive == 0 (all games drew or went to fillers -- or the sim was
+    skipped with games=0) the win_rate keys are OMITTED: the caller passes
+    the fields straight into ``update_iteration_sim``, which leaves absent
+    columns untouched, so a fresh 'pending' row keeps its NULL win rates
+    rather than recording a fabricated 0.0/0.0.
     """
+    from .knowledge_log import decisive_win_rate
+
     fields: dict = {
         "sim_report": ab_result.to_dict() if hasattr(ab_result, "to_dict") else None,
     }
     total = getattr(ab_result, "games", 0) or 0
+    wins_a = getattr(ab_result, "wins_a", 0) or 0
+    wins_b = getattr(ab_result, "wins_b", 0) or 0
     if total > 0:
-        wins_a = getattr(ab_result, "wins_a", 0) or 0
-        wins_b = getattr(ab_result, "wins_b", 0) or 0
-        fields["win_rate_old"] = round(wins_a / total, 4)
-        fields["win_rate_new"] = round(wins_b / total, 4)
+        # Margin is defined whenever the sim actually ran (0 is a real
+        # observation there), independent of whether any game was decisive.
         fields["margin"] = wins_b - wins_a
+    decisive = wins_a + wins_b
+    if decisive > 0:
+        fields["win_rate_old"] = decisive_win_rate(wins_a, decisive)
+        fields["win_rate_new"] = decisive_win_rate(wins_b, decisive)
     return fields
 
 

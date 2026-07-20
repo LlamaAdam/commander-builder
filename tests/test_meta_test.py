@@ -565,3 +565,66 @@ def test_run_meta_test_alternates_seat_parity_across_references(
     # deck (old_deck) is seated first on even parities only.
     assert [c["seat_parity"] for c in captured] == [0, 1, 0]
     assert all(c["old_deck"] == user.name for c in captured)
+
+
+def test_run_meta_test_total_games_includes_filler_wins(tmp_path, monkeypatch):
+    """Honest totals (2026-07-19): user_record.total_games is ALL attributed
+    games played, not just user W + L + D — games a filler seat won used to
+    vanish from the total ('over 11 games' for a 20-game run). filler_wins
+    makes the arithmetic transparent: W + L + D + filler_wins == total."""
+    from commander_builder import meta_test as mt
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir(parents=True)
+    user = deck_dir / "[USER] Mine [B3].dck"
+    user.write_text(
+        "[metadata]\nName=Mine\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+    refs = [
+        mt.ReferenceDeck(
+            source="manual", moxfield_id=None, name=f"Ref{i}", bracket=3,
+            deck_filename=f"[REF] Ref{i} [B3].dck", main_cards=["Forest"],
+        )
+        for i in range(2)
+    ]
+    monkeypatch.setattr(mt, "_parse_commander_names_from_dck", lambda p: ["Cmdr"])
+    monkeypatch.setattr(mt, "fetch_reference_decks", lambda *a, **kw: refs)
+
+    def fake_compare(**kwargs):
+        # Per comparison: 10 attributed games — user 3, ref 4, 1 draw,
+        # and 2 won by the filler seats (10 - 3 - 4 - 1).
+        return ComparisonReport(
+            old_deck=kwargs["old_deck"], new_deck=kwargs["new_deck"],
+            bracket=3, timestamp="x", mode="pod",
+            games_per_pod=kwargs["games_per_pod"],
+            total_games=10, draws=1,
+            old_stats=VersionStats(deck_filename=kwargs["old_deck"], wins=3),
+            new_stats=VersionStats(deck_filename=kwargs["new_deck"], wins=4),
+        )
+
+    monkeypatch.setattr(mt, "compare", fake_compare)
+
+    report = mt.run_meta_test(
+        user_deck=user.name, bracket=3,
+        out_dir=tmp_path / "_meta", deck_dir=deck_dir,
+    )
+
+    rec = report.user_record
+    assert rec["user_wins"] == 6
+    assert rec["user_losses"] == 8
+    assert rec["draws"] == 2
+    assert rec["filler_wins"] == 4
+    assert rec["total_games"] == 20  # the TRUE games-played count
+    # W + L + D + filler == total: the arithmetic is transparent.
+    assert (rec["user_wins"] + rec["user_losses"] + rec["draws"]
+            + rec["filler_wins"]) == rec["total_games"]
+
+    # The summary line is honest about the total and shows filler wins.
+    text = format_report_text(report)
+    assert "over 20 games" in text
+    assert "4 won by filler seats" in text
+
+    # Draw-policy label rides along in the persisted dict shape.
+    assert report.to_dict()["draw_policy"] == "plain_draw"

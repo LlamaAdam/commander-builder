@@ -3843,10 +3843,14 @@ def test_save_iteration_persists_row(save_client):
             "added": [{"card": "Lotus Cobra", "rationale": "ramp"}],
             "removed": [{"card": "Cultivate", "rationale": "slow"}],
         },
+        # Shape matches a real /api/propose_swap payload: total_games is
+        # the attributed-game total for the whole comparison (old_games /
+        # new_games mirror it — both versions sit in every pod), so the
+        # 2026-07-19 convention gives decisive = total_games - draws = 10.
         "sim_report": {
             "winner": "new", "old_wins": 4, "new_wins": 6,
             "old_games": 10, "new_games": 10, "draws": 0,
-            "margin": 2, "total_games": 20, "mode": "pod", "bracket": 3,
+            "margin": 2, "total_games": 10, "mode": "pod", "bracket": 3,
         },
         "verdict": "kept",
         "verdict_notes": "Cobra was the right call.",
@@ -3917,7 +3921,7 @@ def test_save_iteration_accepts_inconclusive(save_client):
         "sim_report": {
             "winner": "new", "old_wins": 2, "new_wins": 3,
             "old_games": 5, "new_games": 5, "draws": 0,
-            "margin": 1, "total_games": 10, "mode": "pod", "bracket": 3,
+            "margin": 1, "total_games": 5, "mode": "pod", "bracket": 3,
         },
         "verdict": "inconclusive",
     })
@@ -4044,6 +4048,147 @@ def test_save_iteration_handles_missing_sim_report(save_client):
     assert detail["win_rate_old"] is None
     assert detail["win_rate_new"] is None
     assert detail["margin"] is None
+
+
+# --- knowledge_log win-rate convention (2026-07-19) -------------------------
+# The three writers of win_rate_old/new — _proposer_sim._ab_to_iteration_
+# fields, iteration_loop.run_one_iteration, and /api/save_iteration — must
+# produce IDENTICAL values for the same underlying sim outcome, and NULL
+# (never 0.0) when no game was decisive. This suite exercises all three in
+# one place because cross-run analyses (FP-002-style row gates) read the
+# columns as one population.
+
+def _stage_iteration_loop_decks(tmp_path, monkeypatch):
+    """Minimal staged_decks harness (mirrors test_iteration_loop's) so
+    run_one_iteration can execute here with a canned compare()."""
+    il_dir = tmp_path / "il_decks" / "commander"
+    il_dir.mkdir(parents=True)
+    names = []
+    for version in ("v1", "v2"):
+        p = il_dir / f"[USER] Conv Deck {version} [B3].dck"
+        p.write_text(
+            "[metadata]\nName=Conv Deck\nMoxfield=conv-public-id\n"
+            "[Commander]\n1 Test Commander\n[Main]\n1 Sol Ring\n",
+            encoding="utf-8",
+        )
+        names.append(p.name)
+    monkeypatch.setattr("commander_builder.iteration_loop.DECK_DIR", il_dir)
+    return names
+
+
+def _canned_comparison(old_wins, new_wins, draws, total):
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+    return ComparisonReport(
+        old_deck="old.dck", new_deck="new.dck", bracket=3,
+        timestamp="2026-07-19T00:00:00Z", mode="pod", games_per_pod=10,
+        total_games=total, draws=draws,
+        old_stats=VersionStats(deck_filename="old.dck", wins=old_wins),
+        new_stats=VersionStats(deck_filename="new.dck", wins=new_wins),
+    )
+
+
+def test_win_rate_convention_identical_across_all_three_writers(
+    save_client, tmp_path, monkeypatch,
+):
+    """Same outcome — 20 attributed games, old 8 / new 10 / 2 draws —
+    must yield the same win_rate_old/new from every writer."""
+    from commander_builder._proposer_sim import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    from commander_builder.iteration_loop import run_one_iteration
+    from commander_builder.knowledge_log import get_iteration
+
+    expected_old = round(8 / 18, 4)
+    expected_new = round(10 / 18, 4)
+
+    # Writer 1 — auto-curate A/B path. In the ABResult shape the
+    # attributed-winner count is wins_a + wins_b (the 2 draws sit inside
+    # `games` but attribute to nobody).
+    fields = _ab_to_iteration_fields(ABResult(
+        deck_a="a.dck", deck_b="b.dck",
+        wins_a=8, wins_b=10, games=20, status="done",
+    ))
+    assert fields["win_rate_old"] == expected_old
+    assert fields["win_rate_new"] == expected_new
+
+    # Writer 2 — iteration_loop over a canned ComparisonReport:
+    # decisive = total_games - draws = 18.
+    v1_name, v2_name = _stage_iteration_loop_decks(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _canned_comparison(8, 10, 2, 20),
+    )
+    il_db = tmp_path / "conv_klog.sqlite"
+    result = run_one_iteration(
+        deck_filename=v1_name, new_deck_filename=v2_name, bracket=3,
+        audit_manifest={"added": [], "removed": []}, db_path=il_db,
+    )
+    row = get_iteration(result.iteration_id, db_path=il_db)
+    assert row.win_rate_old == expected_old
+    assert row.win_rate_new == expected_new
+
+    # Writer 3 — /api/save_iteration with the propose_swap payload shape.
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {"old_wins": 8, "new_wins": 10, "draws": 2,
+                       "total_games": 20},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["win_rate_old"] == expected_old
+    assert detail["win_rate_new"] == expected_new
+
+
+def test_win_rate_convention_null_when_no_decisive_games(
+    save_client, tmp_path, monkeypatch,
+):
+    """decisive == 0 (every attributed game drew) must land NULL win
+    rates from all three writers — a fabricated 0.0 would read as an
+    observed 'never wins'."""
+    from commander_builder._proposer_sim import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    from commander_builder.iteration_loop import run_one_iteration
+    from commander_builder.knowledge_log import get_iteration
+
+    # Writer 1 — the sim RAN (games > 0) but nothing was decisive: the
+    # win_rate keys are omitted so update_iteration_sim leaves the
+    # columns NULL; margin (a real observed 0) is still recorded.
+    fields = _ab_to_iteration_fields(ABResult(
+        deck_a="a.dck", deck_b="b.dck",
+        wins_a=0, wins_b=0, games=5, status="done",
+    ))
+    assert "win_rate_old" not in fields
+    assert "win_rate_new" not in fields
+    assert fields["margin"] == 0
+
+    # Writer 2 — all 20 attributed games drew.
+    v1_name, v2_name = _stage_iteration_loop_decks(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _canned_comparison(0, 0, 20, 20),
+    )
+    il_db = tmp_path / "conv_null_klog.sqlite"
+    result = run_one_iteration(
+        deck_filename=v1_name, new_deck_filename=v2_name, bracket=3,
+        audit_manifest={"added": [], "removed": []}, db_path=il_db,
+    )
+    row = get_iteration(result.iteration_id, db_path=il_db)
+    assert row.win_rate_old is None
+    assert row.win_rate_new is None
+
+    # Writer 3 — same all-draw payload through the endpoint.
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "inconclusive",
+        "sim_report": {"old_wins": 0, "new_wins": 0, "draws": 4,
+                       "total_games": 4},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["win_rate_old"] is None
+    assert detail["win_rate_new"] is None
 
 
 # --- /api/save_iteration — pricing snapshot for cost-evolution chart ------

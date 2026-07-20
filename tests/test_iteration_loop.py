@@ -170,8 +170,10 @@ def test_run_one_iteration_persists_kept_verdict(tmp_path, staged_decks, monkeyp
     assert fetched.deck_id == "stable-public-id"  # publicId, not filename
     assert fetched.verdict == "kept"
     assert fetched.margin == 10
-    assert fetched.win_rate_old == round(2 / 14, 3)
-    assert fetched.win_rate_new == round(12 / 14, 3)
+    # One-convention precision (2026-07-19): all knowledge_log win-rate
+    # writers round to 4 places via knowledge_log.decisive_win_rate.
+    assert fetched.win_rate_old == round(2 / 14, 4)
+    assert fetched.win_rate_new == round(12 / 14, 4)
     assert fetched.audit_manifest["added"] == ["NewCard"]
     # Sim report is the full ComparisonReport.to_dict()
     assert fetched.sim_report["winner"] == "new"

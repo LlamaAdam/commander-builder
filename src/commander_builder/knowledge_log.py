@@ -24,6 +24,17 @@ Schema rationale:
     created_at      ISO timestamp
     deck_snapshot   .dck text content (full deck preserved for reproducibility)
 
+Win-rate convention (standardized 2026-07-19): ``win_rate_old`` /
+``win_rate_new`` are wins / DECISIVE games, where decisive = games with an
+attributed winner — the same denominator each writer's verdict gate uses
+(draws and unattributed games are excluded; see ``decisive_win_rate``).
+When decisive == 0 the columns are NULL, never a fabricated 0.0. Before
+this date the three writers used three different denominators
+(all-games-including-draws, decisive-only, per-version-games), so rows
+older than 2026-07-19 may carry rates on the old denominators — cross-run
+analyses that gate on these columns should treat pre-convention rows
+accordingly.
+
 `deck_snapshot` keeps a copy of the .dck text so we can rebuild any historical
 state without depending on Moxfield not deleting the deck. The blobs are small
 (~2-5KB) so even hundreds of iterations stay well under a MB.
@@ -60,6 +71,36 @@ def _resolve_db_path(db_path: Optional[Path]) -> Path:
     production database. Reading the module attribute here, at call
     time, makes that patch actually take effect."""
     return db_path if db_path is not None else DEFAULT_DB_PATH
+
+
+def decisive_win_rate(wins: int, decisive: int) -> Optional[float]:
+    """Canonical win-rate for the ``win_rate_old`` / ``win_rate_new`` columns.
+
+    One convention (2026-07-19): wins / DECISIVE games, rounded to 4 places,
+    where ``decisive`` is the count of games with an attributed winner — the
+    same denominator the caller's verdict gate uses (draws and unattributed
+    games excluded). Returns ``None`` when ``decisive <= 0`` so callers
+    persist NULL rather than a fabricated 0.0 that would read as an observed
+    "never wins" result.
+
+    Every writer of those columns MUST route through this helper so the
+    values stay cross-run comparable (FP-002-style row gates read them as
+    one population):
+
+      - ``_proposer_sim._ab_to_iteration_fields``  (decisive = wins_a + wins_b)
+      - ``iteration_loop.run_one_iteration``       (decisive = total - draws)
+      - ``web.routes_sim.save_iteration``          (decisive = total - draws)
+
+    The two decisive formulas agree: in a compare() report every non-draw
+    attributed game has a winner (possibly a filler), while an ABResult only
+    attributes head-to-head wins — each writer uses the attributed-winner
+    count its own sim shape can actually observe, which is also exactly what
+    its verdict gate (analyst.min_decisive_games / _verdict_from_ab's
+    MIN_DECISIVE_GAMES_FOR_VERDICT) counts.
+    """
+    if decisive <= 0:
+        return None
+    return round(wins / decisive, 4)
 
 
 SCHEMA_VERSION = 2

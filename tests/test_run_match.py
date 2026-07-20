@@ -86,6 +86,9 @@ def test_to_dict_includes_win_rate():
     )
     d = r.to_dict()
     assert d["win_rate"] == 0.75
+    # Draw-policy label (2026-07-19): run_match counts turn-cap draws as
+    # plain draws (vs the A/B harness's 'resolve_survivor_leader').
+    assert d["draw_policy"] == "plain_draw"
 
 
 def test_format_summary_includes_record_line():
