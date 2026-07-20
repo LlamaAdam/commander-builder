@@ -613,6 +613,50 @@ def test_retry_retries_on_429_rate_limit(monkeypatch):
     assert calls["n"] == 3
 
 
+def test_retry_on_incomplete_read_then_succeeds(monkeypatch):
+    """http.client.IncompleteRead (mid-body disconnect from resp.read())
+    is NOT an OSError — urllib doesn't wrap exceptions raised after
+    urlopen() hands the response back. It's as transient as a 503, so
+    the retry loop must catch and retry it rather than letting it
+    escape and crash the caller."""
+    import http.client
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def cut_off_mid_body(url):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise http.client.IncompleteRead(b"<html>par", expected=4096)
+        return "<html>ok</html>"
+
+    monkeypatch.setattr(ec, "_http_get_text", cut_off_mid_body)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    body = _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+    assert body == "<html>ok</html>"
+    assert calls["n"] == 3  # two IncompleteReads retried, third succeeded
+
+
+def test_retry_exhaustion_reraises_incomplete_read(monkeypatch):
+    """Every attempt dies mid-body → the wrapper re-raises the final
+    HTTPException after using ALL attempts (it must not bail on the
+    first one). Fetch-site handlers translate this into None."""
+    import http.client
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def always_cut_off(url):
+        calls["n"] += 1
+        raise http.client.IncompleteRead(b"", expected=4096)
+
+    monkeypatch.setattr(ec, "_http_get_text", always_cut_off)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    with pytest.raises(http.client.IncompleteRead):
+        _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+    assert calls["n"] == 4  # 1 initial + 3 retries, all consumed
+
+
 # --- fetch_commander_page — integration with retry -------------------------
 
 def test_fetch_commander_page_recovers_from_transient_503(tmp_path, monkeypatch):
@@ -683,6 +727,68 @@ def test_fetch_commander_page_returns_none_after_exhausted_retries(
 
     page = fetch_commander_page("Sephiroth")
     assert page is None
+
+
+def test_fetch_commander_page_degrades_on_persistent_incomplete_read(
+    tmp_path, monkeypatch, capsys,
+):
+    """Retries exhausted on IncompleteRead → the fetch site catches the
+    HTTPException (NOT an OSError — the pre-fix ``except OSError``
+    missed it and crashed CLI callers with a traceback) and degrades to
+    None, emitting the loud grep-able warning from 5c7b3d6."""
+    import http.client
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.time.sleep", lambda s: None,
+    )
+
+    def always_cut_off(url):
+        raise http.client.IncompleteRead(b"<html>par", expected=4096)
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", always_cut_off,
+    )
+
+    page = fetch_commander_page("Sephiroth")  # must not raise
+    assert page is None
+    out = capsys.readouterr().out
+    # The degradation is loud: warning line carries the exception repr.
+    assert "[edhrec] WARNING" in out
+    assert "IncompleteRead" in out
+
+
+def test_fetch_top_cards_degrades_on_persistent_incomplete_read(
+    tmp_path, monkeypatch, capsys,
+):
+    """Same HTTPException gap on the JSON-endpoint path: fetch_top_cards
+    must degrade to [] (with the warning) instead of crashing."""
+    import http.client
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.time.sleep", lambda s: None,
+    )
+
+    def always_cut_off(url):
+        raise http.client.IncompleteRead(b"{", expected=4096)
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", always_cut_off,
+    )
+
+    from commander_builder.edhrec_client import fetch_top_cards
+    cards = fetch_top_cards("year")  # must not raise
+    assert cards == []
+    out = capsys.readouterr().out
+    assert "[edhrec] WARNING" in out
+    assert "IncompleteRead" in out
 
 
 # --- Retry-After header handling + retry logging ---------------------------

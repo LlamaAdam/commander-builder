@@ -190,8 +190,12 @@ def extract_features(it: Iteration) -> Optional[FeatureRow]:
         try:
             from .deck_health import compute_deck_health
             h = compute_deck_health(it.deck_snapshot)
-            dh["dh_spell_density"] = float(h.get("spell_density", {}).get("ratio", 0.0) or 0.0)
-            dh["dh_mana_sinks"] = float(h.get("mana_sinks", {}).get("count", 0) or 0)
+            # spell_density / mana_sinks are None (not a dict) when the
+            # Scryfall outage contract fires — ``or {}`` keeps the 0.0
+            # default instead of AttributeError-ing out of this try block
+            # and losing the OTHER deck-health features below.
+            dh["dh_spell_density"] = float((h.get("spell_density") or {}).get("ratio", 0.0) or 0.0)
+            dh["dh_mana_sinks"] = float((h.get("mana_sinks") or {}).get("count", 0) or 0)
             dh["dh_wincon_protection"] = float(h.get("wincon_protection", {}).get("count", 0) or 0)
             dh["dh_self_mill"] = float(h.get("self_mill", {}).get("count", 0) or 0)
             dh["dh_mdfc"] = float(h.get("mdfc", {}).get("count", 0) or 0)

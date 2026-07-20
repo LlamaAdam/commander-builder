@@ -2631,8 +2631,10 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     client, monkeypatch,
 ):
     """If Scryfall is unreachable, deck_health degrades gracefully:
-    the spell_density and mana_sinks signals report zeros (can't
-    classify types) but the named-card signals (MDFC, protection,
+    the spell_density and mana_sinks signals report None (the module
+    docstring's outage contract -- a misleading '0% spells' / '0
+    sinks' must not render on a deck that simply couldn't be
+    classified) while the named-card signals (MDFC, protection,
     self-mill) still work since they don't need Scryfall."""
     from types import SimpleNamespace
 
@@ -2658,9 +2660,10 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
         "mdfc", "spell_density", "mana_sinks",
         "wincon_protection", "self_mill", "role_targets",
     }
-    # Scryfall-dependent signals return zero/null gracefully.
-    assert health["mana_sinks"]["count"] == 0
-    assert health["spell_density"]["non_permanent_count"] == 0
+    # Scryfall-dependent signals honor the outage contract: None, not
+    # a fabricated zero. The UI renders these as "unavailable" tiles.
+    assert health["mana_sinks"] is None
+    assert health["spell_density"] is None
 
 
 def test_audit_endpoint_surfaces_protected_cards_from_metadata(

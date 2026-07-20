@@ -30,6 +30,7 @@ weekly.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import time
@@ -208,10 +209,21 @@ def _http_get_text_with_retry(
 ) -> str:
     """GET ``url`` with exponential backoff on transient failures.
 
-    Retries on 5xx HTTPError, 429 (rate-limited), and URLError (network /
-    DNS / timeout). 404 is deterministic — caller decides whether the
-    miss is fatal — and propagates without retrying. Other 4xx (400,
-    401, 403) are caller-bug class errors and also don't retry.
+    Retries on 5xx HTTPError, 429 (rate-limited), URLError (network /
+    DNS / timeout), and ``http.client.HTTPException`` (mid-body
+    connection failures — see below). 404 is deterministic — caller
+    decides whether the miss is fatal — and propagates without
+    retrying. Other 4xx (400, 401, 403) are caller-bug class errors
+    and also don't retry.
+
+    Why HTTPException: ``urllib.request.urlopen`` wraps most transport
+    failures in URLError/HTTPError, but once the response object is
+    handed back, ``resp.read()`` (inside ``_http_get_text``) talks to
+    the raw ``http.client`` layer directly. A server/CDN that drops
+    the connection mid-body raises ``http.client.IncompleteRead`` (or
+    another ``HTTPException`` subclass) — which is NOT an OSError and
+    NOT wrapped by urllib. These are exactly as transient as a 503,
+    so they get the same retry treatment.
 
     Backoff: when the server sends a ``Retry-After`` header (RFC 7231),
     honor it (clamped to ``MAX_RETRY_AFTER_SEC`` so a 300+s instruction
@@ -236,6 +248,14 @@ def _http_get_text_with_retry(
         except urllib.error.URLError as exc:
             last_exc = exc
         except TimeoutError as exc:
+            last_exc = exc
+        except http.client.HTTPException as exc:
+            # IncompleteRead / RemoteDisconnected / other connection-state
+            # errors raised by resp.read() after urlopen() succeeded.
+            # (RemoteDisconnected also subclasses ConnectionResetError so
+            # some of these are OSErrors too — but IncompleteRead is not,
+            # and would otherwise escape the loop entirely.) Transient by
+            # nature: the body cut off mid-transfer, so retry.
             last_exc = exc
         if attempt >= max_retries:
             break
@@ -512,12 +532,15 @@ def fetch_top_cards(
     try:
         raw = _http_get_text_with_retry(url)
         payload = json.loads(raw)
-    except (OSError, ValueError) as exc:
+    except (OSError, http.client.HTTPException, ValueError) as exc:
         # OSError covers HTTPError/URLError/TimeoutError (all real
-        # network failures); ValueError covers JSONDecodeError (CDN
-        # served non-JSON, e.g. a challenge page). Anything else is a
-        # programming error and should propagate, not be silently
-        # converted into "no top cards".
+        # network failures); http.client.HTTPException covers
+        # IncompleteRead-class mid-body disconnects that resp.read()
+        # raises WITHOUT an OSError wrapper (they'd otherwise crash the
+        # caller after retries are exhausted); ValueError covers
+        # JSONDecodeError (CDN served non-JSON, e.g. a challenge page).
+        # Anything else is a programming error and should propagate,
+        # not be silently converted into "no top cards".
         print(
             f"[edhrec] WARNING: top-cards fetch failed for {slug!r} "
             f"({exc!r}) — continuing without trending signal",
@@ -616,14 +639,18 @@ def fetch_commander_page(
         if exc.code == 404:
             return None
         return None
-    except OSError as exc:
-        # URLError and TimeoutError are both OSError subclasses, so this
-        # single clause covers every network-level failure urllib can
+    except (OSError, http.client.HTTPException) as exc:
+        # URLError and TimeoutError are both OSError subclasses, so
+        # OSError covers every network-level failure urllib itself can
         # raise (DNS, connection refused, TLS, socket timeout) WITHOUT
         # also swallowing genuine bugs — the old blanket
         # ``except Exception`` silently converted e.g. a parser-adjacent
-        # TypeError into "EDHREC unavailable". Programming errors now
-        # propagate; network errors still degrade gracefully, but loudly
+        # TypeError into "EDHREC unavailable". http.client.HTTPException
+        # closes the one gap in that theory: resp.read() can raise
+        # IncompleteRead (mid-body disconnect) and friends, which are
+        # NOT OSError subclasses and are just as much "the network
+        # failed" as a socket timeout. Programming errors still
+        # propagate; network errors degrade gracefully, but loudly
         # enough (exception repr) to be diagnosable from the server log.
         print(
             f"[edhrec] WARNING: commander-page fetch failed for {slug!r} "
@@ -724,10 +751,13 @@ def fetch_salt_list(
     time.sleep(REQUEST_SLEEP_SEC)
     try:
         html = _http_get_text_with_retry(url)
-    except OSError as exc:
-        # OSError covers HTTPError/URLError/TimeoutError — every real
-        # network failure — without swallowing programming errors like
-        # the old blanket ``except Exception`` did.
+    except (OSError, http.client.HTTPException) as exc:
+        # OSError covers HTTPError/URLError/TimeoutError;
+        # http.client.HTTPException covers IncompleteRead-class mid-body
+        # disconnects that escape urllib's OSError hierarchy. Together
+        # that's every real network failure — without swallowing
+        # programming errors like the old blanket ``except Exception``
+        # did.
         print(
             f"[edhrec] WARNING: salt-list fetch failed ({exc!r}) — "
             "continuing without salt scores",
@@ -841,11 +871,12 @@ def fetch_tag_page(
         if exc.code == 404:
             return None
         return None
-    except OSError as exc:
-        # Same narrowing rationale as fetch_commander_page: OSError
-        # covers URLError/TimeoutError (network-level failures) while
-        # letting programming errors propagate instead of masquerading
-        # as "EDHREC unavailable".
+    except (OSError, http.client.HTTPException) as exc:
+        # Same rationale as fetch_commander_page: OSError covers
+        # URLError/TimeoutError (network-level failures), HTTPException
+        # covers resp.read()'s mid-body disconnects (IncompleteRead is
+        # not an OSError) — while letting programming errors propagate
+        # instead of masquerading as "EDHREC unavailable".
         print(
             f"[edhrec] WARNING: tag-page fetch failed for {safe_slug!r} "
             f"({exc!r}) — continuing without tag signal",
@@ -1064,9 +1095,10 @@ def fetch_average_deck(
         if exc.code == 404:
             return None
         return None
-    except OSError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         # Same narrowing as the other fetchers: OSError covers
-        # URLError/TimeoutError; programming errors propagate.
+        # URLError/TimeoutError, HTTPException covers mid-body
+        # disconnects from resp.read(); programming errors propagate.
         print(
             f"[edhrec] WARNING: average-deck fetch failed for {url!r} "
             f"({exc!r}) — continuing without average-deck signal",
