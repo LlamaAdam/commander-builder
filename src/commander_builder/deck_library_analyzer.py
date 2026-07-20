@@ -32,21 +32,21 @@ aggregations.
 """
 from __future__ import annotations
 
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .dck_utils import CARD_LINE_RE
 from .forge_cards_loader import CardsLoader
 from .forge_script_parser import CardScript, parse_card_script
 
 
-# Matches the leading ``<qty> <name>[|<set>|<cn>]`` shape that
-# .dck files use under [Commander] and [Main]. Same pattern style
-# as deck_health._iter_main_cards but local-only here so this
-# module imports nothing from the audit-side code.
-_DCK_LINE_RE = re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+# Canonical ``<qty> <name>[|<set>|<cn>]`` line regex lives in dck_utils
+# (a pure leaf that imports nothing project-local, so this module still
+# pulls in no audit-side code). Aliased here for the [Commander]/[Main]
+# scan below.
+_DCK_LINE_RE = CARD_LINE_RE
 
 
 @dataclass

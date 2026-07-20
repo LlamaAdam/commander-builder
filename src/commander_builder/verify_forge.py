@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -282,7 +283,7 @@ def run_sim(
     stderr_path = output_dir / f"{label}_stderr.txt"
     info_path = output_dir / f"{label}_meta.json"
 
-    started = datetime.now()
+    started = time.monotonic()
     error: Optional[str] = None
     returncode: Optional[int] = None
     timed_out = False
@@ -325,7 +326,7 @@ def run_sim(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
 
-    duration = (datetime.now() - started).total_seconds()
+    duration = time.monotonic() - started
 
     # Try to grab Forge's own log file if it exists. Path is platform/install
     # dependent; we copy from any plausible location.

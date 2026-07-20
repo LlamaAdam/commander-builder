@@ -26,7 +26,7 @@ def test_override_env_wins(cfg_file):
 
 def test_localappdata_used_on_windows(monkeypatch):
     monkeypatch.delenv("COMMANDER_BUILDER_CONFIG", raising=False)
-    monkeypatch.setattr(config_store.os, "name", "nt")
+    monkeypatch.setattr(config_store, "_is_windows", lambda: True)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\x\AppData\Local")
     p = config_store.config_path()
     assert p.name == "config.json"

@@ -47,6 +47,8 @@ from __future__ import annotations
 import re
 from typing import Iterable, Optional
 
+from . import dck_utils
+
 
 # ---------------------------------------------------------------------------
 # Named-card detection lists
@@ -230,7 +232,8 @@ _SELF_MILL_ENABLERS = _SELF_MILL_ENABLERS - {
 # Deck-text parsing
 # ---------------------------------------------------------------------------
 
-_MAIN_LINE = re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+# Kept for backwards compatibility; canonical copy lives in dck_utils.
+_MAIN_LINE = dck_utils.CARD_LINE_RE
 
 
 def _iter_main_cards(deck_text: str) -> Iterable[tuple[int, str]]:
@@ -241,28 +244,10 @@ def _iter_main_cards(deck_text: str) -> Iterable[tuple[int, str]]:
     preserved from the file. Skips section headers, metadata, and
     blank lines. Same parsing convention as the rest of the project
     (see web/_helpers.py's ``_apply_swaps_to_dck``).
+
+    Thin wrapper over ``dck_utils.iter_main_cards``.
     """
-    in_main = False
-    for raw in deck_text.splitlines():
-        s = raw.strip()
-        if not s:
-            continue
-        if s.startswith("[") and s.endswith("]"):
-            in_main = s.lower() == "[main]"
-            continue
-        if not in_main:
-            continue
-        m = _MAIN_LINE.match(s)
-        if not m:
-            continue
-        try:
-            qty = int(m.group(1))
-        except (TypeError, ValueError):
-            qty = 1
-        name = m.group(2).strip()
-        if not name:
-            continue
-        yield qty, name
+    return dck_utils.iter_main_cards(deck_text)
 
 
 # ---------------------------------------------------------------------------

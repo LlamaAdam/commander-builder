@@ -53,7 +53,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from ._llm_json import LLMJsonError, extract_json_object, try_extract_json_object
 
@@ -641,7 +641,7 @@ def auto_propose(
     max_adds: int = 5,
     max_cuts: int = 5,
     model: str = "claude-sonnet-4-5",
-    protected_cards: "Iterable[str]" = (),
+    protected_cards: Iterable[str] = (),
     mode: str = "polish",
 ) -> Proposal:
     """Curate an advisor's candidate pool into a small applicable Proposal.

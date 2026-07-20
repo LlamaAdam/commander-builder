@@ -92,13 +92,21 @@ class _InstanceLock:
         self.close()
 
 
+def _is_windows() -> bool:
+    """Platform check with a test seam (path layout only — the msvcrt vs
+    fcntl locking branches below must follow the REAL os.name). Tests
+    patch THIS, not ``os.name``: patching the global breaks pathlib on
+    POSIX (WindowsPath NotImplementedError) and killed the Linux CI run."""
+    return os.name == "nt"
+
+
 def _lock_file_path() -> Path:
     """Return the instance-lock file path (mirrors config_store layout)."""
     env_dir = os.environ.get("COMMANDER_BUILDER_LOCK_DIR")
     if env_dir:
         return Path(env_dir) / "instance.lock"
     localappdata = os.environ.get("LOCALAPPDATA")
-    if os.name == "nt" and localappdata:
+    if _is_windows() and localappdata:
         return Path(localappdata) / "commander-builder" / "instance.lock"
     return Path.home() / ".commander-builder" / "instance.lock"
 

@@ -55,7 +55,10 @@ function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "class") node.className = v;
-    else if (k === "html") node.innerHTML = v;
+    // NOTE: deliberately no innerHTML escape hatch here — server/API
+    // data must flow through createTextNode/textContent. If a call
+    // site truly needs raw HTML, assign innerHTML explicitly there
+    // with a comment explaining why it is safe.
     else node.setAttribute(k, v);
   }
   for (const c of children) {

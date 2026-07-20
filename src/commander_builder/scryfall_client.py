@@ -28,6 +28,8 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from . import dck_utils
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -194,27 +196,13 @@ def _parse_commander_names_from_dck(dck_path: Path) -> list[str]:
     """Extract commander names from a Forge .dck file's [Commander] section.
 
     Forge supports partner / Background / Signature Spell, so multiple names
-    are valid. Strips set/CN suffixes (`Atraxa|CMM|1` → `Atraxa`)."""
+    are valid. Strips set/CN suffixes (`Atraxa|CMM|1` → `Atraxa`).
+
+    Thin wrapper over ``dck_utils.section_card_names``."""
     if not dck_path.exists():
         return []
-    out: list[str] = []
-    in_cmdr = False
-    for raw in dck_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[commander]":
-            in_cmdr = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_cmdr = False
-            continue
-        if in_cmdr:
-            # `1 Name|SET|CN` → strip the qty prefix and the |...| suffix.
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                out.append(m.group(1).strip())
-    return out
+    text = dck_path.read_text(encoding="utf-8")
+    return dck_utils.section_card_names(text, "Commander")
 
 
 def color_identity_for_commander(dck_path: Path) -> str:

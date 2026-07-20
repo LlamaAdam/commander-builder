@@ -1166,3 +1166,69 @@ def test_fetch_commander_page_no_longer_swallows_programming_errors(
 
     with pytest.raises(TypeError):
         fetch_commander_page("Sephiroth")
+
+# ---------------------------------------------------------------------------
+# AverageDeck.to_moxfield_shape — basic-land distribution
+# ---------------------------------------------------------------------------
+
+def _build_avg_deck(commander, non_basic_count, basics_listed):
+    """Helper: build an AverageDeck with N non-basics + the named basics."""
+    from commander_builder.edhrec_client import AverageDeck, CardEntry
+    cards: list[CardEntry] = [CardEntry(name=commander, num_decks=1)]
+    for i in range(non_basic_count):
+        cards.append(CardEntry(name=f"NonBasic{i:03d}", num_decks=100))
+    for b in basics_listed:
+        # 5000 is the kind of "appears in N decks" count that used to be
+        # capped at 40 by the old code — the bug we're fixing.
+        cards.append(CardEntry(name=b, num_decks=5000))
+    return AverageDeck(
+        commander_name=commander,
+        slug="test", url="x", bracket_slug=None, budget_slug=None,
+        cards=cards,
+    )
+
+
+def test_to_moxfield_shape_distributes_basics_to_fill_99():
+    """Basics are split evenly across the listed basic types so the total
+    mainboard = 99 cards (not 40-of-each)."""
+    deck = _build_avg_deck("Atraxa, Praetors' Voice",
+                           non_basic_count=65, basics_listed=["Forest", "Island"])
+    shape = deck.to_moxfield_shape(bracket_int=4)
+    main = shape["boards"]["mainboard"]["cards"]
+    total = sum(e["quantity"] for e in main.values())
+    assert total == 99, f"expected 99 mainboard cards, got {total}"
+    # 99 - 65 = 34 basics, split 17/17 (even). Neither basic should be 5000.
+    basic_qtys = {e["card"]["name"]: e["quantity"] for e in main.values()
+                  if e["card"]["name"].lower() in {"forest", "island"}}
+    assert basic_qtys == {"Forest": 17, "Island": 17}
+
+
+def test_to_moxfield_shape_uneven_split_remainder_to_first_listed():
+    """When (99 - non_basic) doesn't divide evenly, the remainder lands on
+    the first-listed basic(s) (deterministic, by EDHREC ordering)."""
+    deck = _build_avg_deck("Niv-Mizzet, Parun",
+                           non_basic_count=64, basics_listed=["Island", "Mountain"])
+    main = deck.to_moxfield_shape()["boards"]["mainboard"]["cards"]
+    basic_qtys = {e["card"]["name"]: e["quantity"] for e in main.values()
+                  if e["card"]["name"].lower() in {"island", "mountain"}}
+    # 99 - 64 = 35 -> 18 + 17, remainder to first-listed (Island).
+    assert basic_qtys == {"Island": 18, "Mountain": 17}
+
+
+def test_to_moxfield_shape_no_basic_overshoot_when_already_99_nonbasic():
+    """If non-basics already fill >=99, the basics get qty 0 (not negative,
+    not the old 40-cap value)."""
+    deck = _build_avg_deck("Krenko, Mob Boss",
+                           non_basic_count=99, basics_listed=["Mountain"])
+    main = deck.to_moxfield_shape()["boards"]["mainboard"]["cards"]
+    mtn_qty = next(e["quantity"] for e in main.values()
+                   if e["card"]["name"] == "Mountain")
+    assert mtn_qty == 0
+
+
+def test_to_moxfield_shape_non_basics_are_singletons():
+    """Commander format -> every non-basic is qty 1 regardless of num_decks."""
+    deck = _build_avg_deck("Sol", non_basic_count=10, basics_listed=[])
+    main = deck.to_moxfield_shape()["boards"]["mainboard"]["cards"]
+    for e in main.values():
+        assert e["quantity"] == 1, e

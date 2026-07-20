@@ -41,6 +41,8 @@ import re
 from pathlib import Path
 from typing import Literal, Optional
 
+from . import dck_utils
+
 Archetype = Literal["aggro", "midrange", "control", "combo", "stax"]
 
 
@@ -141,26 +143,12 @@ MIN_TRIBAL_MATCHES = 10
 
 def _read_main_card_names(deck_path: Path) -> list[str]:
     """Pull just the card-name portion of every line under [Main]. Strip the
-    leading qty and the trailing |SET|CN suffix."""
+    leading qty and the trailing |SET|CN suffix.
+
+    Thin wrapper over ``dck_utils.main_card_names``."""
     if not deck_path.exists():
         return []
-    out: list[str] = []
-    in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[main]":
-            in_main = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                out.append(m.group(1).strip())
-    return out
+    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
 
 
 def _content_scan(card_names: list[str]) -> tuple[Optional[Archetype], int]:

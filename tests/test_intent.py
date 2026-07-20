@@ -545,9 +545,15 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
 
     auto_curate_main does a lazy `from .improvement_advisor import advise`
     inside the function body; patching the module attribute is sufficient.
+
+    The curator step (auto_propose) MUST be stubbed too: the real one
+    requires ANTHROPIC_API_KEY or the `claude` CLI on PATH, so without
+    the stub this test failed on Linux CI (neither available) and —
+    worse — silently invoked the real subscription CLI on dev boxes
+    that have it installed.
     """
-    # Trigger full import chain so the module is in sys.modules.
-    from commander_builder.proposer import auto_propose  # noqa: F401
+    from commander_builder.proposer import Proposal
+    import commander_builder._proposer_cli as _pc
     from commander_builder._proposer_cli import auto_curate_main
     import commander_builder.improvement_advisor as _ia
 
@@ -555,6 +561,59 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
 
     def fake_advise(deck_path, bracket, source=None, intent_themes=None, **kw):
         received["intent_themes"] = intent_themes
+        import types
+        return types.SimpleNamespace(
+            to_manifest=lambda: {"added": [], "removed": []},
+        )
+
+    def fake_auto_propose(**kwargs):
+        received["curated"] = True
+        return Proposal()
+
+    monkeypatch.setattr(_ia, "advise", fake_advise)
+    monkeypatch.setattr(_pc, "auto_propose", fake_auto_propose)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3",
+        "--intent-themes", "tokens,aristocrats",
+        "--dry-run", "--no-log",
+    ])
+
+    assert rc == 0
+    assert received.get("intent_themes") == ["tokens", "aristocrats"]
+    assert received.get("curated") is True  # stub used, real CLI untouched
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    __import__("shutil").which("claude") is None,
+    reason="live curator check needs the `claude` CLI on PATH "
+           "(subscription mode); CI runners don't have it",
+)
+def test_auto_curate_main_live_curator_end_to_end(tmp_path, monkeypatch):
+    """LIVE integration check: auto_curate_main drives the REAL curator
+    (subscription `claude` CLI) end to end and exits 0.
+
+    This deliberately invokes the actual CLI — it exists to prove the
+    subscription-mode call path works, per operator request. Kept out of
+    the fast lane (slow marker) so routine local runs don't spend a
+    subscription call, and skipped where the CLI is absent (Linux CI).
+    Only the advisor is stubbed (no EDHREC/Scryfall network); the
+    curator path is fully real.
+    """
+    # Import proposer FIRST to settle the proposer <-> _proposer_cli
+    # circular import (same ordering note as the stubbed test above).
+    from commander_builder.proposer import auto_propose  # noqa: F401
+    import commander_builder.improvement_advisor as _ia
+    from commander_builder._proposer_cli import auto_curate_main
+
+    def fake_advise(deck_path, bracket, source=None, intent_themes=None, **kw):
         import types
         return types.SimpleNamespace(
             to_manifest=lambda: {"added": [], "removed": []},
@@ -573,9 +632,7 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
         "--intent-themes", "tokens,aristocrats",
         "--dry-run", "--no-log",
     ])
-
     assert rc == 0
-    assert received.get("intent_themes") == ["tokens", "aristocrats"]
 
 
 def test_advise_passes_intent_themes_to_tag_pages(tmp_path, monkeypatch):

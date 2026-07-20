@@ -18,11 +18,15 @@ instead of silent per-request Forge errors.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 FORGE_RELEASES_API = "https://api.github.com/repos/Card-Forge/forge/releases/latest"
 TEMURIN_RELEASES_API = (
@@ -239,6 +243,7 @@ def download_forge(
     forge_dir.mkdir(parents=True, exist_ok=True)
     dest = forge_dir / asset["name"]
     download(asset["browser_download_url"], dest)
+    _verify_asset_checksum(release, asset, dest, download)
     return dest
 
 
@@ -280,7 +285,128 @@ def download_jre(
     jre_dir.mkdir(parents=True, exist_ok=True)
     dest = jre_dir / asset["name"]
     download(asset["browser_download_url"], dest)
+    _verify_asset_checksum(release, asset, dest, download)
     return dest
+
+
+def _sha256_of(path: Path) -> str:
+    """Hex SHA-256 of a file, streamed in chunks (the Forge jar is ~120 MB)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 256), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _expected_sha256(
+    release: dict,
+    asset: dict,
+    download: Callable[[str, Path], None],
+) -> Optional[str]:
+    """Resolve the publisher's expected SHA-256 for a release asset.
+
+    Prefers the GitHub API's per-asset ``digest`` field
+    (``"sha256:<hex>"``); falls back to a ``<name>.sha256[.txt]``
+    sidecar asset in the same release (Adoptium publishes these).
+    Returns None when the release provides no checksum source.
+    """
+    digest = asset.get("digest") or ""
+    if isinstance(digest, str) and digest.lower().startswith("sha256:"):
+        return digest.split(":", 1)[1].strip().lower()
+
+    sidecar_names = {
+        f"{asset.get('name', '')}.sha256",
+        f"{asset.get('name', '')}.sha256.txt",
+    }
+    for a in release.get("assets") or []:
+        if isinstance(a, dict) and a.get("name") in sidecar_names:
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                sidecar_path = Path(tmp) / a["name"]
+                download(a["browser_download_url"], sidecar_path)
+                text = sidecar_path.read_text(encoding="utf-8", errors="replace")
+            # Sidecar format is "<hex>  <filename>" (sha256sum style).
+            for token in text.split():
+                if len(token) == 64 and all(c in "0123456789abcdefABCDEF" for c in token):
+                    return token.lower()
+    return None
+
+
+def _verify_asset_checksum(
+    release: dict,
+    asset: dict,
+    dest: Path,
+    download: Callable[[str, Path], None],
+) -> None:
+    """Verify ``dest`` against the release's published SHA-256, if any.
+
+    Raises RuntimeError (and removes the file) on mismatch — a corrupt or
+    tampered download must not be left where ``check_dependencies`` would
+    find and run it. When the release publishes no checksum we warn
+    loudly rather than fail, so installs keep working for releases that
+    omit digests.
+    """
+    expected = _expected_sha256(release, asset, download)
+    if expected is None:
+        # Library function — emit through logging, not stdout, so it
+        # doesn't pollute the launcher subprocess's output stream.
+        logger.warning(
+            "no published SHA-256 for %r; skipping integrity verification.",
+            asset.get("name"),
+        )
+        return
+    actual = _sha256_of(dest)
+    if actual != expected:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"checksum mismatch for {asset.get('name')!r}: "
+            f"expected sha256 {expected}, got {actual}. "
+            "Download removed — retry, and if it persists treat the "
+            "release asset as suspect."
+        )
+
+
+def _ensure_zip_members_within(zf, dest: Path) -> None:
+    """Zip-slip guard: refuse archive members that would escape ``dest``.
+
+    Used for the zip path (and as the manual fallback for tar on
+    Python < 3.12, where ``extractall(filter="data")`` isn't available).
+    Validates member targets explicitly before extraction.
+    """
+    dest_resolved = dest.resolve()
+    for member in zf.infolist():
+        target = (dest / member.filename).resolve()
+        if not target.is_relative_to(dest_resolved):
+            raise RuntimeError(
+                f"unsafe zip member path (zip-slip): {member.filename!r}"
+            )
+
+
+def _ensure_tar_members_within(tf, dest: Path) -> None:
+    """Tar zip-slip guard for Python < 3.12, where ``extractall`` has no
+    ``filter=`` argument.
+
+    On 3.12+ the tar path uses ``filter="data"`` which blocks traversal,
+    absolute paths, and unsafe links. This is the manual equivalent for
+    older interpreters in the project's supported range (``>=3.10``):
+    reject any member — including symlink/hardlink targets — that would
+    resolve outside ``dest``.
+    """
+    dest_resolved = dest.resolve()
+    for member in tf.getmembers():
+        target = (dest / member.name).resolve()
+        if not target.is_relative_to(dest_resolved):
+            raise RuntimeError(
+                f"unsafe tar member path (zip-slip): {member.name!r}"
+            )
+        # A link whose own name is safe can still point outside dest.
+        if member.issym() or member.islnk():
+            link_target = (target.parent / member.linkname).resolve()
+            if not link_target.is_relative_to(dest_resolved):
+                raise RuntimeError(
+                    f"unsafe tar link target: {member.name!r} -> "
+                    f"{member.linkname!r}"
+                )
 
 
 def extract_jre(archive: Path, jre_dir: Optional[Path] = None) -> Path:
@@ -304,13 +430,15 @@ def extract_jre(archive: Path, jre_dir: Optional[Path] = None) -> Path:
         tmp_path = Path(tmp)
         if name.endswith(".zip"):
             with zipfile.ZipFile(archive) as zf:
+                _ensure_zip_members_within(zf, tmp_path)
                 zf.extractall(tmp_path)
         elif name.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive, "r:gz") as tf:
                 # filter='data' (py3.12+) blocks path-traversal members.
                 try:
                     tf.extractall(tmp_path, filter="data")
-                except TypeError:  # pragma: no cover - older pythons
+                except TypeError:  # Python < 3.12: no filter= arg.
+                    _ensure_tar_members_within(tf, tmp_path)
                     tf.extractall(tmp_path)
         else:
             raise RuntimeError(f"unsupported JRE archive type: {archive.name}")

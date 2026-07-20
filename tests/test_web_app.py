@@ -2895,6 +2895,59 @@ def test_audit_stream_emits_phase_events_in_order(client, monkeypatch):
     assert "proposed_text" in complete
     assert any(a["card"] == "Lotus Cobra" for a in complete["added"])
     assert any(r["card"] == "Cultivate" for r in complete["removed"])
+    # The complete payload carries the diagnosis under the SAME key the
+    # sync endpoint and the UI use (``diagnosis``). The stream used to
+    # mis-name this ``rationale`` so the streamed diagnosis never rendered.
+    assert complete["diagnosis"] == "aggressive dragons"
+    assert "rationale" not in complete
+
+
+def test_audit_stream_complete_warns_when_claude_falls_back_no_key(
+    client, monkeypatch,
+):
+    """Regression: the streaming ``complete`` event must carry the same
+    explicit 'no API key' guidance the sync endpoint returns when Claude
+    is requested but unavailable. The stream path previously only emitted
+    a warning when ``fallback_reason`` was set, so a no-key fallback (the
+    most common case) silently shipped ``warning=null`` to the client."""
+    from commander_builder._advisor_models import (
+        AdvicePhase, AdviceReport, DeckDiagnosis, SwapRecommendation,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def fake_steps(deck_path, bracket, **_kwargs):
+        rep = AdviceReport(
+            deck_filename=deck_path.name,
+            deck_id=None,
+            bracket=bracket,
+            commander_names=["The Ur-Dragon"],
+            diagnosis=DeckDiagnosis(pattern_summary="", weakness_signals=[]),
+            recommendations=[
+                SwapRecommendation(
+                    card="Lotus Cobra", action="add", reason="ramp",
+                    evidence={"source": "edhrec.top_cards"}, name_known=True,
+                ),
+                SwapRecommendation(
+                    card="Cultivate", action="cut", reason="slow",
+                    evidence={}, name_known=True,
+                ),
+            ],
+            # Claude was requested but advise() fell back to heuristic
+            # with no concrete fallback_reason — the exact gap.
+            source="heuristic",
+            fallback_reason=None,
+            timestamp="2026-05-13T12:00:00",
+        )
+        yield AdvicePhase("complete", {"report": rep})
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", fake_steps,
+    )
+    resp = client.get("/api/audit/stream?deck=Alpha&bracket=3&llm=claude")
+    assert resp.status_code == 200
+    complete = dict(_parse_sse(resp.data))["complete"]
+    assert complete["warning"] is not None
+    assert "api key" in complete["warning"].lower()
 
 
 def test_audit_stream_emits_error_on_missing_deck(client, monkeypatch):
@@ -3001,12 +3054,12 @@ def test_audit_stream_byo_key_threaded_not_staged_in_env(client, monkeypatch):
     )
     resp = client.get(
         "/api/audit/stream?deck=Alpha&bracket=3&source=claude",
-        headers={"X-Anthropic-API-Key": "sk-stream-byo"},
+        headers={"X-Anthropic-API-Key": "sk-ant-streambyo12345678"},
     )
     assert resp.status_code == 200
     events = _parse_sse(resp.data)
     assert [e[0] for e in events] == ["complete"]
-    assert seen["api_key_param"] == "sk-stream-byo"
+    assert seen["api_key_param"] == "sk-ant-streambyo12345678"
     assert seen["api_key_in_env"] is None  # never staged in env
     assert "ANTHROPIC_API_KEY" not in _os.environ  # nothing lingers
 
@@ -3064,13 +3117,13 @@ def test_audit_llm_claude_passes_use_claude_and_byo_key(client, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     resp = client.get(
         "/api/audit?deck=Alpha&bracket=3&llm=claude",
-        headers={"X-Anthropic-API-Key": "sk-test-byo-12345"},
+        headers={"X-Anthropic-API-Key": "sk-ant-testbyo1234567890"},
     )
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
     assert seen["use_claude"] is True
     # BYO key rides the explicit api_key parameter...
-    assert seen["api_key_param"] == "sk-test-byo-12345"
+    assert seen["api_key_param"] == "sk-ant-testbyo1234567890"
     # ...and is NEVER staged in the process env, even mid-request —
     # env staging raced across concurrent threaded requests.
     assert seen["api_key_in_env"] is None
@@ -3207,16 +3260,30 @@ def test_audit_does_not_leak_byo_key_to_subsequent_call(client, monkeypatch):
 
     r1 = client.get(
         "/api/audit?deck=Alpha&bracket=3&llm=claude",
-        headers={"X-Anthropic-API-Key": "sk-first-call"},
+        headers={"X-Anthropic-API-Key": "sk-ant-firstcall12345678"},
     )
     assert r1.status_code == 200
-    assert seen["api_key_param"] == "sk-first-call"
+    assert seen["api_key_param"] == "sk-ant-firstcall12345678"
     assert seen["api_key_in_env"] is None  # never staged in env
 
     seen.clear()
     r2 = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")
     assert r2.status_code == 200
     assert seen.get("api_key_param") is None
+    assert seen.get("api_key_in_env") is None
+
+
+def test_audit_rejects_malformed_byo_key_header(client, monkeypatch):
+    """A header value that doesn't match the Anthropic key shape is
+    ignored (never staged into os.environ) — same validation the
+    Settings PUT path enforces."""
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "definitely-not-an-anthropic-key"},
+    )
+    assert resp.status_code == 200
     assert seen.get("api_key_in_env") is None
 
 

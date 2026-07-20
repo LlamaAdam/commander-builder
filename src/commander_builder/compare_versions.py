@@ -56,6 +56,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from . import dck_utils
 from .forge_runner import ForgeRunner, VENDOR_FORGE
 from .game_analyzer import analyze
 from .log_parser import _normalize, parse
@@ -185,49 +186,23 @@ class ComparisonReport:
 
 
 def _read_main_section(deck_path: Path) -> list[str]:
-    """Return the lines under [Main] in a Forge .dck. Used for card-level diff."""
+    """Return the lines under [Main] in a Forge .dck. Used for card-level diff.
+
+    Thin wrapper over ``dck_utils.iter_section_lines``."""
     if not deck_path.exists():
         return []
     text = deck_path.read_text(encoding="utf-8")
-    out: list[str] = []
-    in_main = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.lower() == "[main]":
-            in_main = True
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            out.append(stripped)
-    return out
+    return list(dck_utils.iter_section_lines(text, "Main"))
 
 
 def _main_lines_from_text(text: str) -> list[str]:
     """Parse [Main] lines out of a .dck blob string. Same logic as
     `_read_main_section` but takes the raw text instead of a path —
     useful for diffing snapshots stored in knowledge_log without
-    materializing temp files."""
-    if not text:
-        return []
-    out: list[str] = []
-    in_main = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.lower() == "[main]":
-            in_main = True
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            out.append(stripped)
-    return out
+    materializing temp files.
+
+    Thin wrapper over ``dck_utils.iter_section_lines``."""
+    return list(dck_utils.iter_section_lines(text, "Main"))
 
 
 def diff_decks(old_path: Path, new_path: Path) -> dict[str, list[str]]:

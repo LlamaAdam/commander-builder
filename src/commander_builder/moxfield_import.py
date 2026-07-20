@@ -138,7 +138,15 @@ def lookup_moxfield_card_id(card_name: str) -> Optional[str]:
         resp = _http_get_json(
             f"{CARD_SEARCH_BASE}?q={urllib.parse.quote(card_name)}&limit=10"
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # Surface the failure unconditionally — a silent None here
+        # propagates as "no bracket peers found" and the operator never
+        # learns Moxfield was unreachable / rate-limiting.
+        print(
+            f"WARN: Moxfield card-search failed for {card_name!r} "
+            f"({type(exc).__name__}: {exc}); skipping peer lookup.",
+            flush=True,
+        )
         return None
     target = card_name.lower().strip()
     for card in resp.get("data", []) or []:

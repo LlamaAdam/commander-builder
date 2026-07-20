@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -68,6 +69,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from . import dck_utils
 from .forge_runner import VENDOR_FORGE
 
 DEFAULT_DB_PATH = VENDOR_FORGE.parent.parent / "knowledge_log.sqlite"
@@ -266,13 +268,26 @@ class Iteration:
 
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Context-managed connection with row-factory for column access by name."""
+    """Context-managed connection with row-factory for column access by name.
+
+    Hardened for concurrent local writers (the web app, a CLI run, and
+    parallel A/B pods can all touch the same file): WAL journaling lets
+    readers coexist with a writer, and busy_timeout makes a second writer
+    wait-and-retry instead of failing immediately with "database is
+    locked". Rolls back explicitly on error so a partially applied write
+    never reaches commit.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -289,7 +304,13 @@ def init_db(db_path: Optional[Path] = None) -> None:
                (``_migrate_to_v2``, AGENT_BACKLOG #012).
     """
     with _connect(_resolve_db_path(db_path)) as conn:
-        conn.executescript(_SCHEMA_SQL)
+        # Per-statement execute, NOT executescript(): executescript()
+        # issues an implicit COMMIT before running, which detaches the
+        # schema from the surrounding transaction and could leave a
+        # v1 -> v2 upgrade half-applied if a later migration step fails.
+        for statement in _SCHEMA_SQL.split(";"):
+            if statement.strip():
+                conn.execute(statement)
         # Run migrations unconditionally — they're each individually
         # idempotent (check-then-add pattern via pragma_table_info),
         # so calling them on a fresh DB just adds the v2 column +
@@ -494,7 +515,6 @@ def migrate_legacy_deck_ids(
 
     Returns a dict with `scanned`, `updated`, `skipped`, and `details`. Pass
     `dry_run=True` to report what would change without writing."""
-    import re
     legacy_re = re.compile(r"\[B[0-9?]\]\.dck$")
     moxfield_re = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
 
@@ -563,6 +583,56 @@ def stats_summary(db_path: Optional[Path] = None) -> dict:
             "unique_decks": conn.execute("SELECT COUNT(DISTINCT deck_id) FROM iterations").fetchone()[0],
         }
     return rows
+
+
+# FP-013 gate: promote the project-tuned-LLM spike when the live log holds
+# this many high-confidence curator iterations (see docs/fp013-scope.md).
+FP013_GATE_TARGET = 1000
+FP013_MIN_GAMES = 40
+
+
+def fp013_gate_progress(
+    db_path: Optional[Path] = None,
+    *,
+    min_games: int = FP013_MIN_GAMES,
+    target: int = FP013_GATE_TARGET,
+) -> dict:
+    """Count high-confidence curator iterations toward the FP-013 gate.
+
+    A row qualifies when it carries the full training triple the
+    fine-tune needs: an ``audit_manifest`` (the question), a decided
+    verdict (the label — kept/reverted/neutral, not pending), and a
+    ``sim_report`` with at least ``min_games`` games (ABResult stores
+    the count as ``games``; compare_versions' ComparisonReport as
+    ``total_games``). Soak rows live outside this DB and never count —
+    they are labels without the question they answered.
+    """
+    db_path = _resolve_db_path(db_path)
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT sim_report FROM iterations "
+            "WHERE audit_manifest IS NOT NULL "
+            "AND verdict IN ('kept', 'reverted', 'neutral') "
+            "AND sim_report IS NOT NULL"
+        ).fetchall()
+    count = 0
+    for row in rows:
+        try:
+            report = json.loads(row["sim_report"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(report, dict):
+            continue
+        games = report.get("games") or report.get("total_games") or 0
+        if isinstance(games, (int, float)) and games >= min_games:
+            count += 1
+    return {
+        "count": count,
+        "target": target,
+        "min_games": min_games,
+        "pct": round(100.0 * count / target, 1) if target else 0.0,
+    }
 
 
 def pricing_series_for_deck(
@@ -672,9 +742,8 @@ def verdict_breakdown_for_deck(
 # in the client.
 
 
-import re as _re
-
-_MAIN_LINE_RE = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+# Kept for backwards compatibility; canonical copy lives in dck_utils.
+_MAIN_LINE_RE = dck_utils.CARD_LINE_RE
 
 
 def _count_main_cards(deck_snapshot: Optional[str]) -> int:
@@ -684,26 +753,10 @@ def _count_main_cards(deck_snapshot: Optional[str]) -> int:
     Commander, sideboard, considering sections are excluded — they
     don't change between iterations in a way that's worth surfacing
     on the graph. Returns 0 for None / empty snapshot.
+
+    Thin wrapper over ``dck_utils.count_main_cards``.
     """
-    if not deck_snapshot:
-        return 0
-    total = 0
-    in_main = False
-    for raw in deck_snapshot.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_main = stripped.lower() == "[main]"
-            continue
-        if in_main:
-            m = _MAIN_LINE_RE.match(stripped)
-            if m:
-                try:
-                    total += int(m.group(1))
-                except (TypeError, ValueError):
-                    total += 1
-    return total
+    return dck_utils.count_main_cards(deck_snapshot)
 
 
 def _parse_main_cards(deck_snapshot: Optional[str]) -> dict:
@@ -712,31 +765,10 @@ def _parse_main_cards(deck_snapshot: Optional[str]) -> dict:
     Card names are normalized to their base name (the bit before any `|set|n`
     suffix), so the same card across two snapshots compares equal regardless
     of printing. Quantities are summed. Non-[Main] sections are ignored, to
-    match `_count_main_cards`."""
-    cards: dict = {}
-    if not deck_snapshot:
-        return cards
-    in_main = False
-    for raw in deck_snapshot.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_main = stripped.lower() == "[main]"
-            continue
-        if not in_main:
-            continue
-        m = _MAIN_LINE_RE.match(stripped)
-        if not m:
-            continue
-        try:
-            qty = int(m.group(1))
-        except (TypeError, ValueError):
-            qty = 1
-        name = m.group(2).strip()
-        if name:
-            cards[name] = cards.get(name, 0) + qty
-    return cards
+    match `_count_main_cards`.
+
+    Thin wrapper over ``dck_utils.main_card_quantities``."""
+    return dck_utils.main_card_quantities(deck_snapshot)
 
 
 def audit_card_diff(from_snapshot: Optional[str], to_snapshot: Optional[str]) -> dict:

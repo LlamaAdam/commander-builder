@@ -8,9 +8,17 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-20 (adversarial-review fix branch
-`fix/adversarial-review-2026-07-19` — 39 commits across three review
-rounds, unmerged; see *State of the tree* below)
+**Last updated:** 2026-07-20 (merged `feature/2026-04-28-session` —
+PRs #9/#10, the forge_batch/forge_version/web-module split, FP-013
+gate items — into the adversarial-review fix branch
+`fix/adversarial-review-2026-07-19`; all 40 review-fix commits ported
+onto the new module layout. Prior upstream milestone 2026-07-04:
+stale PRs #9 — 4 known bug fixes — and #10 — advisor tribal-bypass —
+merged after re-review against the June refactor, plus the
+streaming-runner follow-up `6156514`:
+`ForgeRunner.run(keep_partial_output=True)` routes timeout-salvage sims
+through the streaming reader so looper-credit attribution actually
+works — salvaged rows no longer read "credited to none")
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
@@ -26,22 +34,55 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** 1838 passing fast lane / 147 skipped (+slow with
-  `--run-slow`), ~90s offline. Zero warnings under `python -W default`.
-- **Branch:** `feature/2026-04-28-session` (130+ commits ahead of
-  `master`, in sync with `origin`).
+- **Tests:** 1916 passing fast lane / 148 skipped (+slow with
+  `--run-slow`), ~150s offline. Zero warnings under `python -W default`.
+- **Branch:** `fix/adversarial-review-2026-07-19` (worktree at
+  `C:\dev\cb-review-fixes`) — now carries `feature/2026-04-28-session`
+  merged in (PRs #9/#10 + the 2026-06-12 forge_batch/forge_version/
+  web-module split), with all 40 adversarial-review fix commits ported
+  onto the new layout.
 
-**Unmerged fix branch (2026-07-19):** `fix/adversarial-review-2026-07-19`
-(worktree at `C:\dev\cb-review-fixes`) carries 16 commits from an
-adversarial review, pending merge. Most important by theme: `Name=`/
-filename win-attribution invariant (new `dck_meta.py`, all deck writers);
+**Adversarial-review fix branch (2026-07-19/20):**
+`fix/adversarial-review-2026-07-19` carries 40 commits across three
+review rounds. Most important by theme: `Name=`/filename
+win-attribution invariant (new `dck_meta.py`, all deck writers);
 pod-failure surfacing in compare/run_match/iteration_loop (no more
 silently diluted stats); proposer legality guards (cuts/singleton/99-card
 invariant); shared robust LLM-JSON extractor (`_llm_json.py`, loud errors
 instead of misleading fallbacks); BYO-key threading + `ANTHROPIC_API_KEY`
 scrubbed from subprocess env + token-level secret scanner in CI; same-id
 re-import overwrite with bracket-aware name uniquify + pre-revert
-backups. See CHANGELOG 2026-07-19 for the full 16-commit list.
+backups; turn-sample-weighted A/B recombination + draw-policy labels;
+`_apply_swaps_to_dck` cut/add validation with drop reporting. See
+CHANGELOG 2026-07-19 for the full list.
+
+### 2026-07-04 session — stale PRs merged + looper-credit salvage fixed
+
+- **PRs #9 + #10 merged** after re-review against the June module split
+  (both predated it; `locate()` version-sort still resolved via the
+  `_FORGE_JAR_VERSION_RE` re-export). #9: game_changers chrome-strip +
+  versioned cache, Scryfall 429 retry, `locate()` parsed-version sort,
+  EDHREC basics distribution. #10: advisor tribal-bypass cuts
+  (cache-only Scryfall) + off-theme cut rephrase.
+- **Looper-credit salvage fixed** (`6156514`) — the 4f9252b salvage's
+  active-seat credit was a production no-op: `_run_blocking` loses
+  Forge's buffered stdout on the timeout kill, so `_last_active_seat`
+  never saw a Turn line. `ForgeRunner.run()` gained
+  `keep_partial_output: bool` routing through `_run_streaming` (no
+  terminal echo); both salvage sites in `forge_batch.py` set it. 3 TDD
+  regression tests model the blocking-path stdout loss.
+- **FP-013 gate items built** (the fp013-scope memo's two "do next"
+  items): `knowledge_log.fp013_gate_progress()` +
+  `commander-improve --health` report "high-confidence curator
+  iterations: N / 1,000 toward FP-013" (live log reads 0 — the 5
+  decided rows are 10–28-game sims, below the 40-game bar); and
+  `scripts/eval_curator.py` — the paired baseline-vs-candidate eval
+  interface (tested `evaluate()` loop with pluggable proposers/sim;
+  `main()` is a dry-run until a candidate model exists).
+- **Stale plan entries corrected** — FP-007 slices 1–4, FP-010 all
+  five slices, and FP-012 slices A/B1 were already shipped but still
+  listed as "next"/"awaiting go-ahead" in future-plans.md + Parked
+  plans; marked shipped with commit refs.
 
 ### 2026-05-21/22 session — FP-003 shipped, A/B attribution fix, FP-002 concluded
 
@@ -502,14 +543,15 @@ concurrent JVMs (`run_ab_batch`, FP-003).
   margin; advances the base deck on improvement).
 Still parked for the full agent: intent-learning, Bayesian opt, and the
 unattended multi-deck orchestration. North star, not done.
-- **UNPARKED 2026-05-27** for two tractable next slices (gates were met; the
-  "parked" was scope, not a blocker): **Slice A — intent-learning** (reuse
-  `archetype.classify` + `staples.detect_themes` to bias the improve loop +
-  protect signature pieces) and **Slice B1 — Thompson-sampling policy**
-  (pure-stdlib, alongside the shipped ε-greedy/UCB1). **Slice B2 (full GP
-  Bayesian-opt over swap combinations)** stays parked behind a numpy-dependency
-  + sim-cost decision. Designs + decisions in
-  [fp012-next-slices.md](fp012-next-slices.md); awaiting go-ahead to build.
+- ~~**UNPARKED 2026-05-27** for two tractable next slices~~ ✅ **Both
+  SHIPPED** (confirmed 2026-07-04; entry was stale): **Slice A —
+  intent-learning** (`9968c4d` + `e5a9372`: `learn_intent`, auto-protect
+  wincons, themes threaded into the advisor tag_pages soft-bias) and
+  **Slice B1 — Thompson-sampling policy** (`c336822`,
+  `--bandit-policy thompson`), merged via PRs #6/#8. **Slice B2 (full GP
+  Bayesian-opt over swap combinations)** stays parked behind a
+  numpy-dependency + sim-cost decision. Designs in
+  [fp012-next-slices.md](fp012-next-slices.md).
 
 ### FP-013 — Project-tuned LLM (moonshot)
 
