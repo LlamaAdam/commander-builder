@@ -331,7 +331,7 @@ def _run_sim_and_record(
             f"but the verdict gate counts DECISIVE games (won by the old "
             f"or new deck; the 2 filler seats take ~half the wins). "
             f"{args.sim_games} total pod games ~= "
-            f"{expected_decisive:.0f} expected decisive, below the "
+            f"{int(expected_decisive)} expected decisive, below the "
             f"{MIN_DECISIVE_GAMES_FOR_VERDICT}-decisive gate "
             f"(MIN_DECISIVE_GAMES_FOR_VERDICT) -- expect 'inconclusive', "
             f"not kept/reverted/neutral. A verdict needs "

@@ -618,7 +618,7 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
             f"but the verdict gate counts DECISIVE games (won by the "
             f"old or new deck; the 2 filler seats take ~half). "
             f"{args.sim_games} total pod games ~= "
-            f"{expected_decisive:.0f} expected decisive, below the "
+            f"{int(expected_decisive)} expected decisive, below the "
             f"{MIN_DECISIVE_GAMES_FOR_VERDICT}-decisive gate -- every "
             f"round's verdict will likely be 'inconclusive', and "
             f"improve only advances the deck on 'kept', so this run "
