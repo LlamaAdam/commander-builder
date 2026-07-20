@@ -15,6 +15,12 @@ Cheaper than 1v1 series (1 sim run vs N) and preserves multiplayer dynamics
 (political AI, archenemy targeting). Run N games at this single pod composition
 for a clean wins-per-version count.
 
+Seat order alternates across pods (even pod index: old in seat 1; odd: new in
+seat 1) because Forge keeps seat 1 on the play for every game of an
+invocation — same first-player-bias reasoning as
+``forge_runner.run_ab_simulation``, which alternates per game. See the
+alternation block in ``compare()``.
+
 Filler-pair rotation: with `--filler-pairs 2`, the comparison runs twice with
 two different filler pairs from the bracket pool. Counters the bias of any
 single filler choice. Aggregates wins across both runs.
@@ -377,6 +383,14 @@ def _make_pod_abort_check(
     Returns ``(abort_check, state)`` so the caller can read the final
     counts after the run (used to synthesize a Match Result line if
     Forge was killed before printing its own).
+
+    Note: the abort decision uses only the ABSOLUTE margin
+    ``|new_wins - old_wins|``, which is symmetric — so callers may pass
+    the head-to-head pair in either order (seat-order alternation puts
+    NEW in seat 1 on odd pods). The ``old_wins``/``new_wins`` labels in
+    ``state`` then follow the order passed, not the report's old/new;
+    nothing downstream reads them for attribution (``wins_by_seat_name``
+    carries the synthesis data, keyed by seat+name).
     """
     old_norm = _normalize(old_deck)
     new_norm = _normalize(new_deck)
@@ -497,9 +511,14 @@ def _run_one_pod(
     abort_check = None
     abort_state = None
     if intra_pod_abort and len(pod) >= 2:
-        old_deck, new_deck = pod[0], pod[1]
+        # Seats 1+2 always hold the head-to-head pair, but on odd pods
+        # the seat-order alternation puts them in [new, old] order — so
+        # pod[0] is NOT necessarily the old deck. The abort math only
+        # uses the ABSOLUTE margin |a - b| (symmetric), so passing the
+        # pair in seat order is correct regardless of orientation.
+        h2h_a, h2h_b = pod[0], pod[1]
         abort_check, abort_state = _make_pod_abort_check(
-            pod, old_deck, new_deck, games_per_pod,
+            pod, h2h_a, h2h_b, games_per_pod,
         )
     if mode == "1v1":
         result = runner.run(
@@ -605,6 +624,7 @@ def compare(
     parallel: bool = True,
     max_workers: Optional[int] = None,
     early_stop: bool = True,
+    seat_parity: int = 0,
 ) -> ComparisonReport:
     """Run the head-to-head comparison and persist the report.
 
@@ -633,6 +653,14 @@ def compare(
     the saving is small because both pods already run in parallel;
     the value grows once ``filler_pairs`` is bumped above the core
     count or sequential mode is forced.
+
+    ``seat_parity`` (default 0) shifts the seat-order alternation
+    phase: pods whose ``(index + seat_parity)`` is even seat OLD in
+    seat 1, odd pods seat NEW in seat 1 (see the alternation block
+    below). Callers that run SEVERAL compare() calls with a single pod
+    each (meta_test with ``filler_pairs=1``) pass their own call index
+    here so the head-to-head seat-1 share still balances across the
+    whole batch even though no single call has two pods to alternate.
     """
     if mode not in {"pod", "1v1"}:
         raise ValueError(f"mode must be 'pod' or '1v1', got {mode!r}")
@@ -676,6 +704,48 @@ def compare(
         report.filler_pairs_used = pairs
         pods = [[old_deck, new_deck, *pair] for pair in pairs]
 
+    # Seat-order alternation — first-player-bias fix. Forge does NOT
+    # randomize turn order by seat: seat 1 is on the play for every game
+    # of an invocation. forge_runner.run_ab_simulation established the
+    # precedent — it explicitly alternates the head-to-head pair per game
+    # ("Alternate seat order — even iters: A first; odd iters: B first")
+    # for exactly this reason. compare() can't do per-game alternation
+    # because all games_per_pod games of a pod share ONE Forge invocation
+    # with one fixed seat order, so pod-level parity is the correct
+    # granularity here: even (index + seat_parity) seats OLD first, odd
+    # seats NEW first. With an even pod count the first-player advantage
+    # cancels exactly. The filler pair stays in seats 3+4 either way,
+    # matching run_ab_simulation ("The filler pair stays in seats 3+4 in
+    # both cases; only the head-to-head pair flips").
+    #
+    # Without this, the old deck sat in seat 1 for EVERY game of EVERY
+    # pod, tilting every compare()-based verdict (iteration_loop, web
+    # propose_swap) toward "reverted" by pure turn-order advantage.
+    #
+    # Attribution is unaffected by the flip: _aggregate_pod keys on
+    # normalized deck NAMES from the Match Result / Game Result lines,
+    # never on seat number. We flip the pod lists in place BEFORE
+    # dispatch so every downstream record of the pod (the runner call,
+    # pr["pod"], report.pods, pod_failures) reads the true seat order.
+    for i, pod in enumerate(pods):
+        if (i + seat_parity) % 2 == 1:
+            pod[0], pod[1] = pod[1], pod[0]
+    if len(pods) % 2 == 1:
+        # Odd pod count: alternation can't cancel exactly — one side gets
+        # ceil(n/2) seat-1 pods, the other floor(n/2). Surface the
+        # residual so a razor-thin verdict can be read with that grain
+        # of salt (a single pod, e.g. 1v1 or filler_pairs=1, is the
+        # degenerate case: the noted deck holds seat 1 for the whole run).
+        extra_label, extra_deck = (
+            ("OLD", old_deck) if seat_parity % 2 == 0 else ("NEW", new_deck)
+        )
+        print(
+            f"NOTE: odd pod count ({len(pods)}) — seat-order alternation "
+            f"leaves {extra_label} ({extra_deck}) with the extra seat-1 "
+            f"(first-player) pod.",
+            flush=True,
+        )
+
     # Dispatch pods. With parallel=True we run all pods concurrently in
     # a threadpool — each one spawns its own Forge subprocess so the
     # GIL doesn't bottleneck. With parallel=False (or len(pods)==1) we
@@ -695,6 +765,14 @@ def compare(
         parsed = pr.pop("_parsed")
         ma = pr.pop("_analyzed")
         pr["pod_index"] = pr["pod_index"] + 1   # display is 1-based
+        # Seat-order provenance: pr["pod"] already lists the TRUE seat
+        # order (pods are flipped in place before dispatch), but make
+        # the head-to-head orientation explicit so post-mortems don't
+        # have to compare pod[0] against the report header to know who
+        # was on the play.
+        pr["h2h_seat_order"] = (
+            "new_first" if pr["pod"] and pr["pod"][0] == new_deck else "old_first"
+        )
         completed_pods[pr["pod_index"] - 1] = pr
         if pr["pod_failed"]:
             # No silent failures: a crashed or dead-timed-out pod must not

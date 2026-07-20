@@ -508,3 +508,60 @@ def test_extra_url_routes_moxfield_unchanged(tmp_path, monkeypatch):
     )
     assert len(refs) == 1
     assert refs[0].source == "manual"
+
+
+# --- run_meta_test — seat-parity alternation across references -------------
+
+def test_run_meta_test_alternates_seat_parity_across_references(
+    tmp_path, monkeypatch,
+):
+    """With the default filler_pairs=1 each comparison is a single pod, so
+    compare()'s intra-call seat alternation has nothing to alternate — the
+    user deck would sit in seat 1 (on the play, in Forge) for EVERY
+    reference. run_meta_test therefore shifts compare()'s seat_parity by
+    the reference index so the user's seat-1 share balances across the
+    whole meta-test batch instead."""
+    from commander_builder import meta_test as mt
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir(parents=True)
+    user = deck_dir / "[USER] Mine [B3].dck"
+    user.write_text(
+        "[metadata]\nName=Mine\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+
+    refs = [
+        mt.ReferenceDeck(
+            source="manual", moxfield_id=None, name=f"Ref{i}", bracket=3,
+            deck_filename=f"[REF] Ref{i} [B3].dck", main_cards=["Forest"],
+        )
+        for i in range(3)
+    ]
+    monkeypatch.setattr(mt, "_parse_commander_names_from_dck", lambda p: ["Cmdr"])
+    monkeypatch.setattr(mt, "fetch_reference_decks", lambda *a, **kw: refs)
+
+    captured: list[dict] = []
+
+    def fake_compare(**kwargs):
+        captured.append(kwargs)
+        return ComparisonReport(
+            old_deck=kwargs["old_deck"], new_deck=kwargs["new_deck"],
+            bracket=3, timestamp="x", mode="pod",
+            games_per_pod=kwargs["games_per_pod"],
+            old_stats=VersionStats(deck_filename=kwargs["old_deck"], wins=1),
+            new_stats=VersionStats(deck_filename=kwargs["new_deck"], wins=1),
+        )
+
+    monkeypatch.setattr(mt, "compare", fake_compare)
+
+    mt.run_meta_test(
+        user_deck=user.name, bracket=3,
+        out_dir=tmp_path / "_meta", deck_dir=deck_dir,
+    )
+
+    # One compare() per reference, parity alternating 0, 1, 0 — the user
+    # deck (old_deck) is seated first on even parities only.
+    assert [c["seat_parity"] for c in captured] == [0, 1, 0]
+    assert all(c["old_deck"] == user.name for c in captured)

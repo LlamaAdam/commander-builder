@@ -532,7 +532,7 @@ def run_meta_test(
     user_w = 0
     user_l = 0
     user_d = 0
-    for r in refs:
+    for ref_idx, r in enumerate(refs):
         print(f"\n--- Comparing user vs {r.source}: {r.name} ---", flush=True)
         cmp_report = compare(
             old_deck=user_deck,
@@ -540,6 +540,19 @@ def run_meta_test(
             bracket=bracket,
             games_per_pod=games_per_pod,
             filler_pairs=filler_pairs,
+            # Seat-order balance across the whole meta-test. compare()
+            # alternates the head-to-head pair's seat order by pod index
+            # (Forge keeps seat 1 on the play for every game of an
+            # invocation — see compare_versions' alternation block and
+            # forge_runner.run_ab_simulation's per-game precedent), but
+            # with the default filler_pairs=1 each comparison is a single
+            # pod, so the intra-call alternation has nothing to alternate
+            # and the user deck would sit in seat 1 for EVERY reference.
+            # Shifting the parity by the reference index alternates the
+            # user's seat across references instead, so the aggregate
+            # user_record carries at most a one-pod first-player residual
+            # (exact cancellation on an even reference count).
+            seat_parity=ref_idx % 2,
         )
         comparisons.append(cmp_report.to_dict())
         # In compare_versions: old=user, new=reference. So user wins are old_stats.wins.

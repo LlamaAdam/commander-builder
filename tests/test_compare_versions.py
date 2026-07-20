@@ -1294,6 +1294,224 @@ def test_compare_timeout_with_nothing_salvageable_is_excluded(
     assert "FAILED" in out and "EXCLUDED" in out
 
 
+# ---------------------------------------------------------------------------
+# Seat-order alternation — first-player-bias fix
+#
+# Forge keeps seat 1 on the play for every game of an invocation, and
+# compare() used to build EVERY pod as [old, new, *fillers] — so the old
+# deck was on the play for every game of every pod, tilting verdicts
+# toward "reverted". compare() now alternates the head-to-head pair's
+# seat order by pod index parity (run_ab_simulation's per-game
+# alternation, at pod granularity).
+# ---------------------------------------------------------------------------
+
+OLD = "[USER] Old [B3].dck"
+NEW = "[USER] New [B3].dck"
+
+
+def test_compare_alternates_h2h_seat_order_across_pods(
+    tmp_path, monkeypatch, capsys,
+):
+    """Even pod index seats OLD first, odd seats NEW first; fillers stay
+    in seats 3+4 either way. The runner receives the flipped order and
+    the report records it truthfully."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    stdout = _make_pod_stdout(1, 1)
+    captured: list[list[str]] = []
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            captured.append(list(pod))
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=False,
+    )
+
+    # Pod 0: old-first. Pod 1: new-first.
+    assert captured[0][:2] == [OLD, NEW]
+    assert captured[1][:2] == [NEW, OLD]
+    # Only the head-to-head pair flips; fillers keep seats 3+4.
+    assert captured[0][2:] == ["Filler0 [B3].dck", "Filler1 [B3].dck"]
+    assert captured[1][2:] == ["Filler2 [B3].dck", "Filler3 [B3].dck"]
+    # Report provenance reads true: pod list is the actual seat order and
+    # the explicit orientation field matches.
+    assert report.pods[0]["pod"][0] == OLD
+    assert report.pods[1]["pod"][0] == NEW
+    assert report.pods[0]["h2h_seat_order"] == "old_first"
+    assert report.pods[1]["h2h_seat_order"] == "new_first"
+    # Even pod count → no residual-imbalance note.
+    assert "odd pod count" not in capsys.readouterr().out
+
+
+def test_compare_attribution_seat_agnostic_when_pod_flipped(
+    tmp_path, monkeypatch,
+):
+    """A flipped pod's Forge stdout lists the NEW deck's Match Result
+    first (it sits in seat 1). Attribution keys on normalized deck NAMES
+    (_aggregate_pod), never seat, so wins must land on the right version
+    regardless of orientation."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+
+    # Pod 0 (old-first): Old wins both from seat 1.
+    pod0_stdout = _make_pod_stdout(2, 0)
+    # Pod 1 (new-first): New wins both from seat 1 — names appear in
+    # FLIPPED order, exactly as real Forge would print them.
+    pod1_stdout = (
+        "Match Result: Ai(1)-New: 2 Ai(2)-Old: 0 "
+        "Ai(3)-Filler2: 0 Ai(4)-Filler3: 0\n"
+        "Game Result: Game 1 ended in 60000 ms. Ai(1)-New has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(1)-New has won!\n"
+    )
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            # Filler membership identifies the pod (stable regardless of
+            # the head-to-head flip).
+            stdout = pod0_stdout if "Filler0 [B3].dck" in pod else pod1_stdout
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=False,
+    )
+
+    # 2 wins each — the flipped pod's wins credited to NEW, not OLD.
+    assert report.old_stats.wins == 2
+    assert report.new_stats.wins == 2
+    assert report.winner == "tie"
+    assert report.total_games == 4
+
+
+def test_compare_odd_pod_count_prints_residual_imbalance_note(
+    tmp_path, monkeypatch, capsys,
+):
+    """With an odd pod count the alternation can't cancel exactly — OLD
+    (parity 0) gets ceil(n/2) seat-1 pods. A one-line note must surface
+    the residual."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=3)
+    stdout = _make_pod_stdout(1, 1)
+    captured: list[list[str]] = []
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            captured.append(list(pod))
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=3,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=False,
+    )
+
+    # Pods alternate O, N, O — OLD holds 2 of 3 seat-1 pods.
+    assert [p[0] for p in captured] == [OLD, NEW, OLD]
+    out = capsys.readouterr().out
+    assert "odd pod count (3)" in out
+    assert "OLD" in out and "extra seat-1" in out
+
+
+def test_compare_seat_parity_shifts_alternation_phase(
+    tmp_path, monkeypatch, capsys,
+):
+    """seat_parity=1 inverts the phase: pod 0 seats NEW first. Used by
+    meta_test to balance the user deck's seat across single-pod
+    comparisons. The odd-count note then names NEW as the beneficiary."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=3)
+    stdout = _make_pod_stdout(1, 1)
+    captured: list[list[str]] = []
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            captured.append(list(pod))
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=3,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=False,
+        seat_parity=1,
+    )
+
+    assert [p[0] for p in captured] == [NEW, OLD, NEW]
+    out = capsys.readouterr().out
+    assert "odd pod count (3)" in out
+    assert "NEW" in out
+
+
+def test_compare_parallel_pods_alternate_by_stable_index(
+    tmp_path, monkeypatch,
+):
+    """The parallel path must key the flip on the pod's ORIGINAL index,
+    not thread completion order. Pod 1 finishes before pod 0 here; the
+    orientation must still follow input order (pod 0 old-first, pod 1
+    new-first)."""
+    import time
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    stdout = _make_pod_stdout(1, 1)
+    captured: list[list[str]] = []
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            captured.append(list(pod))
+            # Pod 0 (Filler0/Filler1) sleeps longer so pod 1 completes
+            # first — orientation must not depend on completion order.
+            time.sleep(0.3 if "Filler0 [B3].dck" in pod else 0.05)
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    # Identify each dispatched pod by its filler pair.
+    by_filler = {p[2]: p for p in captured}
+    assert by_filler["Filler0 [B3].dck"][:2] == [OLD, NEW]
+    assert by_filler["Filler2 [B3].dck"][:2] == [NEW, OLD]
+    # Report lists pods in input order with truthful orientation.
+    assert report.pods[0]["h2h_seat_order"] == "old_first"
+    assert report.pods[1]["h2h_seat_order"] == "new_first"
+
+
 def test_format_summary_surfaces_pod_failures():
     r = ComparisonReport(
         old_deck="old.dck", new_deck="new.dck", bracket=3, timestamp="x",
