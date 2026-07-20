@@ -82,6 +82,11 @@ class CandidateScore:
     archetype: Archetype = "midrange"
     color_identity: str = ""  # e.g. "WUB"; populated post-classification
     rejected_reason: Optional[str] = None
+    # Filler sets used for each preflight smoke attempt (1 normally, 2 when the
+    # first pod failed and the candidate got a second chance). Persisted so a
+    # post-mortem on a rejected candidate can spot a shared culprit filler —
+    # Forge's unsupported-card / crash output is pod-global, not per-deck.
+    preflight_pods: list[list[str]] = field(default_factory=list)
 
     @property
     def win_rate(self) -> float:
@@ -173,10 +178,15 @@ def preflight_candidate(
     filename: str,
     fillers: list[str],
 ) -> PreflightResult:
-    """Run a 1-game smoke sim for one candidate. `fillers` are 3 known-good
-    decks that pad the pod to 4. Reports both the parsed result and a crash
-    signal — a timeout / non-zero returncode / empty parse means the candidate
-    can't even survive a single game and shouldn't enter the qualifier."""
+    """Run a 1-game smoke sim for one candidate. `fillers` are 3 pod-mates
+    (fellow UNVETTED candidates — see _preflight_pool) that pad the pod to 4.
+    Reports both the parsed result and a crash signal — a timeout / non-zero
+    returncode / empty parse means SOMETHING in the pod can't survive a single
+    game. IMPORTANT: every failure signal here is pod-global. Forge's
+    "An unsupported card was requested" line names only the card (never the
+    deck), and a crash takes down all 4 decks — so the caller must not blame
+    the candidate for a single failed pod; see _preflight_pool for the
+    blame-isolation protocol."""
     decks = [filename, *fillers]
     result = runner.run(decks, num_games=1)
     parsed = parse(result.stdout)
@@ -199,6 +209,178 @@ def preflight_candidate(
         crashed=crashed,
         crash_reason=crash_reason,
     )
+
+
+class InsufficientSurvivorsError(RuntimeError):
+    """Preflight left fewer than 4 survivors, so no qualifier pod can be
+    scheduled. Raised INSTEAD of letting schedule_pods' bare ValueError escape
+    with a traceback after the full smoke spend. Carries the per-candidate
+    rejection records and the path of the persisted preflight JSON so callers
+    (CLI, tests) can report each rejection without re-deriving anything."""
+
+    def __init__(
+        self,
+        message: str,
+        rejected: list[CandidateScore],
+        preflight_path: Optional[Path] = None,
+    ):
+        super().__init__(message)
+        self.rejected = rejected
+        self.preflight_path = preflight_path
+
+
+def _preflight_failure_reason(pre: PreflightResult) -> Optional[str]:
+    """Map a PreflightResult to a rejection reason string, or None if clean.
+    Shared by both preflight passes so first-attempt and retry failures are
+    judged by identical rules."""
+    if pre.crashed:
+        return f"preflight_crash:{pre.crash_reason}"
+    if pre.unsupported > MAX_UNSUPPORTED_CARDS_SMOKE:
+        return f"unsupported_cards={pre.unsupported}"
+    return None
+
+
+def _preflight_pool(
+    runner: ForgeRunner,
+    candidates: list[str],
+    scores: dict[str, CandidateScore],
+) -> int:
+    """Smoke-test every candidate with blame isolation. Mutates `scores`
+    (rejected_reason / unsupported_cards / preflight_pods) and returns the
+    number of smoke games spent.
+
+    Why this exists (bug fix): Forge's unsupported-card output names only the
+    CARD, never the deck (see log_parser._UNSUPPORTED), and a crash takes down
+    the whole 4-deck pod — so every smoke failure is pod-global. The old code
+    padded EVERY candidate's pod with the same 3 alphabetically-first unvetted
+    candidates, meaning one bad filler sat in essentially every pod and zeroed
+    the entire pool. The invariant enforced here: one bad deck must not be
+    able to zero the pool.
+
+    Blame isolation, two mechanisms:
+      1. Rotated fillers — candidate i is padded with the 3 candidates that
+         follow it in cyclic order, so no single deck appears in every pod
+         (each deck fills exactly 3 pods for pools >= 4).
+      2. Second chance — a candidate whose pod failed is NOT rejected yet; it
+         gets ONE retry in a pod with a different filler set (first-pass clean
+         survivors preferred, first-pod fillers excluded whenever the pool is
+         big enough). A clean retry exonerates it: the first failure belonged
+         to a pod-mate. Only a candidate that fails BOTH pods is rejected, and
+         its rejection reason + preflight_pods record both filler sets so a
+         post-mortem can spot a shared culprit.
+
+    Cost is bounded: N first-pass games + at most one retry per first-pass
+    failure => <= 2N smoke games. The total is printed at the end.
+    """
+    ordered = list(candidates)
+    games = 0
+    # (candidate, first-pod fillers, first failure reason) — deferred verdicts.
+    suspects: list[tuple[str, list[str], str]] = []
+
+    # Pass 1: rotated-filler smoke for every candidate.
+    for i, f in enumerate(ordered):
+        # Cyclic rotation: the 3 candidates after f, wrapping around. Contrast
+        # with the old `[c for c in candidates if c != f][:3]`, which put the
+        # same alphabetical leaders in every single pod.
+        others = ordered[i + 1:] + ordered[:i]
+        fillers = others[:3]
+        if len(fillers) < 3:
+            scores[f].rejected_reason = "insufficient_fillers"
+            continue
+        scores[f].preflight_pods.append(list(fillers))
+        pre = preflight_candidate(runner, f, fillers)
+        games += 1
+        scores[f].unsupported_cards = pre.unsupported
+        reason = _preflight_failure_reason(pre)
+        if reason:
+            # Do NOT reject yet — the failure may belong to a filler.
+            suspects.append((f, fillers, reason))
+
+    # Decks that passed their own first-pass pod cleanly. Preferred as retry
+    # fillers because a pod of proven-clean decks makes the retry verdict
+    # attributable to the candidate alone.
+    clean = [
+        f for f in ordered
+        if scores[f].rejected_reason is None
+        and f not in {s[0] for s in suspects}
+    ]
+
+    # Pass 2: one retry per suspect, with a different filler set.
+    for f, first_fillers, first_reason in suspects:
+        preferred = [c for c in clean if c != f and c not in first_fillers]
+        backup = [
+            c for c in ordered
+            if c != f and c not in first_fillers and c not in preferred
+        ]
+        alt = (preferred + backup)[:3]
+        if len(alt) < 3:
+            # Pool too small for a fully-fresh set of 3 — pad with first-pod
+            # fillers (least-bad option; the retry still differs if ANY slot
+            # changed).
+            alt = (alt + [c for c in first_fillers if c not in alt])[:3]
+        if set(alt) == set(first_fillers):
+            # e.g. exactly 4 candidates: the pod composition is forced, so a
+            # retry proves nothing. Reject, but flag that blame is unresolved
+            # so the operator doesn't over-trust the verdict.
+            scores[f].rejected_reason = (
+                f"{first_reason} (pod={first_fillers}; "
+                f"no alternate fillers available — blame unresolved)"
+            )
+            continue
+        scores[f].preflight_pods.append(list(alt))
+        print(
+            f"  Preflight retry: {f} (first failure: {first_reason}; "
+            f"new fillers: {alt})",
+            flush=True,
+        )
+        pre2 = preflight_candidate(runner, f, alt)
+        games += 1
+        scores[f].unsupported_cards = pre2.unsupported
+        second_reason = _preflight_failure_reason(pre2)
+        if second_reason is None:
+            # Exonerated: with different pod-mates the candidate is clean, so
+            # the first failure was a pod-mate's fault. No rejection.
+            print(
+                f"  Preflight exonerated: {f} — first failure was pod-global "
+                f"(fillers were {first_fillers})",
+                flush=True,
+            )
+            continue
+        # Failed twice with different pods — reject, carrying both pod
+        # contexts for post-mortem.
+        scores[f].rejected_reason = (
+            f"{second_reason} (failed twice: first {first_reason} with "
+            f"pod={first_fillers}, then retry with pod={alt})"
+        )
+
+    print(
+        f"  Preflight cost: {games} smoke game(s) for {len(ordered)} "
+        f"candidate(s) ({len(suspects)} retried)",
+        flush=True,
+    )
+    return games
+
+
+def _confirm_actions_for(parsed: ParsedSim, normalized_name: str, pod_size: int) -> int:
+    """Confirm-action events chargeable to one deck for one pod's parse.
+
+    Why the emptiness check matters (bug fix): log_parser only creates a key
+    in confirm_action_by_deck on a deck's FIRST attributed event, so a missing
+    key means two very different things depending on whether the dict has ANY
+    entries:
+
+      - dict NON-empty → Phase attribution worked for this pod, and a missing
+        key is a real zero: the deck simply never triggered confirmAction.
+      - dict empty     → attribution unavailable (e.g. an older Forge build
+        without Phase markers); fall back to the even-split stopgap.
+
+    The old code used the fallback whenever the deck's OWN key was missing,
+    charging a clean deck a quarter of the whole pod's noise — with noisy
+    pod-mates that could breach MAX_CONFIRM_ACTION_PER_GAME and reject a deck
+    for its opponents' behavior."""
+    if parsed.confirm_action_by_deck:
+        return parsed.confirm_action_by_deck.get(normalized_name, 0)
+    return len(parsed.confirm_action_cards) // max(1, pod_size)
 
 
 def _color_overlap(a: str, b: str) -> int:
@@ -304,20 +486,53 @@ def curate_bracket(
         f: CandidateScore(filename=f) for f in candidate_filenames
     }
 
-    # 1. Pre-flight smoke
-    for f in candidate_filenames:
-        fillers = [c for c in candidate_filenames if c != f][:3]
-        if len(fillers) < 3:
-            scores[f].rejected_reason = "insufficient_fillers"
-            continue
-        pre = preflight_candidate(runner, f, fillers)
-        scores[f].unsupported_cards = pre.unsupported
-        if pre.crashed:
-            scores[f].rejected_reason = f"preflight_crash:{pre.crash_reason}"
-        elif pre.unsupported > MAX_UNSUPPORTED_CARDS_SMOKE:
-            scores[f].rejected_reason = f"unsupported_cards={pre.unsupported}"
+    # 1. Pre-flight smoke — blame-isolated (rotated fillers + one retry per
+    #    failed pod; see _preflight_pool for the full protocol and cost bound).
+    _preflight_pool(runner, candidate_filenames, scores)
 
     survivors = [f for f, s in scores.items() if s.rejected_reason is None]
+
+    if len(survivors) < 4:
+        # schedule_pods needs >= 4 decks. Letting its bare ValueError escape
+        # here (the old behavior) produced an uncaught traceback AFTER the
+        # full smoke spend, with no record of why each candidate died. Persist
+        # the preflight verdicts first so the spend isn't wasted, then raise a
+        # typed error the CLI turns into an actionable non-zero exit.
+        rejected = [s for s in scores.values() if s.rejected_reason is not None]
+        pool_dir.mkdir(parents=True, exist_ok=True)
+        preflight_out = pool_dir / f"B{bracket}_preflight.json"
+        preflight_out.write_text(
+            json.dumps(
+                {
+                    "bracket": bracket,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "survivors": survivors,
+                    "rejected": [asdict(s) for s in rejected],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        lines = [
+            f"Preflight left {len(survivors)} survivor(s) of "
+            f"{len(candidate_filenames)} candidate(s) — need >=4 to schedule "
+            f"qualifier pods.",
+        ]
+        for s in rejected:
+            lines.append(f"  REJECTED {s.filename}: {s.rejected_reason}")
+        lines.append(
+            f"Preflight results persisted to {preflight_out} "
+            f"(smoke spend not wasted)."
+        )
+        lines.append(
+            "Fix or remove the rejected decks (or harvest more candidates "
+            "with `commander-import --harvest`) and re-run."
+        )
+        message = "\n".join(lines)
+        print(message, flush=True)
+        raise InsufficientSurvivorsError(
+            message, rejected=rejected, preflight_path=preflight_out
+        )
 
     # 2. Classify (archetype + color identity)
     for f in survivors:
@@ -347,17 +562,15 @@ def curate_bracket(
                 continue
             scores[fname].games_played += parsed.games_completed
             scores[fname].wins += d.wins
-            # log_parser now attributes confirmAction events to the deck whose
-            # Phase line was active when the event fired. If attribution failed
-            # (e.g. older Forge build without Phase markers), fall back to the
-            # even-split stopgap so the metric still produces a number.
-            attributed = parsed.confirm_action_by_deck.get(d.normalized_name)
-            if attributed is not None:
-                scores[fname].confirm_action_total += attributed
-            else:
-                scores[fname].confirm_action_total += (
-                    len(parsed.confirm_action_cards) // max(1, len(pod))
-                )
+            # log_parser attributes confirmAction events to the deck whose
+            # Phase line was active when the event fired. _confirm_actions_for
+            # decides between the attributed count (zero-events == real zero)
+            # and the pod-average fallback (only when attribution was
+            # unavailable for the WHOLE pod) — see its docstring for why the
+            # per-deck .get(...) is None check was a bug.
+            scores[fname].confirm_action_total += _confirm_actions_for(
+                parsed, d.normalized_name, len(pod)
+            )
 
     # 4. AI-pilotability gate
     for f in survivors:
@@ -528,13 +741,20 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"{len(all_candidates)} candidates "
           f"(seed={args.seed}, games_per_pod={args.games_per_pod}, "
           f"pods_per_deck={args.pods_per_deck})")
-    pool = curate_bracket(
-        args.bracket,
-        candidates,
-        games_per_pod=args.games_per_pod,
-        pods_per_deck=args.pods_per_deck,
-        seed=args.seed,
-    )
+    try:
+        pool = curate_bracket(
+            args.bracket,
+            candidates,
+            games_per_pod=args.games_per_pod,
+            pods_per_deck=args.pods_per_deck,
+            seed=args.seed,
+        )
+    except InsufficientSurvivorsError:
+        # curate_bracket already printed the per-candidate rejection report
+        # and persisted the preflight JSON. Exit 3 distinguishes "preflight
+        # rejected the pool" from 2 ("not enough decks on disk") — no
+        # traceback, the message above is the whole story.
+        return 3
     print(f"Pool A ({len(pool.pool_a)}): {pool.pool_a}")
     print(f"Pool B ({len(pool.pool_b)}): {pool.pool_b}")
     print(f"Rejected: {len(pool.rejected)}")

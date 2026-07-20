@@ -264,3 +264,259 @@ def test_filename_for_match_prefers_exact_over_deuniquified():
     candidates = ["Blue Farm (2) [B3].dck", "Blue Farm [B3].dck"]
     # Exact match wins even though it appears second in the list.
     assert _filename_for_match("Blue Farm", candidates) == "Blue Farm [B3].dck"
+
+
+# --- _confirm_actions_for (per-deck confirmAction charging) ----------------
+
+def test_confirm_actions_attributed_zero_is_a_real_zero():
+    """When attribution worked for the pod (dict non-empty), a deck with no
+    key had ZERO confirmAction events — it must NOT be charged the pod-average
+    fallback. Pre-fix, a clean deck in a pod with 200 events was charged
+    200 // 4 = 50 of its opponents' noise."""
+    from commander_builder.log_parser import ParsedSim
+    from commander_builder.pool_curator import _confirm_actions_for
+    parsed = ParsedSim(
+        confirm_action_cards=["CardX"] * 200,
+        confirm_action_by_deck={"Noisy Deck": 200},
+    )
+    assert _confirm_actions_for(parsed, "Clean Deck", pod_size=4) == 0
+    # The noisy deck still gets its full attributed count.
+    assert _confirm_actions_for(parsed, "Noisy Deck", pod_size=4) == 200
+
+
+def test_confirm_actions_fallback_when_attribution_unavailable():
+    """Attribution entirely unavailable (empty dict — e.g. Forge build without
+    Phase markers): the even-split fallback still produces a number, exactly
+    as before the fix."""
+    from commander_builder.log_parser import ParsedSim
+    from commander_builder.pool_curator import _confirm_actions_for
+    parsed = ParsedSim(
+        confirm_action_cards=["CardX"] * 40,
+        confirm_action_by_deck={},
+    )
+    assert _confirm_actions_for(parsed, "Any Deck", pod_size=4) == 10
+
+
+# --- curate_bracket integration (fake runner, no Forge) --------------------
+
+from commander_builder.forge_runner import SimResult
+from commander_builder.pool_curator import (
+    InsufficientSurvivorsError,
+    curate_bracket,
+)
+
+
+def _stems(decks):
+    """Filenames -> the Name= stems Forge reports in Match Result lines."""
+    return [d.rsplit(" [B", 1)[0] for d in decks]
+
+
+def _sim_stdout(decks, games=1, unsupported=(), confirm_by=None):
+    """Craft Forge stdout that log_parser.parse() reads back as intended.
+
+    confirm_by: {stem: event_count} — emitted with a Phase marker per deck so
+    the parser attributes the events (confirm_action_by_deck non-empty)."""
+    stems = _stems(decks)
+    lines = []
+    for card in unsupported:
+        lines.append(f"An unsupported card was requested: {card}")
+    for stem, count in (confirm_by or {}).items():
+        seat = stems.index(stem) + 1
+        lines.append(f"Phase: Ai({seat})-{stem} MAIN1")
+        lines.extend(
+            ["default implementation of confirmAction is used by CardX"] * count
+        )
+    for g in range(games):
+        lines.append(f"Game Result: Game {g + 1} ended in 60000 ms")
+    # Seat 1 takes every win; the tests here assert survival/rejection, not
+    # ranking, so any consistent tally works.
+    payload = " ".join(
+        f"Ai({i + 1})-{s}: {games if i == 0 else 0}" for i, s in enumerate(stems)
+    )
+    lines.append(f"Match Result: {payload}")
+    return "\n".join(lines) + "\n"
+
+
+class _FakeRunner:
+    """Duck-typed ForgeRunner. `bad_decks` inject one unsupported-card line
+    into any pod containing them (pod-global, like real Forge output);
+    `noisy_decks` inject 300 attributed confirmAction events; `crash_all`
+    makes every sim time out. Records every call for assertions."""
+
+    def __init__(self, bad_decks=(), noisy_decks=(), crash_all=False):
+        self.bad_decks = set(bad_decks)
+        self.noisy_decks = set(noisy_decks)
+        self.crash_all = crash_all
+        self.calls = []  # (decks, num_games)
+
+    def run(self, decks, num_games=1, **kwargs):
+        self.calls.append((list(decks), num_games))
+        if self.crash_all:
+            return SimResult(
+                cmd=["x"], returncode=None, duration_sec=600.0,
+                stdout="", stderr="", timed_out=True,
+                error="Timed out after 600s",
+            )
+        unsupported = ["Frobnicate the Bear"] if self.bad_decks & set(decks) else []
+        confirm_by = {
+            stem: 300
+            for d, stem in zip(decks, _stems(decks))
+            if d in self.noisy_decks
+        }
+        return SimResult(
+            cmd=["x"], returncode=0, duration_sec=60.0,
+            stdout=_sim_stdout(
+                decks, games=num_games,
+                unsupported=unsupported, confirm_by=confirm_by,
+            ),
+            stderr="", timed_out=False, error=None,
+        )
+
+
+def _curate(candidates, runner, tmp_path, monkeypatch, **kwargs):
+    """curate_bracket with the offline seams pinned: no Scryfall, no on-disk
+    deck files for the archetype classifier."""
+    import commander_builder.pool_curator as pc
+    monkeypatch.setattr(pc, "_read_color_identity", lambda p: "")
+    archetypes = ["aggro", "midrange", "control", "combo", "stax"]
+    return curate_bracket(
+        bracket=3,
+        candidate_filenames=candidates,
+        # Deterministic per-name archetype spread (hash() is salted per
+        # process, which would make diversity-swap behavior flaky).
+        classifier=lambda p: archetypes[sum(map(ord, p.name)) % len(archetypes)],
+        runner=runner,
+        pool_dir=tmp_path / "_pools",
+        **kwargs,
+    )
+
+
+def _twelve(bad_index=None):
+    names = [f"c{i:02d} [B3].dck" for i in range(12)]
+    bad = names[bad_index] if bad_index is not None else None
+    return names, bad
+
+
+def test_preflight_bad_filler_triggers_retry_not_rejection(tmp_path, monkeypatch, capsys):
+    """A candidate whose FIRST smoke pod contained a bad filler must not be
+    rejected outright: it gets one retry with different fillers and survives.
+    With rotated fillers, c05 fills the pods of c02/c03/c04 only — pre-fix
+    (alphabetical fillers + no retry) a bad deck poisoned every pod."""
+    candidates, bad = _twelve(bad_index=5)  # bad = "c05 [B3].dck"
+    runner = _FakeRunner(bad_decks={bad})
+    pool = _curate(candidates, runner, tmp_path, monkeypatch)
+
+    scores = {s.filename: s for s in pool.scores + pool.rejected}
+    # c02's first pod was [c03, c04, c05] — poisoned. It must have been
+    # retried (two preflight pods recorded) and NOT rejected.
+    c02 = scores.get("c02 [B3].dck")
+    # c02 may have missed top-6 by win rate; find its record via the runner's
+    # preflight calls instead if absent from pool.scores.
+    preflight_calls = [c for c in runner.calls if c[1] == 1]
+    c02_calls = [c for c in preflight_calls if c[0][0] == "c02 [B3].dck"]
+    assert len(c02_calls) == 2, "poisoned candidate should get exactly one retry"
+    first_fillers, retry_fillers = c02_calls[0][0][1:], c02_calls[1][0][1:]
+    assert bad in first_fillers
+    assert bad not in retry_fillers, "retry must use different, clean fillers"
+    assert set(retry_fillers).isdisjoint(set(first_fillers))
+    if c02 is not None:
+        assert c02.rejected_reason is None
+
+    # The genuinely bad deck fails twice and its rejection record carries the
+    # pod context of BOTH attempts.
+    bad_score = next(s for s in pool.rejected if s.filename == bad)
+    assert "unsupported_cards=1" in bad_score.rejected_reason
+    assert "pod=" in bad_score.rejected_reason
+    assert len(bad_score.preflight_pods) == 2
+
+    # Bounded, printed smoke cost: 12 first-pass + 4 retries (c02/c03/c04/c05).
+    out = capsys.readouterr().out
+    assert "Preflight cost: 16 smoke game(s)" in out
+
+
+def test_one_bad_deck_cannot_zero_the_pool(tmp_path, monkeypatch):
+    """THE invariant: a 12-candidate pool with one unsupported-card deck must
+    survive without it — 11 survivors, exactly 1 rejection, non-empty pool.
+    Pre-fix this scenario rejected all 12 candidates and then crashed."""
+    candidates, bad = _twelve(bad_index=5)
+    runner = _FakeRunner(bad_decks={bad})
+    pool = _curate(candidates, runner, tmp_path, monkeypatch)
+
+    assert [s.filename for s in pool.rejected] == [bad]
+    assert len(pool.pool_a) == 3 and len(pool.pool_b) == 3
+    assert bad not in pool.pool_a + pool.pool_b
+    # All six pool decks played qualifier games.
+    for s in pool.scores:
+        assert s.games_played > 0
+
+
+def test_clean_deck_not_charged_for_noisy_podmates(tmp_path, monkeypatch):
+    """A deck with ZERO confirmAction events, podded with a deck that emits
+    300 attributed events per pod, must be charged 0 and pass the
+    AI-pilotability gate. The noisy deck itself (100 events/game > cap of 50)
+    is rejected. Pre-fix the clean decks were charged 300 // 4 = 75 per pod
+    (25/game) of pure opponent noise."""
+    candidates = [f"c{i:02d} [B3].dck" for i in range(8)]
+    noisy = "c03 [B3].dck"
+    runner = _FakeRunner(noisy_decks={noisy})
+    pool = _curate(candidates, runner, tmp_path, monkeypatch)
+
+    all_scores = {s.filename: s for s in pool.scores + pool.rejected}
+    noisy_score = all_scores[noisy]
+    assert noisy_score.rejected_reason is not None
+    assert "ai_pilotability" in noisy_score.rejected_reason
+
+    # Every clean deck: zero charged events, not rejected.
+    for f, s in all_scores.items():
+        if f == noisy:
+            continue
+        assert s.confirm_action_total == 0, (
+            f"{f} charged {s.confirm_action_total} events of podmate noise"
+        )
+        assert s.rejected_reason is None
+
+
+def test_under_four_survivors_raises_clean_error_and_persists(tmp_path, monkeypatch):
+    """When preflight leaves <4 survivors, curate_bracket must raise the typed
+    error (not schedule_pods' bare ValueError), list every rejection with its
+    reason, and persist the preflight records so the smoke spend isn't lost."""
+    import pytest
+    candidates = [f"c{i:02d} [B3].dck" for i in range(6)]
+    runner = _FakeRunner(crash_all=True)
+
+    with pytest.raises(InsufficientSurvivorsError) as exc_info:
+        _curate(candidates, runner, tmp_path, monkeypatch)
+
+    err = exc_info.value
+    msg = str(err)
+    # Actionable message: every candidate listed with its reason.
+    for f in candidates:
+        assert f in msg
+    assert "preflight_crash:timeout" in msg
+    assert "need >=4" in msg
+    # Preflight results persisted.
+    assert err.preflight_path is not None and err.preflight_path.exists()
+    import json
+    data = json.loads(err.preflight_path.read_text(encoding="utf-8"))
+    assert data["survivors"] == []
+    assert len(data["rejected"]) == 6
+    assert all(r["rejected_reason"] for r in data["rejected"])
+    # The structured records ride on the exception too.
+    assert len(err.rejected) == 6
+
+
+def test_main_returns_distinct_exit_code_on_insufficient_survivors(monkeypatch):
+    """CLI convention: 0 = success, 2 = not enough decks on disk,
+    3 = preflight rejected the pool. No traceback."""
+    import commander_builder.pool_curator as pc
+
+    monkeypatch.setattr(
+        pc, "_list_bracket_candidates",
+        lambda bracket: [f"c{i:02d} [B3].dck" for i in range(6)],
+    )
+
+    def _raise(*args, **kwargs):
+        raise InsufficientSurvivorsError("preflight wiped the pool", rejected=[])
+
+    monkeypatch.setattr(pc, "curate_bracket", _raise)
+    assert pc.main(["--bracket", "3"]) == 3
