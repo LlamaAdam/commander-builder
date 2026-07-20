@@ -318,6 +318,115 @@ def test_bulk_import_same_id_under_uniquified_name_is_duplicate(
     ]
 
 
+def test_bulk_import_user_batch_not_blocked_by_pool_copy(
+    tmp_path, monkeypatch,
+):
+    """(role boundary) THE web add-deck regression: the deck's Moxfield id
+    was harvested into the opponent pool ('MyDeck [B3].dck'). A user batch
+    (is_user=True) must import a NEW [USER] copy — success, not
+    'duplicate' — because the pool file is a different ROLE's copy: the
+    sidebar lists only [USER] files, so the old cross-role duplicate skip
+    meant the user could never obtain their own copy of that deck."""
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda deck_id: _stub_deck_json("MyDeck", deck_id),
+    )
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.time.sleep", lambda s: None,
+    )
+
+    pool = tmp_path / "MyDeck [B3].dck"
+    pool.write_text(
+        "[metadata]\nName=MyDeck [B3]\nMoxfield=abc\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    pool_before = pool.read_text(encoding="utf-8")
+
+    result = bulk_import(
+        ["https://moxfield.com/decks/abc"], out_dir=tmp_path, is_user=True,
+    )
+    assert result.success_count == 1
+    assert result.duplicate_count == 0
+    assert Path(result.successes[0]["path"]).name == "[USER] MyDeck [B3].dck"
+    # The opponent-pool copy is byte-untouched; both role copies coexist.
+    assert pool.read_text(encoding="utf-8") == pool_before
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == sorted(
+        ["MyDeck [B3].dck", "[USER] MyDeck [B3].dck"])
+
+
+def test_bulk_import_opponent_batch_not_blocked_by_user_copy(
+    tmp_path, monkeypatch,
+):
+    """(role boundary, mirrored) An opponent batch (is_user=False, the CLI
+    --opponent flag) must not dedupe against the user's [USER] copy of the
+    same id — the pool needs its own file."""
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda deck_id: _stub_deck_json("MyDeck", deck_id),
+    )
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.time.sleep", lambda s: None,
+    )
+
+    user = tmp_path / "[USER] MyDeck [B3].dck"
+    user.write_text(
+        "[metadata]\nName=[USER] MyDeck [B3]\nMoxfield=abc\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    user_before = user.read_text(encoding="utf-8")
+
+    result = bulk_import(
+        ["https://moxfield.com/decks/abc"], out_dir=tmp_path, is_user=False,
+    )
+    assert result.success_count == 1
+    assert result.duplicate_count == 0
+    assert Path(result.successes[0]["path"]).name == "MyDeck [B3].dck"
+    assert user.read_text(encoding="utf-8") == user_before
+
+
+def test_bulk_import_same_role_duplicate_renames_on_bracket_drift(
+    tmp_path, monkeypatch,
+):
+    """(bracket drift) A same-role duplicate whose Moxfield bracket changed
+    since the original import: still reported duplicate (bulk semantics =
+    dedupe-skip), but the file's ` [B<n>]` tag — the bracket source of
+    truth for every filename-keyed consumer — is renamed to the current
+    bracket, and existing_path points at the RENAMED file."""
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda deck_id: _stub_deck_json("MyDeck", deck_id),
+    )
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.time.sleep", lambda s: None,
+    )
+
+    r1 = bulk_import(
+        ["https://moxfield.com/decks/abc"], out_dir=tmp_path, is_user=True,
+    )
+    assert r1.success_count == 1
+    original = Path(r1.successes[0]["path"])
+    assert original.name == "[USER] MyDeck [B3].dck"
+
+    # The deck graduated to bracket 4 on Moxfield; re-paste its URL.
+    def fetch_b4(deck_id):
+        deck = _stub_deck_json("MyDeck", deck_id)
+        deck["bracket"] = 4
+        return deck
+
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck", fetch_b4,
+    )
+    r2 = bulk_import(
+        ["https://moxfield.com/decks/abc"], out_dir=tmp_path, is_user=True,
+    )
+    assert r2.success_count == 0
+    assert r2.duplicate_count == 1
+    renamed = tmp_path / "[USER] MyDeck [B4].dck"
+    assert renamed.exists() and not original.exists()
+    assert r2.duplicates[0]["existing_path"] == str(renamed)
+    assert len(list(tmp_path.glob("*.dck"))) == 1
+
+
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------

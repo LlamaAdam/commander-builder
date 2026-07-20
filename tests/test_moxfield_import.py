@@ -733,11 +733,14 @@ def test_reimport_with_ambiguous_duplicate_ids_is_deterministic(
     tmp_path, monkeypatch, capsys,
 ):
     """(c) import_deck over an ambiguous id: overwrite the sorted-first
-    claimant, leave the stray copy alone, warn, and mint NO new file."""
+    claimant, leave the stray copy alone, warn, and mint NO new file.
+    (The stray copies carry the [USER] prefix — same-id matching is
+    role-scoped, so only same-role claimants are ambiguous to a --user
+    import; a non-[USER] copy would simply be the pool's own file.)"""
     from commander_builder import moxfield_import as mi
 
-    a = tmp_path / "Copy A [B3].dck"
-    b = tmp_path / "Copy B [B3].dck"
+    a = tmp_path / "[USER] Copy A [B3].dck"
+    b = tmp_path / "[USER] Copy B [B3].dck"
     for p in (a, b):
         p.write_text(
             "[metadata]\nName=%s\nMoxfield=pid-1\n[Main]\n1 Sol Ring\n"
@@ -1001,3 +1004,233 @@ def test_harvest_loop_sleeps_on_fetch_failure(tmp_path, monkeypatch):
     assert len(written) == 1
     # One sleep per fetch ATTEMPT: the failed bad-1 fetch AND the good one.
     assert len(sleeps) == 2
+
+
+# --- same-id matching respects the [USER]/pool role boundary ---------------
+# Regression tests for the fc54986 follow-up: the id → path map scanned the
+# WHOLE deck dir, but every consumer keys semantics on the filename wrapper
+# — web/app.py's sidebar lists only [USER] decks, and pool_curator treats
+# every non-[USER] file as an opponent candidate. A cross-role same-id match
+# therefore either skipped the user's import as a "duplicate" (bulk paths)
+# or overwrote the POOL file in place under its pool name (import_deck
+# --user): the user could never obtain a [USER] copy of any deck that was
+# ever harvested into the opponent pool, and their "imported" deck kept
+# fighting against itself as an opponent. Same-id matching is now scoped to
+# the caller's role; the user copy and the pool copy legitimately coexist.
+# Plus: bracket drift WITHIN a role now renames the ` [B<n>]` filename tag,
+# so _bracket_from_filename never serves a stale bracket forever.
+
+def test_existing_moxfield_ids_role_scoping(tmp_path):
+    """Unit pin for the role filter: is_user=True sees only [USER] files,
+    False only pool files, None (role-agnostic tooling) sees everything."""
+    from commander_builder import moxfield_import as mi
+
+    user = tmp_path / "[USER] Foo [B3].dck"
+    pool = tmp_path / "Foo [B3].dck"
+    user.write_text("[metadata]\nName=%s\nMoxfield=pid-u\n[Main]\n1 Sol Ring\n"
+                    % user.stem, encoding="utf-8")
+    pool.write_text("[metadata]\nName=%s\nMoxfield=pid-p\n[Main]\n1 Sol Ring\n"
+                    % pool.stem, encoding="utf-8")
+
+    assert mi._existing_moxfield_ids(tmp_path, is_user=True) == {"pid-u": user}
+    assert mi._existing_moxfield_ids(tmp_path, is_user=False) == {"pid-p": pool}
+    assert mi._existing_moxfield_ids(tmp_path) == {"pid-u": user, "pid-p": pool}
+    # Bracket + role filters compose (harvest's per-bracket seed shape).
+    assert mi._existing_moxfield_ids(tmp_path, 3, is_user=False) == {"pid-p": pool}
+
+
+def test_cross_role_same_id_pair_is_not_ambiguous(tmp_path, capsys):
+    """A user copy and a pool copy of the SAME Moxfield id are the
+    legitimate cross-role pair — a role-scoped scan sees exactly one of
+    them, so the duplicate-id ambiguity WARN must NOT fire."""
+    from commander_builder import moxfield_import as mi
+
+    for name in ("[USER] Foo [B3].dck", "Foo [B3].dck"):
+        p = tmp_path / name
+        p.write_text("[metadata]\nName=%s\nMoxfield=pid-x\n[Main]\n1 Sol Ring\n"
+                     % p.stem, encoding="utf-8")
+
+    assert set(mi._existing_moxfield_ids(tmp_path, is_user=True)) == {"pid-x"}
+    assert set(mi._existing_moxfield_ids(tmp_path, is_user=False)) == {"pid-x"}
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_user_import_of_harvested_deck_creates_new_user_copy(
+    tmp_path, monkeypatch,
+):
+    """(a) THE regression: the deck's Moxfield id was harvested into the
+    opponent pool ('My Deck [B3].dck'). `commander-import --user` (and the
+    web add-deck path) must proceed as a NEW [USER] import — pool file
+    untouched, both role copies coexist — not overwrite the pool file in
+    place under its pool name (which left the user with no [USER] copy and
+    their own deck still in the opponent candidate pool)."""
+    from commander_builder import moxfield_import as mi
+
+    pool = mi._write_deck(_deck_json(pid="pid-1"), 3, tmp_path)
+    assert pool is not None and pool.name == "My Deck [B3].dck"
+    pool_before = pool.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(
+        mi, "fetch_deck",
+        lambda pid: _deck_json(pid=pid, main_card="Arcane Signet"))
+    p = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    assert p.name == "[USER] My Deck [B3].dck"
+    assert "Arcane Signet" in p.read_text(encoding="utf-8")
+    # The opponent-pool copy is a DIFFERENT role's file: byte-untouched.
+    assert pool.read_text(encoding="utf-8") == pool_before
+    assert sorted(q.name for q in tmp_path.glob("*.dck")) == sorted(
+        [pool.name, p.name])
+
+
+def test_pool_harvest_not_blocked_by_user_copy_same_id(tmp_path, monkeypatch):
+    """(b) Mirror image: the id exists only as the user's [USER] copy. A
+    pool harvest must still import the opponent-pool copy — skipping it
+    left the pool one deck short forever (and the user's test deck doing
+    double duty as its own opponent)."""
+    from commander_builder import moxfield_import as mi
+
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: _deck_json(pid=pid))
+    user = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert user.name == "[USER] My Deck [B3].dck"
+
+    pool = mi._write_deck(_deck_json(pid="pid-1"), 3, tmp_path)
+    assert pool is not None and pool.name == "My Deck [B3].dck"
+    assert sorted(q.name for q in tmp_path.glob("*.dck")) == sorted(
+        [user.name, pool.name])
+
+
+def test_import_by_bracket_harvests_deck_whose_id_is_user_copy(
+    tmp_path, monkeypatch,
+):
+    """(b, end-to-end) The bulk harvest loop — including the per-bracket
+    `seen` seed harvest_bracket builds — must not pre-skip a candidate just
+    because the user owns a [USER] copy of its id."""
+    from commander_builder import moxfield_import as mi
+
+    monkeypatch.setattr(mi.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: _deck_json(pid=pid))
+    user = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    def fake_search(bracket, page_size=20, page=1, sort_type="updated",
+                    since_iso=None):
+        return [{"publicId": "pid-1"}] if page == 1 else []
+
+    monkeypatch.setattr(mi, "search_decks", fake_search)
+    # Same role-scoped seed harvest_bracket passes in: the [USER] file must
+    # not appear in it, so the fetch is attempted and the pool copy lands.
+    seen = set(mi._existing_moxfield_ids(tmp_path, 3, is_user=False))
+    assert seen == set()
+    written = mi.import_by_bracket(3, count=1, out_dir=tmp_path, seen=seen)
+    assert [p.name for p in written] == ["My Deck [B3].dck"]
+    assert user.exists()
+
+
+def test_reimport_with_changed_bracket_renames_file(
+    tmp_path, monkeypatch, capsys,
+):
+    """(c) Bracket drift within a role: re-pulling a deck whose Moxfield
+    bracket changed must RENAME the file to the new ` [B<n>]` tag — the
+    filename is the bracket source of truth for _bracket_from_filename and
+    every pool filter — with Name= restamped from the new stem, the old
+    filename gone, and local Protect= metadata still carried."""
+    import re as _re
+    from commander_builder import moxfield_import as mi
+    from commander_builder.web._helpers import read_protected_cards
+
+    decks = {"pid-1": _deck_json(bracket=3)}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert p1.name == "[USER] My Deck [B3].dck"
+    text = p1.read_text(encoding="utf-8")
+    p1.write_text(
+        text.replace("Moxfield=pid-1", "Moxfield=pid-1\nProtect=Sol Ring"),
+        encoding="utf-8",
+    )
+
+    # The deck graduated to bracket 4 on Moxfield; re-pull the same id.
+    decks["pid-1"] = _deck_json(bracket=4, main_card="Arcane Signet")
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    assert p2.name == "[USER] My Deck [B4].dck"
+    assert not p1.exists()  # old stale-bracket filename is gone
+    merged = p2.read_text(encoding="utf-8")
+    assert "Arcane Signet" in merged                       # fresh content
+    assert read_protected_cards(merged) == ["Sol Ring"]    # lock survived
+    # Name= normalizes to the RENAMED stem (post-drift), holding the
+    # dck_meta invariant for every name-keyed consumer.
+    assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p2.stem
+    assert sorted(q.name for q in tmp_path.glob("*.dck")) == [p2.name]
+    out = capsys.readouterr().out
+    assert "bracket changed" in out
+    assert p1.name in out and p2.name in out
+
+
+def test_reimport_same_bracket_does_not_rename(tmp_path, monkeypatch, capsys):
+    """(d) No drift → no rename: the same-bracket overwrite keeps the
+    exact filename and stays silent about brackets."""
+    from commander_builder import moxfield_import as mi
+
+    decks = {"pid-1": _deck_json(bracket=3)}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    decks["pid-1"] = _deck_json(bracket=3, main_card="Arcane Signet")
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert p2 == p1
+    assert "bracket changed" not in capsys.readouterr().out
+
+
+def test_bracket_drift_rename_keeps_counter_before_tag(tmp_path, monkeypatch):
+    """(c+e) Drift rename on a UNIQUIFIED sibling preserves the 6ccf3f0
+    counter placement: 'Foo (2) [B3]' → 'Foo (2) [B4]', counter before the
+    tag, so the file stays visible to every ` [B<n>].dck` suffix filter."""
+    import re as _re
+    from commander_builder import moxfield_import as mi
+
+    decks = {
+        "pid-1": _deck_json(pid="pid-1"),
+        "pid-2": _deck_json(pid="pid-2", main_card="Counterspell"),
+    }
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    p2 = mi.import_deck("pid-2", out_dir=tmp_path, is_user=True)
+    assert p2.name == "[USER] My Deck (2) [B3].dck"
+
+    decks["pid-2"] = _deck_json(pid="pid-2", bracket=5, main_card="Brainstorm")
+    p3 = mi.import_deck("pid-2", out_dir=tmp_path, is_user=True)
+
+    assert p3.name == "[USER] My Deck (2) [B5].dck"
+    assert not p2.exists()
+    assert p1.exists()  # the base-name neighbor was never touched
+    merged = p3.read_text(encoding="utf-8")
+    assert "Brainstorm" in merged
+    assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p3.stem
+
+
+def test_write_deck_skip_renames_on_bracket_drift(tmp_path):
+    """Pool-side drift: the harvest dedupe-skip must still fix a stale
+    ` [B<n>]` tag (content untouched — skip semantics — but filename and
+    Name= track the deck's CURRENT bracket) and repoint the shared id_map
+    so later candidates in the same bulk run resolve to the real file."""
+    import re as _re
+    from commander_builder import moxfield_import as mi
+
+    first = mi._write_deck(_deck_json(pid="pid-1", bracket=3), 3, tmp_path)
+    assert first is not None and first.name == "My Deck [B3].dck"
+
+    # Deck moved to B4 upstream; a B4 harvest sees the same id.
+    id_map = mi._existing_moxfield_ids(tmp_path, is_user=False)
+    assert mi._write_deck(
+        _deck_json(pid="pid-1", bracket=4, main_card="Brainstorm"),
+        4, tmp_path, id_map=id_map,
+    ) is None  # still a dedupe-skip, not a re-import
+    renamed = tmp_path / "My Deck [B4].dck"
+    assert renamed.exists() and not first.exists()
+    text = renamed.read_text(encoding="utf-8")
+    # Skip semantics: the CONTENT was not refreshed...
+    assert "Sol Ring" in text and "Brainstorm" not in text
+    # ...but Name= tracks the renamed stem, and the map points at the file.
+    assert _re.search(r"^Name=(.+)$", text, _re.MULTILINE).group(1) == renamed.stem
+    assert id_map == {"pid-1": renamed}
