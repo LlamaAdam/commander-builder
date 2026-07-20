@@ -150,24 +150,34 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "reflects empirical sim results, not a "
                         "permanent 'pending'. Honesty note: a "
                         "kept/reverted/neutral verdict needs >= 20 "
-                        "decisive (non-draw) games; below that the "
-                        "verdict is recorded as 'inconclusive', so at "
-                        "the default --sim-games 5 this is a smoke "
-                        "signal, not a decisive test. Skipped "
-                        "automatically under --dry-run or --no-log "
-                        "(no row to update).")
+                        "DECISIVE games (won by the old or new deck "
+                        "itself -- the 2 filler seats win ~half the pod "
+                        "games, so budget ~2x that in total games); "
+                        "below that the verdict is recorded as "
+                        "'inconclusive', so at the default --sim-games "
+                        "5 this is a smoke signal, not a decisive "
+                        "test. Skipped automatically under --dry-run "
+                        "or --no-log (no row to update).")
     # Default stays 5 on purpose: auto-curate's --run-sim is a cheap
-    # smoke signal, and silently 5x-ing every operator's Forge bill is
+    # smoke signal, and silently 8x-ing every operator's Forge bill is
     # not this flag's call -- the sub-threshold warning printed at sim
     # start tells them the verdict will be 'inconclusive' and what to
     # pass instead. (commander-improve, whose whole point is advancing
-    # on 'kept', defaults to 25.)
+    # on 'kept', defaults to 45.) UNITS in the help text below: this
+    # flag is TOTAL 4-player-pod games; the 20-game verdict gate counts
+    # DECISIVE games (head-to-head wins only, ~half the total because
+    # the two filler seats win the rest) -- hence "40+, e.g. 45", not
+    # "20, e.g. 25".
     p.add_argument("--sim-games", type=int, default=5,
-                   help="Games per A/B sim (default 5; below the "
-                        "20-decisive-game verdict threshold, so the "
-                        "recorded verdict will be 'inconclusive' -- "
-                        "pass >= 20, e.g. 25, for a verdict that can "
-                        "resolve). The harness alternates seat order "
+                   help="TOTAL 4-player pod games per A/B sim (default "
+                        "5 -- far below what a verdict needs, on "
+                        "purpose: a cheap smoke signal). Verdicts need "
+                        ">= 20 DECISIVE games, i.e. games won by the "
+                        "old or new deck itself; the 2 filler seats "
+                        "win ~half the pod games, so expect decisive "
+                        "~= total/2 and pass >= 40 total, e.g. 45, "
+                        "for a verdict that can resolve. "
+                        "The harness alternates seat order "
                         "per game, so total games = 2 * this number "
                         "isn't quite right -- it's exactly this "
                         "number, near-half with old in seat 1 "

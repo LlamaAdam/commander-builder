@@ -235,21 +235,28 @@ def test_main_no_bracket_no_suffix_errors(tmp_path, monkeypatch):
 # --- improve_main: sub-threshold --sim-games warning ----------------------
 
 def test_main_warns_on_sub_threshold_sim_games(tmp_path, monkeypatch, capsys):
-    """--sim-games below MIN_DECISIVE_GAMES_FOR_VERDICT makes every
-    verdict structurally 'inconclusive' — and improve only advances on
-    'kept', so the run can never move the deck. The CLI must say so
-    LOUDLY up front (on stderr, so --json stdout stays parseable)."""
+    """--sim-games whose EXPECTED decisive count (total * 0.5 -- the 2
+    filler seats win ~half the pod games) is below the 20-decisive gate
+    makes every verdict 'inconclusive' in expectation — and improve only
+    advances on 'kept', so the run can't move the deck. The CLI must say
+    so LOUDLY up front (on stderr, so --json stdout stays parseable),
+    and it must state the total->decisive ARITHMETIC: 25 was the old
+    default precisely because raw sim_games vs the gate looked fine
+    (25 > 20) while the decisive units said otherwise (~12 < 20)."""
     _stub_loop(monkeypatch)
     deck = tmp_path / "[USER] Warn [B3].dck"
     deck.write_text("[metadata]\nName=Warn\n", encoding="utf-8")
 
-    rc = improve_main([str(deck), "--rounds", "1", "--sim-games", "5"])
+    rc = improve_main([str(deck), "--rounds", "1", "--sim-games", "25"])
 
     assert rc == 0
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert "inconclusive" in err
-    assert "5" in err  # echoes the offending value
+    assert "25" in err          # echoes the offending TOTAL value
+    assert "12" in err          # ... its expected-decisive conversion
+    assert "decisive" in err    # ... names the gate's unit
+    assert "40" in err          # ... and the total-games floor to pass
 
 
 def test_main_default_sim_games_clears_threshold_no_warning(
@@ -257,8 +264,10 @@ def test_main_default_sim_games_clears_threshold_no_warning(
 ):
     """The default --sim-games must be able to produce a decisive
     verdict (improve's whole purpose is advancing on 'kept'), so no
-    warning fires at defaults."""
-    from commander_builder._proposer_sim import MIN_DECISIVE_GAMES_FOR_VERDICT
+    warning fires at defaults. Pinned at 45: expected decisive ~= 22
+    clears the 20-decisive gate with headroom, in-family with the
+    operator's 40-game soak convention."""
+    from commander_builder._proposer_sim import min_sim_games_for_verdict
 
     captured = _stub_loop(monkeypatch)
     deck = tmp_path / "[USER] Quiet [B3].dck"
@@ -267,8 +276,17 @@ def test_main_default_sim_games_clears_threshold_no_warning(
     rc = improve_main([str(deck), "--rounds", "1"])
 
     assert rc == 0
-    assert captured["sim_games"] >= MIN_DECISIVE_GAMES_FOR_VERDICT
+    assert captured["sim_games"] == 45  # pinned: see --sim-games comment
+    assert captured["sim_games"] >= min_sim_games_for_verdict()
     assert "WARNING" not in capsys.readouterr().err
+
+
+def test_min_sim_games_for_verdict_is_40():
+    """ceil(20 decisive / 0.5 expected-decisive fraction) = 40 TOTAL pod
+    games. Pinned: both warning sites quote this number as the floor, so
+    a silent change to either constant should trip a test."""
+    from commander_builder._proposer_sim import min_sim_games_for_verdict
+    assert min_sim_games_for_verdict() == 40
 
 
 # --- bandit strategy (FP-012 slice 2) -------------------------------------

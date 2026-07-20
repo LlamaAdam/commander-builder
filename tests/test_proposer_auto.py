@@ -2747,12 +2747,13 @@ def test_auto_curate_main_run_sim_records_verdict(
     from commander_builder.forge_runner import ABResult
 
     def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
-        # 5-15 over 20 decisive games: same 0.25/0.75 win rates as a 1-3, but
-        # at/above the min-decisive threshold so the verdict resolves to 'kept'
-        # rather than being gated to 'inconclusive'.
+        # 10-30 over 40 total games, all decisive: same 0.25/0.75 win
+        # rates as a 1-3, but the 40 decisive clear both the 20-decisive
+        # verdict gate ('kept', not 'inconclusive') and the post-sim
+        # low-decisive honesty check (no stderr note).
         return ABResult(
             deck_a=deck_a_path.name, deck_b=deck_b_path.name,
-            wins_a=5, wins_b=15, games=20,
+            wins_a=10, wins_b=30, games=40,
             avg_turns_a=12.0, avg_turns_b=10.5,
             status="done",
         )
@@ -2774,7 +2775,7 @@ def test_auto_curate_main_run_sim_records_verdict(
     from commander_builder.proposer import auto_curate_main
     rc = auto_curate_main([
         str(deck), "--bracket", "3", "--db-path", str(db),
-        "--run-sim", "--sim-games", "20",
+        "--run-sim", "--sim-games", "40",
     ])
     assert rc == 0
 
@@ -2783,19 +2784,24 @@ def test_auto_curate_main_run_sim_records_verdict(
     its = iterations_for_deck("sim-id", db_path=db)
     assert len(its) == 1
     it = its[0]
-    assert it.verdict == "kept"               # new won 15-5
-    assert it.win_rate_old == 0.25            # 5/20
-    assert it.win_rate_new == 0.75            # 15/20
-    assert it.margin == 10                     # 15 - 5
+    assert it.verdict == "kept"               # new won 30-10
+    assert it.win_rate_old == 0.25            # 10/40
+    assert it.win_rate_new == 0.75            # 30/40
+    assert it.margin == 20                     # 30 - 10
     assert it.sim_report is not None
-    assert it.sim_report["wins_b"] == 15
+    assert it.sim_report["wins_b"] == 30
 
     captured = capsys.readouterr()
     assert "A/B sim" in captured.out
     assert "verdict: kept" in captured.out
-    # 20 games meets MIN_DECISIVE_GAMES_FOR_VERDICT -> no sub-threshold
-    # warning on stderr.
+    # UNITS: --sim-games is TOTAL pod games; 40 total ~= 20 expected
+    # decisive (the 2 filler seats win ~half) meets MIN_DECISIVE_GAMES_
+    # FOR_VERDICT -> no sub-threshold warning on stderr. (20 total, the
+    # pre-2026-07-20 value here, would now warn: ~10 expected decisive.)
     assert "WARNING" not in captured.err
+    # ... and the mocked run's 40 actual decisive also clears the
+    # post-sim low-decisive honesty note.
+    assert "decisive of" not in captured.err
 
 
 def test_auto_curate_main_run_sim_skipped_when_no_fillers(
@@ -2925,9 +2931,79 @@ def test_auto_curate_main_json_mode_surfaces_sim_block(
     assert payload["sim_report"]["wins_b"] == 3
     assert payload["sim_error"] is None
     # ... and the operator was told, loudly, why the verdict can't
-    # resolve at 5 games.
+    # resolve at 5 total games (the pre-sim warning speaks in decisive
+    # units: 5 total ~= 2 expected decisive, gate needs 20 ~= 40+ total).
     assert "WARNING" in captured.err
     assert "inconclusive" in captured.err
+    assert "decisive" in captured.err
+    assert "40" in captured.err
+    # ... and the post-sim honesty note reports the MEASURED decisive
+    # count (all 5 mocked games were decisive) plus the total budget a
+    # verdict actually needs.
+    assert "got 5 decisive of 5 total games" in captured.err
+    assert "40+ total games" in captured.err
+
+
+def test_auto_curate_main_post_sim_reports_actual_decisive_shortfall(
+    tmp_path, monkeypatch, capsys,
+):
+    """The pre-sim warning is an EXPECTATION (total * 0.5); a run whose
+    total cleared the 40-game floor can still come up short on decisive
+    games when the filler seats run hot. The post-sim honesty note must
+    then report the MEASURED decisive count and the suggested total --
+    otherwise the operator sees a 40-game run land 'inconclusive' with
+    no explanation and no warning ever fired."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A"], "cuts": ["C"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    from commander_builder.forge_runner import ABResult
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        # Unlucky pod: fillers took 29 of 40 games -- only 4+7=11
+        # decisive, below the 20-decisive gate despite the healthy total.
+        return ABResult(
+            deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+            wins_a=4, wins_b=7, games=40, status="done",
+        )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation", fake_ab_sim,
+    )
+
+    deck = tmp_path / "[USER] Shortfall [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Sf\nMoxfield=sf-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B.dck").write_text("a", encoding="utf-8")
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--run-sim", "--sim-games", "40",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # 40 total games clears the expected-decisive pre-sim check ...
+    assert "WARNING" not in captured.err
+    # ... but the measured outcome fell short, and the note says by
+    # exactly how much and what to budget instead.
+    assert "got 11 decisive of 40 total games" in captured.err
+    assert "40+ total games" in captured.err
+
+    from commander_builder.knowledge_log import iterations_for_deck
+    its = iterations_for_deck("sf-id", db_path=db)
+    assert len(its) == 1
+    assert its[0].verdict == "inconclusive"
 
 
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
