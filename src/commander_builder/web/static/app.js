@@ -2408,7 +2408,14 @@ async function verifyAgainstSource() {
         style: "color: var(--accent);",
       }, resp.source_url),
     ));
-    if (resp.in_local_only.length === 0 && resp.in_remote_only.length === 0) {
+    // commander_changed is an additive server field (older responses
+    // simply lack it, which coerces to false — same as before the fix).
+    // It must gate the "In sync" pill: the [Main] diff can be empty
+    // while the deck was re-helmed on Moxfield, and a commander swap
+    // is the one drift that invalidates everything downstream.
+    const cmdrChanged = !!resp.commander_changed;
+    if (resp.in_local_only.length === 0 && resp.in_remote_only.length === 0
+        && !cmdrChanged) {
       body.appendChild(el(
         "p", {}, el("span", { class: "pill good" },
           `In sync — ${resp.matched} cards match`),
@@ -2420,8 +2427,22 @@ async function verifyAgainstSource() {
       el("span", { class: "pill warn" },
         `Drift detected — ${resp.matched} matched, ` +
         `${resp.in_local_only.length} only-local, ` +
-        `${resp.in_remote_only.length} only-remote`),
+        `${resp.in_remote_only.length} only-remote` +
+        (cmdrChanged ? ", commander changed" : "")),
     ));
+    if (cmdrChanged) {
+      body.appendChild(el("h4", {}, "Commander changed"));
+      const ul = el("ul");
+      ul.appendChild(el(
+        "li", {},
+        `Local: ${(resp.local_commanders || []).join(" / ") || "(none)"}`,
+      ));
+      ul.appendChild(el(
+        "li", {},
+        `Moxfield: ${(resp.remote_commanders || []).join(" / ") || "(none)"}`,
+      ));
+      body.appendChild(ul);
+    }
     if (resp.in_local_only.length) {
       body.appendChild(el("h4", {}, "In your local copy but not on Moxfield"));
       const ul = el("ul");

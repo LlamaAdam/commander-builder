@@ -3381,6 +3381,58 @@ def test_verify_against_source_diffs_local_vs_remote(client, monkeypatch):
     # remote-only.
     assert any("Cultivate" in line for line in body["in_local_only"])
     assert any("Mana Crypt" in line for line in body["in_remote_only"])
+    # Same commander on both sides ("Test Cmdr" — the remote's
+    # ``|C|1`` edition suffix must NOT read as a swap): no commander
+    # drift, but the additive fields are always present.
+    assert body["commander_changed"] is False
+    assert body["local_commanders"] == ["Test Cmdr"]
+    assert body["remote_commanders"] == ["Test Cmdr"]
+
+
+def test_verify_against_source_detects_commander_swap(client, monkeypatch):
+    """Regression (2026-07-20): diff_deck_text reads only [Main], so a
+    commander swap on Moxfield with an identical mainboard used to
+    report 'no drift' — precisely the change that invalidates every
+    downstream sim and recommendation. The route must compare the
+    [Commander] section too and report it distinctly."""
+    client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/abc"},
+    )
+    # Remote mainboard mirrors the local fixture exactly (Forest +
+    # Cultivate; no set/cn keys so card_line renders bare '1 <Name>'
+    # lines identical to the local .dck) — ONLY the commander differs.
+    fake_remote_json = {
+        "name": "Alpha", "publicId": "abc",
+        "boards": {
+            "commanders": {
+                "cards": {
+                    "k1": {"quantity": 1, "card": {"name": "New Cmdr"}},
+                },
+            },
+            "mainboard": {
+                "cards": {
+                    "k2": {"quantity": 1, "card": {"name": "Forest"}},
+                    "k3": {"quantity": 1, "card": {"name": "Cultivate"}},
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda public_id: fake_remote_json,
+    )
+    resp = client.get("/api/verify_against_source?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # The [Main] diff sees nothing — that was the whole bug.
+    assert body["in_local_only"] == []
+    assert body["in_remote_only"] == []
+    # But the commander drift is reported, with both names so the UI
+    # can say WHICH commander changed.
+    assert body["commander_changed"] is True
+    assert body["local_commanders"] == ["Test Cmdr"]
+    assert body["remote_commanders"] == ["New Cmdr"]
 
 
 def test_verify_against_source_502_on_moxfield_failure(client, monkeypatch):

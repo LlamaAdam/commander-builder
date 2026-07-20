@@ -1559,6 +1559,29 @@ def test_apply_proposal_guard_refuses_to_write_non_99_mainboard(tmp_path):
     assert not (tmp_path / "[USER] Fat v2 [B3].dck").exists()
 
 
+def test_apply_proposal_guard_fires_on_dry_run_too(tmp_path):
+    """Regression (2026-07-20): the ``if dry_run: return`` used to sit
+    BEFORE the 99-card guard, so --dry-run previewed "success" on
+    exactly the deck a real run refuses to write. Preview and real run
+    must agree: dry-run raises the SAME RuntimeError (and, as always,
+    writes nothing)."""
+    import pytest
+
+    # Same over-sized fixture as the real-run guard test above: 100
+    # distinct main cards, which padding can never trim down to 99.
+    main_cards = [f"Card {i}" for i in range(99)] + ["Sol Ring"]
+    src = _make_dck(tmp_path, "[USER] Fat [B3].dck", main_cards)
+    proposal = Proposal(
+        adds=["Lotus Cobra"], cuts=["Sol Ring"], rationale="x",
+    )
+    with pytest.raises(RuntimeError, match="not 99"):
+        apply_proposal_to_deck(src, proposal, dry_run=True)
+    # Dry-run never touches disk — doubly so when refusing.
+    assert not (tmp_path / "[USER] Fat v2 [B3].dck").exists()
+    # And the source is untouched.
+    assert "1 Sol Ring" in src.read_text(encoding="utf-8")
+
+
 def test_apply_proposal_duplicate_add_pair_dropped_and_reported(tmp_path):
     """An add for a non-basic already in [Main] would write an illegal
     ``2 <Name>`` line — the pair drops and lands under

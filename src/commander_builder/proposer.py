@@ -933,7 +933,9 @@ def apply_proposal_to_deck(
     Returns the path of the new file. In ``dry_run`` mode returns the
     path it WOULD have written without touching disk; the proposal's
     ``applied_*`` fields are still populated so the CLI can show what
-    would have landed.
+    would have landed. Dry-run runs the SAME 99-card guard as a real
+    run (invariant 4 below) — a preview that reports success on a deck
+    the real run would refuse is worse than useless.
 
     The new file lives next to the source with a bumped version
     (``[USER] Foo [B3].dck`` -> ``[USER] Foo v2 [B3].dck``). Bracket
@@ -967,6 +969,8 @@ def apply_proposal_to_deck(
          proposed text and the write is REFUSED (RuntimeError) if it
          isn't exactly 99 — a corrupt deck on disk poisons every
          downstream sim/iteration, so failing loudly beats writing.
+         This guard fires under ``dry_run`` too, so preview and real
+         run always agree on whether a proposal is writable.
 
     This mirrors the invariants the web UI's /api/audit endpoint
     already enforces. The two flows are now in sync -- same balancing,
@@ -1070,9 +1074,6 @@ def apply_proposal_to_deck(
     proposal.padded_count = padded_count
     proposal.padded_breakdown = dict(padded_breakdown)
 
-    if dry_run:
-        return out_path
-
     # HARD GUARD — last-resort invariant before anything touches disk.
     # Everything above (pair validation, balancing, padding) should
     # have produced exactly 99 mainboard cards for a Commander deck;
@@ -1081,6 +1082,14 @@ def apply_proposal_to_deck(
     # would hand Forge a deck it rejects — or worse, silently mis-sims
     # — and every downstream iteration builds on the corrupt list.
     # Refuse loudly instead.
+    #
+    # The guard runs BEFORE the dry_run early-return on purpose: the
+    # would-be final text is fully computed at this point, so dry-run
+    # can (and must) evaluate the exact same invariant. Otherwise a
+    # --dry-run preview reports success on precisely the deck a real
+    # run refuses — the preview lies, and the operator only finds out
+    # after committing to the real run. Dry-run still writes nothing;
+    # it just raises the same RuntimeError the real run would.
     from .web._helpers import _count_main_cards
     final_main = _count_main_cards(proposed_text)
     if final_main != 99:
@@ -1093,6 +1102,9 @@ def apply_proposal_to_deck(
             f"{len(applied_adds)}; cuts applied: {len(applied_cuts)}; "
             f"basics padded: {padded_count}."
         )
+
+    if dry_run:
+        return out_path
 
     out_path.write_text(proposed_text, encoding="utf-8")
     return out_path

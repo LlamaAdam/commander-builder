@@ -371,7 +371,17 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
               "in_local_only": [...],   # cards in our copy, not Moxfield
               "in_remote_only": [...],  # cards on Moxfield, not local
               "matched": int,
+              "commander_changed": bool,  # [Commander] section drifted
+              "local_commanders": [...],  # names in our [Commander]
+              "remote_commanders": [...], # names in Moxfield's
             }
+
+        The commander_* fields exist because ``diff_deck_text`` only
+        reads the [Main] section — a commander swap on Moxfield (e.g.
+        the user re-helmed the deck) used to report "no drift" here,
+        which is exactly the change that invalidates every sim result
+        and EDHREC recommendation downstream. Additive fields only, so
+        pre-existing consumers of the response keep working.
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
@@ -402,12 +412,35 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
 
         from ..compare_versions import diff_deck_text
         diff = diff_deck_text(text, remote_text)
+
+        # diff_deck_text is [Main]-only by design (it diffs the 99),
+        # so compare the [Commander] section separately. Reuses
+        # intent's parser — it already strips qty prefixes and
+        # ``|SET|CN`` edition suffixes, so a reprint on Moxfield
+        # doesn't false-positive as a commander swap; only a NAME
+        # change does. Compare as case-folded sets: partner
+        # commanders can legitimately appear in either order, and
+        # to_dck vs. our importer may disagree on casing.
+        from ..intent import _parse_commander_names
+        local_commanders = _parse_commander_names(text)
+        remote_commanders = _parse_commander_names(remote_text)
+        commander_changed = (
+            {c.casefold() for c in local_commanders}
+            != {c.casefold() for c in remote_commanders}
+        )
+
         return jsonify({
             "deck": deck_id,
             "source_url": f"https://moxfield.com/decks/{mox_id}",
             "in_local_only": diff["removed"],
             "in_remote_only": diff["added"],
             "matched": int(diff["unchanged_count"][0]) if diff["unchanged_count"] else 0,
+            # Additive fields (2026-07 fix) — see docstring. Old and
+            # new names ship alongside the bool so the UI can say
+            # WHICH commander changed, not just that one did.
+            "commander_changed": commander_changed,
+            "local_commanders": local_commanders,
+            "remote_commanders": remote_commanders,
         })
 
     @bp.route("/api/moxfield_format")
