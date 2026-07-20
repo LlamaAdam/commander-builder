@@ -46,6 +46,7 @@ plain SQLite file.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -101,6 +102,34 @@ def decisive_win_rate(wins: int, decisive: int) -> Optional[float]:
     if decisive <= 0:
         return None
     return round(wins / decisive, 4)
+
+
+def canonical_content_hash(row: dict, exclude: frozenset = frozenset()) -> str:
+    """Canonical sha256 over a row-shaped dict, minus ``exclude`` keys.
+
+    Shared identity primitive for "have I already stored this content?"
+    checks. It originated as ``export._content_hash`` (99e8b53, the
+    import-merge dedupe) and was promoted here (2026-07-19) because
+    ``scripts/merge_soak.py``'s knowledge-log fold needs the exact same
+    canonicalization for its own idempotence check — sharing the one
+    implementation beats two copies that could drift and silently stop
+    hashing the same content to the same digest.
+
+    Canonicalization details that make cross-machine / cross-run hashes
+    comparable:
+      * ``sort_keys=True`` — nested dicts (audit_manifest, sim_report)
+        hash identically regardless of insertion order;
+      * ``default=str`` — non-JSON types (e.g. ``Path``) degrade to their
+        string form instead of crashing the dump.
+
+    Callers choose what identity MEANS by what dict they pass and which
+    keys they exclude: export/import excludes the machine-local
+    ``id``/``parent_id`` columns; merge_soak passes an explicit stable
+    subset of soak-row facts (no exclusions needed).
+    """
+    semantic = {k: v for k, v in row.items() if k not in exclude}
+    blob = json.dumps(semantic, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 SCHEMA_VERSION = 2

@@ -91,23 +91,142 @@ def report(rows: list[dict]) -> dict:
     return tot
 
 
-def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> int:
-    """Write completed sims to knowledge_log. ``source``/``host`` are
-    carried into each row's audit_manifest so the machines stay
-    distinguishable while all counting toward one dataset."""
+def _is_gauntlet_row(r: dict) -> bool:
+    """True for rows written by ``soak_pool._record_gauntlet``.
+
+    Gauntlet-mode soak rows are a SEPARATE experiment with a SEPARATE
+    schema (one test deck vs a FIXED 3-deck field): they carry
+    ``mode="gauntlet"``, ``test_deck``/``role``/``pair_base``, and
+    per-deck ``wins``/``losses``/``draws`` — and NO ``deck_a``/``deck_b``
+    or ``wins_a``/``wins_b``. They still have ``status='done'``, so
+    before this check the AB fold below happily "folded" them: every
+    field lookup missed, producing a bogus ``deck_id='?'`` 0-0 neutral
+    iteration per gauntlet row. Those rows must be skipped, never
+    shoehorned into the AB iteration shape.
+
+    The explicit ``mode`` tag is the primary signal; the shape check is
+    belt-and-suspenders for a hand-edited row that lost the tag (per-deck
+    ``wins``/``losses`` present while the AB pair field is absent can
+    only be the gauntlet shape).
+    """
+    if r.get("mode") == "gauntlet":
+        return True
+    return ("wins" in r or "losses" in r) and "deck_b" not in r
+
+
+def _soak_identity(*, deck_a, deck_b, ts, host, games, wins_a, wins_b) -> str:
+    """Content-identity hash for one folded soak row.
+
+    Why not export.py's natural key (deck_id, created_at, deck_name)?
+    Soak JSONL rows have no ``created_at`` — knowledge_log stamps that at
+    record time, so it differs on every fold and would defeat dedupe.
+    Mutable DB columns (``verdict`` can be PATCHed later; the verdict/
+    margin policy is a --margin flag) must not participate either, or a
+    refold after an edit would re-insert. Identity is therefore the
+    STABLE FACTS of the sim itself:
+
+      * the two decks (deck_a/deck_b),
+      * the score (games/wins_a/wins_b),
+      * the provenance stamps soak_pool wrote into the row (``ts`` is
+        stamped once at sim completion and carried verbatim through
+        merge, so two sims of the same pair that happen to land the same
+        score still hash differently; ``host`` separates machines).
+
+    The merge-time ``source`` label is deliberately EXCLUDED: it names
+    the file/label a row arrived through, not the sim — the same row
+    re-merged under a different label (e.g. a combined output re-fed
+    alongside its originals) is still the same sim and must dedupe.
+
+    Hashing goes through ``knowledge_log.canonical_content_hash`` — the
+    exact canonicalization export.py's import dedupe uses (promoted out
+    of export.py so this fold doesn't copy-paste it).
+
+    Invariant: the same JSONL row folded twice -> one DB row. Rows folded
+    by the pre-fix code lack ``ts`` in their manifest, so they hash
+    differently and are NOT retro-deduped — this is fix-forward only (the
+    pre-fix rows are already potentially double-counted; nothing recorded
+    then can distinguish a true duplicate from a coincidental rematch).
+    """
+    from commander_builder.knowledge_log import canonical_content_hash
+    return canonical_content_hash({
+        "deck_a": deck_a, "deck_b": deck_b, "ts": ts, "host": host,
+        "games": games, "wins_a": wins_a, "wins_b": wins_b,
+    })
+
+
+def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> dict:
+    """Write completed AB sims to knowledge_log. ``source``/``host``/``ts``
+    are carried into each row's audit_manifest so the machines stay
+    distinguishable while all counting toward one dataset.
+
+    Returns counters ``{"written", "skipped_duplicate", "skipped_gauntlet"}``.
+
+    IDEMPOTENT (2026-07-19): this fold used to re-INSERT every 'done' row
+    on every run — ``record_iteration`` is append-only and nothing
+    deduped — so re-running the same merge silently double-counted the
+    dataset the FP-002/FP-013 row gates read. Candidate rows are now
+    hashed over their stable facts (see ``_soak_identity``) and skipped
+    when an identical soak-ab row already exists.
+
+    Gauntlet-mode rows are SKIPPED, not folded — separate schema, see
+    ``_is_gauntlet_row``.
+    """
     from commander_builder.knowledge_log import (
-        DEFAULT_DB_PATH, Iteration, decisive_win_rate, record_iteration,
+        Iteration, _resolve_db_path, all_iterations, decisive_win_rate,
+        record_iteration,
     )
     from commander_builder.web._helpers import _bracket_from_filename
 
-    db = Path(db_path) if db_path else DEFAULT_DB_PATH
-    n = 0
+    # _resolve_db_path (not a copy of DEFAULT_DB_PATH) so the default DB
+    # is looked up at call time — the test suite's autouse isolation
+    # fixture monkeypatches knowledge_log.DEFAULT_DB_PATH.
+    db = Path(db_path) if db_path else _resolve_db_path(None)
+
+    # Pre-scan the destination ONCE and index existing soak-fold rows by
+    # content identity. Only audit_version='soak-ab' rows are indexed:
+    # they're the only rows this fold can collide with, and their
+    # audit_manifest/sim_report carry exactly the fields _soak_identity
+    # reads. Personal-project scale (thousands of rows, not millions)
+    # makes one in-memory set far simpler than per-row SQL lookups, and
+    # it lets rows inserted BY THIS fold participate in dedupe too.
+    seen: set[str] = set()
+    for it in all_iterations(db_path=db):
+        if it.audit_version != "soak-ab":
+            continue
+        m = it.audit_manifest or {}
+        s = it.sim_report or {}
+        seen.add(_soak_identity(
+            deck_a=m.get("deck_a"), deck_b=m.get("deck_b"),
+            ts=m.get("ts"), host=m.get("host"),
+            # `or 0` mirrors the write-side normalization below, so a
+            # None-vs-0 representation difference can't defeat the match.
+            games=s.get("games") or 0,
+            wins_a=s.get("wins_a") or 0, wins_b=s.get("wins_b") or 0,
+        ))
+
+    written = 0
+    skipped_duplicate = 0
+    skipped_gauntlet = 0
     for r in rows:
         if r.get("status") != "done":
+            continue
+        if _is_gauntlet_row(r):
+            skipped_gauntlet += 1
             continue
         wa = r.get("wins_a") or 0
         wb = r.get("wins_b") or 0
         g = r.get("games") or 0
+        # Normalize deck_b BEFORE hashing: the identity must match what
+        # the manifest stores (the DB-side pre-scan reads the manifest,
+        # which holds the normalized value).
+        deck_b = r.get("deck_b") or "?.dck"
+        identity = _soak_identity(
+            deck_a=r.get("deck_a"), deck_b=deck_b, ts=r.get("ts"),
+            host=r.get("host"), games=g, wins_a=wa, wins_b=wb,
+        )
+        if identity in seen:
+            skipped_duplicate += 1
+            continue
         # Win-rate convention (2026-07-19, knowledge_log schema docstring):
         # wins / DECISIVE games. For AB-shaped soak rows the attributed-
         # winner count is wa + wb (games includes filler-won / unresolved-
@@ -117,7 +236,6 @@ def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> int:
         delta = wb - wa
         verdict = ("kept" if delta >= margin
                    else "reverted" if delta <= -margin else "neutral")
-        deck_b = r.get("deck_b") or "?.dck"
         it = Iteration(
             deck_id=Path(deck_b).stem,
             deck_name=Path(deck_b).stem,
@@ -125,6 +243,11 @@ def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> int:
             audit_version="soak-ab",
             audit_manifest={"deck_a": r.get("deck_a"), "deck_b": deck_b,
                             "source": r.get("source"), "host": r.get("host"),
+                            # ts anchors content identity for refold
+                            # dedupe (see _soak_identity) AND is useful
+                            # provenance: when the sim actually ran, not
+                            # just when it was folded.
+                            "ts": r.get("ts"),
                             "games": g},
             sim_report={"wins_a": wa, "wins_b": wb, "games": g},
             verdict=verdict,
@@ -133,8 +256,14 @@ def fold_to_knowledge_log(rows: list[dict], db_path, margin: int) -> int:
             margin=delta,
         )
         record_iteration(it, db_path=db)
-        n += 1
-    return n
+        # Register the fresh row immediately so a duplicate later in this
+        # same batch (same row arriving through two differently-labeled
+        # input files — load_tagged's byte-dedupe misses those because
+        # the `source` tag differs) also collapses to one insert.
+        seen.add(identity)
+        written += 1
+    return {"written": written, "skipped_duplicate": skipped_duplicate,
+            "skipped_gauntlet": skipped_gauntlet}
 
 
 def main(argv=None) -> int:
@@ -156,9 +285,17 @@ def main(argv=None) -> int:
     print(f"combined -> {args.out}\n")
     report(rows)
     if args.to_knowledge_log:
-        n = fold_to_knowledge_log(rows, args.db_path, args.margin)
-        print(f"\nwrote {n} iterations to knowledge_log "
-              f"(audit_version='soak-ab'; source/host in manifest)")
+        res = fold_to_knowledge_log(rows, args.db_path, args.margin)
+        print(f"\nwrote {res['written']} iterations to knowledge_log "
+              f"(audit_version='soak-ab'; source/host/ts in manifest)")
+        # Always print the dedupe count (even 0) so a re-run visibly
+        # reports itself as a no-op instead of looking like it did work.
+        print(f"skipped {res['skipped_duplicate']} already-folded rows "
+              f"(content-identity dedupe; re-running the same merge is a no-op)")
+        if res["skipped_gauntlet"]:
+            print(f"skipped {res['skipped_gauntlet']} gauntlet-mode rows: "
+                  f"separate schema (test deck vs fixed gauntlet, wins/losses"
+                  f") — not foldable into the AB iteration shape")
     return 0
 
 

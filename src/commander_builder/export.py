@@ -27,7 +27,6 @@ CLI:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -41,6 +40,7 @@ from .knowledge_log import (
     Iteration,
     _resolve_db_path,
     all_iterations,
+    canonical_content_hash,
     iterations_for_deck,
     recent_iterations,
     stats_summary,
@@ -133,11 +133,15 @@ def _content_hash(row: dict) -> str:
     """Canonical hash of a row's semantic columns (everything except the
     machine-local id/parent_id). Used to distinguish "byte-for-byte the
     same iteration" from "same iteration, but verdict/sim/milestone fields
-    have since diverged". json.dumps with sort_keys canonicalizes nested
-    dicts (audit_manifest, sim_report) so key order can't break equality."""
-    semantic = {k: v for k, v in row.items() if k not in _LOCAL_ONLY_COLUMNS}
-    blob = json.dumps(semantic, sort_keys=True, default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    have since diverged".
+
+    The canonicalization itself (sort_keys so nested audit_manifest /
+    sim_report dicts can't break equality on key order) lives in
+    ``knowledge_log.canonical_content_hash`` — promoted there 2026-07-19
+    so ``scripts/merge_soak.py``'s fold dedupe shares the identical hash
+    instead of copy-pasting it. This wrapper just binds export/import's
+    identity choice: everything semantic, minus the machine-local ids."""
+    return canonical_content_hash(row, _LOCAL_ONLY_COLUMNS)
 
 
 def import_knowledge_log(
