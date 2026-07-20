@@ -389,26 +389,50 @@ def to_dck(deck_json: dict) -> str:
 _MOXFIELD_META = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
 
 
-def _existing_moxfield_ids(out_dir: Path, bracket: int) -> set[str]:
-    """Scan on-disk decks at this bracket and return their stored Moxfield
-    publicIds. Decks imported before the publicId-in-metadata patch land are
-    invisible to this scan — caller still gets best-effort dedupe via the
-    skip-if-destination-exists check inside `_write_deck`.
+def _existing_moxfield_ids(
+    out_dir: Path, bracket: Optional[int] = None,
+) -> dict[str, Path]:
+    """Scan on-disk decks and map each stored Moxfield publicId → its path.
+
+    ONE directory scan builds the whole map — every writer's same-id lookup
+    goes through this so a bulk run never rescans the deck dir per candidate.
+    Returning the PATH (not just the id) is what lets the same-id overwrite
+    semantics reach decks living under a UNIQUIFIED name: `Foo (2) [B3].dck`
+    still records its own `Moxfield=` id, and the map hands the caller that
+    exact file to overwrite/skip. Checking only the base destination path —
+    the pre-fix behavior — saw the OTHER colliding deck there and minted a
+    fresh `(3)` duplicate on every re-pull.
+
+    `bracket=None` scans the whole dir (the writers need same-id-anywhere);
+    a bracket restricts to that suffix (harvest's per-bracket `seen` seed).
+    Decks imported before the publicId-in-metadata patch are invisible to
+    this scan — callers still get best-effort dedupe via the "unknown"
+    verdict path on the base destination.
+
+    Two files claiming the SAME id (user copied a .dck by hand) would make
+    "the" same-id destination ambiguous: iterate in sorted() order so the
+    first name deterministically wins, and warn loudly so the user knows
+    which copy future re-imports will target. Never crash — a stray manual
+    copy must not break the import pipeline.
 
     Note: globbing `*[B<n>].dck` doesn't work — pathlib treats the brackets as
     a character class. Glob `*.dck` and filter by suffix instead."""
-    suffix = f" [B{bracket}].dck"
-    out: set[str] = set()
-    for path in out_dir.glob("*.dck"):
-        if not path.name.endswith(suffix):
+    suffix = f" [B{bracket}].dck" if bracket is not None else None
+    out: dict[str, Path] = {}
+    for path in sorted(out_dir.glob("*.dck")):
+        if suffix is not None and not path.name.endswith(suffix):
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
+        pid = _read_moxfield_id(path)
+        if pid is None:
             continue
-        m = _MOXFIELD_META.search(text)
-        if m:
-            out.add(m.group(1).strip())
+        if pid in out:
+            print(
+                f"  WARN: {path.name} and {out[pid].name} both record "
+                f"Moxfield={pid}; treating {out[pid].name} (first sorted) as "
+                f"the canonical copy. Delete or re-id the stray duplicate.",
+            )
+            continue
+        out[pid] = path
     return out
 
 
@@ -516,6 +540,13 @@ def _classify_destination(dest: Path, public_id: str) -> str:
       "unknown"   — can't tell: dest predates Moxfield= metadata, or the
                     incoming deck has no publicId. Callers keep their old
                     conservative exists() behavior for this case.
+
+    Scope: this inspects ONE candidate path. It cannot see a same-id deck
+    living under a DIFFERENT filename (a uniquified `Foo (2) [B3].dck`
+    sibling), so every writer first resolves same-id-anywhere via
+    `_existing_moxfield_ids(out_dir)` and only consults this verdict when
+    no file in the dir records the incoming id — leaving "same" as a
+    defensive dead branch in the callers.
     """
     if not dest.exists():
         return "free"
@@ -597,29 +628,50 @@ def import_deck(
 
     bracket = resolve_bracket(deck_json)
     dck = to_dck(deck_json)
+    public_id = deck_json.get("publicId", "")
     out_path = deck_destination(deck_json.get("name", deck_id), bracket, out_dir, is_user)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    verdict = _classify_destination(out_path, deck_json.get("publicId", ""))
-    if verdict == "same":
+    # Same-id lookup over the WHOLE deck dir, not just the base destination.
+    # A deck that lost an earlier name collision lives under a uniquified
+    # name (`Foo (2) [B3].dck`); classifying only the base path saw the
+    # OTHER deck there, called it "collision", and minted a fresh `(3)`
+    # duplicate on every re-pull — the documented same-id overwrite (and the
+    # Protect=/DisplayName= merge below) never applied to that deck. One
+    # directory scan per import call.
+    same_path = _existing_moxfield_ids(out_dir).get(public_id) if public_id else None
+    if same_path is not None:
         # Documented re-pull semantics (README audit-cycle step 4,
         # snapshot_deck docstring): re-importing the SAME Moxfield deck
         # overwrites the local file in place. Uniquifying here — the old
         # behavior — broke the audit A/B twice over: the v2 snapshot copied
         # the untouched v1 file (deck compared against itself), and the
         # "(2)" name fell outside the `[B<n>].dck` suffix the bracket
-        # filters key on. Carry over local-only metadata (Protect=,
-        # user-edited DisplayName=) that a plain re-render would drop.
+        # filters key on. The file KEEPS its existing name — including a
+        # uniquify counter or a different [USER]/bracket wrapping — because
+        # the recorded id, not the filename, is the deck's identity, and
+        # renaming would orphan every name-keyed history row. Carry over
+        # local-only metadata (Protect=, user-edited DisplayName=) that a
+        # plain re-render would drop.
+        out_path = same_path
         dck = _merge_local_metadata(out_path.read_text(encoding="utf-8"), dck)
-    elif verdict in ("collision", "unknown"):
-        # A DIFFERENT deck (or one we can't identify) owns this filename —
-        # never clobber it; write under a uniquified name.
-        out_path = _uniquify(out_path)
-    # Stamp Name= from the FINAL filename stem (after any _uniquify), so
-    # every name-keyed consumer (Forge's picker, compare_versions,
-    # pool_curator) agrees with the file on disk even when safe_filename
-    # mangled the pretty Moxfield name. The pretty name survives as
-    # DisplayName= for the status CLI. Must run AFTER _merge_local_metadata
-    # so a re-import stamps the merged text, not a soon-discarded render.
+    else:
+        # No file anywhere records this id. "same" can't come back here —
+        # a base-path file recording this id would have been in the map —
+        # so the only occupied-destination verdicts left are:
+        verdict = _classify_destination(out_path, public_id)
+        if verdict in ("collision", "unknown"):
+            # A DIFFERENT deck (or one we can't identify) owns this
+            # filename — never clobber it; write under a uniquified name.
+            out_path = _uniquify(out_path)
+    # Stamp Name= from the FINAL filename stem — after any _uniquify, and
+    # for a same-id overwrite the kept file's OWN stem (counter included:
+    # a re-pull landing in `Foo (2) [B3].dck` stamps `Name=Foo (2) [B3]`,
+    # never the base stem) — so every name-keyed consumer (Forge's picker,
+    # compare_versions, pool_curator) agrees with the file on disk even
+    # when safe_filename mangled the pretty Moxfield name. The pretty name
+    # survives as DisplayName= for the status CLI. Must run AFTER
+    # _merge_local_metadata so a re-import stamps the merged text, not a
+    # soon-discarded render.
     dck = stamp_name_preserving_display(dck, out_path.stem)
     out_path.write_text(dck, encoding="utf-8")
 
@@ -661,6 +713,11 @@ def import_by_bracket(
     written: list[Path] = []
     if seen is None:
         seen = set()
+    # Whole-dir Moxfield-id → path map, built ONCE per call. _write_deck
+    # dedupes each candidate against it (same id anywhere — uniquified
+    # siblings included — means "already harvested") and refreshes it after
+    # each write, so the bulk loop never rescans the deck dir per candidate.
+    id_map = _existing_moxfield_ids(out_dir)
     page = 1
     while len(written) < count and page <= max_pages:
         try:
@@ -706,7 +763,7 @@ def import_by_bracket(
                 # Skip near-bracket result; don't pollute the requested bucket.
                 continue
             try:
-                path = _write_deck(deck_json, actual, out_dir)
+                path = _write_deck(deck_json, actual, out_dir, id_map=id_map)
                 if path is not None:
                     written.append(path)
             except Exception as exc:
@@ -743,7 +800,12 @@ def harvest_bracket(
     backfilled from the next category. This keeps duplicate fetches minimal.
     """
     print(f"\n=== Harvesting B{bracket}: {sum(c for _, c, _ in recipe)}-deck mix ===")
-    seen: set[str] = _existing_moxfield_ids(out_dir, bracket)
+    # Keys only — harvest's `seen` is a plain id set (it also accumulates
+    # ids seen in search results, which have no path yet). Per-bracket on
+    # purpose: this seed only pre-skips FETCHES for decks already harvested
+    # at THIS bracket; cross-bracket same-id dedupe still happens inside
+    # _write_deck via its whole-dir id map.
+    seen: set[str] = set(_existing_moxfield_ids(out_dir, bracket))
     if seen:
         print(f"  ({len(seen)} already on disk with Moxfield metadata, skipping those)")
     all_written: list[Path] = []
@@ -759,26 +821,51 @@ def harvest_bracket(
     return all_written
 
 
-def _write_deck(deck_json: dict, bracket: int, out_dir: Path) -> Optional[Path]:
+def _write_deck(
+    deck_json: dict,
+    bracket: int,
+    out_dir: Path,
+    id_map: Optional[dict[str, Path]] = None,
+) -> Optional[Path]:
     """Write a fetched deck JSON to disk and report counts.
 
     Returns None when the deck is already on disk (same recorded Moxfield
-    publicId, or an unidentifiable pre-metadata file under the same name —
-    correct harvest dedupe either way). Returns the new path otherwise.
-    `_uniquify` only fires on genuine name collisions: a DIFFERENT publicId
-    under the same sanitized filename. The old exists()-before-_uniquify
-    check silently dropped those distinct decks as "already on disk"."""
+    publicId — under ANY filename, uniquified siblings included — or an
+    unidentifiable pre-metadata file under the same name; correct harvest
+    dedupe either way). Returns the new path otherwise. `_uniquify` only
+    fires on genuine name collisions: a DIFFERENT publicId under the same
+    sanitized filename. The old exists()-before-_uniquify check silently
+    dropped those distinct decks as "already on disk" — and the follow-up
+    base-path-only same-id check still re-imported a deck whose earlier copy
+    had lost a name collision and lived under `Foo (2) [B3].dck`.
+
+    ``id_map`` is the whole-dir Moxfield-id → path map from
+    `_existing_moxfield_ids(out_dir)`. Bulk loops (import_by_bracket) build
+    it ONCE and pass it in — this function refreshes it in place after each
+    write so later candidates dedupe without a per-candidate directory
+    rescan. Standalone callers may omit it; we scan ourselves."""
     fmt = (deck_json.get("format") or "").lower()
     if fmt and fmt != "commander":
         print(f"  WARN: deck format is '{fmt}', not 'commander'. Importing anyway.")
     dck = to_dck(deck_json)
+    public_id = deck_json.get("publicId", "")
     out_path = deck_destination(deck_json.get("name", "deck"), bracket, out_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    verdict = _classify_destination(out_path, deck_json.get("publicId", ""))
-    if verdict == "same":
-        # Same Moxfield deck already harvested — skip is the correct dedupe
-        # for the bulk pool (unlike import_deck's user re-pull, nothing here
+    if id_map is None:
+        id_map = _existing_moxfield_ids(out_dir)
+    same_path = id_map.get(public_id) if public_id else None
+    if same_path is not None:
+        # Same Moxfield deck already harvested — wherever it lives, base
+        # name or uniquified sibling. Skip is the correct dedupe for the
+        # bulk pool (unlike import_deck's user re-pull, nothing here
         # implies "give me the fresh version").
+        print(f"  SKIP {same_path.name} (same Moxfield deck already on disk)")
+        return None
+    verdict = _classify_destination(out_path, public_id)
+    if verdict == "same":
+        # Unreachable when id_map covers the dir (a base-path file recording
+        # this id is in the map) — kept as a cheap guard against a stale
+        # caller-supplied map, where skipping is the only safe answer.
         print(f"  SKIP {out_path.name} (same Moxfield deck already on disk)")
         return None
     if verdict == "unknown":
@@ -796,6 +883,11 @@ def _write_deck(deck_json: dict, bracket: int, out_dir: Path) -> Optional[Path]:
     # the stem Forge reports.)
     dck = stamp_name_preserving_display(dck, out_path.stem)
     out_path.write_text(dck, encoding="utf-8")
+    if public_id:
+        # Refresh the shared map in place so later candidates in the same
+        # bulk run see this write — without it, a deck appearing twice in
+        # one harvest (paging glitch) would import twice.
+        id_map[public_id] = out_path
     boards = deck_json.get("boards", {})
     cmdr_count = sum(c.get("quantity", 0) for c in boards.get("commanders", {}).get("cards", {}).values())
     main_count = sum(c.get("quantity", 0) for c in boards.get("mainboard", {}).get("cards", {}).values())
@@ -946,6 +1038,13 @@ def bulk_import(
 
     valid_urls = [u.strip() for u in urls if u and u.strip()]
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Whole-dir Moxfield-id → path map, built ONCE per bulk run and
+    # refreshed after each write. The same-id duplicate check consults this
+    # instead of classifying only the base destination path, so a deck whose
+    # earlier import lost a name collision (lives as `Foo (2) [B3].dck`)
+    # still dedupes — the old base-path check saw the OTHER deck there and
+    # wrote a fresh numbered copy on every re-paste.
+    id_map = _existing_moxfield_ids(out_dir)
 
     for idx, url in enumerate(valid_urls):
         try:
@@ -965,16 +1064,32 @@ def bulk_import(
                 time.sleep(sleep_sec)
 
             bracket = resolve_bracket(deck_json)
+            public_id = deck_json.get("publicId", "")
             dest = deck_destination(
                 deck_json.get("name", deck_id),
                 bracket, out_dir, is_user=is_user,
             )
-            verdict = _classify_destination(dest, deck_json.get("publicId", ""))
+            # Same-id-anywhere first: this exact Moxfield deck is already
+            # on disk (base name OR uniquified sibling) — re-pasting a URL
+            # is a no-op, per the module contract. `existing_path` points
+            # at the ACTUAL file, not the base-path guess.
+            same_path = id_map.get(public_id) if public_id else None
+            if same_path is not None:
+                result.duplicates.append({
+                    "url": url,
+                    "deck_id": deck_id,
+                    "existing_path": str(same_path),
+                    "reason": "same Moxfield deck already on disk",
+                })
+                seen_in_batch.add(deck_id)
+                continue
+            verdict = _classify_destination(dest, public_id)
             if verdict in ("same", "unknown"):
-                # "same": this exact Moxfield deck is already on disk —
-                # re-pasting a URL is a no-op, per the module contract.
                 # "unknown": a pre-Moxfield=-metadata file owns the name;
                 # can't verify identity, so keep the old conservative skip.
+                # ("same" is unreachable now — a base-path file recording
+                # this id sits in id_map — but skipping stays the only safe
+                # answer if the map were ever stale.)
                 result.duplicates.append({
                     "url": url,
                     "deck_id": deck_id,
@@ -998,6 +1113,11 @@ def bulk_import(
             dck = stamp_name_preserving_display(to_dck(deck_json), dest.stem)
             dest.write_text(dck, encoding="utf-8")
             seen_in_batch.add(deck_id)
+            if public_id:
+                # Refresh so a later URL resolving to the same publicId
+                # (different URL spelling of one deck) dedupes against
+                # this write without a rescan.
+                id_map[public_id] = dest
             result.successes.append({
                 "url": url,
                 "deck_id": deck_id,

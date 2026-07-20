@@ -571,10 +571,12 @@ def test_import_different_deck_with_colliding_name_uniquifies(tmp_path, monkeypa
     assert p2.name == "[USER] My Deck (2) [B3].dck"
     assert p1.read_text(encoding="utf-8") != p2.read_text(encoding="utf-8")
 
-    # Both decks visible to the real bracket-suffix consumers.
+    # Both decks visible to the real bracket-suffix consumers. (The id map
+    # returns id → path since the same-id-anywhere fix; both files carry
+    # their own id.)
     counts = _count_decks(tmp_path)
     assert counts[3]["user"] == 2
-    assert mi._existing_moxfield_ids(tmp_path, 3) == {"pid-1", "pid-2"}
+    assert mi._existing_moxfield_ids(tmp_path, 3) == {"pid-1": p1, "pid-2": p2}
 
 
 def test_uniquify_inserts_counter_before_bracket_tag(tmp_path):
@@ -619,6 +621,142 @@ def test_write_deck_still_skips_pre_metadata_files(tmp_path):
     assert _write_deck(_deck_json(pid="pid-1"), 3, tmp_path) is None
     assert "Sol Ring" in legacy.read_text(encoding="utf-8")
     assert sorted(p.name for p in tmp_path.glob("*.dck")) == ["My Deck [B3].dck"]
+
+
+# --- same-id matching must reach UNIQUIFIED siblings, not just the base ----
+# Regression tests for the follow-up to the 6ccf3f0 fix: _classify_destination
+# only inspected the BASE destination path. A deck that lost an earlier name
+# collision lives under `Foo (2) [B3].dck`; re-importing it classified the
+# base path (occupied by the OTHER deck) as "collision" and minted a fresh
+# `(3)` copy on every re-pull — the documented same-id overwrite (and the
+# Protect=/DisplayName= merge) never applied to that deck. Writers now
+# resolve same-id-anywhere via the _existing_moxfield_ids id → path map.
+
+def test_reimport_after_collision_overwrites_uniquified_sibling(
+    tmp_path, monkeypatch,
+):
+    """(a) Collision-import lands as '(2)'; re-importing that same id must
+    overwrite the '(2)' file IN PLACE — no '(3)' copy — with Protect= and
+    the user-edited DisplayName= preserved, and Name= re-stamped from the
+    '(2)' file's OWN stem (the file keeps its uniquified name)."""
+    import re as _re
+    from commander_builder import moxfield_import as mi
+    from commander_builder.web._helpers import read_protected_cards
+
+    decks = {
+        "pid-1": _deck_json(pid="pid-1"),
+        "pid-2": _deck_json(pid="pid-2", main_card="Counterspell"),
+    }
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    p2 = mi.import_deck("pid-2", out_dir=tmp_path, is_user=True)
+    assert p2.name == "[USER] My Deck (2) [B3].dck"
+
+    # User adds a pet-card lock and hand-edits the display name on the
+    # uniquified deck — exactly the local metadata the merge must carry.
+    text = p2.read_text(encoding="utf-8")
+    text = text.replace("Moxfield=pid-2",
+                        "Moxfield=pid-2\nProtect=Counterspell")
+    text = _re.sub(r"^DisplayName=.*$", "DisplayName=Pet Deck", text,
+                   flags=_re.MULTILINE)
+    assert "DisplayName=Pet Deck" in text  # the stamp had written one
+    p2.write_text(text, encoding="utf-8")
+    p1_before = p1.read_text(encoding="utf-8")
+
+    # Deck changed upstream; re-pull the SAME id.
+    decks["pid-2"] = _deck_json(pid="pid-2", main_card="Brainstorm")
+    p3 = mi.import_deck("pid-2", out_dir=tmp_path, is_user=True)
+
+    # Overwrote the (2) file in place — NO (3) duplicate appeared.
+    assert p3 == p2
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == sorted(
+        [p1.name, p2.name])
+    merged = p2.read_text(encoding="utf-8")
+    assert "Brainstorm" in merged            # fresh content landed
+    assert read_protected_cards(merged) == ["Counterspell"]  # lock survived
+    # The LOCAL DisplayName edit won, exactly once.
+    assert (_re.findall(r"^DisplayName=(.*)$", merged, _re.MULTILINE)
+            == ["Pet Deck"])
+    # Name= normalizes to the (2) stem — the file keeps its uniquified name
+    # and every name-keyed consumer agrees with it.
+    assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p2.stem
+    # The colliding neighbor was never touched.
+    assert p1.read_text(encoding="utf-8") == p1_before
+
+
+def test_write_deck_dedupes_same_id_under_uniquified_name(tmp_path):
+    """(b) Harvest path: a deck whose earlier copy lives under a uniquified
+    name is STILL 'already on disk' — dedupe-skip, not a new numbered copy
+    (harvest semantics stay skip, unlike import_deck's overwrite)."""
+    from commander_builder.moxfield_import import _write_deck
+
+    first = _write_deck(_deck_json(pid="pid-1"), 3, tmp_path)
+    other = _write_deck(
+        _deck_json(pid="pid-2", main_card="Counterspell"), 3, tmp_path)
+    assert other is not None and other.name == "My Deck (2) [B3].dck"
+
+    # Re-harvest pid-2: its file is the (2) sibling, not the base path.
+    before = other.read_text(encoding="utf-8")
+    assert _write_deck(
+        _deck_json(pid="pid-2", main_card="Brainstorm"), 3, tmp_path) is None
+    assert other.read_text(encoding="utf-8") == before  # untouched
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == [
+        "My Deck (2) [B3].dck", "My Deck [B3].dck"]
+
+
+def test_existing_moxfield_ids_duplicate_id_first_sorted_wins_with_warning(
+    tmp_path, capsys,
+):
+    """(c) Two files claiming the SAME Moxfield id (user copied a .dck by
+    hand): the map must pick the first in sorted() order deterministically,
+    warn loudly, and never crash."""
+    from commander_builder import moxfield_import as mi
+
+    a = tmp_path / "Alpha Copy [B3].dck"
+    b = tmp_path / "Beta Copy [B3].dck"
+    for p in (a, b):
+        p.write_text(
+            "[metadata]\nName=%s\nMoxfield=pid-x\n[Main]\n1 Sol Ring\n"
+            % p.stem,
+            encoding="utf-8",
+        )
+
+    id_map = mi._existing_moxfield_ids(tmp_path)
+    assert id_map == {"pid-x": a}  # 'Alpha...' sorts first — deterministic
+    out = capsys.readouterr().out
+    assert "WARN" in out and "pid-x" in out
+    assert a.name in out and b.name in out
+
+
+def test_reimport_with_ambiguous_duplicate_ids_is_deterministic(
+    tmp_path, monkeypatch, capsys,
+):
+    """(c) import_deck over an ambiguous id: overwrite the sorted-first
+    claimant, leave the stray copy alone, warn, and mint NO new file."""
+    from commander_builder import moxfield_import as mi
+
+    a = tmp_path / "Copy A [B3].dck"
+    b = tmp_path / "Copy B [B3].dck"
+    for p in (a, b):
+        p.write_text(
+            "[metadata]\nName=%s\nMoxfield=pid-1\n[Main]\n1 Sol Ring\n"
+            % p.stem,
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        mi, "fetch_deck",
+        lambda pid: _deck_json(pid=pid, main_card="Arcane Signet"))
+
+    out_path = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    assert out_path == a  # sorted-first claimant chosen
+    assert "Arcane Signet" in a.read_text(encoding="utf-8")
+    assert "Sol Ring" in b.read_text(encoding="utf-8")  # stray untouched
+    assert "WARN" in capsys.readouterr().out
+    # No third file: the base destination '[USER] My Deck [B3].dck' was
+    # never created.
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == [a.name, b.name]
 
 
 # --- Name=-from-final-filename-stem stamping -------------------------------

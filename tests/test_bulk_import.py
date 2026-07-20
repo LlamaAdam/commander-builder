@@ -273,6 +273,51 @@ def test_bulk_import_different_deck_name_collision_uniquified(
     ]
 
 
+def test_bulk_import_same_id_under_uniquified_name_is_duplicate(
+    tmp_path, monkeypatch,
+):
+    """Same-id matching must reach UNIQUIFIED siblings: a deck whose earlier
+    import lost a name collision lives as '(2)'. Re-pasting its URL must
+    dedupe against THAT file (the old base-path-only check saw the OTHER
+    deck at the base name, called it a collision, and minted a fresh '(3)'
+    copy on every re-paste)."""
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda deck_id: _stub_deck_json("MyDeck", deck_id),
+    )
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.time.sleep", lambda s: None,
+    )
+
+    r1 = bulk_import(
+        ["https://moxfield.com/decks/id-one",
+         "https://moxfield.com/decks/id-two"],
+        out_dir=tmp_path, is_user=True,
+    )
+    assert r1.success_count == 2
+    uniquified = tmp_path / "[USER] MyDeck (2) [B3].dck"
+    assert uniquified.exists()
+    before = uniquified.read_text(encoding="utf-8")
+
+    # Re-paste ONLY the collision-loser's URL.
+    r2 = bulk_import(
+        ["https://moxfield.com/decks/id-two"],
+        out_dir=tmp_path, is_user=True,
+    )
+    assert r2.success_count == 0
+    assert r2.duplicate_count == 1
+    dup = r2.duplicates[0]
+    assert dup["reason"] == "same Moxfield deck already on disk"
+    # existing_path points at the ACTUAL (2) file, not the base-path guess.
+    assert dup["existing_path"] == str(uniquified)
+    # File untouched (bulk semantics = dedupe-skip), and NO (3) copy.
+    assert uniquified.read_text(encoding="utf-8") == before
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == [
+        "[USER] MyDeck (2) [B3].dck",
+        "[USER] MyDeck [B3].dck",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------

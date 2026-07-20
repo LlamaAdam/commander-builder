@@ -206,7 +206,8 @@ def test_backup_filename_invisible_to_deck_listing_filters(tmp_path):
     # (its content DOES contain `Moxfield=stable-id`).
     target.unlink()
     assert _count_decks(tmp_path) == {}
-    assert _existing_moxfield_ids(tmp_path, 3) == set()
+    # (id → path dict since the same-id-anywhere fix; empty either way.)
+    assert _existing_moxfield_ids(tmp_path, 3) == {}
 
 
 def test_identical_content_revert_skips_backup(tmp_path):
