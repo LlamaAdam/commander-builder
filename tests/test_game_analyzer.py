@@ -375,6 +375,70 @@ def test_turn_cap_draw_all_seats_lost_lines_stays_a_true_draw():
     assert g.resolved_is_draw is True
 
 
+def test_cap_stop_survivors_are_not_marked_lost_real_log_shape():
+    """Verified against real cap-stopped games (2026-07-20, see the
+    evidence comment in game_analyzer._summarize_game): when Forge stops a
+    slow match, SURVIVING seats get the (ignored, known-buggy) 'has won
+    because all opponents have lost' line — never a 'has lost' line. Only
+    genuinely-eliminated seats carry 'has lost because life total reached
+    0'. Shape mirrors vendor/forge10/userdata/forge.log (seats 1+2 dead,
+    3+4 alive at the cap), with the Game Result winner clause dropped to
+    exercise the draw-resolution path. Survivors must stay un-eliminated
+    so the life leader among them is crowned — the feared all-seats-lost
+    degradation to a plain draw must not happen."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 0\n"
+        "Life: Life: Ai(2)-B 40 > 0\n"
+        "Life: Life: Ai(3)-C 40 > 25\n"
+        "Life: Life: Ai(4)-D 40 > 12\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 21\n"
+        "Game Outcome: Ai(1)-A has lost because life total reached 0\n"
+        "Game Outcome: Ai(2)-B has lost because life total reached 0\n"
+        "Game Outcome: Ai(3)-C has won because all opponents have lost\n"
+        "Game Outcome: Ai(4)-D has won because all opponents have lost\n"
+        "Game Result: Game 1 ended in 120175 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    dead = [d for d in g.deck_stats if d.eliminated]
+    # ONLY the two genuine eliminations — the cap did not mark survivors.
+    assert sorted(d.seat for d in dead) == [1, 2]
+    # Draw resolution stays intact: the living life leader (seat 3 @ 25)
+    # is crowned instead of the game silently degrading to a plain draw.
+    assert g.resolved_winner_seat == 3
+    assert g.resolved_winner_name == "C"
+    assert g.resolved_is_draw is False
+
+
+def test_cap_stop_with_zero_lost_lines_keeps_all_seats_alive():
+    """The other real cap-stop shape (vendor/forge2/userdata/forge0.log):
+    the match hits the cap with ALL FOUR seats alive — the outcome block
+    contains ZERO 'has lost' lines, all four read 'has won because all
+    opponents have lost'. Every seat must stay un-eliminated and the
+    unique life leader resolves the draw."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 31\n"
+        "Life: Life: Ai(2)-B 40 > 17\n"
+        "Life: Life: Ai(3)-C 40 > 8\n"
+        "Life: Life: Ai(4)-D 40 > 22\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 20\n"
+        "Game Outcome: Ai(1)-A has won because all opponents have lost\n"
+        "Game Outcome: Ai(2)-B has won because all opponents have lost\n"
+        "Game Outcome: Ai(3)-C has won because all opponents have lost\n"
+        "Game Outcome: Ai(4)-D has won because all opponents have lost\n"
+        "Game Result: Game 1 ended in 120112 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    assert all(not d.eliminated for d in g.deck_stats)
+    assert g.resolved_winner_seat == 1   # 31 life, strict maximum
+    assert g.resolved_winner_name == "A"
+
+
 def test_truncated_log_fallback_crowns_sole_survivor_not_life_leader():
     """No 'has won!' clause on Game Result and no draw marker (truncated
     log): the fallback may only crown the SOLE seat with no elimination

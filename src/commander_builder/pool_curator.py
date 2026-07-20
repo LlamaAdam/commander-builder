@@ -687,14 +687,30 @@ def _filename_for_match(normalized_match_name: str, candidate_filenames: list[st
 
 
 def _list_bracket_candidates(bracket: int, deck_dir: Path = DECK_DIR) -> list[str]:
-    """Return all non-[USER] .dck filenames at this bracket, alphabetized.
+    """Return all pool-candidate .dck filenames at this bracket, alphabetized.
+
+    Excluded prefixes:
+      [USER]    — the user's own decks are never pool candidates.
+      [CONTROL] — calibration_check leaves "[CONTROL] do-nothing calibN
+                  [B<n>].dck" files in the same deck dir. They carry the
+                  bracket suffix, so the glob would happily seat them as
+                  candidates — burning smoke games on decks DESIGNED to do
+                  nothing (and, worse, letting a do-nothing deck occupy one
+                  of the limited --max-candidates slots). Mirrors
+                  _proposer_sim's filler exclusion ("never use a calibration
+                  deck as filler").
+    [REF] decks (meta_test's imported community references) are deliberately
+    KEPT: they are real, playable community builds at the bracket — exactly
+    the population the curator exists to rank.
 
     Note: globbing `*[B<n>].dck` doesn't work — pathlib treats the brackets
     as a character class. We glob `*.dck` and filter by suffix instead."""
     suffix = f" [B{bracket}].dck"
     return sorted(
         f.name for f in deck_dir.glob("*.dck")
-        if f.name.endswith(suffix) and not f.name.startswith("[USER]")
+        if f.name.endswith(suffix)
+        and not f.name.startswith("[USER]")
+        and not f.name.startswith("[CONTROL]")
     )
 
 

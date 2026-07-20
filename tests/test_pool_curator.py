@@ -505,6 +505,31 @@ def test_under_four_survivors_raises_clean_error_and_persists(tmp_path, monkeypa
     assert len(err.rejected) == 6
 
 
+def test_list_bracket_candidates_excludes_control_and_user_keeps_ref(tmp_path):
+    """calibration_check leaves '[CONTROL] do-nothing calibN [Bn].dck' files
+    in the shared deck dir; they carry the bracket suffix so the old glob
+    seated them as candidates — wasting smoke games on decks designed to do
+    nothing. [USER] decks stay excluded as before; [REF] decks (meta_test's
+    imported community references) are real playable builds and stay IN."""
+    import commander_builder.pool_curator as pc
+
+    for name in [
+        "Alpha Deck [B3].dck",
+        "[CONTROL] do-nothing calib1 [B3].dck",
+        "[CONTROL] do-nothing calib2 [B3].dck",
+        "[USER] Mine [B3].dck",
+        "[REF] mox Community Build [B3].dck",
+        "Wrong Bracket [B4].dck",
+    ]:
+        (tmp_path / name).write_text("[Main]\n1 Forest\n", encoding="utf-8")
+
+    got = pc._list_bracket_candidates(3, deck_dir=tmp_path)
+    assert got == [
+        "Alpha Deck [B3].dck",
+        "[REF] mox Community Build [B3].dck",
+    ]
+
+
 def test_main_returns_distinct_exit_code_on_insufficient_survivors(monkeypatch):
     """CLI convention: 0 = success, 2 = not enough decks on disk,
     3 = preflight rejected the pool. No traceback."""

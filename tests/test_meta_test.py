@@ -567,6 +567,71 @@ def test_run_meta_test_alternates_seat_parity_across_references(
     assert all(c["old_deck"] == user.name for c in captured)
 
 
+def test_run_meta_test_quiets_per_call_note_and_prints_one_aggregate(
+    tmp_path, monkeypatch, capsys,
+):
+    """Round 3: with filler_pairs=1 every per-reference compare() is a
+    single (odd) pod, so compare()'s odd-pod residual note would print once
+    per reference — N copies of a warning about a residual that is
+    deliberate and cancels across the batch. run_meta_test must (a) pass
+    suppress_seat_note=True to every compare() call and (b) print exactly
+    ONE aggregate seat-balance line built from the reports'
+    h2h_seat_balance fields."""
+    from commander_builder import meta_test as mt
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir(parents=True)
+    user = deck_dir / "[USER] Mine [B3].dck"
+    user.write_text(
+        "[metadata]\nName=Mine\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+    refs = [
+        mt.ReferenceDeck(
+            source="manual", moxfield_id=None, name=f"Ref{i}", bracket=3,
+            deck_filename=f"[REF] Ref{i} [B3].dck", main_cards=["Forest"],
+        )
+        for i in range(3)
+    ]
+    monkeypatch.setattr(mt, "_parse_commander_names_from_dck", lambda p: ["Cmdr"])
+    monkeypatch.setattr(mt, "fetch_reference_decks", lambda *a, **kw: refs)
+
+    captured: list[dict] = []
+
+    def fake_compare(**kwargs):
+        captured.append(kwargs)
+        # Mirror the real single-pod balance: even parity seats the user
+        # (old) first, odd parity seats the reference (new) first.
+        user_first = kwargs["seat_parity"] % 2 == 0
+        return ComparisonReport(
+            old_deck=kwargs["old_deck"], new_deck=kwargs["new_deck"],
+            bracket=3, timestamp="x", mode="pod",
+            games_per_pod=kwargs["games_per_pod"],
+            old_stats=VersionStats(deck_filename=kwargs["old_deck"], wins=1),
+            new_stats=VersionStats(deck_filename=kwargs["new_deck"], wins=1),
+            h2h_seat_balance={
+                "old_first": 1 if user_first else 0,
+                "new_first": 0 if user_first else 1,
+            },
+        )
+
+    monkeypatch.setattr(mt, "compare", fake_compare)
+
+    mt.run_meta_test(
+        user_deck=user.name, bracket=3,
+        out_dir=tmp_path / "_meta", deck_dir=deck_dir,
+    )
+
+    # Every compare() call was told to hold the per-call note.
+    assert all(c["suppress_seat_note"] is True for c in captured)
+    out = capsys.readouterr().out
+    # ONE aggregate line: parities 0,1,0 seat the user first in 2 of 3.
+    assert out.count("seat balance") == 1
+    assert "user deck took seat 1 (on the play) in 2 of 3" in out
+    assert "across 3 reference(s)" in out
+
+
 def test_run_meta_test_total_games_includes_filler_wins(tmp_path, monkeypatch):
     """Honest totals (2026-07-19): user_record.total_games is ALL attributed
     games played, not just user W + L + D — games a filler seat won used to

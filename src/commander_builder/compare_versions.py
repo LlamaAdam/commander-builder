@@ -147,6 +147,18 @@ class ComparisonReport:
     # ('resolve_survivor_leader'). Label only, so downstream analysis can
     # tell the two report populations apart; no behavior change.
     draw_policy: str = "plain_draw"
+    # Absorbed-set seat balance (round 3). The odd-pod-count note keys off
+    # the PLANNED pod list, but the set of pods that actually contributed
+    # games can differ from the plan: parallel early-stop cancels queued
+    # pods, sequential early-stop breaks out, and failed pods are excluded
+    # outright. Any of those can leave the ABSORBED subset seat-imbalanced
+    # with no planned-parity warning (e.g. 4 planned = 2/2, early stop
+    # absorbs 3 = 2 old-first / 1 new-first). Counted over non-failed
+    # absorbed pods only — a failed pod contributed zero attributed games,
+    # so its seat order is irrelevant to the verdict's first-player tilt.
+    h2h_seat_balance: dict[str, int] = field(
+        default_factory=lambda: {"old_first": 0, "new_first": 0}
+    )
 
     @property
     def winner(self) -> str:
@@ -683,6 +695,7 @@ def compare(
     max_workers: Optional[int] = None,
     early_stop: bool = True,
     seat_parity: int = 0,
+    suppress_seat_note: bool = False,
 ) -> ComparisonReport:
     """Run the head-to-head comparison and persist the report.
 
@@ -722,6 +735,16 @@ def compare(
     each (meta_test with ``filler_pairs=1``) pass their own call index
     here so the head-to-head seat-1 share still balances across the
     whole batch even though no single call has two pods to alternate.
+
+    ``suppress_seat_note`` (default False) silences the two seat-balance
+    console notes (odd-pod-count residual, absorbed-set imbalance) WITHOUT
+    touching the report fields. For a direct compare() the notes are the
+    only surface a human sees, so they stay on by default. Batch drivers
+    that make many single-pod calls (meta_test with filler_pairs=1) would
+    otherwise print the odd-pod note once per call — pure spam, since each
+    call's "residual" is by design and cancels across the batch. Those
+    callers pass True and print ONE aggregate line themselves from the
+    ``h2h_seat_balance`` fields.
     """
     if mode not in {"pod", "1v1"}:
         raise ValueError(f"mode must be 'pod' or '1v1', got {mode!r}")
@@ -791,12 +814,15 @@ def compare(
     for i, pod in enumerate(pods):
         if (i + seat_parity) % 2 == 1:
             pod[0], pod[1] = pod[1], pod[0]
-    if len(pods) % 2 == 1:
+    if len(pods) % 2 == 1 and not suppress_seat_note:
         # Odd pod count: alternation can't cancel exactly — one side gets
         # ceil(n/2) seat-1 pods, the other floor(n/2). Surface the
         # residual so a razor-thin verdict can be read with that grain
         # of salt (a single pod, e.g. 1v1 or filler_pairs=1, is the
         # degenerate case: the noted deck holds seat 1 for the whole run).
+        # Batch drivers that intentionally make many single-pod calls
+        # (meta_test) suppress this per-call note and print one aggregate
+        # line instead — see the suppress_seat_note docstring.
         extra_label, extra_deck = (
             ("OLD", old_deck) if seat_parity % 2 == 0 else ("NEW", new_deck)
         )
@@ -997,6 +1023,53 @@ def compare(
     # `pods` list lines up with `filler_pairs_used`.
     for idx in sorted(completed_pods):
         report.pods.append(completed_pods[idx])
+
+    # Absorbed-set seat balance. The odd-pod-count note above reasons
+    # about the PLANNED pod list; the pods that actually fed the verdict
+    # can be a different set — early-stop (parallel cancel or sequential
+    # break) drops trailing pods and failed pods are excluded — so an
+    # even PLAN can still yield an imbalanced ABSORBED set with no
+    # warning. Count the head-to-head orientation of every non-failed
+    # absorbed pod (h2h_seat_order is stamped in _absorb from the true,
+    # already-flipped seat list) and surface the residual when it can
+    # actually color the verdict.
+    for pr in report.pods:
+        if not pr["pod_failed"]:
+            report.h2h_seat_balance[pr["h2h_seat_order"]] += 1
+    bal_old = report.h2h_seat_balance["old_first"]
+    bal_new = report.h2h_seat_balance["new_first"]
+    # Planned split under the same parity, for the "differs from plan"
+    # check: even (i + seat_parity) pods seat OLD first (the alternation
+    # loop above), so the plan gives OLD first in ceil-or-floor(n/2) pods
+    # depending on the phase.
+    planned_old = sum(
+        1 for i in range(report.pods_planned) if (i + seat_parity) % 2 == 0
+    )
+    planned_new = report.pods_planned - planned_old
+    # Two triggers, matching how the imbalance arises:
+    #   |old - new| > 1  — a residual of 1 is unavoidable for any odd
+    #                      absorbed count and (when planned) is already
+    #                      covered by the odd-pod-count note; >1 means
+    #                      one side got at least two extra on-the-play
+    #                      pods, which alternation can never produce.
+    #   absorbed != plan — early-stop/failures changed the set, so the
+    #                      planned-parity reasoning (and the note above,
+    #                      or its silence) no longer describes reality.
+    # (bal_old or bal_new) guard: when EVERY pod failed nothing was
+    # absorbed at all — the verdict is already loudly flagged as built on
+    # zero games, and a "0/0 seat split" note would be noise on top.
+    if not suppress_seat_note and (bal_old or bal_new) and (
+        abs(bal_old - bal_new) > 1
+        or (bal_old, bal_new) != (planned_old, planned_new)
+    ):
+        print(
+            f"NOTE: absorbed-pod seat balance — OLD on the play in "
+            f"{bal_old} pod(s), NEW in {bal_new} (planned "
+            f"{planned_old}/{planned_new}); early stop and/or excluded "
+            f"pods changed the seat-1 split, so read a razor-thin margin "
+            f"with the first-player residual in mind.",
+            flush=True,
+        )
 
     # Finalize derived averages.
     for stats, target in [(report.old_stats, "old"), (report.new_stats, "new")]:

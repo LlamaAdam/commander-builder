@@ -543,6 +543,15 @@ def run_meta_test(
     # attributed totals from each comparison instead and surface the
     # filler-won remainder explicitly so the arithmetic is transparent.
     games_total = 0
+    # Aggregate seat-balance tally (round 3). Each compare() below is a
+    # single pod (default filler_pairs=1), so compare()'s own odd-pod
+    # residual note would fire on EVERY reference — N copies of a warning
+    # about a "residual" that is deliberate here and cancels across the
+    # batch (that's what seat_parity=ref_idx % 2 is for). We suppress the
+    # per-call note and print ONE aggregate line after the loop instead,
+    # built from each report's h2h_seat_balance (old = the user deck).
+    user_seat1_pods = 0
+    counted_pods = 0
     for ref_idx, r in enumerate(refs):
         print(f"\n--- Comparing user vs {r.source}: {r.name} ---", flush=True)
         cmp_report = compare(
@@ -564,8 +573,17 @@ def run_meta_test(
             # user_record carries at most a one-pod first-player residual
             # (exact cancellation on an even reference count).
             seat_parity=ref_idx % 2,
+            # Silence compare()'s per-call seat notes: with one pod per
+            # call the "odd pod count" residual is by design, and the
+            # aggregate line below reports the whole batch's balance once.
+            suppress_seat_note=True,
         )
         comparisons.append(cmp_report.to_dict())
+        user_seat1_pods += cmp_report.h2h_seat_balance["old_first"]
+        counted_pods += (
+            cmp_report.h2h_seat_balance["old_first"]
+            + cmp_report.h2h_seat_balance["new_first"]
+        )
         # In compare_versions: old=user, new=reference. So user wins are old_stats.wins.
         user_w += cmp_report.old_stats.wins
         user_l += cmp_report.new_stats.wins
@@ -573,6 +591,19 @@ def run_meta_test(
         # total_games counts every ATTRIBUTED game (failed pods already
         # excluded by compare()), including games a filler seat won.
         games_total += cmp_report.total_games
+
+    # The ONE aggregate seat-balance line (replaces N per-reference odd-pod
+    # notes). Forge keeps seat 1 on the play for every game of an
+    # invocation, so this is the honest "how often was the user deck on
+    # the play" number for the whole run. Skipped when no pod contributed
+    # (all comparisons failed/stubbed) — 0-of-0 would be noise.
+    if counted_pods:
+        print(
+            f"\nNOTE: seat balance — user deck took seat 1 (on the play) "
+            f"in {user_seat1_pods} of {counted_pods} head-to-head pod(s) "
+            f"across {len(refs)} reference(s).",
+            flush=True,
+        )
 
     # Diff the user deck against the references.
     user_main = _parse_main_card_names(user_path)

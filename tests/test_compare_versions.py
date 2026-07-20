@@ -1474,6 +1474,115 @@ def test_compare_seat_parity_shifts_alternation_phase(
     assert "NEW" in out
 
 
+def test_compare_absorbed_seat_balance_field_and_note_under_early_stop(
+    tmp_path, monkeypatch, capsys,
+):
+    """The odd-pod-count note reasons about PLANNED pods; early-stop can
+    leave the ABSORBED set imbalanced with an even plan and no warning.
+    4 pods planned (2 old-first / 2 new-first); OLD sweeps every game so
+    the sequential loop stops after 3 absorbed pods — 2 old-first vs 1
+    new-first. The report must carry the absorbed split and a note must
+    surface that it differs from the planned parity."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=4)
+    stdout = _make_pod_stdout(2, 0)  # OLD sweeps → margin grows fast
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=4,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=True,
+    )
+
+    # Early stop fired after 3 of 4 planned pods (margin 6 > 2 remaining).
+    assert report.stopped_early is True
+    assert report.pods_planned == 4
+    assert len(report.pods) == 3
+    # Absorbed set: pods 0,1,2 alternate old/new/old-first → 2/1.
+    assert report.h2h_seat_balance == {"old_first": 2, "new_first": 1}
+    # The split rides into the persisted dict shape.
+    assert report.to_dict()["h2h_seat_balance"] == {
+        "old_first": 2, "new_first": 1,
+    }
+    out = capsys.readouterr().out
+    assert "absorbed-pod seat balance" in out
+    assert "OLD on the play in 2 pod(s), NEW in 1" in out
+    assert "planned 2/2" in out
+
+
+def test_compare_full_even_run_populates_balance_without_note(
+    tmp_path, monkeypatch, capsys,
+):
+    """A full even-count run is exactly balanced: the field is populated
+    (1/1) but no absorbed-balance note prints — it would be pure noise."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    stdout = _make_pod_stdout(1, 1)
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=False,
+    )
+
+    assert report.h2h_seat_balance == {"old_first": 1, "new_first": 1}
+    assert "absorbed-pod seat balance" not in capsys.readouterr().out
+
+
+def test_compare_suppress_seat_note_silences_prints_keeps_fields(
+    tmp_path, monkeypatch, capsys,
+):
+    """suppress_seat_note=True (meta_test's batch mode) silences BOTH seat
+    notes — the odd-pod residual and the absorbed-balance line — but the
+    h2h_seat_balance field still populates so the caller can build its own
+    aggregate line."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=3)
+    stdout = _make_pod_stdout(1, 1)
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=3,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=False,
+        suppress_seat_note=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "odd pod count" not in out
+    assert "absorbed-pod seat balance" not in out
+    # Telemetry survives suppression: 3 pods alternate O/N/O.
+    assert report.h2h_seat_balance == {"old_first": 2, "new_first": 1}
+
+
 def test_compare_parallel_pods_alternate_by_stable_index(
     tmp_path, monkeypatch,
 ):

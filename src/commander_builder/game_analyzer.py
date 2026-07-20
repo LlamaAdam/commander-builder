@@ -338,6 +338,30 @@ def _summarize_game(lines: list[str], end_line: str, game_index: int) -> Optiona
         # eliminations (commander damage, poison, mill, spell) which end a
         # player at positive life. Must come before the generic fall-through
         # so a dead seat can never masquerade as a living life leader.
+        #
+        # TURN-CAP-STOP EVIDENCE (verified 2026-07-20 against the real soak
+        # logs under vendor/forge*/userdata/forge*.log). The risk under
+        # review: if Forge marked EVERY seat "has lost" when it stops a
+        # slow match, all seats would become `eliminated` here and
+        # _resolve_life_leader would return (None, None) — silently
+        # degrading every turn-cap draw to a plain draw. It does NOT.
+        # In cap-stopped games (marked "Stopping slow match as draw"),
+        # surviving seats get the known-buggy "has won" line, never a
+        # "has lost" line. vendor/forge10/userdata/forge.log (game ended
+        # at the ~120s cap, "Game 1 ended in 120175 ms"):
+        #   Game Outcome: Turn 21
+        #   Game Outcome: Ai(1)-Choco, Seeker of Paradise has lost because life total reached 0
+        #   Game Outcome: Ai(2)-Eldrazi Incursion [M3C] [2024] has lost because life total reached 0
+        #   Game Outcome: Ai(3)-Graveyard Overdrive [M3C] [2024] has won because all opponents have lost
+        #   Game Outcome: Ai(4)-Creative Energy [M3C] [2024] has won because all opponents have lost
+        # And vendor/forge2/userdata/forge0.log shows the all-survivors
+        # cap stop ("Game 1 ended in 120112 ms") with ZERO "has lost"
+        # lines — all four seats read "has won because all opponents have
+        # lost". Across all 9 cap-stopped games in the corpus the only
+        # loss phrasing Forge ever emitted is "has lost because life
+        # total reached 0" (24 lines total); no cap-specific loss reason
+        # exists in the wild. So a cap stop leaves genuine survivors
+        # un-eliminated and the life-leader resolution stays intact.
         m_lost = _GAME_OUTCOME_LOST.match(s)
         if m_lost:
             seat = int(m_lost.group(1))
