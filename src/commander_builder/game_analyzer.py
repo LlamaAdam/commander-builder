@@ -24,6 +24,27 @@ The signals come from Forge log lines that `log_parser` deliberately ignores
       The trailing `has won!` clause is the *correct* winner — unlike the four
       Game Outcome lines that all say "won" in 4-player commander. Use this.
 
+  Game Outcome: Ai(N)-DeckName has lost <reason>
+      Per-seat loss attribution, emitted in a block at game end (after the
+      last Turn line, right before Game Result). Verified against real
+      headless logs (vendor/forge*/userdata/forge*.log): losers ALWAYS get a
+      "has lost <reason>" line, even when they were eliminated many turns
+      before the game ended. The sibling "has won because all opponents have
+      lost" lines are NOT reliable — real logs show up to all four seats
+      marked "has won" in one game — but the "has lost" lines are: a seat
+      with one genuinely left the game. Forge's en-US.properties enumerates
+      every loss phrasing it can emit:
+        has lost because life total reached 0
+        has lost due to accumulation of 21 damage from generals  (commander)
+        has lost because of obtaining 10 poison counters
+        has lost trying to draw cards from empty library         (mill-out)
+        has lost due to effect of spell '<name>'
+        has lost because an opponent has won by spell '<name>'
+        has lost for unknown reason (this is a bug)
+      Commander damage / poison / mill / spell losses happen at POSITIVE
+      life, so the Life: stream alone cannot see them — elimination MUST
+      also be derived from these lines or a dead seat looks alive.
+
   Stopping slow match as draw
       Forge concedes after its turn-cap. Authoritative draw marker.
 
@@ -60,6 +81,15 @@ _GAME_RESULT_NO_WIN = re.compile(
     re.IGNORECASE,
 )
 _DRAW = re.compile(r"^Stopping slow match as draw\b", re.IGNORECASE)
+# Per-seat loss line from the end-of-game Game Outcome block (see module
+# docstring for the full evidence). We match ONLY "has lost" — the "has won"
+# variants are known-buggy in 4-player commander (multiple seats get one) and
+# stay ignored. All seven loss phrasings share the "has lost" stem; the tail
+# is kept as the human-readable reason.
+_GAME_OUTCOME_LOST = re.compile(
+    r"^Game Outcome:\s+Ai\((\d+)\)-(.+?)\s+has lost\b\s*(.*)$",
+    re.IGNORECASE,
+)
 _LIFE = re.compile(
     r"^Life:\s+Life:\s+Ai\((\d+)\)-(.+?)\s+(\d+)\s*>\s*(-?\d+)\s*$"
 )
@@ -78,8 +108,16 @@ class DeckGameStats:
     life_max: Optional[int] = None
     damage_taken: int = 0    # sum of life decreases (excludes pay-life)
     life_gained: int = 0     # sum of life increases
-    eliminated: bool = False  # ending_life <= 0
+    # True when the seat left the game: EITHER a Life: transition to <= 0
+    # OR an explicit "Game Outcome: ... has lost <reason>" line. The latter
+    # catches commander damage / poison / mill / spell losses that happen at
+    # POSITIVE life and are invisible to the Life: stream.
+    eliminated: bool = False
     eliminated_turn: Optional[int] = None  # turn at which life first hit 0
+    # Tail of the "has lost" outcome line (e.g. "due to accumulation of 21
+    # damage from generals"). None when the seat survived or when the only
+    # elimination signal was the Life: stream (older logs / truncation).
+    loss_reason: Optional[str] = None
 
     @property
     def normalized_name(self) -> str:
@@ -296,6 +334,25 @@ def _summarize_game(lines: list[str], end_line: str, game_index: int) -> Optiona
             end_turn = int(m_outcome.group(1))
             continue
 
+        # Per-seat "has lost" outcome line — the ONLY signal for non-life
+        # eliminations (commander damage, poison, mill, spell) which end a
+        # player at positive life. Must come before the generic fall-through
+        # so a dead seat can never masquerade as a living life leader.
+        m_lost = _GAME_OUTCOME_LOST.match(s)
+        if m_lost:
+            seat = int(m_lost.group(1))
+            name = m_lost.group(2).strip()
+            d = decks.setdefault(seat, DeckGameStats(seat=seat, name=name))
+            d.eliminated = True
+            # Deliberately NOT setting eliminated_turn here: the outcome
+            # block is emitted at game END, not at the moment of death, so
+            # the current turn context says nothing about WHEN a non-life
+            # elimination happened. The Life: stream already stamps the turn
+            # for life-based deaths; for the rest it stays None (honest
+            # "unknown") rather than a fabricated end-of-game turn.
+            d.loss_reason = m_lost.group(3).strip() or None
+            continue
+
         if _DRAW.search(s):
             is_draw = True
             continue
@@ -328,19 +385,19 @@ def _summarize_game(lines: list[str], end_line: str, game_index: int) -> Optiona
 
     # Forge's "all four players won" bug means winner_name from Game Result is
     # the only reliable source. If absent (rare — happens on draws or when the
-    # log got truncated), fall back to "highest ending life" as a tiebreak hint.
+    # log got truncated), fall back to crowning the SOLE surviving seat.
+    # Previously this compared the top-two ending_life values, which had two
+    # holes: (1) a seat dead to commander damage / poison / mill at positive
+    # life could be crowned, and (2) a seat with NO life data was treated as
+    # dead (None -> 0). Now a seat only counts as dead when it is provably
+    # eliminated (Life: hit <= 0, or an explicit "has lost" outcome line);
+    # anything less certain leaves winner as None — an honest draw beats a
+    # fabricated winner.
     if winner_name is None and not is_draw and decks:
-        # Only assign if there's a clear leader; otherwise leave as None.
-        candidates = sorted(
-            decks.values(), key=lambda d: (d.ending_life or 0), reverse=True
-        )
-        if (
-            len(candidates) >= 2
-            and candidates[0].ending_life is not None
-            and (candidates[1].ending_life or 0) <= 0
-        ):
-            winner_seat = candidates[0].seat
-            winner_name = candidates[0].name
+        survivors = [d for d in decks.values() if not d.eliminated]
+        if len(decks) >= 2 and len(survivors) == 1:
+            winner_seat = survivors[0].seat
+            winner_name = survivors[0].name
 
     # Resolve a winner per the operator verdict-scoring policy. For decisive
     # games this just mirrors winner_seat/winner_name. For turn-cap draws we
@@ -375,7 +432,10 @@ def _resolve_life_leader(
     top) or no usable life data. Decks with an unknown ending_life are
     excluded from contention. Eliminated seats are also excluded — a player
     who already lost (life <= 0, or commander-damage/poison/mill while still
-    at positive life) must never be crowned the winner of a turn-cap draw."""
+    at positive life) must never be crowned the winner of a turn-cap draw.
+    Non-life eliminations are visible because _summarize_game parses the
+    per-seat "Game Outcome: ... has lost <reason>" lines, so `eliminated` is
+    trustworthy here regardless of the seat's ending life total."""
     scored = [d for d in decks
               if d.ending_life is not None and not d.eliminated]
     if not scored:

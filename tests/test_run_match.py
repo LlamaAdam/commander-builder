@@ -236,6 +236,56 @@ def test_run_matchup_salvages_timed_out_pod_not_counted_as_losses(
     assert "TIMED OUT" in out
 
 
+def test_run_matchup_draw_end_turn_not_counted_in_loss_turn_stats(
+    tmp_path, monkeypatch,
+):
+    """The bug: a drawn game has winner_normalized None, which satisfied the
+    old `winner_normalized != user_norm` loss branch, so the draw's end_turn
+    (the turn cap — huge) was averaged into avg_turns_when_lost. Here the
+    user wins game 1 (turn 10) and game 2 is a turn-cap draw (turn 50): with
+    no actual losses, avg_turns_when_lost must be 0.0, not 50.0."""
+    from commander_builder.forge_runner import SimResult
+
+    rm = _setup_match_world(tmp_path, monkeypatch)
+
+    stdout = (
+        # Game 1 — Hero wins decisively at turn 10.
+        "Turn: Turn 1 (Ai(1)-Hero)\n"
+        "Life: Life: Ai(2)-OppA [B3] 40 > 0\n"
+        "Game Outcome: Turn 10\n"
+        "Game Result: Game 1 ended in 60000 ms. Ai(1)-Hero has won!\n"
+        # Game 2 — turn-cap draw at turn 50, no winner attributed.
+        "Turn: Turn 1 (Ai(1)-Hero)\n"
+        "Life: Life: Ai(1)-Hero 40 > 20\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Result: Game 2 ended in 240000 ms\n"
+        "Match Result: Ai(1)-Hero: 1 Ai(2)-OppA [B3]: 0 "
+        "Ai(3)-OppB [B3]: 0 Ai(4)-OppC [B3]: 0\n"
+    )
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=1.0,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = rm.run_matchup(
+        user_deck="[USER] Hero [B3].dck",
+        bracket=3, games_per_pod=2, num_pods=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_matches",
+    )
+    assert report.games_played == 2
+    assert report.user_wins == 1
+    assert report.draws == 1
+    assert report.user_losses == 0          # decisive(1) - wins(1)
+    assert report.avg_turns_when_won == 10.0
+    # Pre-fix this was 50.0 — the draw's turn-cap end_turn booked as a loss.
+    assert report.avg_turns_when_lost == 0.0
+
+
 def test_run_matchup_timeout_with_nothing_salvageable_is_excluded(
     tmp_path, monkeypatch,
 ):

@@ -281,7 +281,16 @@ def run_matchup(
             damages.append(user_stats.damage_taken)
             if game.winner_normalized == user_norm and game.end_turn is not None:
                 won_turns.append(game.end_turn)
-            elif game.winner_normalized != user_norm and game.end_turn is not None:
+            # `is not None` guard: a drawn game has winner_normalized None,
+            # which satisfies `!= user_norm` — without the guard the draw's
+            # end_turn (typically the turn cap, i.e. huge) was booked as a
+            # LOSS turn and inflated avg_turns_when_lost. Draws are neither
+            # wins nor losses here (mirrors compare_versions._aggregate_pod).
+            elif (
+                game.winner_normalized is not None
+                and game.winner_normalized != user_norm
+                and game.end_turn is not None
+            ):
                 lost_turns.append(game.end_turn)
                 if user_stats.eliminated and user_stats.eliminated_turn is not None:
                     cur = report.fastest_loss_turn
