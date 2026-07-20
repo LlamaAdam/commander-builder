@@ -43,7 +43,12 @@ from pathlib import Path
 # the [metadata] section, which by convention leads the file, so "first
 # Name= line" is the metadata name. count=1 in the substitution keeps a
 # hypothetical later `Name=` inside a comment or odd section untouched.
-_NAME_LINE = re.compile(r"^Name=.+$", re.MULTILINE)
+# `.*`, NOT `.+`: an EMPTY `Name=` line still counts as "the Name= line".
+# With `.+` the search missed it, so rewrite_name concluded "no Name="
+# and synthesized a second one under [metadata] — leaving BOTH the empty
+# line and the new one in the file, and which of the two Forge honors is
+# parser-dependent. Replacing the empty line keeps exactly one.
+_NAME_LINE = re.compile(r"^Name=.*$", re.MULTILINE)
 
 # `[metadata]` section header (usually the first line of the file). Used to
 # synthesize a Name= line right below it when the deck has none.
@@ -66,7 +71,9 @@ def rewrite_name(dck_text: str, new_name: str) -> str:
     under an existing ``[metadata]`` header, or a whole ``[metadata]``
     section prepended when the deck has none — because a Name-less deck
     leaves Forge to invent its own display name, which the log parser can
-    never map back to the file.
+    never map back to the file. An empty ``Name=`` line counts as PRESENT
+    and is replaced in place (synthesizing next to it would leave a
+    duplicate).
 
     The replacement uses a callable so ``new_name`` is inserted literally
     (deck names can contain characters ``re.sub`` would otherwise treat as
@@ -109,6 +116,10 @@ def stamp_name_preserving_display(dck_text: str, stem: str) -> str:
     - Prior ``Name=`` already equals the stem (re-stamp) → nothing to do.
     - A ``DisplayName=`` already present wins — never duplicated or
       clobbered, so user edits to it survive re-imports of copied files.
+      (The re-import half of that contract lives in
+      ``moxfield_import._merge_local_metadata``, which carries the LOCAL
+      ``DisplayName=`` into the fresh render before this stamp runs — the
+      stamp alone only guards the file it is handed.)
 
     Everything else (``Moxfield=``, ``Protect=``, card sections) passes
     through byte-identical — same-id re-import classification and pet-card

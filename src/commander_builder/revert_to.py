@@ -7,7 +7,10 @@ deck. `revert_to.py` reads the prior iteration's `deck_snapshot` blob from
 and:
 
   1. Writes the snapshot back to the `vendor/forge/.../commander/` directory
-     so local tooling sees the v1 state.
+     so local tooling sees the v1 state — restamping `[metadata] Name=` to
+     the destination filename stem on the way, because snapshots carry the
+     stem of the (usually versioned) file they were recorded FROM (see
+     `dck_meta` for the invariant and `revert_to_iteration` for the why).
   2. Generates a clipboard-ready Moxfield textarea blob via `moxfield_push`.
 
 The user still has to paste the blob into Moxfield (manual push). When
@@ -31,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .dck_meta import rewrite_name
 from .forge_runner import VENDOR_FORGE
 # ``db_path=None`` defaults below defer to knowledge_log's call-time
 # resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
@@ -148,10 +152,35 @@ def revert_to_iteration(
 
     out_path = deck_path or (DECK_DIR / target.deck_name)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Restamp Name= to the DESTINATION stem before writing. iteration_loop
+    # records deck_snapshot by reading the on-disk v2 FILE, and since every
+    # deck writer stamps Name=<its own filename stem> (the dck_meta
+    # invariant), a snapshot of "[USER] My Deck v2 [B3].dck" carries
+    # Name=[USER] My Deck v2 [B3]. Writing that blob VERBATIM over the base
+    # filename would deterministically re-create the exact mismatch dck_meta
+    # exists to fix: Forge's Match Result lines report "My Deck v2" while
+    # run_match / compare_versions key on _normalize("[USER] My Deck [B3]")
+    # — the reverted deck scores 0 wins and every decisive game books as a
+    # loss for it.
+    #
+    # rewrite_name, NOT stamp_name_preserving_display, deliberately: the
+    # stale Name= here is a machine stem inherited from a versioned
+    # filename, not a pretty name worth keeping. stamp_… would move it into
+    # a synthesized DisplayName= ("DisplayName=[USER] My Deck v2 [B3]"),
+    # which status would then show forever and _merge_local_metadata would
+    # carry across every future re-import as if the user had chosen it.
+    # rewrite_name touches only the first Name= line, so a REAL
+    # DisplayName= present in the snapshot passes through untouched — same
+    # choice as the other splice-existing-.dck writers (snapshot_deck,
+    # proposer, meta_test, routes_sim staging).
+    restored_text = rewrite_name(target.deck_snapshot, out_path.stem)
     # Save the current file BEFORE overwriting — see _backup_current_file for
-    # why (un-logged on-disk state is otherwise gone forever).
-    backup_path = _backup_current_file(out_path, target.deck_snapshot)
-    out_path.write_text(target.deck_snapshot, encoding="utf-8")
+    # why (un-logged on-disk state is otherwise gone forever). Compare
+    # against restored_text (what will actually be written), not the raw
+    # snapshot, so "already identical → skip backup" answers the real
+    # question about the post-restamp bytes.
+    backup_path = _backup_current_file(out_path, restored_text)
+    out_path.write_text(restored_text, encoding="utf-8")
 
     blob = dck_to_textarea(out_path)
 
@@ -176,7 +205,12 @@ def revert_to_iteration(
                     "audit_version": "revert",
                     "reverted_to_iteration_id": iteration_id,
                 },
-                deck_snapshot=target.deck_snapshot,
+                # Snapshot the RESTAMPED text — the knowledge log's contract
+                # (followed by iteration_loop) is "deck_snapshot mirrors the
+                # on-disk file for this iteration", and that is now the
+                # restamped bytes. A later revert TO this row then restores
+                # identical bytes instead of re-deriving them.
+                deck_snapshot=restored_text,
                 verdict="kept",  # the revert action itself is "kept"
                 verdict_notes=f"Reverted to iteration {iteration_id}.",
             ),

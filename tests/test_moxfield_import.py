@@ -667,6 +667,21 @@ def test_stamp_name_preserving_display_rules():
     assert "Name=Stem" in out4 and "DisplayName=" not in out4
 
 
+def test_rewrite_name_replaces_empty_name_line():
+    """(dck_meta hardening) An EMPTY 'Name=' line is still the Name= line.
+    The old ^Name=.+$ regex skipped it, so rewrite_name concluded "no
+    Name=" and synthesized a second one under [metadata] — leaving a
+    duplicate whose winner is Forge-parser-dependent. Exactly one Name=
+    must remain, holding the new value; neighbors pass through."""
+    import re as _re
+    from commander_builder.dck_meta import rewrite_name
+
+    src = "[metadata]\nName=\nMoxfield=abc\n[Main]\n1 Sol Ring\n"
+    out = rewrite_name(src, "Stem")
+    assert _re.findall(r"^Name=.*$", out, _re.MULTILINE) == ["Name=Stem"]
+    assert "Moxfield=abc" in out and "1 Sol Ring" in out
+
+
 def test_import_deck_stamps_name_from_final_filename_stem(tmp_path, monkeypatch):
     """(a) Non-ASCII + ':' deck name: the written file's Name= must equal
     its own filename stem, and log_parser._normalize must agree whether it
@@ -739,6 +754,46 @@ def test_reimport_preserves_protect_and_stamped_name(tmp_path, monkeypatch):
     merged = p1.read_text(encoding="utf-8")
     assert read_protected_cards(merged) == ["Sol Ring"]
     import re as _re
+    assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p1.stem
+
+
+def test_reimport_preserves_locally_edited_displayname(tmp_path, monkeypatch):
+    """dck_meta's documented contract: user edits to DisplayName= survive
+    re-imports. The mechanism is two-part and ORDER-dependent —
+    _merge_local_metadata carries the local line into the fresh render, then
+    stamp_name_preserving_display's "existing DisplayName wins" rule sees it
+    and never synthesizes a competitor — so the result must be the LOCAL
+    edit, exactly once, with Name= still stamped from the stem."""
+    from commander_builder import moxfield_import as mi
+    import re as _re
+
+    decks = {"pid-1": _deck_json(name=_UGLY_NAME, pid="pid-1")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    text = p1.read_text(encoding="utf-8")
+    assert f"DisplayName={_UGLY_NAME}" in text  # stamp wrote the pretty name
+
+    # User hand-edits the display name locally.
+    p1.write_text(
+        text.replace(f"DisplayName={_UGLY_NAME}", "DisplayName=Squirrel Storm"),
+        encoding="utf-8",
+    )
+
+    # Deck changes upstream; re-pull the same publicId (overwrite in place).
+    decks["pid-1"] = _deck_json(
+        name=_UGLY_NAME, pid="pid-1", main_card="Arcane Signet",
+    )
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert p2 == p1
+
+    merged = p1.read_text(encoding="utf-8")
+    assert "Arcane Signet" in merged  # fresh content landed
+    # The local edit won — and there is exactly ONE DisplayName= line (a
+    # duplicate would make the honored value ordering luck).
+    assert (_re.findall(r"^DisplayName=(.*)$", merged, _re.MULTILINE)
+            == ["Squirrel Storm"])
+    # Name= is still stamped from the final filename stem.
     assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p1.stem
 
 

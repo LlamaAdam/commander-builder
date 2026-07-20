@@ -527,10 +527,18 @@ def _classify_destination(dest: Path, public_id: str) -> str:
     return "same" if existing == public_id else "collision"
 
 
-# User-authored metadata lines. `Protect=` is the one metadata key written
-# locally (pet-card locks for the proposer — see web/_helpers.read_protected_cards),
-# never present in the Moxfield payload, so a fresh to_dck render drops it.
+# User-authored metadata lines carried across same-id re-imports.
+# `Protect=`: pet-card locks for the proposer (see
+# web/_helpers.read_protected_cards) — written locally, never present in the
+# Moxfield payload, so a fresh to_dck render drops it.
 _PROTECT_META = re.compile(r"^Protect=.*$", re.MULTILINE)
+# `DisplayName=`: the pretty deck name stamp_name_preserving_display writes
+# when safe_filename mangled the Moxfield name — and which the user may have
+# hand-edited since. `.+` (not `.*`) on purpose: an EMPTIED local
+# `DisplayName=` line reads as "user cleared it", so we don't carry it and
+# the stamp below falls back to the fresh render's pretty name. (Mirrors
+# dck_meta._DISPLAY_NAME_LINE, which also requires a value.)
+_DISPLAY_META = re.compile(r"^DisplayName=.+$", re.MULTILINE)
 
 
 def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
@@ -538,20 +546,39 @@ def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
     freshly rendered import.
 
     `to_dck` only regenerates `Name=`/`Moxfield=`; a plain same-id overwrite
-    would silently wipe the user's `Protect=` pet-card locks. Re-insert them
-    right after the metadata block (before the first card section header)."""
-    protects = _PROTECT_META.findall(old_text)
-    if not protects:
+    would silently wipe local-only metadata. Two keys are carried:
+
+    - `Protect=` pet-card locks (all lines), and
+    - `DisplayName=` (first line) — dck_meta documents that user edits to
+      the display name survive re-imports, and this carry is what makes
+      that true: import_deck runs this merge BEFORE
+      stamp_name_preserving_display, whose "existing DisplayName wins" rule
+      then sees the carried line and never synthesizes a competing one, so
+      exactly one DisplayName= comes out and the LOCAL edit is it.
+
+    Re-insert them right after the metadata block (before the first card
+    section header)."""
+    carried = _PROTECT_META.findall(old_text)
+    local_display = _DISPLAY_META.search(old_text)
+    if local_display:
+        # Local DisplayName wins over the fresh render's. to_dck never emits
+        # DisplayName= today, but strip any that shows up anyway — otherwise
+        # the merge would produce two lines and which one a display surface
+        # honors would be ordering luck.
+        fresh_dck = re.sub(r"^DisplayName=.*\n?", "", fresh_dck,
+                           flags=re.MULTILINE)
+        carried.append(local_display.group(0))
+    if not carried:
         return fresh_dck
     lines = fresh_dck.splitlines()
     # First section header AFTER [metadata] (i.e. [Commander] or [Main]) —
-    # protect lines must stay inside the metadata block to be parseable.
+    # carried lines must stay inside the metadata block to be parseable.
     insert_at = len(lines)
     for i, ln in enumerate(lines):
         if i > 0 and ln.startswith("["):
             insert_at = i
             break
-    lines[insert_at:insert_at] = protects
+    lines[insert_at:insert_at] = carried
     return "\n".join(lines) + "\n"
 
 
@@ -580,8 +607,8 @@ def import_deck(
         # behavior — broke the audit A/B twice over: the v2 snapshot copied
         # the untouched v1 file (deck compared against itself), and the
         # "(2)" name fell outside the `[B<n>].dck` suffix the bracket
-        # filters key on. Carry over local-only metadata (Protect=) that a
-        # plain re-render would drop.
+        # filters key on. Carry over local-only metadata (Protect=,
+        # user-edited DisplayName=) that a plain re-render would drop.
         dck = _merge_local_metadata(out_path.read_text(encoding="utf-8"), dck)
     elif verdict in ("collision", "unknown"):
         # A DIFFERENT deck (or one we can't identify) owns this filename —

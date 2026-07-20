@@ -1,4 +1,5 @@
 """revert_to tests with isolated knowledge_log DBs."""
+import re
 from pathlib import Path
 
 import pytest
@@ -212,7 +213,13 @@ def test_identical_content_revert_skips_backup(tmp_path):
     db = tmp_path / "kl.sqlite"
     v1, v2 = _seed_two_iterations(db)
     target = tmp_path / "[USER] Test [B3].dck"
-    target.write_text(_SNAPSHOT_V1, encoding="utf-8")  # already at v1 state
+    # "Already at v1 state" means: identical to what the revert will WRITE —
+    # which since the restamp fix is the snapshot with Name= rewritten to
+    # the destination stem, not the raw snapshot bytes. (A real pre-revert
+    # file always carries Name=<its own stem>: every writer stamps it.)
+    from commander_builder.dck_meta import rewrite_name
+    target.write_text(rewrite_name(_SNAPSHOT_V1, target.stem),
+                      encoding="utf-8")
 
     result = revert_to_iteration(v1, deck_path=target, db_path=db,
                                  record_revert=False)
@@ -280,3 +287,89 @@ def test_cli_prints_backup_path(tmp_path, monkeypatch, capsys):
     assert rt.main(["--to-iteration", "7", "--no-clipboard"]) == 0
     out = capsys.readouterr().out
     assert "No backup needed" in out
+
+
+# --- Name= restamp on restore ----------------------------------------------
+# iteration_loop records deck_snapshot by READING the on-disk v2 file, which
+# (dck_meta invariant: every writer stamps Name=<its own filename stem>)
+# carries Name=<v2 stem>, e.g. "Name=[USER] Test v2 [B3]". Writing that blob
+# verbatim over the BASE filename re-created the exact mismatch dck_meta
+# exists to fix: Forge reports "Test v2", run_match/compare_versions key on
+# _normalize("[USER] Test [B3]") → the reverted deck scores 0 wins and every
+# decisive game books as a loss. The revert writer must restamp Name= to the
+# DESTINATION stem — and leave a real DisplayName= alone.
+
+_SNAPSHOT_V2_STAMPED = "\n".join([
+    "[metadata]",
+    "Name=[USER] Test v2 [B3]",  # stem of the v2 FILE the snapshot came from
+    "DisplayName=Test Deck",     # pretty name — must survive the restamp
+    "Moxfield=stable-id",
+    "[Commander]",
+    "1 Test Commander",
+    "[Main]",
+    "1 Sol Ring",
+    "1 Old Card",
+])
+
+
+def _seed_v2_stamped_iteration(db: Path) -> int:
+    """One iteration whose snapshot carries a versioned-stem Name= — the
+    shape iteration_loop actually records."""
+    return record_iteration(
+        Iteration(
+            deck_id="stable-id", deck_name="[USER] Test [B3].dck", bracket=3,
+            audit_version="v3", audit_manifest={"added": [], "removed": []},
+            verdict="kept", deck_snapshot=_SNAPSHOT_V2_STAMPED,
+        ), db_path=db,
+    )
+
+
+def test_revert_restamps_name_to_destination_stem(tmp_path):
+    from commander_builder.log_parser import _normalize
+
+    db = tmp_path / "kl.sqlite"
+    rid = _seed_v2_stamped_iteration(db)
+    target = tmp_path / "[USER] Test [B3].dck"
+    # Un-logged live content: the backup must still happen (ordering: backup
+    # BEFORE the restamped write).
+    target.write_text("live content never recorded", encoding="utf-8")
+
+    result = revert_to_iteration(rid, deck_path=target, db_path=db)
+
+    text = target.read_text(encoding="utf-8")
+    # Exactly one Name= line, equal to the DESTINATION stem — not the v2
+    # stem the snapshot arrived with.
+    name_values = re.findall(r"^Name=(.*)$", text, re.MULTILINE)
+    assert name_values == [target.stem]
+    # The invariant every name-keyed consumer relies on: the filename and
+    # the written Name= normalize to the same attribution key.
+    assert _normalize(target.name) == _normalize(name_values[0])
+    # Real DisplayName= passes through untouched — no duplicate, no
+    # synthesized junk from the discarded v2 machine stem.
+    assert re.findall(r"^DisplayName=(.*)$", text, re.MULTILINE) == ["Test Deck"]
+    # Deck content itself untouched by the restamp.
+    assert "1 Old Card" in text and "Moxfield=stable-id" in text
+    # Pre-revert backup still created, with the pre-revert bytes.
+    assert result.backup_path is not None
+    assert (result.backup_path.read_text(encoding="utf-8")
+            == "live content never recorded")
+    # The revert record snapshots what's ON DISK (restamped), so a later
+    # revert TO the revert record restores identical bytes.
+    history = iterations_for_deck("stable-id", db_path=db)
+    assert history[-1].audit_version == "revert"
+    assert history[-1].deck_snapshot == text
+
+
+def test_revert_deck_to_version_also_restamps(tmp_path):
+    """The by-version entry point delegates to revert_to_iteration — pin
+    that the restamp holds through it too."""
+    db = tmp_path / "kl.sqlite"
+    _seed_v2_stamped_iteration(db)
+    target = tmp_path / "[USER] Test [B3].dck"
+
+    revert_deck_to_version("stable-id", version=1, deck_path=target,
+                           db_path=db, record_revert=False)
+
+    text = target.read_text(encoding="utf-8")
+    assert re.findall(r"^Name=(.*)$", text, re.MULTILINE) == [target.stem]
+    assert "DisplayName=Test Deck" in text
