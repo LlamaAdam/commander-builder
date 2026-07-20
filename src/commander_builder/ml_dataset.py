@@ -129,16 +129,35 @@ def extract_features(it: Iteration) -> Optional[FeatureRow]:
     total = int(sim.get("total_games", sim.get("games", 0)) or 0)
     old_wins = int(sim.get("wins_a", old.get("wins", 0)) or 0)
     new_wins = int(sim.get("wins_b", new.get("wins", 0)) or 0)
+    # NOTE (pre-existing, AB-shaped rows only): when an ABResult dict lacks a
+    # `draws` key, this fallback counts filler-won games as "draws" (games -
+    # wins_a - wins_b bundles both). The draws / draw_rate / decisive_games
+    # FEATURES are therefore approximate for that shape — kept as-is because
+    # changing feature semantics would invalidate previously built datasets.
     draws = int(sim.get("draws", max(0, total - old_wins - new_wins)) or 0)
+    # `decisive_games` feature = attributed non-draw games (includes
+    # filler wins in compare-shaped reports). Deliberately NOT the
+    # win-rate denominator — see below.
     decisive = max(0, total - draws)
     draw_rate = draws / total if total else 0.0
 
     # Prefer the per-iteration authoritative columns (the analyst computed and
     # persisted these next to the verdict) when present; else derive.
+    #
+    # Fallback derivation follows the 2026-07-20 knowledge_log convention:
+    # wins / HEAD-TO-HEAD decisive (old_wins + new_wins), the same
+    # denominator the columns carry. The previous fallback divided by
+    # total - draws, which counts FILLER-won pod games in compare-shaped
+    # reports — mixing ~2x-scaled derived rates into the same feature as
+    # the column-sourced rates. Both win counts are always readable here
+    # (wins_a/wins_b or old_stats/new_stats.wins), so the fallback can
+    # match the column convention exactly. 0.0 (not None) when no
+    # head-to-head game exists: feature vectors can't hold NULL.
+    hh_decisive = old_wins + new_wins
     win_rate_old = (it.win_rate_old if it.win_rate_old is not None
-                    else (old_wins / decisive if decisive else 0.0))
+                    else (old_wins / hh_decisive if hh_decisive else 0.0))
     win_rate_new = (it.win_rate_new if it.win_rate_new is not None
-                    else (new_wins / decisive if decisive else 0.0))
+                    else (new_wins / hh_decisive if hh_decisive else 0.0))
 
     cards_added = len(manifest.get("added", []))
     cards_removed = len(manifest.get("removed", []))

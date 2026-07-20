@@ -179,6 +179,31 @@ def test_run_one_iteration_persists_kept_verdict(tmp_path, staged_decks, monkeyp
     assert fetched.sim_report["winner"] == "new"
 
 
+def test_run_one_iteration_win_rates_exclude_filler_wins(tmp_path, staged_decks, monkeypatch):
+    """Pinned values for a FILLER-HEAVY comparison (2026-07-20 convention):
+    30 attributed games — old won 4, new won 8, 2 drew, fillers took the
+    other 16. Denominator is head-to-head decisive (4 + 8 = 12), NOT
+    total - draws (28, which counts the filler wins): the rates must be
+    4/12 and 8/12. Under 611feff this writer recorded 4/28 and 8/28,
+    ~2x low versus the AB-shaped writers for the same outcome."""
+    canned = _make_canned_comparison(old_wins=4, new_wins=8, draws=2, total=30)
+    monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
+
+    db = tmp_path / "kl.sqlite"
+    result = run_one_iteration(
+        deck_filename=staged_decks["v1"],
+        new_deck_filename=staged_decks["v2"],
+        bracket=3,
+        audit_manifest={"added": ["NewCard"], "removed": ["OldCard"]},
+        db_path=db,
+    )
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    assert fetched.win_rate_old == round(4 / 12, 4)
+    assert fetched.win_rate_new == round(8 / 12, 4)
+    # Margin stays a raw head-to-head game delta, untouched by fillers.
+    assert fetched.margin == 4
+
+
 def test_run_one_iteration_persists_reverted_verdict(tmp_path, staged_decks, monkeypatch):
     """Strong regression → reverted → next_action='revert'."""
     canned = _make_canned_comparison(old_wins=12, new_wins=2, draws=0, total=14)

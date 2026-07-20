@@ -24,16 +24,29 @@ Schema rationale:
     created_at      ISO timestamp
     deck_snapshot   .dck text content (full deck preserved for reproducibility)
 
-Win-rate convention (standardized 2026-07-19): ``win_rate_old`` /
-``win_rate_new`` are wins / DECISIVE games, where decisive = games with an
-attributed winner — the same denominator each writer's verdict gate uses
-(draws and unattributed games are excluded; see ``decisive_win_rate``).
-When decisive == 0 the columns are NULL, never a fabricated 0.0. Before
-this date the three writers used three different denominators
-(all-games-including-draws, decisive-only, per-version-games), so rows
-older than 2026-07-19 may carry rates on the old denominators — cross-run
-analyses that gate on these columns should treat pre-convention rows
-accordingly.
+Win-rate convention (2026-07-20): ``win_rate_old`` / ``win_rate_new`` are
+wins / HEAD-TO-HEAD DECISIVE games, where decisive = wins_old + wins_new —
+the games one of the two compared versions actually won (draws,
+unattributed games, and filler-won pod games are all excluded; see
+``decisive_win_rate``). When decisive == 0 the columns are NULL, never a
+fabricated 0.0.
+
+Convention history — cross-run analyses that pool these columns must
+bucket rows by write date:
+
+  * Before 2026-07-19 the three writers used three different denominators
+    (all-games-including-draws, decisive-only, per-version-games).
+  * 2026-07-19 (611feff) unified the writers on "attributed-winner"
+    denominators — but the compare-shaped writers (iteration_loop,
+    save_iteration on total_games payloads) counted FILLER-won games in
+    their denominator (total_games - draws) while the AB-shaped writers
+    (_proposer_sim, merge_soak) counted only head-to-head wins
+    (wins_a + wins_b). Fillers take roughly half the games in a 4-player
+    pod, so rows written between 2026-07-19 and 2026-07-20 are a MIXED
+    population whose two halves differ by ~2x scale — do NOT pool them
+    as one convention.
+  * From 2026-07-20 all writers use head-to-head decisive
+    (wins_old + wins_new), the denominator every verdict gate counts.
 
 `deck_snapshot` keeps a copy of the .dck text so we can rebuild any historical
 state without depending on Moxfield not deleting the deck. The blobs are small
@@ -77,27 +90,29 @@ def _resolve_db_path(db_path: Optional[Path]) -> Path:
 def decisive_win_rate(wins: int, decisive: int) -> Optional[float]:
     """Canonical win-rate for the ``win_rate_old`` / ``win_rate_new`` columns.
 
-    One convention (2026-07-19): wins / DECISIVE games, rounded to 4 places,
-    where ``decisive`` is the count of games with an attributed winner — the
-    same denominator the caller's verdict gate uses (draws and unattributed
-    games excluded). Returns ``None`` when ``decisive <= 0`` so callers
-    persist NULL rather than a fabricated 0.0 that would read as an observed
-    "never wins" result.
+    ONE convention (2026-07-20): wins / HEAD-TO-HEAD DECISIVE games, rounded
+    to 4 places, where ``decisive`` = wins_old + wins_new — the count of
+    games one of the TWO COMPARED VERSIONS actually won. Draws, unattributed
+    games, and FILLER-won pod games are all excluded. Head-to-head decisive
+    is the quantity every verdict gate counts (analyst margin checks,
+    ``_verdict_from_ab``'s MIN_DECISIVE_GAMES_FOR_VERDICT) and the only
+    attributed-winner count EVERY writer's sim shape can compute — an
+    ABResult never attributes filler wins, while a compare() report does, so
+    any denominator that includes filler wins (e.g. total_games - draws)
+    exists only for compare-shaped writers and differs from the AB writers'
+    by roughly 2x in a 4-player pod.
 
-    Every writer of those columns MUST route through this helper so the
-    values stay cross-run comparable (FP-002-style row gates read them as
-    one population):
+    Returns ``None`` when ``decisive <= 0`` so callers persist NULL rather
+    than a fabricated 0.0 that would read as an observed "never wins" result.
 
-      - ``_proposer_sim._ab_to_iteration_fields``  (decisive = wins_a + wins_b)
-      - ``iteration_loop.run_one_iteration``       (decisive = total - draws)
-      - ``web.routes_sim.save_iteration``          (decisive = total - draws)
+    Every writer of those columns MUST pass decisive = wins_old + wins_new
+    through this helper so the values stay cross-run comparable (FP-002-style
+    row gates read them as one population):
 
-    The two decisive formulas agree: in a compare() report every non-draw
-    attributed game has a winner (possibly a filler), while an ABResult only
-    attributes head-to-head wins — each writer uses the attributed-winner
-    count its own sim shape can actually observe, which is also exactly what
-    its verdict gate (analyst.min_decisive_games / _verdict_from_ab's
-    MIN_DECISIVE_GAMES_FOR_VERDICT) counts.
+      - ``_proposer_sim._ab_to_iteration_fields``  (wins_a + wins_b)
+      - ``iteration_loop.run_one_iteration``       (old_stats.wins + new_stats.wins)
+      - ``web.routes_sim.save_iteration``          (old_wins + new_wins)
+      - ``scripts/merge_soak`` soak-fold           (wins_a + wins_b)
     """
     if decisive <= 0:
         return None

@@ -173,6 +173,15 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
     games = sim_report.get("games") or 0
     wins_a = sim_report.get("wins_a")
     wins_b = sim_report.get("wins_b")
+    # CONVENTION DIVERGENCE (documented, not fixed — 2026-07-20): these
+    # RoundResult fields share the win_rate_old/new NAMES with the
+    # knowledge_log columns but use a different denominator: wins / ALL
+    # games (draws and filler wins included), not wins / head-to-head
+    # decisive (wins_a + wins_b). They are CLI progress display only —
+    # never persisted to knowledge_log (the auto-curate subprocess writes
+    # the row itself via _ab_to_iteration_fields, on the one convention) —
+    # so they are left as-is rather than silently changing the improve
+    # loop's printed/JSON output. Do NOT pool these with the DB columns.
     wr_old = round(wins_a / games, 4) if games and wins_a is not None else None
     wr_new = round(wins_b / games, 4) if games and wins_b is not None else None
     margin = (wins_b - wins_a) if (wins_a is not None and wins_b is not None) else None

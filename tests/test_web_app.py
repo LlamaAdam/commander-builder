@@ -3911,8 +3911,9 @@ def test_save_iteration_persists_row(save_client):
         },
         # Shape matches a real /api/propose_swap payload: total_games is
         # the attributed-game total for the whole comparison (old_games /
-        # new_games mirror it — both versions sit in every pod), so the
-        # 2026-07-19 convention gives decisive = total_games - draws = 10.
+        # new_games mirror it — both versions sit in every pod). The
+        # 2026-07-20 convention gives decisive = old_wins + new_wins = 10
+        # (no filler wins in this fake, so it coincides with total - draws).
         "sim_report": {
             "winner": "new", "old_wins": 4, "new_wins": 6,
             "old_games": 10, "new_games": 10, "draws": 0,
@@ -4116,13 +4117,22 @@ def test_save_iteration_handles_missing_sim_report(save_client):
     assert detail["margin"] is None
 
 
-# --- knowledge_log win-rate convention (2026-07-19) -------------------------
+# --- knowledge_log win-rate convention (2026-07-20) -------------------------
 # The three writers of win_rate_old/new — _proposer_sim._ab_to_iteration_
 # fields, iteration_loop.run_one_iteration, and /api/save_iteration — must
 # produce IDENTICAL values for the same underlying sim outcome, and NULL
 # (never 0.0) when no game was decisive. This suite exercises all three in
 # one place because cross-run analyses (FP-002-style row gates) read the
 # columns as one population.
+#
+# The fake sim outcome deliberately includes FILLER-won games. The first
+# unification pass (611feff) passed a filler-free version of this test
+# because 8 + 10 + 2 == 20 made total_games - draws (the compare-shaped
+# denominator, filler wins included) numerically equal to wins_old +
+# wins_new (the AB-shaped denominator) — masking that the two formulas
+# diverge by ~2x on any real 4-player pod, where fillers take roughly half
+# the games. With filler wins in the fake, only the one true convention
+# (head-to-head decisive = wins_old + wins_new) makes all writers agree.
 
 def _stage_iteration_loop_decks(tmp_path, monkeypatch):
     """Minimal staged_decks harness (mirrors test_iteration_loop's) so
@@ -4156,8 +4166,12 @@ def _canned_comparison(old_wins, new_wins, draws, total):
 def test_win_rate_convention_identical_across_all_three_writers(
     save_client, tmp_path, monkeypatch,
 ):
-    """Same outcome — 20 attributed games, old 8 / new 10 / 2 draws —
-    must yield the same win_rate_old/new from every writer."""
+    """Same FILLER-HEAVY outcome — 40 attributed games: old won 8, new won
+    10, 2 drew, and fillers took the other 20 — must yield the same
+    win_rate_old/new (8/18 and 10/18) from every writer. Under 611feff's
+    mixed convention the compare-shaped writers would have recorded
+    8/38 and 10/38 here (~2x low) — this is the regression test that
+    would have caught that gap."""
     from commander_builder._proposer_sim import _ab_to_iteration_fields
     from commander_builder.forge_runner import ABResult
     from commander_builder.iteration_loop import run_one_iteration
@@ -4166,22 +4180,24 @@ def test_win_rate_convention_identical_across_all_three_writers(
     expected_old = round(8 / 18, 4)
     expected_new = round(10 / 18, 4)
 
-    # Writer 1 — auto-curate A/B path. In the ABResult shape the
-    # attributed-winner count is wins_a + wins_b (the 2 draws sit inside
-    # `games` but attribute to nobody).
+    # Writer 1 — auto-curate A/B path. In the ABResult shape the 2 draws
+    # and 20 filler wins sit inside `games` but attribute to neither
+    # version; head-to-head decisive is wins_a + wins_b = 18.
     fields = _ab_to_iteration_fields(ABResult(
         deck_a="a.dck", deck_b="b.dck",
-        wins_a=8, wins_b=10, games=20, status="done",
+        wins_a=8, wins_b=10, games=40, status="done",
     ))
     assert fields["win_rate_old"] == expected_old
     assert fields["win_rate_new"] == expected_new
 
-    # Writer 2 — iteration_loop over a canned ComparisonReport:
-    # decisive = total_games - draws = 18.
+    # Writer 2 — iteration_loop over a canned ComparisonReport. Filler
+    # wins live inside total_games (attributed games), so total - draws
+    # is 38, NOT the head-to-head decisive count. The writer must use
+    # old_stats.wins + new_stats.wins = 18.
     v1_name, v2_name = _stage_iteration_loop_decks(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "commander_builder.iteration_loop.compare",
-        lambda **kw: _canned_comparison(8, 10, 2, 20),
+        lambda **kw: _canned_comparison(8, 10, 2, 40),
     )
     il_db = tmp_path / "conv_klog.sqlite"
     result = run_one_iteration(
@@ -4192,18 +4208,45 @@ def test_win_rate_convention_identical_across_all_three_writers(
     assert row.win_rate_old == expected_old
     assert row.win_rate_new == expected_new
 
-    # Writer 3 — /api/save_iteration with the propose_swap payload shape.
+    # Writer 3 — /api/save_iteration with the propose_swap payload shape
+    # (total_games present, filler wins inside it).
     client, _ = save_client
     resp = client.post("/api/save_iteration", json={
         "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
         "verdict": "kept",
         "sim_report": {"old_wins": 8, "new_wins": 10, "draws": 2,
-                       "total_games": 20},
+                       "total_games": 40},
     })
     assert resp.status_code == 200, resp.get_json()
     detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
     assert detail["win_rate_old"] == expected_old
     assert detail["win_rate_new"] == expected_new
+
+
+def test_save_iteration_both_payload_shapes_same_denominator(save_client):
+    """The two /api/save_iteration payload shapes — the propose_swap
+    response body (has total_games) and hand-built / legacy AB-shaped
+    payloads (no total_games) — must land IDENTICAL win rates for the
+    same wins. 611feff flipped denominators per shape (total - draws vs
+    old + new), so the same 8-10 outcome stored two different rate pairs
+    depending on which shape delivered it."""
+    client, _ = save_client
+    shapes = [
+        # Compare shape: total_games includes 20 filler wins + 2 draws.
+        {"old_wins": 8, "new_wins": 10, "draws": 2, "total_games": 40},
+        # AB / legacy shape: no total_games at all.
+        {"old_wins": 8, "new_wins": 10},
+    ]
+    rates = []
+    for sim_report in shapes:
+        resp = client.post("/api/save_iteration", json={
+            "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+            "verdict": "kept", "sim_report": sim_report,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        d = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+        rates.append((d["win_rate_old"], d["win_rate_new"]))
+    assert rates[0] == rates[1] == (round(8 / 18, 4), round(10 / 18, 4))
 
 
 def test_win_rate_convention_null_when_no_decisive_games(
@@ -4243,12 +4286,40 @@ def test_win_rate_convention_null_when_no_decisive_games(
     assert row.win_rate_old is None
     assert row.win_rate_new is None
 
+    # Writer 2, filler sweep — FILLERS won all 20 attributed games (no
+    # draws at all). Head-to-head decisive is 0, so the columns must be
+    # NULL. Under 611feff's total - draws denominator this recorded a
+    # fabricated 0/20 = 0.0 "never wins" for both versions.
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _canned_comparison(0, 0, 0, 20),
+    )
+    result = run_one_iteration(
+        deck_filename=v1_name, new_deck_filename=v2_name, bracket=3,
+        audit_manifest={"added": [], "removed": []}, db_path=il_db,
+    )
+    row = get_iteration(result.iteration_id, db_path=il_db)
+    assert row.win_rate_old is None
+    assert row.win_rate_new is None
+
     # Writer 3 — same all-draw payload through the endpoint.
     client, _ = save_client
     resp = client.post("/api/save_iteration", json={
         "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
         "verdict": "inconclusive",
         "sim_report": {"old_wins": 0, "new_wins": 0, "draws": 4,
+                       "total_games": 4},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["win_rate_old"] is None
+    assert detail["win_rate_new"] is None
+
+    # Writer 3, filler sweep — fillers took every attributed game.
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "inconclusive",
+        "sim_report": {"old_wins": 0, "new_wins": 0, "draws": 0,
                        "total_games": 4},
     })
     assert resp.status_code == 200, resp.get_json()

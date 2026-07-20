@@ -172,7 +172,16 @@ def run_one_iteration(
     # label _proposer_sim._verdict_from_ab uses for skipped/failed sims)
     # with NULL win rates, so the iteration can be re-run later and no
     # analyst/LLM wastes a call on an empty sim.
-    decisive = cmp_report.total_games - cmp_report.draws
+    # Head-to-head decisive count (2026-07-20 convention, see
+    # knowledge_log's schema docstring): games one of the TWO COMPARED
+    # VERSIONS actually won. The previous denominator, total_games -
+    # draws (611feff), also counted FILLER-won pod games — games the
+    # old/new pair can never win, but which fillers take roughly half
+    # the time in a 4-player pod — so this writer's rates sat ~2x lower
+    # than the AB-shaped writers' (wins_a + wins_b) for the same
+    # outcome. wins_old + wins_new is the quantity every verdict gate
+    # counts and every writer can compute, so it is THE convention.
+    decisive = cmp_report.old_stats.wins + cmp_report.new_stats.wins
     if cmp_report.total_games == 0:
         reason = (
             f"sim produced no attributed games "
@@ -201,10 +210,11 @@ def run_one_iteration(
             ),
             config=analyst_config,
         )
-        # Draws are excluded from the denominator. If every attributed
-        # game drew there is no decisive sample — record NULL win rates
-        # rather than a fake 0.0/0.0 (the old max(1, ...) clamp did
-        # exactly that). decisive_win_rate (2026-07-19) is the shared
+        # Draws AND filler wins are excluded from the denominator. If
+        # every attributed game drew or went to a filler there is no
+        # head-to-head sample — record NULL win rates rather than a fake
+        # 0.0/0.0 (the old max(1, ...) clamp did exactly that; NULL-when-
+        # zero follows 1ae44f9). decisive_win_rate is the shared
         # convention helper ALL knowledge_log win-rate writers route
         # through — same denominator rule, same rounding — so the columns
         # stay comparable across writers.

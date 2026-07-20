@@ -57,6 +57,24 @@ def test_extract_features_computes_derived_metrics():
     assert row.features["margin"] == 2.0
 
 
+def test_extract_features_fallback_win_rates_exclude_filler_wins():
+    """When the authoritative win_rate columns are NULL, the fallback
+    derivation must follow the 2026-07-20 knowledge_log convention:
+    wins / head-to-head decisive (old + new wins), NOT total - draws.
+    Filler-heavy compare report: 20 attributed games, old 3 / new 5 /
+    2 draws, fillers took the other 10 — rates are 3/8 and 5/8, not
+    3/18 and 5/18. The decisive_games FEATURE keeps its attributed
+    non-draw meaning (18) — only the win-rate denominator is
+    head-to-head."""
+    row = extract_features(_it(1, "abc", sim_report={
+        "total_games": 20, "draws": 2,
+        "old_stats": {"wins": 3}, "new_stats": {"wins": 5},
+    }))
+    assert row.features["win_rate_old"] == 3 / 8
+    assert row.features["win_rate_new"] == 5 / 8
+    assert row.features["decisive_games"] == 18.0
+
+
 def test_extract_features_reads_real_ab_sim_schema():
     """Regression guard: forge_runner.ABResult.to_dict() emits wins_a/wins_b/
     games -- NOT old_stats/new_stats/total_games. extract_features must read

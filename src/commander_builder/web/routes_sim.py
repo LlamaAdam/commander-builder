@@ -491,14 +491,20 @@ def make_sim_blueprint(
         # Pull win-rate / margin out of sim_report if present so the
         # row is queryable without parsing the JSON blob every time.
         #
-        # Win-rate convention (2026-07-19, see knowledge_log's schema
-        # docstring): wins / DECISIVE games via the shared helper, where
-        # decisive = total_games - draws — total_games only counts
-        # ATTRIBUTED games (compare() excludes failed pods), so subtracting
-        # draws leaves exactly the games with an attributed winner. The old
-        # per-version old_wins/old_games denominators produced rates
-        # incomparable with the other knowledge_log writers. When
-        # decisive == 0 the helper returns None and the columns stay NULL.
+        # Win-rate convention (2026-07-20, see knowledge_log's schema
+        # docstring): wins / HEAD-TO-HEAD DECISIVE games via the shared
+        # helper, where decisive = old_wins + new_wins — the games one of
+        # the two compared versions actually won. BOTH payload shapes
+        # (the /api/propose_swap response body carrying total_games, and
+        # hand-built / legacy AB-shaped payloads without it) compute this
+        # same denominator. The previous pass (611feff) used total_games
+        # - draws when total_games was present — but that count includes
+        # FILLER-won pod games the head-to-head pair can never win
+        # (fillers take roughly half the games in a 4-player pod), so the
+        # two shapes wrote rates ~2x apart for the same outcome, and this
+        # writer's compare-shaped rows were incomparable with the
+        # AB-shaped writers'. When decisive == 0 the helper returns None
+        # and the columns stay NULL.
         win_rate_old = None
         win_rate_new = None
         margin = None
@@ -506,16 +512,7 @@ def make_sim_blueprint(
             try:
                 old_w = int(sim_report.get("old_wins") or 0)
                 new_w = int(sim_report.get("new_wins") or 0)
-                draws = int(sim_report.get("draws") or 0)
-                total = sim_report.get("total_games")
-                if total is not None:
-                    decisive = int(total) - draws
-                else:
-                    # Hand-built / legacy payloads without total_games:
-                    # the head-to-head decisive count is the best
-                    # attributed-winner count available (same fallback
-                    # shape the A/B writer uses).
-                    decisive = old_w + new_w
+                decisive = old_w + new_w
                 win_rate_old = decisive_win_rate(old_w, decisive)
                 win_rate_new = decisive_win_rate(new_w, decisive)
                 if "margin" in sim_report and sim_report["margin"] is not None:
