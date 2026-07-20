@@ -392,7 +392,8 @@ def make_sim_blueprint(
                 "audit_manifest": {"added": [...], "removed": [...],
                                     "rationale": "..."} (optional),
                 "sim_report": { ...full propose_swap response... } (optional),
-                "verdict": "kept" | "reverted" | "neutral" | "pending",
+                "verdict": "kept" | "reverted" | "neutral"
+                           | "inconclusive" | "pending",
                 "verdict_notes": "..." (optional),
                 "deck_snapshot": "<.dck text>" (optional),
                 "parent_id": int (optional)
@@ -421,9 +422,16 @@ def make_sim_blueprint(
             return jsonify({"error": "bracket must be 1..5"}), 400
 
         verdict = (payload.get("verdict") or "pending").strip()
-        if verdict not in ("kept", "reverted", "neutral", "pending"):
+        # 'inconclusive' must be accepted here: the web UI *defaults* the
+        # save-verdict radio to it whenever the sim had < 20 decisive games
+        # (see app.js renderSaveIterationBlock), and both the PATCH verdict
+        # endpoint and knowledge_log already treat it as valid. Rejecting it
+        # made the UI's own default save path 400.
+        if verdict not in ("kept", "reverted", "neutral", "inconclusive",
+                           "pending"):
             return jsonify({
-                "error": "verdict must be one of kept, reverted, neutral, pending",
+                "error": "verdict must be one of kept, reverted, neutral, "
+                         "inconclusive, pending",
             }), 400
 
         audit_manifest = payload.get("audit_manifest")

@@ -2024,9 +2024,12 @@ function renderDashboard(data, iterations) {
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: `verdict ${it.verdict}` }, it.verdict));
       row.appendChild(el("span", { class: "name" }, it.deck_name));
+      // `margin` is a raw game-count delta (wins_new - wins_old, see
+      // _proposer_sim._ab_to_iteration_fields) — NOT percentage points,
+      // so label it in games. "+2pp" here overstated a +2-game edge.
       const deltaText =
         it.margin != null
-          ? `${it.margin > 0 ? "+" : ""}${it.margin}pp`
+          ? `${it.margin > 0 ? "+" : ""}${it.margin} games`
           : it.win_rate_new != null
           ? `${Math.round(it.win_rate_new * 100)}%`
           : "";
@@ -2212,6 +2215,7 @@ async function loadVerdictBreakdown(deckId, dashContainer) {
       const kept = b.kept || 0;
       const reverted = b.reverted || 0;
       const neutral = b.neutral || 0;
+      const inconclusive = b.inconclusive || 0;
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: "name" }, v));
       // Color the verdict count pills like the iteration list.
@@ -2224,6 +2228,12 @@ async function loadVerdictBreakdown(deckId, dashContainer) {
       ));
       if (neutral) pills.appendChild(el(
         "span", { class: "verdict neutral" }, `${neutral} neutral`,
+      ));
+      // Without this pill, low-N sims (verdict='inconclusive', counted
+      // in `total` by knowledge_log.stats) silently deflate the
+      // "kept/total" ratio below with no visible explanation.
+      if (inconclusive) pills.appendChild(el(
+        "span", { class: "verdict inconclusive" }, `${inconclusive} inconclusive`,
       ));
       row.appendChild(pills);
       const keptPct = total ? Math.round((kept / total) * 100) : 0;

@@ -570,6 +570,11 @@ body {
 .verdict.kept     { background: var(--good); color: #08361d; }
 .verdict.reverted { background: var(--bad);  color: #380808; }
 .verdict.neutral  { background: var(--warn); color: #4a3308; }
+/* 'inconclusive' = sim finished but < 20 decisive games. Muted gray-blue
+   (indigo, matching iteration_graph.js's node tint) so it reads as
+   "recorded but uncallable" — distinct from pending's flat panel gray.
+   Without this rule the pill rendered as bare unstyled text. */
+.verdict.inconclusive { background: rgba(129, 140, 248, 0.25); color: #a5b4fc; }
 .verdict.pending  { background: var(--panel-2); color: var(--muted); }
 .iteration .name { font-size: 14px; }
 .iteration .delta { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }

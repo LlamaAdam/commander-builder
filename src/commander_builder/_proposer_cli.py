@@ -145,17 +145,35 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--run-sim", action="store_true",
                    help="After applying the proposal, run a Forge A/B "
                         "head-to-head between the old and new deck and "
-                        "record the verdict (kept/reverted/neutral) in "
-                        "the knowledge_log. Closes the loop -- the "
-                        "iteration row's verdict reflects empirical sim "
-                        "results, not a permanent 'pending'. Skipped "
+                        "record the verdict in the knowledge_log. "
+                        "Closes the loop -- the iteration row's verdict "
+                        "reflects empirical sim results, not a "
+                        "permanent 'pending'. Honesty note: a "
+                        "kept/reverted/neutral verdict needs >= 20 "
+                        "decisive (non-draw) games; below that the "
+                        "verdict is recorded as 'inconclusive', so at "
+                        "the default --sim-games 5 this is a smoke "
+                        "signal, not a decisive test. Skipped "
                         "automatically under --dry-run or --no-log "
                         "(no row to update).")
+    # Default stays 5 on purpose: auto-curate's --run-sim is a cheap
+    # smoke signal, and silently 5x-ing every operator's Forge bill is
+    # not this flag's call -- the sub-threshold warning printed at sim
+    # start tells them the verdict will be 'inconclusive' and what to
+    # pass instead. (commander-improve, whose whole point is advancing
+    # on 'kept', defaults to 25.)
     p.add_argument("--sim-games", type=int, default=5,
-                   help="Games per A/B sim (default 5). The harness "
-                        "alternates seat order, so total games = 2 * "
-                        "this number isn't quite right -- it's exactly "
-                        "this number, half with old in seat 1.")
+                   help="Games per A/B sim (default 5; below the "
+                        "20-decisive-game verdict threshold, so the "
+                        "recorded verdict will be 'inconclusive' -- "
+                        "pass >= 20, e.g. 25, for a verdict that can "
+                        "resolve). The harness alternates seat order "
+                        "per game, so total games = 2 * this number "
+                        "isn't quite right -- it's exactly this "
+                        "number, near-half with old in seat 1 "
+                        "(exactly half only for even counts; an odd "
+                        "count gives the old deck one extra seat-1 "
+                        "game).")
     p.add_argument("--sim-fillers", default=None,
                    help="Comma-separated filenames (relative to "
                         "deck_dir) of filler decks for the 4-player "

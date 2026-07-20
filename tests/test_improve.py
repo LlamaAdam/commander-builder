@@ -171,6 +171,7 @@ def _stub_loop(monkeypatch):
         captured["deck_id"] = deck_id
         captured["rounds"] = rounds
         captured["bracket"] = args.bracket
+        captured["sim_games"] = args.sim_games
         return ImproveResult(
             deck_id=deck_id, start_deck=str(deck_path), final_deck=str(deck_path),
             rounds_requested=rounds, rounds_run=0, rounds_kept=0, converged=False,
@@ -229,6 +230,45 @@ def test_main_no_bracket_no_suffix_errors(tmp_path, monkeypatch):
     deck.write_text("[metadata]\nName=Plain\n", encoding="utf-8")
     rc = improve_main([str(deck), "--rounds", "1"])
     assert rc == 2
+
+
+# --- improve_main: sub-threshold --sim-games warning ----------------------
+
+def test_main_warns_on_sub_threshold_sim_games(tmp_path, monkeypatch, capsys):
+    """--sim-games below MIN_DECISIVE_GAMES_FOR_VERDICT makes every
+    verdict structurally 'inconclusive' — and improve only advances on
+    'kept', so the run can never move the deck. The CLI must say so
+    LOUDLY up front (on stderr, so --json stdout stays parseable)."""
+    _stub_loop(monkeypatch)
+    deck = tmp_path / "[USER] Warn [B3].dck"
+    deck.write_text("[metadata]\nName=Warn\n", encoding="utf-8")
+
+    rc = improve_main([str(deck), "--rounds", "1", "--sim-games", "5"])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "inconclusive" in err
+    assert "5" in err  # echoes the offending value
+
+
+def test_main_default_sim_games_clears_threshold_no_warning(
+    tmp_path, monkeypatch, capsys,
+):
+    """The default --sim-games must be able to produce a decisive
+    verdict (improve's whole purpose is advancing on 'kept'), so no
+    warning fires at defaults."""
+    from commander_builder._proposer_sim import MIN_DECISIVE_GAMES_FOR_VERDICT
+
+    captured = _stub_loop(monkeypatch)
+    deck = tmp_path / "[USER] Quiet [B3].dck"
+    deck.write_text("[metadata]\nName=Quiet\n", encoding="utf-8")
+
+    rc = improve_main([str(deck), "--rounds", "1"])
+
+    assert rc == 0
+    assert captured["sim_games"] >= MIN_DECISIVE_GAMES_FOR_VERDICT
+    assert "WARNING" not in capsys.readouterr().err
 
 
 # --- bandit strategy (FP-012 slice 2) -------------------------------------

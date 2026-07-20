@@ -25,6 +25,7 @@ the orchestrator under the 800-line guideline. Re-exported from
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -260,6 +261,26 @@ def _run_sim_and_record(
                       f"{type(exc).__name__}: {exc}", flush=True)
         return None, msg, "pending"
 
+    # LOUD sub-threshold warning: with fewer total games than the
+    # min-decisive gate, the verdict is STRUCTURALLY 'inconclusive' --
+    # even a clean sweep can't reach MIN_DECISIVE_GAMES_FOR_VERDICT
+    # decisive games, so kept/reverted/neutral are unreachable and the
+    # Forge time is spent on a verdict that can never resolve. Printed
+    # on stderr deliberately: --json mode keeps stdout machine-parseable,
+    # and commander-improve captures auto-curate's stdout per round --
+    # stderr is the only channel that reaches the operator in all three
+    # invocation modes.
+    if args.sim_games < MIN_DECISIVE_GAMES_FOR_VERDICT:
+        print(
+            f"[sim] WARNING: --sim-games {args.sim_games} < "
+            f"{MIN_DECISIVE_GAMES_FOR_VERDICT} (MIN_DECISIVE_GAMES_FOR_"
+            f"VERDICT): at most {args.sim_games} decisive games are "
+            f"possible, so the verdict will ALWAYS be 'inconclusive' -- "
+            f"never kept/reverted/neutral. Pass --sim-games >= "
+            f"{MIN_DECISIVE_GAMES_FOR_VERDICT} (draws don't count as "
+            f"decisive, so add headroom) for a verdict that can resolve.",
+            file=sys.stderr, flush=True,
+        )
     if not args.json:
         print(f"[4/4] Running Forge A/B sim ({args.sim_games} games, "
               f"fillers={filler_names})...", flush=True)

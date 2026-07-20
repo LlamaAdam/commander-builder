@@ -3904,6 +3904,31 @@ def test_save_iteration_400_on_invalid_verdict(save_client):
     assert "verdict" in resp.get_json()["error"]
 
 
+def test_save_iteration_accepts_inconclusive(save_client):
+    """'inconclusive' is the web UI's DEFAULT save verdict whenever the
+    sim had < 20 decisive games (app.js renderSaveIterationBlock), and
+    both the PATCH endpoint and knowledge_log already accept it — so
+    save_iteration rejecting it 400'd the UI's own default path."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        # A 3-2 smoke sim: exactly the low-N shape that defaults the UI
+        # radio to 'inconclusive'.
+        "sim_report": {
+            "winner": "new", "old_wins": 2, "new_wins": 3,
+            "old_games": 5, "new_games": 5, "draws": 0,
+            "margin": 1, "total_games": 10, "mode": "pod", "bracket": 3,
+        },
+        "verdict": "inconclusive",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["verdict"] == "inconclusive"
+    # Round-trips through the detail endpoint unchanged.
+    detail = client.get(f"/api/iteration/{body['id']}").get_json()
+    assert detail["verdict"] == "inconclusive"
+
+
 def test_save_iteration_400_on_invalid_bracket(save_client):
     client, _ = save_client
     resp = client.post("/api/save_iteration", json={

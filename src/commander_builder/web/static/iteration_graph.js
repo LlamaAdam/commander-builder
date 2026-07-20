@@ -344,6 +344,12 @@ function _verdictBgColor(verdict) {
     case "kept":     return "rgba(74, 222, 128, 0.10)";   // green
     case "reverted": return "rgba(248, 113, 113, 0.10)";  // red
     case "neutral":  return "rgba(148, 163, 184, 0.10)";  // gray
+    // 'inconclusive' (sim finished but < 20 decisive games) must not
+    // share pending's amber: pending means "no result yet", while
+    // inconclusive means "result recorded, sample too small to call".
+    // Gray-blue (indigo-400, matching the tailwind-400 tints above)
+    // keeps it visually muted but distinct from neutral's slate gray.
+    case "inconclusive": return "rgba(129, 140, 248, 0.10)"; // gray-blue
     case "pending":
     default:         return "rgba(245, 158, 11, 0.08)";   // amber
   }

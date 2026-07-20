@@ -38,6 +38,10 @@ from typing import Callable, Optional
 
 from .forge_runner import VENDOR_FORGE
 from .intent import Intent, intent_protect_cards, learn_intent
+# Imported (not duplicated) so the sub-threshold warning and the
+# --sim-games default can never drift from the verdict gate in
+# _proposer_sim._verdict_from_ab.
+from ._proposer_sim import MIN_DECISIVE_GAMES_FOR_VERDICT
 
 # Default Commander deck directory — mirrors compare_versions.DECK_DIR /
 # doctor.DECK_DIR so ``--deck <id>`` resolves against the same place the
@@ -456,8 +460,21 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                    help="Advisor backend (default heuristic).")
     p.add_argument("--model", default="claude-sonnet-4-5",
                    help="Anthropic model id for the curator step.")
-    p.add_argument("--sim-games", type=int, default=5,
-                   help="Games per A/B sim each round (default 5).")
+    # Default 25, NOT 5: verdicts below MIN_DECISIVE_GAMES_FOR_VERDICT
+    # (=20) decisive games are gated to 'inconclusive', and the greedy
+    # loop only advances on 'kept' -- so a 5-game default made improve
+    # structurally unable to ever advance the base deck while still
+    # burning Forge + LLM time every round. 25 leaves headroom for a
+    # few draws and still clears the 20-decisive gate.
+    p.add_argument("--sim-games", type=int, default=25,
+                   help="Games per A/B sim each round (default 25). "
+                        "Verdicts need >= 20 decisive (non-draw) games "
+                        "to resolve to kept/reverted/neutral; fewer is "
+                        "recorded 'inconclusive' and the round cannot "
+                        "advance the deck. NOTE the runtime cost: 25 "
+                        "Forge pod games per round is roughly 5x the "
+                        "old 5-game default -- budget on the order of "
+                        "an hour per round, not minutes.")
     p.add_argument("--sim-margin", type=int, default=1,
                    help="Min (wins_new - wins_old) margin to call 'kept' "
                         "(default 1). Within margin = neutral.")
@@ -557,6 +574,24 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                 print(f"[improve] intent learning failed ({exc}); "
                       "proceeding without intent.", flush=True)
             args.intent = None
+
+    # LOUD up-front warning before any Forge/LLM time is spent: below
+    # the min-decisive gate every round's verdict is structurally
+    # 'inconclusive', and the greedy loop advances ONLY on 'kept', so
+    # the whole run cannot ever move the base deck forward. On stderr
+    # so --json stdout stays machine-parseable and the warning is
+    # visible even when stdout is piped.
+    if args.sim_games < MIN_DECISIVE_GAMES_FOR_VERDICT:
+        print(
+            f"[improve] WARNING: --sim-games {args.sim_games} < "
+            f"{MIN_DECISIVE_GAMES_FOR_VERDICT} (MIN_DECISIVE_GAMES_FOR_"
+            f"VERDICT): every round's verdict will be 'inconclusive', "
+            f"and improve only advances the deck on 'kept' -- this run "
+            f"CANNOT improve the deck, it will only burn Forge/LLM "
+            f"time. Pass --sim-games >= {MIN_DECISIVE_GAMES_FOR_VERDICT} "
+            f"(default 25) to let verdicts resolve.",
+            file=sys.stderr, flush=True,
+        )
 
     if not args.json:
         print(f"[improve] {deck_id} (B{args.bracket}) -- strategy={args.strategy}, "

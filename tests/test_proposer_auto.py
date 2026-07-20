@@ -2739,9 +2739,12 @@ def test_auto_curate_main_run_sim_records_verdict(
     assert it.sim_report is not None
     assert it.sim_report["wins_b"] == 15
 
-    out = capsys.readouterr().out
-    assert "A/B sim" in out
-    assert "verdict: kept" in out
+    captured = capsys.readouterr()
+    assert "A/B sim" in captured.out
+    assert "verdict: kept" in captured.out
+    # 20 games meets MIN_DECISIVE_GAMES_FOR_VERDICT -> no sub-threshold
+    # warning on stderr.
+    assert "WARNING" not in captured.err
 
 
 def test_auto_curate_main_run_sim_skipped_when_no_fillers(
@@ -2859,13 +2862,21 @@ def test_auto_curate_main_json_mode_surfaces_sim_block(
         "--run-sim", "--sim-games", "5", "--sim-margin", "2", "--json",
     ])
     assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    # Stdout must stay pure JSON: the sub-threshold warning goes to
+    # stderr precisely so batch drivers (and commander-improve's
+    # stdout capture) can keep parsing this blob.
+    payload = json.loads(captured.out)
     assert payload["sim_run"] is True
     # 3-2 over only 5 decisive games is below the min-decisive threshold ->
     # 'inconclusive' (the low-N gate fires before the margin check).
     assert payload["sim_verdict"] == "inconclusive"
     assert payload["sim_report"]["wins_b"] == 3
     assert payload["sim_error"] is None
+    # ... and the operator was told, loudly, why the verdict can't
+    # resolve at 5 games.
+    assert "WARNING" in captured.err
+    assert "inconclusive" in captured.err
 
 
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
