@@ -1516,6 +1516,264 @@ def test_compare_parallel_pods_alternate_by_stable_index(
     assert report.pods[1]["h2h_seat_order"] == "new_first"
 
 
+# ---------------------------------------------------------------------------
+# Early-stop x parallel dispatch — in-flight pods are absorbed, not dropped
+# ---------------------------------------------------------------------------
+
+def _make_scripted_executor():
+    """Fake ThreadPoolExecutor for the early-stop drain test.
+
+    Real threads make "one pod still running at decision time"
+    unforceable, so this executor pins the states by hand:
+      - pods 0..3 are marked RUNNING at submit (cancel() must fail on
+        them, exactly like a pod whose Forge JVM is already up);
+      - pod 4 stays PENDING (cancel() succeeds — the never-started pod);
+      - a controller thread resolves pods 0..2 immediately, then holds
+        pod 3 until compare() has TRIED to cancel it (observed via a
+        cancel()-signalling Future subclass) — i.e. until the early-stop
+        decision has fired — and only then lets pod 3 "finish".
+    The futures are real concurrent.futures.Future objects, so the
+    production as_completed() loop is exercised unmodified.
+    """
+    import threading
+    from concurrent.futures import Future
+
+    class SignalingFuture(Future):
+        """Future whose cancel() attempt is observable by the test."""
+        def __init__(self):
+            super().__init__()
+            self.cancel_attempted = threading.Event()
+
+        def cancel(self):
+            self.cancel_attempted.set()
+            return super().cancel()
+
+    class FakeExecutor:
+        created = []
+
+        def __init__(self, max_workers=None):
+            self.submitted = {}  # pod index -> (future, fn, args, kwargs)
+            self._controller = None
+            FakeExecutor.created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def submit(self, fn, *args, **kwargs):
+            pod_index = args[4]  # _run_one_pod(runner, pod, mode, gpp, i, n)
+            fut = SignalingFuture() if pod_index == 3 else Future()
+            if pod_index != 4:
+                # Pods 0-3 are "in flight": RUNNING futures reject cancel().
+                fut.set_running_or_notify_cancel()
+            self.submitted[pod_index] = (fut, fn, args, kwargs)
+            if len(self.submitted) == 5:
+                self._controller = threading.Thread(target=self._drive, daemon=True)
+                self._controller.start()
+            return fut
+
+        def _drive(self):
+            # Fast pods land first; each is computed synchronously with the
+            # REAL _run_one_pod so absorption exercises production code.
+            for i in (0, 1, 2):
+                fut, fn, args, kwargs = self.submitted[i]
+                fut.set_result(fn(*args, **kwargs))
+            # Pod 3 "finishes" only after the early-stop decision tried to
+            # cancel it — guaranteeing the decision fired while it ran.
+            f3, fn3, args3, kwargs3 = self.submitted[3]
+            if not f3.cancel_attempted.wait(timeout=10):
+                # Fail fast instead of hanging as_completed forever.
+                f3.set_exception(AssertionError("early stop never attempted cancel"))
+                f4 = self.submitted[4][0]
+                if not f4.cancelled():
+                    f4.set_exception(AssertionError("pod 4 never cancelled"))
+                return
+            f3.set_result(fn3(*args3, **kwargs3))
+            # Pod 4 must have been cancelled by the sweep; if a regression
+            # leaves it pending, unblock as_completed with a failure.
+            import time as _t
+            f4 = self.submitted[4][0]
+            for _ in range(500):
+                if f4.cancelled():
+                    # Mimic the real executor's worker thread: cancel() on a
+                    # PENDING future only flips its state to CANCELLED — the
+                    # as_completed() waiters are woken later, when the worker
+                    # dequeues the dead work item and calls
+                    # set_running_or_notify_cancel() (CANCELLED →
+                    # CANCELLED_AND_NOTIFIED). Skipping this step leaves the
+                    # production drain loop blocked forever on a future
+                    # nobody will ever notify — which is a fake-executor
+                    # artifact, not a production bug.
+                    f4.set_running_or_notify_cancel()
+                    return
+                if f4.done():
+                    return
+                _t.sleep(0.01)
+            f4.set_exception(AssertionError("pod 4 neither cancelled nor run"))
+
+        def __exit__(self, *exc):
+            if self._controller is not None:
+                self._controller.join(timeout=10)
+            return False
+
+    return FakeExecutor
+
+
+def test_compare_parallel_early_stop_absorbs_in_flight_pod(tmp_path, monkeypatch):
+    """Early stop under parallel dispatch must NOT throw away pods that
+    are already running: their JVM cost is paid either way, so their
+    games count. 5 pods x 5 games; pods 0-2 land 5-0 OLD (decision fires
+    after the third: margin 15 > 10 remaining) while pod 3 is mid-run
+    and pod 4 is still queued. Pod 3's 0-5 result must be absorbed —
+    with correct index/seat bookkeeping — and pod 4 stays excluded."""
+    from commander_builder.forge_runner import SimResult
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=5)
+
+    # Pod i carries Filler{2i}/Filler{2i+1}; key results off that.
+    outputs = {
+        0: _make_pod_stdout(5, 0),
+        1: _make_pod_stdout(5, 0),
+        2: _make_pod_stdout(5, 0),
+        3: _make_pod_stdout(0, 5),   # the in-flight pod: NEW sweeps it
+        4: _make_pod_stdout(5, 0),   # must never run
+    }
+    ran: list[int] = []
+
+    class FakeRunner:
+        def run(self, pod, *args, **kwargs):
+            idx = next(
+                i for i in range(5) if f"Filler{2 * i} [B3].dck" in pod
+            )
+            ran.append(idx)
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=outputs[idx], stderr="", timed_out=False, error=None,
+            )
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(cv, "ThreadPoolExecutor", _make_scripted_executor())
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=5, filler_pairs=5,
+        runner=fake_runner,
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=True,
+    )
+
+    # Pod 4 was cancelled before starting — its runner call never happened.
+    assert sorted(ran) == [0, 1, 2, 3]
+    assert report.stopped_early is True
+    assert report.pods_planned == 5
+    # The in-flight pod's games ARE in the totals: 15-0 + 0-5 = 20 games.
+    assert report.old_stats.wins == 15
+    assert report.new_stats.wins == 5
+    assert report.total_games == 20
+    # No misalignment: pods listed in original order, 1-based, pod 5 absent.
+    assert [p["pod_index"] for p in report.pods] == [1, 2, 3, 4]
+    # Seat bookkeeping survives late absorption: pod index 3 is odd →
+    # seat alternation put NEW first, and the absorbed record says so.
+    assert report.pods[3]["h2h_seat_order"] == "new_first"
+    assert report.pods[3]["pod"][0] == NEW
+    # Late absorption is a clean success — not misclassified as a failure.
+    assert report.failed_pods == 0
+    assert report.pod_failures == []
+
+
+# ---------------------------------------------------------------------------
+# forge_log_tail honesty under shared-profile parallel dispatch
+# ---------------------------------------------------------------------------
+
+def _tail_capturing_runner(stdout, tail):
+    """FakeRunner that records every SimResult it hands out, so tests can
+    check whether compare() replaced forge_log_tail post-hoc."""
+    from commander_builder.forge_runner import SimResult
+
+    class FakeRunner:
+        def __init__(self):
+            self.sims = []
+
+        def run(self, pod, *args, **kwargs):
+            sim = SimResult(
+                cmd=["x"], returncode=0, duration_sec=0.01,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+                forge_log_tail=tail,
+            )
+            self.sims.append(sim)
+            return sim
+
+    return FakeRunner()
+
+
+def test_compare_parallel_replaces_forge_log_tail_with_marker(
+    tmp_path, monkeypatch,
+):
+    """Parallel pods share ONE profile, so each pod's forge.log tail is an
+    interleaving of every concurrent pod — attribution would be wrong.
+    compare() must replace it with the explicit marker on EVERY pod."""
+    from commander_builder.compare_versions import _PARALLEL_LOG_TAIL_MARKER
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    fr = _tail_capturing_runner(
+        _make_pod_stdout(1, 1),
+        "java.lang.NullPointerException — could be ANY concurrent pod's",
+    )
+
+    cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=fr,
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    assert len(fr.sims) == 2
+    for sim in fr.sims:
+        assert sim.forge_log_tail == _PARALLEL_LOG_TAIL_MARKER
+
+
+def test_compare_sequential_keeps_real_forge_log_tail(tmp_path, monkeypatch):
+    """Sequential pods have the profile to themselves — the tail IS this
+    pod's log, so it must be preserved for post-mortems."""
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    fr = _tail_capturing_runner(
+        _make_pod_stdout(1, 1), "this pod's very own stack trace",
+    )
+
+    cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=fr,
+        out_dir=tmp_path / "_compare",
+        parallel=False, early_stop=False,
+    )
+
+    assert len(fr.sims) == 2
+    for sim in fr.sims:
+        assert sim.forge_log_tail == "this pod's very own stack trace"
+
+
+def test_compare_single_pod_parallel_flag_keeps_real_tail(
+    tmp_path, monkeypatch,
+):
+    """parallel=True with ONE pod short-circuits to the sequential path
+    (use_parallel requires >1 pod) — no concurrency, no interleaving, so
+    the real tail survives."""
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch)
+    fr = _tail_capturing_runner(_make_pod_stdout(2, 0), "solo pod tail")
+
+    cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, mode="1v1",
+        runner=fr,
+        out_dir=tmp_path / "_compare",
+        parallel=True,
+    )
+
+    assert len(fr.sims) == 1
+    assert fr.sims[0].forge_log_tail == "solo pod tail"
+
+
 def test_format_summary_surfaces_pod_failures():
     r = ComparisonReport(
         old_deck="old.dck", new_deck="new.dck", bracket=3, timestamp="x",

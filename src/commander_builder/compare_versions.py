@@ -486,6 +486,19 @@ def _salvage_wins_from_stdout(stdout: str) -> dict:
     return state
 
 
+
+# Marker substituted for SimResult.forge_log_tail when pods run in
+# parallel within the ONE shared Forge profile. The real tail would be
+# an interleaved mix of every concurrent pod's log lines, so any stack
+# trace in it may belong to a DIFFERENT pod — an honest "unavailable"
+# beats confidently-wrong post-mortem data. See _run_one_pod's
+# ``shared_profile_parallel`` and the shared-profile comment at
+# compare()'s parallel dispatch. Tests assert on this exact string.
+_PARALLEL_LOG_TAIL_MARKER = (
+    "(forge.log tail unavailable under parallel dispatch — shared profile)"
+)
+
+
 def _run_one_pod(
     runner: ForgeRunner,
     pod: list[str],
@@ -495,20 +508,32 @@ def _run_one_pod(
     total_pods: int,
     *,
     intra_pod_abort: bool = True,
+    shared_profile_parallel: bool = False,
 ) -> dict:
     """Worker: run one Forge sim, parse, return a structured pod result.
 
     Pulled out of ``compare()``'s loop so the same code path can serve
-    both sequential (``parallel=False``) and threaded execution. Each
-    invocation is wholly self-contained — Forge writes nothing to the
-    install dir during sim, so concurrent calls don't race on shared
-    state.
+    both sequential (``parallel=False``) and threaded execution. MOSTLY
+    self-contained — decks and cache are only READ during a sim, so
+    concurrent calls don't race on those — but not wholly: Forge appends
+    to the shared profile's ``userdata/forge.log`` during every sim, so
+    concurrent invocations DO interleave in that one file (see
+    ``shared_profile_parallel`` below and the shared-profile comment at
+    ``compare()``'s parallel dispatch).
 
     ``intra_pod_abort`` (Sprint 1C, default True) enables per-game
     abort: as soon as the in-pod margin exceeds the games left in this
     pod, the JVM is killed. We then synthesize the ``Match Result``
     line from observed per-game winners so log_parser can score the
     truncated run.
+
+    ``shared_profile_parallel`` (default False) tells the worker it is
+    running concurrently with sibling pods in the SAME Forge profile.
+    In that case ``SimResult.forge_log_tail`` — read from the shared
+    ``userdata/forge.log`` after the run — is an unattributable
+    interleaving of whichever pods happened to be running, so we replace
+    it with ``_PARALLEL_LOG_TAIL_MARKER`` rather than hand post-mortems
+    another pod's stack trace. Sequential mode keeps the real tail.
     """
     print(
         f"--- Pod {pod_index + 1}/{total_pods} starting: {pod} ---",
@@ -535,6 +560,14 @@ def _run_one_pod(
         result = runner.run(
             pod, num_games=games_per_pod, abort_check=abort_check,
         )
+    if shared_profile_parallel:
+        # Every parallel pod shares ONE profile, so forge.log is a single
+        # file all the concurrent JVMs append to; the tail read after
+        # THIS pod finished is an interleaving of whichever pods were
+        # running and can't be attributed to this one. Replace it with an
+        # explicit marker so a post-mortem sees "unavailable" instead of
+        # (very plausibly) another pod's crash.
+        result.forge_log_tail = _PARALLEL_LOG_TAIL_MARKER
     stdout = result.stdout
     pod_aborted = bool(abort_state and abort_state.get("aborted"))
     timeout_salvaged = False
@@ -655,7 +688,10 @@ def compare(
 
     ``early_stop`` (default True) skips remaining pods once the
     cumulative margin is too large for them to possibly flip the
-    verdict (see ``_is_decisive``). With the default 2 filler pairs
+    verdict (see ``_is_decisive``). Under parallel dispatch only
+    NOT-YET-STARTED pods are skipped; pods already in flight run to
+    completion (their JVM cost is paid either way) and their games ARE
+    absorbed into the report. With the default 2 filler pairs
     the saving is small because both pods already run in parallel;
     the value grows once ``filler_pairs`` is bumped above the core
     count or sequential mode is forced.
@@ -847,28 +883,79 @@ def compare(
             f"(workers={workers}) ---",
             flush=True,
         )
+        # SHARED-PROFILE PARALLELISM — reconciling with forge_runner's own
+        # warnings. run_ab_batch / run_ab_parallel refuse to let two Forge
+        # instances share a profile ("they'd collide on the deck dir,
+        # cache, and forge.log" — ForgeRunner.for_profile) and hand each
+        # worker its own cwd-isolated vendor/forge{N} profile. This
+        # dispatch DOES run every pod concurrently in the one shared
+        # profile. Taking the three collision surfaces honestly:
+        #   - deck dir: safe HERE. Those helpers' callers stage/copy decks
+        #     into the profile as part of each job; compare() writes
+        #     nothing during dispatch — every pod only READS .dck files
+        #     that already exist before the first submit (old/new are
+        #     verified above; web callers stage before calling). Concurrent
+        #     readers don't collide.
+        #   - cache: read-mostly in headless sim (the card DB/pics were
+        #     populated long before any compare() runs). A cold, never-run
+        #     profile could race on first-time cache population; accepted
+        #     risk, since every deployed profile is warmed.
+        #   - forge.log: the collision is REAL and unavoidable — every JVM
+        #     appends to the one userdata/forge.log, so a per-pod tail read
+        #     is an unattributable interleaving. We don't pretend
+        #     otherwise: _run_one_pod(shared_profile_parallel=True)
+        #     replaces forge_log_tail with an explicit marker.
+        # The robust alternative is run_ab_parallel's per-worker profiles
+        # (vendor/forge2..N); adopting it here is deliberately out of
+        # scope — it would change profile discovery and deck staging for
+        # every compare() caller.
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {
                 ex.submit(
                     _run_one_pod, runner, pod, mode, games_per_pod, i, len(pods),
+                    shared_profile_parallel=True,
                 ): i
                 for i, pod in enumerate(pods)
             }
+            # `stop_decided` latches the first decisive verdict so late
+            # absorptions can't re-trigger (or un-trigger) the early-stop
+            # decision: after the cancel sweep every future is done,
+            # running, or cancelled — there is nothing left to cancel, and
+            # nothing restarts a cancelled future.
+            stop_decided = False
             for fut in as_completed(futures):
+                if fut.cancelled():
+                    # Cancelled == never started (Future.cancel() only
+                    # succeeds on not-yet-running futures), so there is no
+                    # result to absorb — and .result() would raise
+                    # CancelledError. Skipping here can't misalign the
+                    # report: _absorb keys completed_pods on each result's
+                    # OWN pod_index, so absent indices simply don't appear.
+                    continue
                 _absorb(fut.result())
-                if _check_early_stop():
-                    # Cancel any still-queued pods. Already-running pods
-                    # can't be interrupted (Forge subprocess won't honor
-                    # a thread cancel), but unstarted pods stay unstarted.
-                    canceled = sum(1 for f in futures if f.cancel())
-                    if canceled:
-                        report.stopped_early = True
-                        print(
-                            f"--- Early stop: verdict locked in, "
-                            f"canceled {canceled} pending pod(s) ---",
-                            flush=True,
-                        )
-                        break
+                if stop_decided or not _check_early_stop():
+                    continue
+                # Verdict locked in. Cancel any still-QUEUED pods —
+                # already-running pods can't be interrupted (the Forge
+                # subprocess won't honor a thread cancel), so their full
+                # wall-clock cost is paid regardless of what we do next.
+                # That is exactly why we do NOT `break` here: the old
+                # break-out still blocked on the executor's shutdown join
+                # for as long as the in-flight JVMs took, but silently
+                # threw their fully-played games away. Keep draining
+                # as_completed instead and absorb in-flight pods through
+                # the same _absorb path (same failure classification, same
+                # seat/pod-index bookkeeping) when they land.
+                stop_decided = True
+                canceled = sum(1 for f in futures if f.cancel())
+                if canceled:
+                    report.stopped_early = True
+                    print(
+                        f"--- Early stop: verdict locked in, canceled "
+                        f"{canceled} pending pod(s); draining pods already "
+                        f"in flight ---",
+                        flush=True,
+                    )
     else:
         for i, pod in enumerate(pods):
             _absorb(
