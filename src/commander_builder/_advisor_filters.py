@@ -15,12 +15,21 @@ claude) produces its recommendations:
   (plausible-sounding fake cards) before the audit pipeline passes
   them to Forge, which would silently reject the deck.
 
+- ``_filter_for_ownership``: ManaFoundry-parity collection filter.
+  When the user has registered a card collection
+  (``collection.load_collection``), either drops unowned add
+  candidates ('exclude' mode) or annotates them ('flag' mode) so
+  the UI can render a "not owned" badge. Inert when no collection
+  is registered.
+
 Extracted from ``improvement_advisor.py`` as part of the per-source
 module split. External code keeps importing from
 ``commander_builder.improvement_advisor``.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 from ._advisor_models import SwapRecommendation
 from .staples import ROLE_SATURATION_THRESHOLDS, is_role_saturated
@@ -66,6 +75,71 @@ def _filter_for_saturation(
                 "threshold": threshold,
             })
             continue
+        kept.append(rec)
+    return kept, skipped
+
+
+def _filter_for_ownership(
+    recs: list[SwapRecommendation],
+    collection_keys: Optional[frozenset[str]],
+    mode: str,
+) -> tuple[list[SwapRecommendation], list[dict]]:
+    """Apply the user's card collection to add candidates.
+
+    ManaFoundry parity: a user who registers what they own wants the
+    advisor to respect that — either by hiding cards they'd have to
+    buy, or by labeling them so the "buy vs. proxy vs. skip" decision
+    is visible in the UI. Two modes:
+
+    - ``"exclude"`` — drop unowned adds entirely. Returns them as
+      skipped records ``{card, reason: "not owned"}`` so the report
+      (and UI) can say "skipped 4 adds you don't own" instead of
+      silently producing a short list — the same disclosure contract
+      as ``_filter_for_saturation``'s skipped records.
+    - ``"flag"``   — keep everything, annotate each add's evidence
+      with ``owned: True/False``. Annotating via the evidence dict
+      (not a new dataclass field) follows the existing precedent for
+      per-source metadata (``evidence["source"]``,
+      ``evidence["price_usd"]``) and flows to the web payload without
+      touching ``asdict`` consumers.
+
+    ``collection_keys is None`` means "no collection registered" —
+    fully inert pass-through in EITHER mode, so users who never touch
+    the feature get byte-identical behavior (pinned by test). An
+    EMPTY frozenset is a real (empty) collection and marks every
+    non-basic add unowned — see ``collection.load_collection``'s
+    None-vs-empty contract.
+
+    Cuts are NEVER filtered or annotated: a cut candidate is by
+    definition already in the user's deck, so ownership is moot.
+    Basic lands always count as owned (``collection.owns``) — the
+    manabase safety net must keep suggesting basics regardless of
+    what the user typed into their collection.
+
+    Mutates flag-mode recs in place (evidence dict update) and
+    returns ``(kept_recs, skipped_records)``; skipped is always
+    empty in flag mode.
+    """
+    if collection_keys is None:
+        return recs, []
+    from .collection import owns
+
+    kept: list[SwapRecommendation] = []
+    skipped: list[dict] = []
+    for rec in recs:
+        if rec.action != "add":
+            kept.append(rec)
+            continue
+        owned = owns(collection_keys, rec.card)
+        if mode == "exclude" and not owned:
+            skipped.append({"card": rec.card, "reason": "not owned"})
+            continue
+        # Annotate in BOTH modes: exclude-mode survivors are all
+        # owned, and stamping owned=True keeps the payload shape
+        # uniform for UIs that branch on the field's presence.
+        if rec.evidence is None:
+            rec.evidence = {}
+        rec.evidence["owned"] = owned
         kept.append(rec)
     return kept, skipped
 

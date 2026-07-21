@@ -237,6 +237,7 @@ from ._advisor_heuristic import (  # noqa: E402
 # manabase recommender. All re-exported here so external callers
 # don't see the move.
 from ._advisor_filters import (  # noqa: E402,F401
+    _filter_for_ownership,
     _filter_for_saturation,
     _validate_card_names,
 )
@@ -383,6 +384,8 @@ def advise(
     budget: bool = False,
     intent_themes: Optional[list[str]] = None,
     api_key: Optional[str] = None,
+    collection_path: Optional[Path] = None,
+    owned_only: bool = False,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck.
 
@@ -416,6 +419,17 @@ def advise(
     has to stage per-request secrets in the process-global
     ``os.environ`` (which raced across concurrent requests).
 
+    ``collection_path`` / ``owned_only`` drive the ManaFoundry-parity
+    ownership filter. ``collection_path=None`` (default) resolves the
+    user's registered collection via ``collection.collection_path()``
+    at call time; when NO collection file exists the filter is fully
+    inert and output is identical to the pre-feature behavior. With a
+    collection present: ``owned_only=False`` (default) annotates each
+    add's evidence with ``owned: True/False`` ('flag' mode, so UIs
+    can badge unowned picks); ``owned_only=True`` drops unowned adds
+    entirely ('exclude' mode) and records them in the report's
+    ``skipped_for_ownership``.
+
     Implementation note: this synchronous entry point collects all
     phases from ``_advise_steps()`` and assembles the final report.
     Callers that want to render partial progress (e.g. the streaming
@@ -430,6 +444,8 @@ def advise(
         claude_model=claude_model, budget=budget,
         intent_themes=intent_themes,
         api_key=api_key,
+        collection_path=collection_path,
+        owned_only=owned_only,
     ):
         if phase.phase == "complete":
             final_report = phase.data.get("report")
@@ -464,6 +480,8 @@ def _advise_steps(
     budget: bool = False,
     intent_themes: Optional[list[str]] = None,
     api_key: Optional[str] = None,
+    collection_path: Optional[Path] = None,
+    owned_only: bool = False,
 ) -> Iterator[AdvicePhase]:
     """Generator version of :func:`advise` — yields ``AdvicePhase``
     events as each stage of the pipeline completes.
@@ -861,6 +879,26 @@ def _advise_steps(
         deduped.append(rec)
     recs = deduped
 
+    # Ownership filter (ManaFoundry parity). Runs FIRST among the
+    # post-processing filters, on the deduped combined list, so that
+    # (a) exclude-mode drops happen before the saturation / CI /
+    # Scryfall passes waste lookups on cards that won't survive, and
+    # (b) flag-mode annotations land on every add — including the
+    # manabase prepends — before later filters thin the list (those
+    # filters only drop recs, never rebuild evidence, so annotations
+    # survive them). ``load_collection`` returning None (no collection
+    # file registered) keeps this whole block inert — output stays
+    # byte-identical to the pre-feature pipeline, which is the hard
+    # backward-compatibility constraint (pinned by test).
+    from .collection import load_collection
+    skipped_for_ownership: list[dict] = []
+    collection_keys = load_collection(collection_path)
+    if collection_keys is not None:
+        recs, skipped_for_ownership = _filter_for_ownership(
+            recs, collection_keys,
+            mode="exclude" if owned_only else "flag",
+        )
+
     role_counts = count_deck_roles(main_cards)
     recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
 
@@ -971,6 +1009,7 @@ def _advise_steps(
         timestamp=datetime.now(timezone.utc).isoformat(),
         fallback_reason=fallback_reason,
         skipped_for_saturation=skipped_for_saturation,
+        skipped_for_ownership=skipped_for_ownership,
         bracket_peer_ref_count=bracket_peer_ref_count,
         average_deck=average_deck,
         edhrec_categories=edhrec_categories,
@@ -1066,7 +1105,28 @@ def _format_report_text(
         marker = "★" if role in report.diagnosis.priority_roles else " "
         lines.append(f"  {marker} [{role}]")
         for r in by_role[role]:
-            lines.append(f"      + {r.card}  ({r.reason})")
+            # Ownership marker (flag mode): only unowned adds get the
+            # tag — owned/unannotated lines stay byte-identical to the
+            # pre-collection output so no-collection users see zero
+            # diff in the report.
+            owned_tag = (
+                "  [not owned]"
+                if (r.evidence or {}).get("owned") is False else ""
+            )
+            lines.append(f"      + {r.card}  ({r.reason}){owned_tag}")
+    # Exclude-mode disclosure: say how many adds were hidden for
+    # ownership so a short list reads as filtered, not as "the
+    # advisor found nothing". Mirrors the UI's skipped_for_saturation
+    # disclosure contract.
+    # getattr: stub reports in tests (SimpleNamespace) may predate the
+    # field — same defensive pattern the web payload builder uses.
+    skipped_own = getattr(report, "skipped_for_ownership", []) or []
+    if skipped_own:
+        dropped = ", ".join(e.get("card", "?") for e in skipped_own)
+        lines.append(
+            f"  (skipped {len(skipped_own)} unowned adds — "
+            f"owned-only mode: {dropped})"
+        )
     lines.append("")
     lines.append(f"Recommended cuts ({len(cuts)}):")
     for r in cuts:
@@ -1113,6 +1173,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             "most expensive cards."
         ),
     )
+    p.add_argument(
+        "--collection", default=None, metavar="PATH",
+        help=(
+            "Path to your card-collection file (one card name per "
+            "line; '<qty> Name' also accepted). Default: the "
+            "registered collection at ~/.commander-builder/"
+            "collection.txt (or $COMMANDER_BUILDER_COLLECTION). With "
+            "a collection present, unowned adds are annotated "
+            "'[not owned]'; combine with --owned-only to drop them."
+        ),
+    )
+    p.add_argument(
+        "--owned-only", action="store_true",
+        help=(
+            "Drop recommendations for cards not in your collection "
+            "(basic lands always count as owned). Requires a "
+            "registered collection file — inert with a warning "
+            "otherwise. Without this flag, unowned adds are kept but "
+            "tagged '[not owned]'."
+        ),
+    )
     p.add_argument("--output", help="Write JSON manifest here (audit_manifest schema).")
     args = p.parse_args(argv)
 
@@ -1128,6 +1209,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         advise_kwargs["claude_model"] = args.claude_model
     if args.budget:
         advise_kwargs["budget"] = True
+    # Ownership threading. --collection overrides the default path;
+    # --owned-only flips the filter from flag ('[not owned]' tags) to
+    # exclude (drop unowned adds). Warn — don't fail — when owned-only
+    # is requested with no collection registered: the advice is still
+    # useful, it just can't be ownership-filtered, and an unattended
+    # batch shouldn't die over a missing optional file.
+    from .collection import load_collection
+    _coll_path = Path(args.collection) if args.collection else None
+    if args.collection:
+        advise_kwargs["collection_path"] = _coll_path
+    if args.owned_only:
+        if load_collection(_coll_path) is None:
+            print(
+                "WARN: --owned-only requested but no collection file "
+                "found — showing unfiltered recommendations. Register "
+                "one via the web Settings panel or pass --collection.",
+                file=sys.stderr,
+            )
+        else:
+            advise_kwargs["owned_only"] = True
     report = advise(Path(args.user), args.bracket, **advise_kwargs)
     # Bracket estimate for the report header. Fail-quiet: the deck
     # read is the only thing that can raise (estimate_bracket never

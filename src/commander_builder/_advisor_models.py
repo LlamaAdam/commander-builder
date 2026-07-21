@@ -81,6 +81,13 @@ class AdviceReport:
     # your deck already has 13 ramp pieces" rather than silently
     # producing a short list.
     skipped_for_saturation: list[dict] = field(default_factory=list)
+    # Adds the ownership filter dropped in 'exclude' mode (the user
+    # registered a collection and asked for owned-only suggestions).
+    # Each entry: {card, reason}. Same disclosure contract as
+    # skipped_for_saturation — the UI can say "skipped 4 adds you
+    # don't own" instead of silently shortening the list. Always
+    # empty when no collection is registered or in 'flag' mode.
+    skipped_for_ownership: list[dict] = field(default_factory=list)
     # Non-zero only when ``source="claude"`` AND the Claude path
     # successfully fetched bracket-peer references before the LLM
     # call. Lets the UI disclose 'Claude analyst (5 peer refs)' on

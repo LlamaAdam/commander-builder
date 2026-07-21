@@ -68,6 +68,22 @@
                style="width: 100%; box-sizing: border-box;" />
       </label>
 
+      <!-- Card collection (ManaFoundry parity). The full list is never
+           echoed back (it can be huge) — a count headline stands in,
+           and users update by re-pasting. settings.js wires GET/PUT
+           /api/collection separately from /api/config. -->
+      <label style="display: block; margin: 0.75rem 0;">
+        Card collection
+        <span class="muted" id="settings-collection-state">(not set)</span><br />
+        <textarea id="settings-collection" spellcheck="false" rows="5"
+                  placeholder="Paste your collection — CSV export (with a Name column) or one card per line. Leave blank to keep the current collection."
+                  style="width: 100%; box-sizing: border-box;"></textarea>
+      </label>
+      <button type="button" class="topbar-btn" id="settings-collection-clear"
+              title="Unregister your collection — ownership filtering and 'not owned' badges turn off.">
+        Clear collection
+      </button>
+
       <menu style="display: flex; gap: 0.5rem; justify-content: flex-end; padding: 0; margin: 1rem 0 0;">
         <button type="button" class="topbar-btn" id="settings-cancel">Cancel</button>
         <button type="button" class="topbar-btn primary" id="settings-save">Save</button>

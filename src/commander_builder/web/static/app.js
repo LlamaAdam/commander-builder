@@ -662,6 +662,12 @@ const _LLM_PREF_KEY = "cb.audit.llm";
 const _ANTHROPIC_KEY = "cb.audit.anthropic_key";  // legacy; cleared on load
 const _CLAUDE_MODEL_KEY = "cb.audit.claude_model";
 const _BUDGET_KEY = "cb.audit.budget";
+// Owned-only audit pref (ManaFoundry parity). The collection itself is
+// server-side state (Settings panel → /api/collection); this toggle
+// only decides whether unowned adds are DROPPED (checked) or kept with
+// a "not owned" badge (unchecked, the flag-mode default). Inert when
+// no collection is registered.
+const _OWNED_ONLY_KEY = "cb.audit.owned_only";
 
 function getBudgetPref() {
   try { return localStorage.getItem(_BUDGET_KEY) === "1"; }
@@ -669,6 +675,15 @@ function getBudgetPref() {
 }
 function setBudgetPref(v) {
   try { localStorage.setItem(_BUDGET_KEY, v ? "1" : "0"); }
+  catch (_e) { /* ignore */ }
+}
+
+function getOwnedOnlyPref() {
+  try { return localStorage.getItem(_OWNED_ONLY_KEY) === "1"; }
+  catch (_e) { return false; }
+}
+function setOwnedOnlyPref(v) {
+  try { localStorage.setItem(_OWNED_ONLY_KEY, v ? "1" : "0"); }
   catch (_e) { /* ignore */ }
 }
 
@@ -1044,6 +1059,9 @@ async function loadAdvise(sourceOverride) {
     if (getBudgetPref()) {
       url += `&budget=1`;
     }
+    if (getOwnedOnlyPref()) {
+      url += `&owned_only=1`;
+    }
     const headers = {};
     if (keyFinal) headers["X-Anthropic-API-Key"] = keyFinal;
     // EventSource doesn't support custom headers (the BYO Claude
@@ -1213,6 +1231,25 @@ function renderAuditBackendRow(body) {
   budgetLabel.appendChild(budgetBox);
   budgetLabel.appendChild(document.createTextNode(" Budget mode"));
   row.appendChild(budgetLabel);
+
+  // Owned-only toggle — drops adds outside the registered collection
+  // (Settings → Card collection) from the *next* audit. Mirrors the
+  // Budget-mode checkbox pattern: localStorage pref, re-run to apply.
+  // Unchecked with a collection registered still badges unowned adds.
+  const ownedLabel = el("label",
+    { style: "font-size: 12px; display: flex; gap: 4px; "
+           + "align-items: center;",
+      title: "Only recommend cards in your registered collection "
+           + "(Settings → Card collection). Basic lands always count "
+           + "as owned. No effect until a collection is registered." });
+  const ownedBox = el("input", { type: "checkbox" });
+  ownedBox.checked = getOwnedOnlyPref();
+  ownedBox.addEventListener("change", () => {
+    setOwnedOnlyPref(ownedBox.checked);
+  });
+  ownedLabel.appendChild(ownedBox);
+  ownedLabel.appendChild(document.createTextNode(" Owned only"));
+  row.appendChild(ownedLabel);
 
   // Manage-key button — opens the unified Settings panel. FP-011: the
   // Anthropic key is stored server-side (config.json) and set in ONE
@@ -1586,6 +1623,25 @@ function renderAuditResult(container, body) {
             title: "Not found in Scryfall — likely a hallucinated card name",
           },
           "⚠ not in Scryfall",
+        ));
+      }
+      // Ownership pill — only on an EXPLICIT owned === false (the
+      // advisor's flag mode annotates every add when a collection is
+      // registered; absent/null means the feature isn't in use, so
+      // legacy payloads and collection-less users see no pill).
+      // "warn" not "bad": an unowned card is a purchase decision,
+      // not an error like a hallucinated name.
+      if (a.owned === false) {
+        nameDiv.appendChild(el(
+          "span",
+          {
+            class: "pill warn",
+            style: "margin-left: 6px; font-size: 11px;",
+            title: "Not in your registered collection (Settings → "
+                 + "Card collection). Check 'Owned only' to hide "
+                 + "cards you don't own.",
+          },
+          "not owned",
         ));
       }
       // EDHREC salt-score pill — surfaces when a rec is in the
