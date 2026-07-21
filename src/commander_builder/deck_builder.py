@@ -1,4 +1,4 @@
-"""FP-014.1 — build-from-scratch deck assembly (commander → legal 99).
+"""FP-014 — build-from-scratch deck assembly (commander → legal 99).
 
 commander-builder is deliberately an *iteration engine* everywhere else: it
 improves an EXISTING deck. This module is the first vertical slice of the
@@ -24,16 +24,19 @@ EDHREC's community aggregate:
     "legal-but-mediocre" first cut the FP-014 plan calls out. The
     downstream ``commander-improve`` loop is where that pile gets measured.
 
+WHAT THE MANABASE DOES (FP-014.2 — the "hard 20%").
+===================================================
+  The manabase is color-source-aware (``deck_builder_manabase.py``). It
+  KEEPS the seed average deck's own dual/fetch/utility lands (they're tuned
+  for this commander), tops up fixing from the improvement-advisor's land
+  tiers, and fills the rest with basics sized to hit a per-color SOURCE
+  target derived from the spells' pip requirements (a Karsten-anchored
+  model — see that module). The land COUNT comes from the curve, reconciled
+  against the seed's own count. When card/land data can't be resolved the
+  manabase degrades to a basics-only base (the FP-014.1 behavior).
+
 WHAT IS DELIBERATELY DEFERRED.
 ==============================
-  * FP-014.2 (real manabase): the manabase HERE is basics-only. We strip
-    every land the seed carried (including its real dual/fetch/shock base)
-    and rebuild the land slots from basic lands alone, distributed across
-    the commander's colors by the pip weight of the nonland spells. Proper
-    color-source math — how many sources of each color a curve actually
-    needs, which nonbasic lands to run — is the genuinely hard research
-    step and is out of scope for this slice. See ``_distribute_basics_by_pips``.
-
   * FP-014.3 (owned-card preference): when a collection is supplied we apply
     only a MINIMAL owned-bias (keep owned cards first when we have to trim).
     Full owned-aware fill/substitution is future work.
@@ -59,10 +62,16 @@ from . import dck_meta
 from ._proposer_filters import enforce_color_identity
 from .collection import load_collection, name_key, owns
 from .dck_utils import count_main_cards
+from .deck_builder_manabase import (
+    ManabaseSummary,
+    build_manabase,
+    pip_stats,
+    target_land_count,
+)
 from .edhrec_client import fetch_average_deck, fetch_commander_page
 from .moxfield_import import DECK_OUT_DIR, safe_filename
 from .scryfall_client import lookup_card, normalize_color_identity
-from .staples import ROLE_TARGETS, is_basic_land
+from .staples import ROLE_TARGETS, detect_tribal_type, is_basic_land
 from .web.deck_text_ops import _pad_main_to_99
 
 # Commander decks are exactly 100 cards: 1 commander in the command zone +
@@ -105,6 +114,7 @@ class BuildResult:
     land_count: int
     source: str  # "average-deck seed" | "commander-page fallback"
     dropped_off_color: list[str]
+    manabase: ManabaseSummary  # per-color sources vs target (FP-014.2)
 
 
 # --------------------------------------------------------------------------
@@ -359,14 +369,19 @@ def _assemble(
         source = "commander-page fallback"
         raw_names = _fallback_candidates(page)
 
-    # ---- 3. LEGALITY: drop commander + all lands, hold singleton ---------
-    # Every land (basic AND nonbasic) is dropped here; the manabase is
-    # rebuilt basics-only in step 4. Discarding the seed's real dual/fetch
-    # base is the deliberate FP-014.1 simplification (FP-014.2 keeps/selects
-    # nonbasics with color-source math).
+    # ---- 3. LEGALITY: split commander / seed lands / spells, singleton ----
+    # FP-014.2: unlike FP-014.1 (which discarded every land), we KEEP the
+    # seed's own NONBASIC lands — an average deck's dual/fetch/utility base
+    # is tuned for this commander and is real fixing. Basic lands are still
+    # dropped and recomputed (their counts are what we tune to hit the source
+    # targets). We only keep lands on the seed path; the commander-page
+    # fallback has no tuned base to preserve, so its lands are dropped (they
+    # get rebuilt from the tiers + basics like FP-014.1).
+    keep_seed_lands = source == "average-deck seed"
     cmdr_key = name_key(commander)
     seen: set[str] = set()
     nonlands: list[str] = []
+    seed_lands: list[str] = []
     for nm in raw_names:
         if not nm or not nm.strip():
             continue
@@ -374,16 +389,22 @@ def _assemble(
         if k == cmdr_key:
             continue  # commander lives in the command zone, not [Main].
         if _is_land(nm, lookup):
-            continue
+            if keep_seed_lands and not is_basic_land(nm) and k not in seen:
+                seen.add(k)
+                seed_lands.append(nm)  # KEEP tuned nonbasic fixing.
+            continue  # basics + fallback lands are rebuilt in step 4.
         if k in seen:
             continue  # singleton: no duplicate nonbasics.
         seen.add(k)
         nonlands.append(nm)
 
-    # Color-identity legality over the nonland picks. ``ci is None`` makes
-    # this a pass-through (can't verify → don't strip everything) — the
-    # advisor degrades the same way; warn so it's not silent.
+    # Color-identity legality over BOTH the spells and the kept lands. ``ci
+    # is None`` makes this a pass-through (can't verify → don't strip
+    # everything) — the advisor degrades the same way; warn so it's not
+    # silent. Colorless lands (Command Tower) pass every identity.
     nonlands, dropped_off_color = enforce_color_identity(nonlands, ci)
+    seed_lands, dropped_lands = enforce_color_identity(seed_lands, ci)
+    dropped_off_color = dropped_off_color + dropped_lands
     if ci is None:
         print(
             f"[build] WARNING: could not resolve color identity for "
@@ -402,37 +423,74 @@ def _assemble(
     if coll is not None:
         nonlands.sort(key=lambda nm: 0 if owns(coll, nm) else 1)
 
-    # ---- 4. MANABASE (basics-only) + exactly-99 sizing -------------------
-    land_target = seed_land_count if seed_land_count else DEFAULT_LAND_TARGET
+    # ---- 4. MANABASE (color-source-aware, FP-014.2) + exactly-99 sizing --
+    # The land BUDGET and the 99-card invariant live HERE (deck_builder owns
+    # them); WHICH lands fill the budget lives in deck_builder_manabase.
+    #
+    # Land count: from the curve model, reconciled against the seed's own
+    # count (the seed wins when it's plausible — it's community-tuned). See
+    # ``target_land_count``. We compute pip/curve stats once and reuse them
+    # for both the count and the per-color source targets.
+    stats = pip_stats(nonlands, lookup)
+    land_target = target_land_count(stats.avg_mana_value, seed_land_count)
+
+    # Trim spells to the nonland budget, then read the ACTUAL land count off
+    # what's left (when a seed has few spells, the spare slots become lands —
+    # exactly the FP-014.1 behavior). Never trim below the kept lands: the
+    # tuned base is not up for negotiation, so widen the land budget if the
+    # kept lands alone already exceed it.
     nonland_target = MAIN_SIZE - land_target
     if len(nonlands) > nonland_target:
-        # More spells than the land target leaves room for — trim the tail
+        # More spells than the budget leaves room for — trim the tail
         # (lowest EDHREC priority / least-owned) so lands + spells == 99.
         nonlands = nonlands[:nonland_target]
-    basics_needed = MAIN_SIZE - len(nonlands)
+    land_slots = MAIN_SIZE - len(nonlands)
+    if land_slots < len(seed_lands):
+        # Kept base is bigger than the budget — keep it all, shed spells.
+        land_slots = len(seed_lands)
+        nonlands = nonlands[:MAIN_SIZE - land_slots]
+        land_slots = MAIN_SIZE - len(nonlands)
 
-    # Colors to spread basics across: the commander's identity. When identity
-    # is unresolved or colorless, fall back to the colors that actually
-    # appear in the nonland spells' costs (so a mono-pip pile still gets the
-    # right basic even without a resolved CI).
-    weights = _pip_weights(nonlands, lookup)
+    # Colors to fix for: the commander's identity. When identity is
+    # unresolved or colorless, fall back to the colors that actually appear
+    # in the spells' costs (so a mono-pip pile still gets the right basics).
     ci_colors = [c for c in "WUBRG" if ci and c in ci]
     if not ci_colors:
-        ci_colors = [c for c in "WUBRG" if weights.get(c, 0) > 0]
-    basics = _distribute_basics_by_pips(ci_colors, weights, basics_needed)
+        ci_colors = [c for c in "WUBRG" if stats.weights.get(c, 0) > 0]
+
+    # Tribal utility lands (Cavern of Souls etc.) apply when the commander's
+    # oracle text reads tribal — the same detector the advisor uses. Best-
+    # effort: no oracle text → no tribe → no tribal lands.
+    tribe = None
+    try:
+        cmdr_card = lookup(commander)
+        if cmdr_card:
+            tribe = detect_tribal_type(
+                cmdr_card.get("oracle_text") or "",
+                cmdr_card.get("type_line") or "",
+            )
+    except Exception:  # noqa: BLE001 — tribal detection is a nicety, not load-bearing.
+        tribe = None
+
+    manabase = build_manabase(
+        ci_colors, nonlands, seed_lands, land_slots,
+        lookup=lookup, tribe=tribe, stats=stats,
+        collection=coll,  # FP-014.3 hook — accepted, not yet consumed.
+    )
 
     # ---- 5. OUTPUT + INVARIANT -------------------------------------------
     display_name = name or f"{commander} Build"
     # Stem the dashboard/improve loop and the win-attribution pipeline key
     # on: "[USER] <name> [B<n>]". Name= is stamped to match it (dck_meta).
     stem = f"[USER] {safe_filename(display_name)} [B{bracket}]"
-    text = _render_dck(commander, nonlands, basics)
+    text = _render_dck(commander, nonlands, manabase.lands, manabase.basics)
     text = dck_meta.rewrite_name(text, stem)
 
-    # Guarantee exactly 99. The pip split already sums to ``basics_needed``
-    # so we should be exact; ``_pad_main_to_99`` is the belt-and-suspenders
-    # backstop (reuses the shipped guard). Overshoot is a real bug — raise
-    # rather than emit an illegal deck.
+    # Guarantee exactly 99. The manabase sums to ``land_slots`` and
+    # ``land_slots + len(nonlands) == 99`` by construction, so we should be
+    # exact; ``_pad_main_to_99`` is the belt-and-suspenders backstop (reuses
+    # the shipped guard). Overshoot is a real bug — raise rather than emit
+    # an illegal deck.
     main = count_main_cards(text)
     if main < MAIN_SIZE:
         text, _added, _breakdown = _pad_main_to_99(text, main)
@@ -443,33 +501,39 @@ def _assemble(
             f"(expected {MAIN_SIZE}); refusing to emit an illegal deck"
         )
 
-    land_count = sum(basics.values())
     return BuildResult(
         text=text,
         name=display_name,
         stem=stem,
         colors=(ci if ci is not None else "?"),
         nonland_count=len(nonlands),
-        land_count=land_count,
+        land_count=manabase.summary.land_count,
         source=source,
         dropped_off_color=dropped_off_color,
+        manabase=manabase.summary,
     )
 
 
 def _render_dck(
-    commander: str, nonlands: list[str], basics: dict[str, int],
+    commander: str,
+    nonlands: list[str],
+    lands: list[str],
+    basics: dict[str, int],
 ) -> str:
     """Render the Forge ``.dck`` text: [metadata]/[Commander]/[Main].
 
     Matches ``moxfield_import.to_dck``'s section layout so the dashboard and
-    improve loop accept the file unchanged. Card lines are name-only (no
-    ``|SET|CN`` edition tail) — Forge falls back to any printing, and
-    resolving an exact printing per card would mean a Scryfall round-trip
-    for all 99. The ``Name=`` here is a placeholder; the caller stamps the
-    real stem via ``dck_meta.rewrite_name``.
+    improve loop accept the file unchanged. ``lands`` are the singleton
+    nonbasic lands (kept-from-seed + topped-up fixing); ``basics`` is the
+    basic-land multiset. Card lines are name-only (no ``|SET|CN`` edition
+    tail) — Forge falls back to any printing, and resolving an exact printing
+    per card would mean a Scryfall round-trip for all 99. The ``Name=`` here
+    is a placeholder; the caller stamps the real stem via
+    ``dck_meta.rewrite_name``.
     """
     lines = ["[metadata]", "Name=", "[Commander]", f"1 {commander}", "[Main]"]
     lines.extend(f"1 {nm}" for nm in nonlands)
+    lines.extend(f"1 {nm}" for nm in lands)  # singleton nonbasic lands.
     lines.extend(f"{qty} {basic}" for basic, qty in basics.items() if qty > 0)
     return "\n".join(lines) + "\n"
 
@@ -563,6 +627,10 @@ def main(argv=None) -> int:
         f"nonland: {result.nonland_count}   land: {result.land_count}   "
         f"source: {result.source}"
     )
+    # FP-014.2 manabase quality: per-color sources vs target so the manabase
+    # is inspectable at a glance (not just a land count).
+    for line in result.manabase.format_lines():
+        print(line)
     if result.dropped_off_color:
         print(f"  dropped off-color: {', '.join(result.dropped_off_color)}")
     return 0

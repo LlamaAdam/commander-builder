@@ -97,11 +97,14 @@ def test_average_deck_seed_builds_legal_99():
     # Exactly 99 main + commander in the command zone.
     assert count_main_cards(text) == 99
     assert section_card_names(text, "Commander") == ["Krenko, Mob Boss"]
-    # Commander never leaks into [Main]; the seed's real lands are stripped.
     mains = main_card_quantities(text)
+    # Commander never leaks into [Main].
     assert "Krenko, Mob Boss" not in mains
-    assert "Command Tower" not in mains
-    # Singleton: every nonbasic sits at quantity 1.
+    # FP-014.2: the seed's own nonbasic land is KEPT (not discarded like
+    # FP-014.1) — its tuned fixing survives into the output at singleton.
+    assert mains.get("Command Tower") == 1
+    # The seed's basic (Mountain) is dropped and recomputed by the manabase.
+    # Singleton: every nonbasic (spell or land) sits at quantity 1.
     for name, qty in mains.items():
         if name != "Mountain":
             assert qty == 1, f"{name} broke singleton with qty {qty}"
