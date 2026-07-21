@@ -8,9 +8,13 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-21 (`feature/manafoundry-parity` — six
-user-facing ManaFoundry-parity features landed; see the branch note below
-and CHANGELOG 2026-07-21.) Prior: 2026-07-20 (merged
+**Last updated:** 2026-07-21 (`feature/fp014-build-from-scratch` —
+**FP-014 build-from-scratch deck assembly shipped as a first cut**
+(`commander-build`: commander + bracket → legal exactly-99, EDHREC-seeded,
+color-source manabase, personalized, optional improve hand-off); unmerged
+pending PR; see the branch note below and CHANGELOG 2026-07-21.) Prior:
+2026-07-21 (`feature/manafoundry-parity` — six user-facing
+ManaFoundry-parity features landed.) Prior: 2026-07-20 (merged
 `feature/2026-04-28-session` —
 PRs #9/#10, the forge_batch/forge_version/web-module split, FP-013
 gate items — into the adversarial-review fix branch
@@ -24,8 +28,10 @@ through the streaming reader so looper-credit attribution actually
 works — salvaged rows no longer read "credited to none")
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
-apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-003
-(concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML predictor)
+apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-014
+(build-from-scratch deck assembly) shipped as a first cut** (`commander-build`
++ web "Build from scratch" tab; EDHREC-seeded, improve-loop is the quality
+path). **FP-003 (concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML predictor)
 REOPENED** under the margin-regression framing now that 40-game soak
 rows supply a negative class — curation is empirically ~neutral across
 two designs (A/B + unconfounded gauntlet); no feature survives
@@ -37,26 +43,42 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** 2089 passing fast lane / 155 skipped (+slow with
-  `--run-slow`), ~130s offline.
-- **Branch:** `feature/manafoundry-parity` (worktree at
-  `C:\dev\cb-review-fixes`) — six ManaFoundry-parity features on top of
-  the adversarial-review fix branch, which itself carries
-  `feature/2026-04-28-session` merged in (PRs #9/#10 + the 2026-06-12
+- **Tests:** 2155 passing fast lane / 155 skipped (+slow with
+  `--run-slow`), ~170s offline.
+- **Branch:** `feature/fp014-build-from-scratch` (worktree at
+  `C:\dev\cb-review-fixes`) — the FP-014 build-from-scratch first cut (4
+  commits) on top of the `feature/manafoundry-parity` six-feature branch,
+  which itself sits on the adversarial-review fix branch carrying
+  `feature/2026-04-28-session` (PRs #9/#10 + the 2026-06-12
   forge_batch/forge_version/web-module split) with all 40
   adversarial-review fix commits ported onto the new layout.
+
+**`feature/fp014-build-from-scratch` (2026-07-21):** the FP-014
+build-from-scratch first cut, 4 commits on top of `feature/manafoundry-parity`
+(unmerged, pending PR). `commander-build --commander "<name>" --bracket <n>`
+assembles a legal exactly-99: EDHREC average-deck seed → color-source
+manabase (`deck_builder_manabase.py`, simplified Karsten source model) →
+lift/bracket/collection personalization (`deck_builder_personalize.py`) →
+optional `--improve N` hand-off to the empirical loop. Commits: `76f1ca7`
+(core assembler `deck_builder.py` + CLI), `d02fc62` (manabase), `dd818b1`
+(personalization), `545b2db` (web `POST /api/build_deck` +
+`GET /api/build_job/<id>` + "Build from scratch" tab). **Live-verified**: a
+real *Krenko, Mob Boss* build produced a legal mono-red 99 steered to B3 and
+loaded in the dashboard. Honest scope: coherence is borrowed from the EDHREC
+seed, not from-atoms synthesis; the improve loop is the intended quality
+path. See CHANGELOG 2026-07-21 + FP-014 in
+[docs/future-plans.md](future-plans.md).
 
 **`feature/manafoundry-parity` (2026-07-21):** six user-facing features
 closing the gap with from-scratch builders like ManaFoundry.gg —
 cheaper-printing savings (`9d16fb2`), explainable bracket estimator
 (`6b00ef5`), MTGA/CSV paste import (`c110041`), at-a-glance health grade
 (`194dba1`), owned-card collection filter (`95a6ee7`), and co-occurrence
-lift analysis (`e51f9cf`). The branch also lands **FP-014
-(build-from-scratch deck assembly)** as a parked plan — most of its
-ingredients now exist (those same six modules + the improve-loop), so
-it's unusually ready to start (see
-[docs/future-plans.md](future-plans.md)). Tasks for **async-sim-jobs**
-and **per-worker-forge-profiles** are queued next.
+lift analysis (`e51f9cf`). Those same six modules + the improve-loop are the
+ingredients **FP-014 (build-from-scratch deck assembly)** then composed into
+a shipped first cut on the child `feature/fp014-build-from-scratch` branch
+(see the note above). Tasks for **async-sim-jobs** and
+**per-worker-forge-profiles** are queued next.
 
 **Adversarial-review fix branch (2026-07-19/20):**
 `fix/adversarial-review-2026-07-19` carries 40 commits across three
