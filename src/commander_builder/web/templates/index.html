@@ -8,6 +8,11 @@
 </head>
 <body>
   <header class="topbar">
+    <!-- Mobile-only drawer toggle (hidden >768px via .hamburger in app.css).
+         Toggles body.drawer-open; app.js wires the click + close handlers. -->
+    <button class="topbar-btn hamburger" id="btn-drawer-toggle" type="button"
+            aria-label="Open menu" aria-expanded="false" aria-controls="sidebar-panel"
+            title="Menu">&#9776;</button>
     <h1>Commander Builder</h1>
     <span class="muted" id="health-badge">checking…</span>
     <div class="topbar-spacer"></div>
@@ -67,6 +72,22 @@
         <input type="text" id="settings-moxfield" placeholder="YourHandle"
                style="width: 100%; box-sizing: border-box;" />
       </label>
+
+      <!-- Card collection (ManaFoundry parity). The full list is never
+           echoed back (it can be huge) — a count headline stands in,
+           and users update by re-pasting. settings.js wires GET/PUT
+           /api/collection separately from /api/config. -->
+      <label style="display: block; margin: 0.75rem 0;">
+        Card collection
+        <span class="muted" id="settings-collection-state">(not set)</span><br />
+        <textarea id="settings-collection" spellcheck="false" rows="5"
+                  placeholder="Paste your collection — CSV export (with a Name column) or one card per line. Leave blank to keep the current collection."
+                  style="width: 100%; box-sizing: border-box;"></textarea>
+      </label>
+      <button type="button" class="topbar-btn" id="settings-collection-clear"
+              title="Unregister your collection — ownership filtering and 'not owned' badges turn off.">
+        Clear collection
+      </button>
 
       <menu style="display: flex; gap: 0.5rem; justify-content: flex-end; padding: 0; margin: 1rem 0 0;">
         <button type="button" class="topbar-btn" id="settings-cancel">Cancel</button>
@@ -143,6 +164,11 @@
     </section>
   </main>
 
+  <!-- Mobile drawer scrim: covers the dashboard behind the open drawer;
+       tapping it closes the drawer (wired in app.js). Hidden >768px and
+       when body.drawer-open is absent (see .drawer-scrim in app.css). -->
+  <div class="drawer-scrim" id="drawer-scrim"></div>
+
   <!-- New / import deck modal -->
   <div class="modal-backdrop" id="new-deck-modal" hidden>
     <div class="modal">
@@ -181,7 +207,7 @@
           <option value="4">4 — Optimized</option>
           <option value="5">5 — cEDH</option>
         </select>
-        <label>Deck list (.dck format or Moxfield bulk-paste — both work)</label>
+        <label>Deck list (.dck, MTG Arena export, CSV, or plain card lines — auto-detected)</label>
         <textarea id="new-paste-text" spellcheck="false" placeholder="1 Sol Ring&#10;1 Arcane Signet&#10;1 Command Tower&#10;..."></textarea>
         <button class="advise-btn" id="new-paste-create">Create deck</button>
       </div>

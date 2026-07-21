@@ -757,6 +757,23 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"{len(all_candidates)} candidates "
           f"(seed={args.seed}, games_per_pod={args.games_per_pod}, "
           f"pods_per_deck={args.pods_per_deck})")
+
+    # Pool hygiene (ManaFoundry parity): warn — NEVER reject — when a
+    # candidate's estimated bracket differs from its [Bn] tag by >= 2.
+    # A mislabeled deck poisons the pool it joins (a de-facto B4 list
+    # tagged [B2] farms wins off genuine B2 decks and skews every
+    # ranking downstream), but the estimator is a heuristic so the
+    # human decides. mismatch_warning never raises; the per-deck read
+    # is guarded so one unreadable file can't abort curation.
+    from .bracket_estimator import mismatch_warning
+    for cand in candidates:
+        try:
+            text = (DECK_DIR / cand).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        warning = mismatch_warning(cand, text, args.bracket)
+        if warning:
+            print(f"  {warning}", flush=True)
     try:
         pool = curate_bracket(
             args.bracket,

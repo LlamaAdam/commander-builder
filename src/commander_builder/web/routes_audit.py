@@ -146,6 +146,26 @@ def _compute_deck_health_safe(deck_text: str) -> dict:
         return dict(_EMPTY_DECK_HEALTH)
 
 
+# Failure shape for the health grade. 'N/A' (never 'F') mirrors
+# compute_health_grade's own all-unavailable contract: a route-layer
+# exception is an availability problem, not a deck-construction one.
+_EMPTY_HEALTH_GRADE = {
+    "grade": "N/A", "score": None, "reasons": [], "components": {},
+}
+
+
+def _compute_health_grade_safe(deck_text: str, health_signals: dict) -> dict:
+    """Wrap ``deck_health.compute_health_grade`` so grade aggregation
+    can never take down the audit. Reuses the already-computed
+    ``deck_health`` signals dict (avoids a second Scryfall walk for
+    the signal-derived components)."""
+    try:
+        from ..deck_health import compute_health_grade
+        return compute_health_grade(deck_text, health=health_signals)
+    except Exception:  # noqa: BLE001 -- defensive at the route layer
+        return dict(_EMPTY_HEALTH_GRADE)
+
+
 _EMPTY_COMBO_ASSESSMENT = {
     "combos": [], "recommended_bracket": 1, "violations": [],
     "within_bracket": True,
@@ -263,6 +283,12 @@ def _build_audit_payload(
             "source": (rec.evidence or {}).get("source"),
             "applied": rec.card.lower() in applied_add_set,
             "salt": salt_map.get(rec.card.lower()),
+            # Ownership flag from the collection filter: True/False
+            # when a collection is registered (flag mode annotates
+            # every add), absent → None when the feature isn't in use.
+            # The UI renders a "not owned" badge only on explicit
+            # False, so legacy/no-collection payloads render unchanged.
+            "owned": (rec.evidence or {}).get("owned"),
         }
         for rec in report.recommendations
         if rec.action == "add"
@@ -287,6 +313,9 @@ def _build_audit_payload(
     warning = _fallback_warning(
         requested, actual_source, fallback_reason, byo_key,
     )
+    # Health signals computed once; the letter grade aggregates them
+    # (plus the land-count walk) without recomputing the signal set.
+    health_signals = _compute_deck_health_safe(original)
     return {
         "deck": deck_id,
         "bracket": bracket,
@@ -313,6 +342,12 @@ def _build_audit_payload(
         "skipped_for_saturation": list(
             getattr(report, "skipped_for_saturation", []) or []
         ),
+        # Adds hidden by owned-only mode — same disclosure contract as
+        # skipped_for_saturation (a short list must read as filtered,
+        # not as "the advisor found nothing").
+        "skipped_for_ownership": list(
+            getattr(report, "skipped_for_ownership", []) or []
+        ),
         "bracket_peer_ref_count": int(
             getattr(report, "bracket_peer_ref_count", 0) or 0,
         ),
@@ -328,7 +363,10 @@ def _build_audit_payload(
         ),
         "salt_warning": project_salt_warning(original, salt_map, bracket),
         "protected_cards": read_protected_cards(original),
-        "deck_health": _compute_deck_health_safe(original),
+        "deck_health": health_signals,
+        # At-a-glance letter grade over the deck_health signals
+        # (ManaFoundry parity). Rendered as the tile row's header.
+        "health_grade": _compute_health_grade_safe(original, health_signals),
         "combo_assessment": _assess_combos_safe(original, bracket),
     }
 
@@ -413,6 +451,15 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
         # essentials safety net. Truthy query values: 1, true, yes.
         budget_raw = (request.args.get("budget") or "").strip().lower()
         budget = budget_raw in ("1", "true", "yes")
+        # Owned-only mode: drop adds outside the user's registered
+        # collection. Same truthy-value convention as ``budget``. The
+        # collection itself is server-side state (the user-dir file the
+        # Settings panel writes) so only the mode toggle rides the
+        # query string. With a collection registered but no flag, the
+        # advisor's flag mode still annotates each add's ``owned``
+        # field; with no collection at all the param is inert.
+        owned_raw = (request.args.get("owned_only") or "").strip().lower()
+        owned_only = owned_raw in ("1", "true", "yes")
         # Optional model override. Accepts any string the SDK accepts;
         # defaults to whatever DEFAULT_CLAUDE_MODEL is set to in
         # improvement_advisor (Sonnet today). Most-cost-effective
@@ -432,6 +479,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
                 budget=budget,
                 api_key=(byo_key or None) if use_claude else None,
+                owned_only=owned_only,
             )
         except FileNotFoundError as exc:
             return jsonify({"error": str(exc)}), 404
@@ -517,6 +565,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
         byo_key = _resolve_byo_key(request.headers.get("X-Anthropic-API-Key", ""))
         budget_raw = (request.args.get("budget") or "").strip().lower()
         budget = budget_raw in ("1", "true", "yes")
+        # Same owned-only semantics as the sync endpoint (see comment
+        # there) — params mirror so the client can switch endpoints by
+        # URL alone.
+        owned_raw = (request.args.get("owned_only") or "").strip().lower()
+        owned_only = owned_raw in ("1", "true", "yes")
         claude_model = (request.args.get("model") or "").strip() or None
 
         # --- Stream generator -----------------------------------------
@@ -554,6 +607,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
                     budget=budget,
                     api_key=(byo_key or None) if use_claude else None,
+                    owned_only=owned_only,
                 ):
                     if phase.phase == "error":
                         yield _sse("error", {

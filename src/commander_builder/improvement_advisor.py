@@ -237,6 +237,7 @@ from ._advisor_heuristic import (  # noqa: E402
 # manabase recommender. All re-exported here so external callers
 # don't see the move.
 from ._advisor_filters import (  # noqa: E402,F401
+    _filter_for_ownership,
     _filter_for_saturation,
     _validate_card_names,
 )
@@ -383,6 +384,8 @@ def advise(
     budget: bool = False,
     intent_themes: Optional[list[str]] = None,
     api_key: Optional[str] = None,
+    collection_path: Optional[Path] = None,
+    owned_only: bool = False,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck.
 
@@ -416,6 +419,17 @@ def advise(
     has to stage per-request secrets in the process-global
     ``os.environ`` (which raced across concurrent requests).
 
+    ``collection_path`` / ``owned_only`` drive the ManaFoundry-parity
+    ownership filter. ``collection_path=None`` (default) resolves the
+    user's registered collection via ``collection.collection_path()``
+    at call time; when NO collection file exists the filter is fully
+    inert and output is identical to the pre-feature behavior. With a
+    collection present: ``owned_only=False`` (default) annotates each
+    add's evidence with ``owned: True/False`` ('flag' mode, so UIs
+    can badge unowned picks); ``owned_only=True`` drops unowned adds
+    entirely ('exclude' mode) and records them in the report's
+    ``skipped_for_ownership``.
+
     Implementation note: this synchronous entry point collects all
     phases from ``_advise_steps()`` and assembles the final report.
     Callers that want to render partial progress (e.g. the streaming
@@ -430,6 +444,8 @@ def advise(
         claude_model=claude_model, budget=budget,
         intent_themes=intent_themes,
         api_key=api_key,
+        collection_path=collection_path,
+        owned_only=owned_only,
     ):
         if phase.phase == "complete":
             final_report = phase.data.get("report")
@@ -464,6 +480,8 @@ def _advise_steps(
     budget: bool = False,
     intent_themes: Optional[list[str]] = None,
     api_key: Optional[str] = None,
+    collection_path: Optional[Path] = None,
+    owned_only: bool = False,
 ) -> Iterator[AdvicePhase]:
     """Generator version of :func:`advise` — yields ``AdvicePhase``
     events as each stage of the pipeline completes.
@@ -830,9 +848,33 @@ def _advise_steps(
     except OSError:
         pass
 
+    # --- Lift Web (ManaFoundry parity): a few co-occurrence picks from
+    # the harvested corpus, appended AFTER manabase + primary so dedup
+    # always lets the established sources win a collision — lift only
+    # ever contributes cards nobody else surfaced, clearly labeled
+    # source='lift'. Fail-quiet like every supplemental signal: a
+    # missing/too-small corpus or an I/O blip yields zero lift recs,
+    # never a broken audit. Appending BEFORE the dedup/ownership/
+    # saturation/CI stages below means lift adds flow through the
+    # exact same post-processing as every other source (verified
+    # ordering: ownership annotates/drops them, saturation checks
+    # their role tag, enforce_color_identity strips off-color picks).
+    lift_recs: list[SwapRecommendation] = []
+    try:
+        from .lift_analysis import lift_recommendations
+        lift_recs = lift_recommendations(
+            deck_path, deck_dir=deck_dir, bracket=bracket,
+        )
+    except Exception as exc:  # noqa: BLE001 — supplemental evidence only
+        print(
+            f"WARN: lift analysis skipped "
+            f"({type(exc).__name__}: {exc}); no lift picks this audit.",
+            flush=True,
+        )
+
     # Prepend manabase so curated essentials surface at the top,
     # then deduplicate so the same card never appears in both the
-    # manabase + primary slices.
+    # manabase + primary slices (lift picks trail last — see above).
     #
     # Real failure mode caught in the 2026-05-13 live-browser audit:
     # manabase prepends shock lands (Steam Vents, Blood Crypt, etc.)
@@ -850,7 +892,7 @@ def _advise_steps(
     # source-badge rendering.
     seen_lc: set[str] = set()
     deduped: list[SwapRecommendation] = []
-    for rec in list(manabase_recs) + list(recs):
+    for rec in list(manabase_recs) + list(recs) + list(lift_recs):
         # Only de-dup add candidates — cuts are user-deck cards
         # already present and naturally singleton.
         if rec.action == "add":
@@ -860,6 +902,26 @@ def _advise_steps(
             seen_lc.add(key)
         deduped.append(rec)
     recs = deduped
+
+    # Ownership filter (ManaFoundry parity). Runs FIRST among the
+    # post-processing filters, on the deduped combined list, so that
+    # (a) exclude-mode drops happen before the saturation / CI /
+    # Scryfall passes waste lookups on cards that won't survive, and
+    # (b) flag-mode annotations land on every add — including the
+    # manabase prepends — before later filters thin the list (those
+    # filters only drop recs, never rebuild evidence, so annotations
+    # survive them). ``load_collection`` returning None (no collection
+    # file registered) keeps this whole block inert — output stays
+    # byte-identical to the pre-feature pipeline, which is the hard
+    # backward-compatibility constraint (pinned by test).
+    from .collection import load_collection
+    skipped_for_ownership: list[dict] = []
+    collection_keys = load_collection(collection_path)
+    if collection_keys is not None:
+        recs, skipped_for_ownership = _filter_for_ownership(
+            recs, collection_keys,
+            mode="exclude" if owned_only else "flag",
+        )
 
     role_counts = count_deck_roles(main_cards)
     recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
@@ -971,6 +1033,7 @@ def _advise_steps(
         timestamp=datetime.now(timezone.utc).isoformat(),
         fallback_reason=fallback_reason,
         skipped_for_saturation=skipped_for_saturation,
+        skipped_for_ownership=skipped_for_ownership,
         bracket_peer_ref_count=bracket_peer_ref_count,
         average_deck=average_deck,
         edhrec_categories=edhrec_categories,
@@ -983,12 +1046,56 @@ def _advise_steps(
 
 # --- CLI -------------------------------------------------------------------
 
-def _format_report_text(report: AdviceReport) -> str:
+def _format_report_text(
+    report: AdviceReport,
+    bracket_estimate: Optional[dict] = None,
+    health_grade: Optional[dict] = None,
+) -> str:
     lines = []
     lines.append("=" * 60)
     lines.append(f" Improvement advice — {report.deck_filename}")
     lines.append("=" * 60)
     lines.append(f"Bracket: B{report.bracket}")
+    # Explainable bracket estimate (ManaFoundry parity) — rendered
+    # right under the declared bracket so estimated-vs-declared reads
+    # as one unit. ``bracket_estimate`` is the
+    # bracket_estimator.estimate_bracket dict; None keeps the legacy
+    # output byte-identical (callers that don't compute it lose
+    # nothing). Mismatch levels per the estimator's documented rule:
+    # diff >= 2 hard "MISMATCH", diff == 1 soft "check".
+    if bracket_estimate and bracket_estimate.get("estimate") is not None:
+        est = bracket_estimate["estimate"]
+        level = bracket_estimate.get("mismatch_level")
+        if level == "mismatch":
+            verdict = "MISMATCH vs declared"
+        elif level == "check":
+            verdict = "check vs declared"
+        else:
+            verdict = "matches declared"
+        lines.append(
+            f"Estimated bracket: B{est} "
+            f"({bracket_estimate.get('confidence', '?')} confidence) — "
+            f"{verdict}"
+        )
+        for reason in bracket_estimate.get("reasons", []):
+            lines.append(f"    {reason}")
+    # Health grade (ManaFoundry parity) — one letter aggregating the
+    # deck-health signals, rendered right beside the Estimated-bracket
+    # block so the report header carries both at-a-glance verdicts.
+    # ``health_grade`` is the deck_health.compute_health_grade dict;
+    # None keeps the legacy output byte-identical. 'N/A' (the
+    # all-signals-unavailable / Scryfall-outage contract) prints
+    # explicitly rather than masquerading as a real grade.
+    if health_grade and health_grade.get("grade"):
+        if health_grade["grade"] == "N/A":
+            lines.append("Health grade: N/A (signals unavailable)")
+        else:
+            lines.append(
+                f"Health grade: {health_grade['grade']} "
+                f"({health_grade.get('score')}/100)"
+            )
+            for reason in health_grade.get("reasons", []):
+                lines.append(f"    {reason}")
     lines.append(f"Commander(s): {', '.join(report.commander_names)}")
     lines.append(f"Source: {report.source}")
     lines.append("")
@@ -1022,7 +1129,28 @@ def _format_report_text(report: AdviceReport) -> str:
         marker = "★" if role in report.diagnosis.priority_roles else " "
         lines.append(f"  {marker} [{role}]")
         for r in by_role[role]:
-            lines.append(f"      + {r.card}  ({r.reason})")
+            # Ownership marker (flag mode): only unowned adds get the
+            # tag — owned/unannotated lines stay byte-identical to the
+            # pre-collection output so no-collection users see zero
+            # diff in the report.
+            owned_tag = (
+                "  [not owned]"
+                if (r.evidence or {}).get("owned") is False else ""
+            )
+            lines.append(f"      + {r.card}  ({r.reason}){owned_tag}")
+    # Exclude-mode disclosure: say how many adds were hidden for
+    # ownership so a short list reads as filtered, not as "the
+    # advisor found nothing". Mirrors the UI's skipped_for_saturation
+    # disclosure contract.
+    # getattr: stub reports in tests (SimpleNamespace) may predate the
+    # field — same defensive pattern the web payload builder uses.
+    skipped_own = getattr(report, "skipped_for_ownership", []) or []
+    if skipped_own:
+        dropped = ", ".join(e.get("card", "?") for e in skipped_own)
+        lines.append(
+            f"  (skipped {len(skipped_own)} unowned adds — "
+            f"owned-only mode: {dropped})"
+        )
     lines.append("")
     lines.append(f"Recommended cuts ({len(cuts)}):")
     for r in cuts:
@@ -1069,6 +1197,37 @@ def main(argv: Optional[list[str]] = None) -> int:
             "most expensive cards."
         ),
     )
+    p.add_argument(
+        "--collection", default=None, metavar="PATH",
+        help=(
+            "Path to your card-collection file (one card name per "
+            "line; '<qty> Name' also accepted). Default: the "
+            "registered collection at ~/.commander-builder/"
+            "collection.txt (or $COMMANDER_BUILDER_COLLECTION). With "
+            "a collection present, unowned adds are annotated "
+            "'[not owned]'; combine with --owned-only to drop them."
+        ),
+    )
+    p.add_argument(
+        "--owned-only", action="store_true",
+        help=(
+            "Drop recommendations for cards not in your collection "
+            "(basic lands always count as owned). Requires a "
+            "registered collection file — inert with a warning "
+            "otherwise. Without this flag, unowned adds are kept but "
+            "tagged '[not owned]'."
+        ),
+    )
+    p.add_argument(
+        "--show-lift", action="store_true",
+        help=(
+            "Append a Lift Web section: the deck's strongest in-deck "
+            "card pairs and the top 'pairs well with your deck' "
+            "candidate adds, both ranked by co-occurrence lift over "
+            "the locally harvested (non-[USER]/[CONTROL]) deck corpus. "
+            "Purely informational — does not change the manifest."
+        ),
+    )
     p.add_argument("--output", help="Write JSON manifest here (audit_manifest schema).")
     args = p.parse_args(argv)
 
@@ -1084,12 +1243,86 @@ def main(argv: Optional[list[str]] = None) -> int:
         advise_kwargs["claude_model"] = args.claude_model
     if args.budget:
         advise_kwargs["budget"] = True
+    # Ownership threading. --collection overrides the default path;
+    # --owned-only flips the filter from flag ('[not owned]' tags) to
+    # exclude (drop unowned adds). Warn — don't fail — when owned-only
+    # is requested with no collection registered: the advice is still
+    # useful, it just can't be ownership-filtered, and an unattended
+    # batch shouldn't die over a missing optional file.
+    from .collection import load_collection
+    _coll_path = Path(args.collection) if args.collection else None
+    if args.collection:
+        advise_kwargs["collection_path"] = _coll_path
+    if args.owned_only:
+        if load_collection(_coll_path) is None:
+            print(
+                "WARN: --owned-only requested but no collection file "
+                "found — showing unfiltered recommendations. Register "
+                "one via the web Settings panel or pass --collection.",
+                file=sys.stderr,
+            )
+        else:
+            advise_kwargs["owned_only"] = True
     report = advise(Path(args.user), args.bracket, **advise_kwargs)
-    text = _format_report_text(report)
+    # Bracket estimate for the report header. Fail-quiet: the deck
+    # read is the only thing that can raise (estimate_bracket never
+    # does by contract), and a missing estimate must not sink the
+    # advice output the user actually asked for.
+    bracket_estimate = None
+    try:
+        from .bracket_estimator import estimate_bracket
+        bracket_estimate = estimate_bracket(
+            Path(args.user).read_text(encoding="utf-8"),
+            declared=args.bracket,
+        )
+    except Exception:  # noqa: BLE001 — advice must print regardless
+        bracket_estimate = None
+    # Health grade for the report header, mirroring the bracket-estimate
+    # wiring above: fail-quiet, computed from the same deck text. A
+    # Scryfall outage inside the grade yields 'N/A' by contract; any
+    # unexpected exception just drops the line.
+    health_grade = None
+    try:
+        from .deck_health import compute_health_grade
+        health_grade = compute_health_grade(
+            Path(args.user).read_text(encoding="utf-8"),
+        )
+    except Exception:  # noqa: BLE001 — advice must print regardless
+        health_grade = None
+    text = _format_report_text(
+        report,
+        bracket_estimate=bracket_estimate,
+        health_grade=health_grade,
+    )
     try:
         print(text)
     except UnicodeEncodeError:
         sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+
+    # Lift Web section (opt-in). Resolves the deck against DECK_DIR at
+    # call time (same relative-filename contract as advise()) and uses
+    # the same dir as the corpus root. User asked for it explicitly, so
+    # a failure prints a visible one-liner instead of vanishing — but
+    # it still never sinks the advice output above.
+    if args.show_lift:
+        try:
+            from .lift_analysis import format_lift_report
+            _lift_deck = Path(args.user)
+            if not _lift_deck.is_absolute():
+                _lift_deck = DECK_DIR / _lift_deck
+            lift_text = format_lift_report(
+                _lift_deck, DECK_DIR, bracket=args.bracket,
+            )
+        except Exception as exc:  # noqa: BLE001 — informational section
+            lift_text = (
+                f"Lift analysis unavailable ({type(exc).__name__}: {exc})"
+            )
+        try:
+            print(lift_text)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write(
+                (lift_text + "\n").encode("utf-8", errors="replace"),
+            )
 
     if args.output:
         Path(args.output).write_text(

@@ -1,9 +1,17 @@
-// FP-011 Settings panel — drives GET/PUT /api/config.
+// FP-011 Settings panel — drives GET/PUT /api/config, plus the card
+// collection (GET/PUT /api/collection).
 //
 // The Anthropic token is never returned by the server, so the key field
 // starts blank and a "(set · …last4)" hint shows whether one is stored.
 // Leaving it blank on save keeps the existing token; typing a new value
 // replaces it. Non-secret fields round-trip normally.
+//
+// The collection follows the same blank-means-keep convention as the
+// token, for a different reason: the server never echoes the full list
+// (it can be tens of thousands of lines), only a "(N cards)" headline.
+// Pasting a new list replaces the whole collection; the explicit Clear
+// button unregisters it (blank + Save must NOT clear, or every settings
+// save would wipe the collection).
 (function () {
   "use strict";
 
@@ -34,12 +42,33 @@
     $("settings-moxfield").value = cfg.moxfield_user || "";
   }
 
+  // Reflect the server-side collection registration. The textarea is
+  // always cleared (blank = keep current — the list itself is never
+  // echoed back); only the "(N cards)" headline changes.
+  function fillCollectionState(state) {
+    $("settings-collection").value = "";
+    var stateEl = $("settings-collection-state");
+    if (state && state.configured) {
+      stateEl.textContent = "(" + state.count + " cards)";
+    } else {
+      stateEl.textContent = "(not set)";
+    }
+  }
+
+  function refreshCollectionState() {
+    fetch("/api/collection")
+      .then(function (r) { return r.json(); })
+      .then(fillCollectionState)
+      .catch(function () { /* leave whatever headline is showing */ });
+  }
+
   function openSettings() {
     setStatus("loading…", false);
     fetch("/api/config")
       .then(function (r) { return r.json(); })
       .then(function (cfg) { fillForm(cfg); setStatus("", false); })
       .catch(function () { setStatus("could not load config", true); });
+    refreshCollectionState();
     if (typeof dialog.showModal === "function") {
       dialog.showModal();
     } else {
@@ -68,6 +97,50 @@
     return update;
   }
 
+  // PUT the pasted collection when the textarea is non-blank. Returns
+  // a promise resolving true on success / nothing-to-do, false on a
+  // rejected paste (the save flow then keeps the dialog open so the
+  // user can fix the offending line the 400 body names).
+  function saveCollectionIfPasted() {
+    var text = $("settings-collection").value;
+    if (!text.trim()) { return Promise.resolve(true); }
+    return fetch("/api/collection", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          setStatus(res.body.error || "collection import failed", true);
+          return false;
+        }
+        fillCollectionState(res.body);
+        return true;
+      })
+      .catch(function () {
+        setStatus("collection import failed", true);
+        return false;
+      });
+  }
+
+  function clearCollection() {
+    setStatus("clearing collection…", false);
+    fetch("/api/collection", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "" }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        fillCollectionState(body);
+        setStatus("collection cleared", false);
+      })
+      .catch(function () { setStatus("could not clear collection", true); });
+  }
+
   function saveSettings() {
     setStatus("saving…", false);
     fetch("/api/config", {
@@ -86,8 +159,14 @@
           return;
         }
         fillForm(res.body.config);
-        setStatus("saved", false);
-        setTimeout(closeSettings, 600);
+        // Collection rides the same Save button but its own endpoint —
+        // only close the dialog when BOTH writes succeeded, so a bad
+        // CSV row's 400 message stays visible for fixing.
+        saveCollectionIfPasted().then(function (collectionOk) {
+          if (!collectionOk) { return; }
+          setStatus("saved", false);
+          setTimeout(closeSettings, 600);
+        });
       })
       .catch(function () { setStatus("save failed", true); });
   }
@@ -98,4 +177,6 @@
   if (cancel) { cancel.addEventListener("click", closeSettings); }
   var save = $("settings-save");
   if (save) { save.addEventListener("click", saveSettings); }
+  var clearColl = $("settings-collection-clear");
+  if (clearColl) { clearColl.addEventListener("click", clearCollection); }
 })();

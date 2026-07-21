@@ -439,6 +439,14 @@ class Proposal:
     # to load such decks). Same defensive pattern as bracket caps +
     # protection.
     dropped_for_color_identity: list[str] = field(default_factory=list)
+    # Cards Claude proposed as ADDS that the user's registered card
+    # collection doesn't contain (owned-only curation mode). The
+    # candidate pool the curator saw was already ownership-filtered
+    # by the advisor, but Claude can propose cards from outside the
+    # pool; this is the post-response safety net (enforce_ownership),
+    # same defensive pattern as bracket caps + color identity. Empty
+    # unless the caller opted into owned-only curation.
+    dropped_for_unowned: list[str] = field(default_factory=list)
     # Populated by apply_proposal_to_deck. Empty until that call.
     applied_adds: list[str] = field(default_factory=list)
     applied_cuts: list[str] = field(default_factory=list)
@@ -479,6 +487,7 @@ from ._proposer_filters import (  # noqa: E402
     _safe_lookup_card,
     enforce_bracket_caps,
     enforce_color_identity,
+    enforce_ownership,
 )
 
 
@@ -643,6 +652,7 @@ def auto_propose(
     model: str = "claude-sonnet-4-5",
     protected_cards: Iterable[str] = (),
     mode: str = "polish",
+    collection_keys: "Optional[frozenset[str]]" = None,
 ) -> Proposal:
     """Curate an advisor's candidate pool into a small applicable Proposal.
 
@@ -670,6 +680,13 @@ def auto_propose(
                          applies via max_adds / max_cuts; mode only
                          tunes Claude's pairing aggressiveness within
                          the cap. Default 'polish'.
+      collection_keys  -- name-key set from ``collection.load_
+                         collection`` when the caller wants owned-only
+                         curation (--owned-only). Adds outside the
+                         collection are post-filtered to ``Proposal.
+                         dropped_for_unowned`` (basics always pass).
+                         None (default) = no ownership filtering,
+                         byte-identical to prior behavior.
 
     Side effects: none. ``apply_proposal_to_deck`` does the file write.
 
@@ -849,6 +866,18 @@ def auto_propose(
         kept_adds, deck_color_identity,
     )
 
+    # Ownership filter (owned-only curation): strip adds the user's
+    # registered collection doesn't contain. The advisor already
+    # excluded unowned candidates upstream, but Claude can propose
+    # cards outside the candidate pool — same post-response safety-net
+    # rationale as the color-identity filter above. Runs BEFORE the
+    # max_adds slice so the cap counts only ownable cards; None
+    # collection_keys (the default) is a pass-through, keeping the
+    # non-opted-in pipeline byte-identical.
+    kept_adds, dropped_for_unowned = enforce_ownership(
+        kept_adds, collection_keys,
+    )
+
     # Protection filter: strip any cut Claude proposed against the
     # user's locked list. Same pattern as bracket caps -- done BEFORE
     # max_cuts slicing so the cap counts only allowed cuts. Claude
@@ -873,6 +902,7 @@ def auto_propose(
         dropped_for_bracket=dropped_for_bracket,
         dropped_for_protection=dropped_for_protection,
         dropped_for_color_identity=dropped_for_color_identity,
+        dropped_for_unowned=dropped_for_unowned,
     )
 
 

@@ -9,10 +9,12 @@ The primary use case: *"I have a Commander deck. Make it better, prove
 it's better, and learn what kinds of changes actually move the needle so
 future audits get smarter."*
 
-It is **not** a deck builder from scratch, not a Moxfield clone, not a
-real-time game client. It's an iteration engine where Forge provides
-ground-truth simulation and an LLM (Claude or local Ollama) acts as the
-analyst that reads sim deltas and decides what to try next.
+It is **not YET** a deck builder from scratch (that's a planned
+direction — see FP-014 in [docs/future-plans.md](docs/future-plans.md)),
+not a Moxfield clone, not a real-time game client. It's an iteration
+engine where Forge provides ground-truth simulation and an LLM (Claude or
+local Ollama) acts as the analyst that reads sim deltas and decides what
+to try next.
 
 **Source-of-truth docs:**
 - [STATUS.md](docs/STATUS.md) — current state, open backlog, parked plans
@@ -58,6 +60,19 @@ parallel-pod harness; "Save iteration" persists to
 `knowledge_log.sqlite`. The Claude analyst is opt-in per request via the
 LLM toggle row.
 
+The dashboard and audit also surface (ManaFoundry-parity additions):
+
+- **Cheaper-printing savings** — the Est. price tile lists cards where a
+  legal cheaper printing of the same card saves money ("Save up to $X").
+- **Estimated bracket** — an explainable 1–5 bracket estimate with the
+  reasons behind it, flagged when it disagrees with the declared bracket.
+- **Health grade** — the deck-health signals compressed into one A–F
+  letter grade with the top reasons points were lost.
+- **Lift picks** — "pairs well with your deck" candidate adds from
+  co-occurrence analysis over the harvested corpus.
+- **MTGA / CSV paste import** — the paste-import textarea now auto-detects
+  MTG Arena exports and CSV card lists in addition to `.dck` / Moxfield.
+
 ## CLI commands
 
 ```bash
@@ -69,6 +84,10 @@ commander-snapshot "[USER] My Deck [B3].dck" --version v1
 
 # Heuristic/Claude swap recommendations (no browser session needed)
 commander-advise --user "[USER] My Deck v1 [B3].dck" --bracket 3
+# --show-lift prints the deck's strongest in-deck card pairs + top
+# lift-scored candidate adds from the harvested corpus. --collection PATH
+# + --owned-only filter recs to cards you own (also on commander-auto-curate;
+# register your collection at ~/.commander-builder/collection.txt, plain or CSV).
 
 # End-to-end auto-curate: advisor -> Claude curator -> apply -> optional
 # A/B sim with empirical kept/reverted/neutral verdict written back to

@@ -370,3 +370,76 @@ Setup installer + `build_installer.py` driver (`8146450`, PR #7).
 Producing the `.exe`/installer remains a local
 `python scripts/build_desktop.py` / `build_installer.py` run (deps are
 heavy); CI builds the artifact on tag.
+
+---
+
+# FP-014 — Build-from-scratch deck assembly
+
+**Status: PARKED / future.** Sized rough at **2–3 sessions for a first
+cut**. Unusually ready to start vs a cold plan — most of the ingredients
+already exist on disk (listed under *Substrate* below), so this is
+assembly + one genuinely hard research step, not a green-field build.
+
+## Motivation
+
+ManaFoundry.gg (and similar tools) assemble a **full deck from a chosen
+commander** in one shot. commander-builder deliberately does the opposite
+today: it is an *iteration engine* that improves an **existing** deck (the
+README's own framing — "not a deck builder from scratch"). This plan
+reverses that — take a commander (+ target bracket / archetype) and emit a
+complete, legal 99 — with an angle the competitors structurally lack:
+**assembled decks get Forge-VALIDATED, not just heuristically scored.**
+Every other from-scratch builder stops at a static power heuristic; we can
+hand the assembled list straight to the existing empirical
+improve-loop and prove it out in simulation.
+
+## Scope sketch (cite what already exists)
+
+Seed and fill the shell from modules that are already built and tested:
+
+- **Seed the skeleton** from the EDHREC average deck for the commander —
+  `edhrec_client.fetch_average_deck` (coherent, no Moxfield dependency) —
+  shaped by **archetype templates** (`archetype.py`) and **role targets**
+  (`staples.ROLE_TARGETS`) so the ramp/draw/removal/wipe/protection counts
+  land in-band from the start.
+- **Synergy-driven picks** from the new **`lift_analysis.py`** — the
+  co-occurrence matrix over the harvested corpus surfaces "pairs well with
+  this commander/shell" candidates with empirical support, exactly the
+  pick-selection signal a from-scratch builder needs.
+- **Hit a target power level** with the new **`bracket_estimator.py`** —
+  estimate the assembled list's bracket and steer picks (Game Changers /
+  fast mana / combo density) up or down until the estimate matches the
+  requested bracket.
+- **Prefer owned cards** via **`collection.py`** — bias the fill toward
+  what the user already owns (the same exclude/flag machinery the advisor
+  now uses), so the first cut is buildable, not a wishlist.
+- **Validate legality** with the guards the adversarial-review fix
+  campaign hardened: the singleton / exactly-99-mainboard / drop-reporting
+  checks in `web/deck_text_ops._apply_swaps_to_dck`, plus
+  `_proposer_filters.enforce_color_identity` for color-identity legality.
+- **Empirically tune** by handing the assembled `.dck` to the existing
+  `commander-improve` loop — Forge A/B sims + knowledge_log verdicts turn
+  a plausible pile into a measured one. **This is the validation moat.**
+
+## The honest hard part
+
+The assembler above is the **easy 80%**. Going from *"a pile of
+role-appropriate, high-lift, in-color cards"* to *"a coherent 99 with a
+real manabase"* — curve, color-source counts, the actual land base, and
+the non-obvious glue that makes a deck *function* rather than merely
+satisfy per-role quotas — is the **hard 20%** and the real research. Role
+targets and lift scores get you a defensible shell; they do **not** get you
+coherence. Expect the first cut to produce legal-but-mediocre decks that
+the improve-loop then has to do heavy lifting on, and treat
+"curated-coherence" as the open problem this plan actually has to solve,
+not a detail.
+
+## Substrate that already exists (why it's cheap to start)
+
+`fetch_average_deck`, `archetype.py`, `staples.ROLE_TARGETS`,
+`lift_analysis.py`, `bracket_estimator.py`, `collection.py`, the
+legality/color-identity guards (`_apply_swaps_to_dck`,
+`enforce_color_identity`), and the whole `commander-improve` empirical
+loop are all shipped and tested. What's missing is (a) the orchestrator
+that composes them into a from-scratch builder and (b) the
+manabase/coherence step — i.e. the hard 20%.

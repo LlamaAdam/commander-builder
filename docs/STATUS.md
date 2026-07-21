@@ -8,7 +8,10 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-20 (merged `feature/2026-04-28-session` —
+**Last updated:** 2026-07-21 (`feature/manafoundry-parity` — six
+user-facing ManaFoundry-parity features landed; see the branch note below
+and CHANGELOG 2026-07-21.) Prior: 2026-07-20 (merged
+`feature/2026-04-28-session` —
 PRs #9/#10, the forge_batch/forge_version/web-module split, FP-013
 gate items — into the adversarial-review fix branch
 `fix/adversarial-review-2026-07-19`; all 40 review-fix commits ported
@@ -34,13 +37,26 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** 1916 passing fast lane / 148 skipped (+slow with
-  `--run-slow`), ~150s offline. Zero warnings under `python -W default`.
-- **Branch:** `fix/adversarial-review-2026-07-19` (worktree at
-  `C:\dev\cb-review-fixes`) — now carries `feature/2026-04-28-session`
-  merged in (PRs #9/#10 + the 2026-06-12 forge_batch/forge_version/
-  web-module split), with all 40 adversarial-review fix commits ported
-  onto the new layout.
+- **Tests:** 2089 passing fast lane / 155 skipped (+slow with
+  `--run-slow`), ~130s offline.
+- **Branch:** `feature/manafoundry-parity` (worktree at
+  `C:\dev\cb-review-fixes`) — six ManaFoundry-parity features on top of
+  the adversarial-review fix branch, which itself carries
+  `feature/2026-04-28-session` merged in (PRs #9/#10 + the 2026-06-12
+  forge_batch/forge_version/web-module split) with all 40
+  adversarial-review fix commits ported onto the new layout.
+
+**`feature/manafoundry-parity` (2026-07-21):** six user-facing features
+closing the gap with from-scratch builders like ManaFoundry.gg —
+cheaper-printing savings (`9d16fb2`), explainable bracket estimator
+(`6b00ef5`), MTGA/CSV paste import (`c110041`), at-a-glance health grade
+(`194dba1`), owned-card collection filter (`95a6ee7`), and co-occurrence
+lift analysis (`e51f9cf`). The branch also lands **FP-014
+(build-from-scratch deck assembly)** as a parked plan — most of its
+ingredients now exist (those same six modules + the improve-loop), so
+it's unusually ready to start (see
+[docs/future-plans.md](future-plans.md)). Tasks for **async-sim-jobs**
+and **per-worker-forge-profiles** are queued next.
 
 **Adversarial-review fix branch (2026-07-19/20):**
 `fix/adversarial-review-2026-07-19` carries 40 commits across three

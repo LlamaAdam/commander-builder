@@ -6,6 +6,49 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-21 — ManaFoundry-parity features (6 commits, UNMERGED)
+
+Lives on `feature/manafoundry-parity`, pending merge. Six user-facing
+features that close the gap with from-scratch builders like ManaFoundry.gg
+(the assembly angle itself is planned as FP-014). One bullet per commit,
+oldest first. Fast lane after this branch: 2089 passed / 155 skipped.
+
+#### Added
+
+- **`feat(pricing)`** (`9d16fb2`): cheaper-printing savings. `/api/dashboard`
+  attaches a `printing_savings` block and the Est. price tile grows a "Save
+  up to $X with cheaper printings (N cards)" list. New
+  `scryfall_client.lookup_card_prints` (lazily-cached `/cards/search?unique=prints`
+  walk) + `deck_pricing.printing_savings_for_deck_text`; legality-filtered,
+  qty-aware, biggest-saving-first.
+- **`feat(bracket)`** (`6b00ef5`): explainable bracket estimator. New core
+  `bracket_estimator.py` estimates a deck's Commander bracket (1–5) from its
+  list using the repo's existing rule encodings (Game-Changer / combo / MLD
+  floors + weighted signals) and reports estimate/floor/confidence/reasons;
+  `|est−declared| ≥ 1` soft-flags, `≥ 2` hard-flags a mismatch. Surfaced in
+  the dashboard payload.
+- **`feat(import)`** (`c110041`): MTGA + CSV paste import. New core
+  `import_formats.py` (`arena_to_dck`, `csv_to_lines`, conservative
+  `detect_paste_format`) lets the single paste textarea accept MTG Arena
+  exports and CSV card lists on top of `.dck` / Moxfield-bulk paste;
+  ambiguity always falls back to plain, malformed lines in a positively
+  detected format raise a named error.
+- **`feat(health)`** (`194dba1`): at-a-glance letter grade.
+  `deck_health.compute_health_grade` aggregates the existing health signals
+  into one A–F grade (0–100 score + worst-first reasons) via one documented
+  weight dict; unavailable signals renormalize out, all-unavailable grades
+  N/A. Rendered as the deck-health panel header + shipped in `/api/audit`.
+- **`feat(collection)`** (`95a6ee7`): owned-card registry. New
+  `collection.py` reads `~/.commander-builder/collection.txt` (plain or CSV,
+  reusing `import_formats.csv_to_lines`); `commander-advise` /
+  `commander-auto-curate` gain `--collection PATH` + `--owned-only` to
+  exclude or flag unowned adds through the advisor's disclosure contract.
+- **`feat(lift)`** (`e51f9cf`): co-occurrence lift analysis. New stdlib-only
+  `lift_analysis.py` computes pairwise lift over the harvested deck corpus
+  (support-floored, band sub-matrices, sha256-keyed cache) and surfaces
+  "pairs well with your deck" candidate adds — as a dashboard "Lift picks"
+  panel, `source='lift'` advisor evidence, and `commander-advise --show-lift`.
+
 ### 2026-07-20 — adversarial-review round 3 (5 commits, UNMERGED)
 
 Third pass: an audit of round 2's own commits plus a completeness check
