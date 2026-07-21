@@ -369,8 +369,21 @@ async function runProposeSwap() {
   status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} `
     + `games on B${bracket} via Forge — ${etaStr}…`;
   btn.disabled = true;
+  // Guard against the stale-response race (the _activeDeckId pattern from
+  // 13f16de): a pod sim can run for minutes, and the user may switch decks
+  // while it runs. Capture which deck we kicked this off for; every async
+  // continuation below bails if the active deck has since changed, so a
+  // poll that resolves after a deck switch never renders onto the wrong
+  // deck's panel.
+  const simDeckId = _activeDeckId;
   try {
-    const resp = await fetch("/api/propose_swap", {
+    // Async contract (2026-07-21): POST returns {job_id} immediately, then
+    // we poll GET /api/sim_job/<id>. The old sync POST held the HTTP
+    // connection open for the whole sim — a pod-mode 40-game run could
+    // outlast a browser/proxy read timeout and lose the response even
+    // though Forge finished and wrote its report. Polling keeps every
+    // request short.
+    const startResp = await fetch("/api/propose_swap_async", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -381,20 +394,79 @@ async function runProposeSwap() {
         mode,
       }),
     });
-    const body = await resp.json();
-    if (!resp.ok) {
-      status.textContent = `Error: ${body.error || resp.status}${
-        body.detail ? " — " + body.detail : ""
+    const startBody = await startResp.json();
+    if (!startResp.ok) {
+      // Validation/staging/availability errors still come back
+      // synchronously here (before any job is created), so surface them
+      // exactly as before.
+      status.textContent = `Error: ${startBody.error || startResp.status}${
+        startBody.detail ? " — " + startBody.detail : ""
       }`;
       return;
     }
+    const jobId = startBody.job_id;
+
+    // Poll with a gentle backoff: 2s, then creeping up to 5s so a long pod
+    // sim doesn't hammer the server. No hard timeout — the server keeps the
+    // job until it finishes; the user can also just close the modal.
+    let delay = 2000;
+    const body = await new Promise((resolve, reject) => {
+      const tick = async () => {
+        // Stop polling entirely if the user navigated away from this deck.
+        if (_activeDeckId !== simDeckId) {
+          reject(new Error("__deck_switched__"));
+          return;
+        }
+        try {
+          const pollResp = await fetch(
+            `/api/sim_job/${encodeURIComponent(jobId)}`,
+          );
+          const job = await pollResp.json();
+          if (!pollResp.ok) {
+            reject(new Error(job.error || `HTTP ${pollResp.status}`));
+            return;
+          }
+          if (job.status === "done") {
+            resolve(job.report);
+            return;
+          }
+          if (job.status === "failed") {
+            reject(new Error(job.error || "sim failed"));
+            return;
+          }
+          // queued/running — update the status line with coarse progress
+          // when compare() has reported a completed pod.
+          if (_activeDeckId === simDeckId) {
+            const prog = job.progress;
+            if (prog && prog.pods_total) {
+              status.textContent =
+                `Running ${games} ${mode === "pod" ? "pod" : "1v1"} games `
+                + `on B${bracket} via Forge — pod ${prog.pods_done}/${prog.pods_total}…`;
+            }
+          }
+          delay = Math.min(delay + 500, 5000);
+          setTimeout(tick, delay);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      setTimeout(tick, delay);
+    });
+
+    // A poll that resolved after the user switched decks must not render.
+    if (_activeDeckId !== simDeckId) return;
     status.textContent = `Done. ${body.total_games} games played.`;
     _lastSimReport = body;
     renderProposeResult(result, body);
   } catch (e) {
+    // Swallow the deck-switch sentinel silently — it isn't an error, the
+    // user just moved on.
+    if (e && e.message === "__deck_switched__") return;
     status.textContent = `Network error: ${e.message}`;
   } finally {
-    btn.disabled = false;
+    // Only re-enable the button if we're still on the deck we started on;
+    // a deck switch rebuilt the panel and its own button.
+    if (_activeDeckId === simDeckId) btn.disabled = false;
   }
 }
 

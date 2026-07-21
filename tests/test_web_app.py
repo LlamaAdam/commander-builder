@@ -1246,6 +1246,292 @@ def test_propose_swap_400_on_empty_new_text(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /api/propose_swap_async + /api/sim_job/<id> (recommendation #2)
+#
+# The async endpoint dispatches compare() onto a background daemon thread
+# and returns {job_id} immediately; the client polls GET /api/sim_job/<id>.
+# Every test injects a fake compare (via the module attribute the endpoint
+# resolves at call time) so no Forge is needed. A blocking fake gated on a
+# threading.Event lets us observe intermediate states deterministically.
+# ---------------------------------------------------------------------------
+
+# A valid non-empty diff vs. the "Alpha"/"Bravo" fixture decks (adds Lotus
+# Cobra) so _prepare_swap's no-op guard passes.
+_ASYNC_NEW_TEXT = (
+    "[metadata]\nName=Alpha v2\n\n"
+    "[Commander]\n1 Test Cmdr\n\n"
+    "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+)
+
+
+def _fake_report(old_deck, new_deck, games_per_pod, mode,
+                 old_wins=4, new_wins=11, draws=0, winner="new"):
+    """Build a SimpleNamespace shaped like a ComparisonReport — the exact
+    duck-type _execute_swap reads to build its response body."""
+    from types import SimpleNamespace
+    total = old_wins + new_wins + draws
+    return SimpleNamespace(
+        old_deck=old_deck, new_deck=new_deck,
+        bracket=3, mode=mode, games_per_pod=games_per_pod,
+        old_stats=SimpleNamespace(deck_filename=old_deck, wins=old_wins,
+                                  games=total),
+        new_stats=SimpleNamespace(deck_filename=new_deck, wins=new_wins,
+                                  games=total),
+        draws=draws, total_games=games_per_pod,
+        timestamp="2026-07-21T00:00:00", winner=winner,
+        margin=abs(new_wins - old_wins), pods=[{}, {}],
+        pods_planned=2, stopped_early=False,
+    )
+
+
+def _install_forge_stub(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.ForgeRunner.locate",
+        classmethod(lambda cls: SimpleNamespace(name="stubbed")),
+    )
+
+
+def _wait_for(client, job_id, statuses, timeout=8.0):
+    """Poll /api/sim_job/<id> until status is in ``statuses`` or timeout.
+    Returns the final job dict. Raises AssertionError on timeout."""
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        resp = client.get(f"/api/sim_job/{job_id}")
+        assert resp.status_code == 200, resp.get_json()
+        job = resp.get_json()
+        if job["status"] in statuses:
+            return job
+        _time.sleep(0.02)
+    raise AssertionError(f"job {job_id} never reached {statuses}")
+
+
+def test_propose_swap_async_returns_job_id(client, monkeypatch):
+    _install_forge_stub(monkeypatch)
+
+    def fake_compare(**kw):
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"])
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    assert resp.status_code == 202, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    # uuid4 hex — 32 lowercase hex chars.
+    assert isinstance(job_id, str) and len(job_id) == 32
+
+
+def test_sim_job_lifecycle_running_then_done(client, monkeypatch):
+    """queued/running -> done: a blocking fake lets us observe 'running'
+    before releasing it to finish."""
+    import threading as _threading
+    _install_forge_stub(monkeypatch)
+    release = _threading.Event()
+
+    def fake_compare(**kw):
+        # Block until the test releases us so 'running' is observable.
+        release.wait(5.0)
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"])
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    # Observe running (compare is blocked).
+    job = _wait_for(client, job_id, {"running"})
+    assert job["status"] == "running"
+    assert job["report"] is None
+    # Release and observe done.
+    release.set()
+    job = _wait_for(client, job_id, {"done"})
+    assert job["report"]["winner"] == "new"
+    assert job["report"]["old_wins"] == 4
+    assert job["report"]["new_wins"] == 11
+
+
+def test_sim_job_poll_returns_full_report_when_done(client, monkeypatch):
+    _install_forge_stub(monkeypatch)
+
+    def fake_compare(**kw):
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"],
+                            old_wins=3, new_wins=7)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    job = _wait_for(client, job_id, {"done", "failed"})
+    assert job["status"] == "done", job
+    report = job["report"]
+    # Same body shape the synchronous endpoint returns.
+    assert report["games_per_pod"] == 10
+    assert report["old_wins"] == 3
+    assert report["new_wins"] == 7
+    assert any("Lotus Cobra" in s for s in report["diff"]["added"])
+
+
+def test_sim_job_failed_when_compare_raises(client, monkeypatch):
+    """A sim that raises -> status=failed with the message; no 500, and the
+    thread doesn't die silently (the registry is updated)."""
+    _install_forge_stub(monkeypatch)
+
+    def boom(**kw):
+        raise RuntimeError("forge exploded")
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", boom,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    # The POST itself still succeeds — the failure is inside the job.
+    assert resp.status_code == 202
+    job_id = resp.get_json()["job_id"]
+    job = _wait_for(client, job_id, {"failed"})
+    assert job["status"] == "failed"
+    assert "forge exploded" in job["error"]
+    assert job["report"] is None
+
+
+def test_sim_job_unknown_id_returns_404(client):
+    resp = client.get("/api/sim_job/deadbeefdeadbeefdeadbeefdeadbeef")
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "job not found"
+
+
+def test_two_concurrent_jobs_distinct_ids_no_clobber(client, monkeypatch):
+    """Two jobs get distinct ids and each keeps its OWN report — the
+    per-job registry entries never clobber each other."""
+    import threading as _threading
+    _install_forge_stub(monkeypatch)
+    # Gate BOTH sims so they are genuinely in flight at the same time.
+    release = _threading.Event()
+
+    def fake_compare(**kw):
+        release.wait(5.0)
+        # Distinct outcome keyed on which deck is being simmed so we can
+        # prove the reports didn't cross-contaminate.
+        if kw["old_deck"].startswith("Alpha"):
+            return _fake_report(kw["old_deck"], kw["new_deck"],
+                                kw["games_per_pod"], kw["mode"],
+                                old_wins=1, new_wins=9, winner="new")
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"],
+                            old_wins=8, new_wins=2, winner="old")
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    r1 = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    r2 = client.post("/api/propose_swap_async", json={
+        "deck": "Bravo", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    j1 = r1.get_json()["job_id"]
+    j2 = r2.get_json()["job_id"]
+    assert j1 != j2
+    release.set()
+    job1 = _wait_for(client, j1, {"done", "failed"})
+    job2 = _wait_for(client, j2, {"done", "failed"})
+    assert job1["status"] == "done", job1
+    assert job2["status"] == "done", job2
+    assert job1["report"]["winner"] == "new"
+    assert job1["report"]["new_wins"] == 9
+    assert job2["report"]["winner"] == "old"
+    assert job2["report"]["old_wins"] == 8
+
+
+def test_propose_swap_async_content_type_gate(client, monkeypatch):
+    """The POST is still gated: a non-JSON content-type -> 415, no job
+    created."""
+    _install_forge_stub(monkeypatch)
+    resp = client.post(
+        "/api/propose_swap_async",
+        data="deck=Alpha",
+        content_type="text/plain",
+    )
+    assert resp.status_code == 415
+
+
+def test_sim_job_reattach_from_persisted_sidecar(client, monkeypatch):
+    """A done job is fetchable even after the in-memory registry loses it
+    (simulating a server restart): the poll falls back to the persisted
+    _sim_jobs/<id>.json sidecar."""
+    from commander_builder.web import routes_sim
+    _install_forge_stub(monkeypatch)
+
+    def fake_compare(**kw):
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"],
+                            old_wins=5, new_wins=6)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    _wait_for(client, job_id, {"done"})
+    # Evict from the in-memory registry — as if the process restarted.
+    with routes_sim._SIM_JOBS_LOCK:
+        routes_sim._SIM_JOBS.pop(job_id, None)
+    assert routes_sim._get_job(job_id) is None
+    # Still fetchable from disk.
+    resp2 = client.get(f"/api/sim_job/{job_id}")
+    assert resp2.status_code == 200
+    job = resp2.get_json()
+    assert job["status"] == "done"
+    assert job["report"]["new_wins"] == 6
+
+
+def test_sim_job_reports_pod_progress(client, monkeypatch):
+    """When compare() fires its progress_cb, the poll surfaces coarse
+    'pod n/total' progress."""
+    import threading as _threading
+    _install_forge_stub(monkeypatch)
+    gate = _threading.Event()
+
+    def fake_compare(**kw):
+        cb = kw.get("progress_cb")
+        assert cb is not None, "async path must pass progress_cb"
+        cb(1, 2)  # one pod of two done
+        gate.wait(5.0)  # hold so the test can observe progress mid-run
+        cb(2, 2)
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"])
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    # Poll until progress shows the first pod done.
+    import time as _time
+    deadline = _time.time() + 5.0
+    prog = None
+    while _time.time() < deadline:
+        job = client.get(f"/api/sim_job/{job_id}").get_json()
+        if job["progress"] and job["progress"]["pods_done"] >= 1:
+            prog = job["progress"]
+            break
+        _time.sleep(0.02)
+    assert prog is not None, "progress never surfaced"
+    assert prog["pods_total"] == 2
+    gate.set()
+    _wait_for(client, job_id, {"done"})
+
+
+# ---------------------------------------------------------------------------
 # /api/deck_text PUT + DELETE
 # ---------------------------------------------------------------------------
 

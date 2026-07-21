@@ -54,7 +54,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import dck_utils
 from .forge_runner import ForgeRunner, VENDOR_FORGE
@@ -671,6 +671,7 @@ def compare(
     early_stop: bool = True,
     seat_parity: int = 0,
     suppress_seat_note: bool = False,
+    progress_cb: Optional["Callable[[int, int], None]"] = None,
 ) -> ComparisonReport:
     """Run the head-to-head comparison and persist the report.
 
@@ -720,6 +721,13 @@ def compare(
     call's "residual" is by design and cancels across the batch. Those
     callers pass True and print ONE aggregate line themselves from the
     ``h2h_seat_balance`` fields.
+
+    ``progress_cb`` (default None) is an optional ``(pods_done,
+    pods_total)`` callback fired once per absorbed pod. It exists for the
+    web async-sim job registry so a polling client can render
+    'running (pod 2/4)…'; it is best-effort telemetry (wrapped so an
+    exception in the callback can never break or slow the sim) and has no
+    effect on the report.
     """
     if mode not in {"pod", "1v1"}:
         raise ValueError(f"mode must be 'pod' or '1v1', got {mode!r}")
@@ -896,6 +904,19 @@ def compare(
             report.old_stats.wins, report.new_stats.wins, games_remaining,
         )
 
+    def _fire_progress() -> None:
+        """Report coarse pod-completion progress to an optional caller
+        (the web async-sim job registry, 2026-07-21). Fires once per
+        absorbed pod with (pods_done, pods_total). Wrapped so a buggy
+        callback can never break — or even slow — the simulation: progress
+        reporting is strictly best-effort telemetry."""
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(len(completed_pods), len(pods))
+        except Exception:  # noqa: BLE001 - telemetry must never break a sim
+            pass
+
     if use_parallel:
         workers = max_workers or min(len(pods), os.cpu_count() or 4)
         print(
@@ -953,6 +974,7 @@ def compare(
                     # OWN pod_index, so absent indices simply don't appear.
                     continue
                 _absorb(fut.result())
+                _fire_progress()
                 if stop_decided or not _check_early_stop():
                     continue
                 # Verdict locked in. Cancel any still-QUEUED pods —
@@ -981,6 +1003,7 @@ def compare(
             _absorb(
                 _run_one_pod(runner, pod, mode, games_per_pod, i, len(pods)),
             )
+            _fire_progress()
             remaining = len(pods) - len(completed_pods)
             # Only flag early-stop when there are still pods we can
             # actually skip; otherwise the decisive check just
