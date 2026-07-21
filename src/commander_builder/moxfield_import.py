@@ -605,6 +605,22 @@ def _rename_for_bracket_drift(
     return target
 
 
+def _moxfield_id_from_text(text: str) -> Optional[str]:
+    """Parse the `Moxfield=` publicId out of raw .dck TEXT.
+
+    Split out from `_read_moxfield_id` so a caller holding .dck content that
+    never touched disk shares the exact same parse as the on-disk reader —
+    one regex, one notion of "the id". `revert_to` needs this: it resolves a
+    restore target from a knowledge_log `deck_snapshot` blob (in-memory
+    string), not from the file about to be overwritten.
+
+    None when the text carries no `Moxfield=` line (bare paste, or a snapshot
+    recorded before the publicId-in-metadata patch) — callers must treat that
+    as "identity unknown", not "different"."""
+    m = _MOXFIELD_META.search(text)
+    return m.group(1).strip() if m else None
+
+
 def _read_moxfield_id(path: Path) -> Optional[str]:
     """Best-effort read of the `Moxfield=` publicId recorded in a .dck.
 
@@ -614,8 +630,7 @@ def _read_moxfield_id(path: Path) -> Optional[str]:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    m = _MOXFIELD_META.search(text)
-    return m.group(1).strip() if m else None
+    return _moxfield_id_from_text(text)
 
 
 def _classify_destination(dest: Path, public_id: str) -> str:
