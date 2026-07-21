@@ -252,7 +252,7 @@ be worked. Sized for a single session each.
 
 - ~~**A3. FP-001 bounded spike — LLM-piloted Forge AI (time-boxed).**~~
   ✅ **Memo delivered 2026-05-22 — verdict NO-GO (as scoped) / GO
-  redirected + gated.** See [docs/fp001-llm-pilot-spike.md](fp001-llm-pilot-spike.md).
+  redirected + gated.** See [docs/fp001-llm-pilot-spike.md](archive/fp001-llm-pilot-spike.md).
   Finding: you **cannot** pilot Forge 2.0.12's AI with an LLM — it's a
   vendored compiled JAR run as a fire-and-forget subprocess with no
   decision-injection seam (only read-stdout / kill-process), and there's
@@ -421,7 +421,7 @@ spec. Token cost: ~$0.10–$1.00 per game.
 **Status: PARKED.** The wrapper we've built IS the streamlined Python
 interface. Highest-leverage move toward "fewer draws / better signal" is
 Claude/Ollama-piloted Forge AI, not a new engine. The **bounded go/no-go
-spike ran 2026-05-22** ([docs/fp001-llm-pilot-spike.md](fp001-llm-pilot-spike.md)):
+spike ran 2026-05-22** ([docs/fp001-llm-pilot-spike.md](archive/fp001-llm-pilot-spike.md)):
 **verdict NO-GO as scoped** — Forge 2.0.12 is an unpilotable compiled-JAR
 black box (no decision-injection seam; no source), so the LLM-pilot idea
 can't host on Forge at all. It's **redirected to `forge_py`** (Python
@@ -439,8 +439,8 @@ exists in source (`PlayerController` is abstract; subclass it), so a
 *frozen* fork of Forge 2.0.12 with an LLM-piloted seat answers the
 "does piloting help?" question in ~1–1.5 weeks with zero correlation
 risk — vs weeks-to-months + unproven correlation for forge_py. A-vs-B
-analysis + scoping result in [fp001-path-comparison.md](fp001-path-comparison.md);
-step-by-step build guide in [fp001-pathb-handoff.md](fp001-pathb-handoff.md).
+analysis + scoping result in [fp001-path-comparison.md](archive/fp001-path-comparison.md);
+step-by-step build guide in [fp001-pathb-handoff.md](archive/fp001-pathb-handoff.md).
 Path A (native engine) stays parked, funded only if the measured delta
 proves worth having natively.
 
@@ -589,7 +589,7 @@ unattended multi-deck orchestration. North star, not done.
   `--bandit-policy thompson`), merged via PRs #6/#8. **Slice B2 (full GP
   Bayesian-opt over swap combinations)** stays parked behind a
   numpy-dependency + sim-cost decision. Designs in
-  [fp012-next-slices.md](fp012-next-slices.md).
+  [fp012-next-slices.md](archive/fp012-next-slices.md).
 
 ### FP-013 — Project-tuned LLM (moonshot)
 

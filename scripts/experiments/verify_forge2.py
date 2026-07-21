@@ -19,7 +19,7 @@ from commander_builder.forge_runner import (
     run_ab_simulation,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _runner_for(profile_dir: Path) -> ForgeRunner:

@@ -60,7 +60,7 @@ green state is unambiguous **and** the fix is one existing file, it's B.
    pinned by the assertions (inputs → outputs), a clear section comment naming
    the **existing file to edit**, and **never `forge_runner.py`**.
 3. Confirm it's red (`pytest tests/test_orch_worklist.py`), commit, push
-   (`--force-with-lease`, the branch is disposable). Update `docs/orch-worklist.md`.
+   (`--force-with-lease`, the branch is disposable). Update `docs/archive/orch-worklist.md`.
 4. Tell the operator to point the orchestrator at it:
    `git -C C:\dev\commander-builder checkout orch/worklist` then `orch fix`.
    (The orchestrator tests the *checked-out* branch — on `feature` it finds 0
@@ -154,9 +154,9 @@ For each `auto-fix/*` branch, confirm before merging the source change to
   `FP-###` *Parked plans* catalog. Start here.
 - **`CHANGELOG.md`** — per-commit history.
 - **`docs/future-plans.md`** — consolidated detailed FP plans/findings.
-- **`docs/orch-worklist.md`** — the live orchestrator queue + workflow.
+- **`docs/archive/orch-worklist.md`** — the live orchestrator queue + workflow.
 - **`docs/architecture.md`** — modules + key decisions.
-- **`docs/HANDOFF.md`** — repo onboarding/setup (also distinguishes the two programs).
+- **`docs/archive/HANDOFF.md`** — repo onboarding/setup (also distinguishes the two programs).
 - **`docs/SOAK_RUNBOOK.md`**, **`docs/SECRETS.md`** — soak ops, credentials.
 
 ## Snapshot (2026-05-26 — verify against STATUS.md, which is authoritative)

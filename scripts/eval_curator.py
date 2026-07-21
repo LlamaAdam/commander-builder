@@ -1,6 +1,6 @@
 """Paired curator evaluation harness (FP-013 gate condition b) — stub.
 
-The FP-013 unblock condition is twofold (docs/fp013-scope.md): (a) the
+The FP-013 unblock condition is twofold (docs/archive/fp013-scope.md): (a) the
 live knowledge_log holds >= 1,000 high-confidence curator iterations
 (track with ``commander-improve --health``), and (b) THIS script exists
 and runs — a paired eval that scores a candidate proposer (eventually

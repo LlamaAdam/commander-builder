@@ -105,4 +105,4 @@ The bookmarklet runs in your browser's authenticated session against
 already-rendered DOM, sidestepping all of that. CORS-free, no API key,
 no server-side scraping infrastructure.
 
-[1]: HANDOFF.md
+[1]: archive/HANDOFF.md
