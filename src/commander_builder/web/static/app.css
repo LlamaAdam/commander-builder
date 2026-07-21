@@ -610,6 +610,11 @@ body {
 @media (max-width: 1024px) and (min-width: 769px) {
   .layout { grid-template-columns: 56px 220px 1fr; }
   .dashboard { padding: 20px; }
+  /* The full-width topbar buttons can exceed a ~800px tablet width and
+     push a trailing button off the right edge (horizontal body scroll).
+     Let the row wrap here too — the phone query already does this below
+     the 769px floor, but the tablet band kept the desktop no-wrap topbar. */
+  .topbar { flex-wrap: wrap; row-gap: 8px; }
 }
 
 /* --- Phone: sidebar+rail drawer, full-width dashboard. -------------- */
