@@ -1961,8 +1961,10 @@ function renderDashboard(data, iterations) {
   // Bracket tile: heuristic recommendation + dropdown to override.
   // `bracket_name` carries the human label. The override re-fetches
   // /api/dashboard with the chosen bracket, so the user sees how
-  // the heuristic shifts power-related fields.
-  tiles.appendChild(bracketTile(t));
+  // the heuristic shifts power-related fields. Second arg is the
+  // explainable estimator payload (ManaFoundry parity) — estimated
+  // vs declared with expandable reasons.
+  tiles.appendChild(bracketTile(t, data.bracket_estimate));
   tiles.appendChild(priceTile(t, data.printing_savings));
   tiles.appendChild(tile(
     "Deck progress",
@@ -2459,7 +2461,7 @@ async function verifyAgainstSource() {
   }
 }
 
-function bracketTile(t) {
+function bracketTile(t, estimate) {
   const t_node = el("div", { class: "tile" });
   t_node.appendChild(el("div", { class: "label" }, "Bracket"));
   const num = t.bracket ?? t.power_level ?? "—";
@@ -2470,6 +2472,48 @@ function bracketTile(t) {
       "div", { class: "sub" },
       `${t.n_game_changers} game changer${t.n_game_changers === 1 ? "" : "s"}`,
     ));
+  }
+  // Explainable bracket estimate (ManaFoundry parity). Backend rule:
+  // |estimate - declared| >= 2 is a hard "mismatch" (warn styling),
+  // == 1 is a soft "check" — mismatch_level carries which. Reasons
+  // render inside a collapsed <details>, matching the lazy-expand
+  // pattern used by priceTile's savings breakdown.
+  if (estimate && estimate.estimate != null) {
+    const declared = estimate.declared;
+    const level = estimate.mismatch_level; // null | "check" | "mismatch"
+    let text;
+    if (declared == null) {
+      text = `Estimated bracket: ${estimate.estimate}`;
+    } else if (level === "mismatch") {
+      text = `Estimated bracket: ${estimate.estimate} — declared ${declared} ⚠ mismatch`;
+    } else if (level === "check") {
+      text = `Estimated bracket: ${estimate.estimate} — declared ${declared} (check)`;
+    } else {
+      text = `Estimated bracket: ${estimate.estimate} — declared ${declared} ✓`;
+    }
+    const style = level === "mismatch"
+      ? "color: var(--warn, #d4a017); font-weight: 600;"
+      : level === "check"
+      ? "color: var(--warn, #d4a017);"
+      : "";
+    t_node.appendChild(el("div", { class: "sub", style }, text));
+    if ((estimate.reasons || []).length) {
+      const details = el("details", { style: "margin-top: 6px;" });
+      details.appendChild(el(
+        "summary",
+        { class: "muted", style: "cursor: pointer; font-size: 12px;" },
+        `Why B${estimate.estimate}? (${estimate.confidence} confidence)`,
+      ));
+      const ul = el("ul", {
+        style: "margin: 6px 0 0; padding-left: 16px; font-size: 12px; "
+             + "text-align: left; max-height: 180px; overflow: auto;",
+      });
+      for (const r of estimate.reasons) {
+        ul.appendChild(el("li", { style: "margin-bottom: 3px;" }, r));
+      }
+      details.appendChild(ul);
+      t_node.appendChild(details);
+    }
   }
   // Bracket auto-inference divergence warning. When the heuristic
   // disagrees with the user's declared bracket, surface that so they

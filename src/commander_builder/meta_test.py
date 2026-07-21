@@ -270,6 +270,18 @@ def _import_reference(deck_json: dict, source: str,
     text = rewrite_name(text, out_path.stem)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
+    # Pool hygiene (ManaFoundry parity): imported [REF] decks feed sim
+    # pools (pool_curator deliberately keeps them as candidates), so a
+    # reference whose actual power differs from its claimed bracket by
+    # >= 2 poisons every comparison it appears in. WARN only — the
+    # bracket came from Moxfield/EDHREC metadata and the estimator is
+    # a heuristic; the import always proceeds. mismatch_warning
+    # returns None both on agreement and on bracket 0/None (EDHREC
+    # decks that never declared one).
+    from .bracket_estimator import mismatch_warning
+    warning = mismatch_warning(out_path.name, text, bracket)
+    if warning:
+        print(f"  {warning}", flush=True)
     main_cards = _parse_main_card_names(out_path)
     return ReferenceDeck(
         source=source,

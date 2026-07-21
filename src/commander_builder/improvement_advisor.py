@@ -983,12 +983,38 @@ def _advise_steps(
 
 # --- CLI -------------------------------------------------------------------
 
-def _format_report_text(report: AdviceReport) -> str:
+def _format_report_text(
+    report: AdviceReport,
+    bracket_estimate: Optional[dict] = None,
+) -> str:
     lines = []
     lines.append("=" * 60)
     lines.append(f" Improvement advice — {report.deck_filename}")
     lines.append("=" * 60)
     lines.append(f"Bracket: B{report.bracket}")
+    # Explainable bracket estimate (ManaFoundry parity) — rendered
+    # right under the declared bracket so estimated-vs-declared reads
+    # as one unit. ``bracket_estimate`` is the
+    # bracket_estimator.estimate_bracket dict; None keeps the legacy
+    # output byte-identical (callers that don't compute it lose
+    # nothing). Mismatch levels per the estimator's documented rule:
+    # diff >= 2 hard "MISMATCH", diff == 1 soft "check".
+    if bracket_estimate and bracket_estimate.get("estimate") is not None:
+        est = bracket_estimate["estimate"]
+        level = bracket_estimate.get("mismatch_level")
+        if level == "mismatch":
+            verdict = "MISMATCH vs declared"
+        elif level == "check":
+            verdict = "check vs declared"
+        else:
+            verdict = "matches declared"
+        lines.append(
+            f"Estimated bracket: B{est} "
+            f"({bracket_estimate.get('confidence', '?')} confidence) — "
+            f"{verdict}"
+        )
+        for reason in bracket_estimate.get("reasons", []):
+            lines.append(f"    {reason}")
     lines.append(f"Commander(s): {', '.join(report.commander_names)}")
     lines.append(f"Source: {report.source}")
     lines.append("")
@@ -1085,7 +1111,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.budget:
         advise_kwargs["budget"] = True
     report = advise(Path(args.user), args.bracket, **advise_kwargs)
-    text = _format_report_text(report)
+    # Bracket estimate for the report header. Fail-quiet: the deck
+    # read is the only thing that can raise (estimate_bracket never
+    # does by contract), and a missing estimate must not sink the
+    # advice output the user actually asked for.
+    bracket_estimate = None
+    try:
+        from .bracket_estimator import estimate_bracket
+        bracket_estimate = estimate_bracket(
+            Path(args.user).read_text(encoding="utf-8"),
+            declared=args.bracket,
+        )
+    except Exception:  # noqa: BLE001 — advice must print regardless
+        bracket_estimate = None
+    text = _format_report_text(report, bracket_estimate=bracket_estimate)
     try:
         print(text)
     except UnicodeEncodeError:
