@@ -170,11 +170,38 @@ def test_run_one_iteration_persists_kept_verdict(tmp_path, staged_decks, monkeyp
     assert fetched.deck_id == "stable-public-id"  # publicId, not filename
     assert fetched.verdict == "kept"
     assert fetched.margin == 10
-    assert fetched.win_rate_old == round(2 / 14, 3)
-    assert fetched.win_rate_new == round(12 / 14, 3)
+    # One-convention precision (2026-07-19): all knowledge_log win-rate
+    # writers round to 4 places via knowledge_log.decisive_win_rate.
+    assert fetched.win_rate_old == round(2 / 14, 4)
+    assert fetched.win_rate_new == round(12 / 14, 4)
     assert fetched.audit_manifest["added"] == ["NewCard"]
     # Sim report is the full ComparisonReport.to_dict()
     assert fetched.sim_report["winner"] == "new"
+
+
+def test_run_one_iteration_win_rates_exclude_filler_wins(tmp_path, staged_decks, monkeypatch):
+    """Pinned values for a FILLER-HEAVY comparison (2026-07-20 convention):
+    30 attributed games — old won 4, new won 8, 2 drew, fillers took the
+    other 16. Denominator is head-to-head decisive (4 + 8 = 12), NOT
+    total - draws (28, which counts the filler wins): the rates must be
+    4/12 and 8/12. Under 611feff this writer recorded 4/28 and 8/28,
+    ~2x low versus the AB-shaped writers for the same outcome."""
+    canned = _make_canned_comparison(old_wins=4, new_wins=8, draws=2, total=30)
+    monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
+
+    db = tmp_path / "kl.sqlite"
+    result = run_one_iteration(
+        deck_filename=staged_decks["v1"],
+        new_deck_filename=staged_decks["v2"],
+        bracket=3,
+        audit_manifest={"added": ["NewCard"], "removed": ["OldCard"]},
+        db_path=db,
+    )
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    assert fetched.win_rate_old == round(4 / 12, 4)
+    assert fetched.win_rate_new == round(8 / 12, 4)
+    # Margin stays a raw head-to-head game delta, untouched by fillers.
+    assert fetched.margin == 4
 
 
 def test_run_one_iteration_persists_reverted_verdict(tmp_path, staged_decks, monkeypatch):
@@ -268,3 +295,49 @@ def test_run_one_iteration_writes_deck_snapshot_blob(tmp_path, staged_decks, mon
     assert fetched.deck_snapshot is not None
     assert "NewCard" in fetched.deck_snapshot
     assert "Moxfield=stable-public-id" in fetched.deck_snapshot
+
+
+def test_run_one_iteration_refuses_verdict_on_zero_attributed_games(
+    tmp_path, staged_decks, monkeypatch, capsys,
+):
+    """The bug: a fully-failed sim (every pod crashed/timed out → 0
+    attributed games) recorded win_rate_old=0.0 / win_rate_new=0.0 via the
+    max(1, ...) clamp — a fabricated 'empirical neutral' in the knowledge
+    log. It must instead land as 'pending' (the failed-sim label
+    _proposer_sim._verdict_from_ab uses) with NULL win rates, and the
+    analyst must not even be consulted."""
+    canned = _make_canned_comparison(old_wins=0, new_wins=0, draws=0, total=0)
+    canned.failed_pods = 2
+    canned.pods_planned = 2
+    canned.excluded_games = 7
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare", lambda **kw: canned,
+    )
+
+    # The analyst has no business rendering a verdict on an empty sim —
+    # fail the test if it's called.
+    def _no_analyst(*a, **kw):
+        raise AssertionError("analyze() must not be called on 0 attributed games")
+    monkeypatch.setattr("commander_builder.iteration_loop.analyze", _no_analyst)
+
+    db = tmp_path / "kl.sqlite"
+    result = run_one_iteration(
+        deck_filename=staged_decks["v1"],
+        new_deck_filename=staged_decks["v2"],
+        bracket=3,
+        audit_manifest={"added": ["NewCard"], "removed": ["OldCard"]},
+        db_path=db,
+    )
+
+    assert result.verdict.label == "pending"
+    assert result.next_action == "stop"
+
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    assert fetched.verdict == "pending"
+    # NULL, not a fake 0.0/0.0 empirical neutral.
+    assert fetched.win_rate_old is None
+    assert fetched.win_rate_new is None
+    assert fetched.margin is None
+    assert "no attributed games" in (fetched.verdict_notes or "")
+    # Loud warning on the console.
+    assert "WARNING" in capsys.readouterr().out

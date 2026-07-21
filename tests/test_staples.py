@@ -6,6 +6,7 @@ import pytest
 from commander_builder.staples import (
     BASIC_LANDS_LC,
     ROLE_SATURATION_THRESHOLDS,
+    ROLE_TARGETS,
     UNIVERSAL_STAPLES_LC,
     classify_role,
     classify_role_extended,
@@ -512,7 +513,9 @@ def test_role_saturation_thresholds_match_tuned_deck_norms():
     in CI. These reflect what tuned EDH decks actually run:
 
       ramp: 8-10 standard, 12+ bloat
-      draw: 8-10 standard, 12+ bloat
+      draw: 8-10 standard, 12+ bloat (threshold raised 9 → 10 in
+        2026-07 so the saturation ceiling can't sit below the
+        ROLE_TARGETS floor — see the invariant test below)
       removal: 6-8 standard
       wipe: 2-4 standard
       protection: 3-5 standard
@@ -525,13 +528,36 @@ def test_role_saturation_thresholds_match_tuned_deck_norms():
     """
     assert ROLE_SATURATION_THRESHOLDS == {
         "ramp": 10,
-        "draw": 9,
+        "draw": 10,
         "removal": 8,
         "wipe": 4,
         "protection": 5,
         "tutor": 5,
         "finisher": 3,
     }
+
+
+def test_role_saturation_threshold_never_below_role_target():
+    """INVARIANT: for every role with both a recommended-minimum
+    (ROLE_TARGETS, the floor) and a saturation threshold
+    (ROLE_SATURATION_THRESHOLDS, the ceiling), ceiling >= floor.
+
+    If the ceiling ever dips below the floor there is a contradiction
+    band of counts (threshold <= count < target) where the same audit
+    says 'needs more X' (deficit > 0) while the redundancy guard
+    refuses every X add (is_role_saturated is True). Exactly this
+    happened with draw (threshold 9 < target 10) until 2026-07.
+    """
+    for role, target in ROLE_TARGETS.items():
+        ceiling = ROLE_SATURATION_THRESHOLDS.get(role)
+        if ceiling is None:
+            # Roles without a threshold never saturate — no conflict.
+            continue
+        assert ceiling >= target, (
+            f"role {role!r}: saturation threshold {ceiling} < target "
+            f"{target} — the advisor would demand more {role} while "
+            f"refusing every {role} add"
+        )
 
 
 def test_is_role_saturated_fires_above_threshold():

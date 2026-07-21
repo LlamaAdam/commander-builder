@@ -8,9 +8,14 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-04 (merged stale PRs #9 — 4 known bug fixes —
-and #10 — advisor tribal-bypass — after re-review against the June
-refactor; shipped the streaming-runner follow-up `6156514`:
+**Last updated:** 2026-07-20 (merged `feature/2026-04-28-session` —
+PRs #9/#10, the forge_batch/forge_version/web-module split, FP-013
+gate items — into the adversarial-review fix branch
+`fix/adversarial-review-2026-07-19`; all 40 review-fix commits ported
+onto the new module layout. Prior upstream milestone 2026-07-04:
+stale PRs #9 — 4 known bug fixes — and #10 — advisor tribal-bypass —
+merged after re-review against the June refactor, plus the
+streaming-runner follow-up `6156514`:
 `ForgeRunner.run(keep_partial_output=True)` routes timeout-salvage sims
 through the streaming reader so looper-credit attribution actually
 works — salvaged rows no longer read "credited to none")
@@ -29,10 +34,27 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 ## State of the tree
 
-- **Tests:** 1661 passing fast lane + 466 slow (`--run-slow`), ~168s
-  offline fast lane. Zero warnings under `python -W default`.
-- **Branch:** `feature/2026-04-28-session` (320+ commits ahead of
-  `master`, in sync with `origin`).
+- **Tests:** 1916 passing fast lane / 148 skipped (+slow with
+  `--run-slow`), ~150s offline. Zero warnings under `python -W default`.
+- **Branch:** `fix/adversarial-review-2026-07-19` (worktree at
+  `C:\dev\cb-review-fixes`) — now carries `feature/2026-04-28-session`
+  merged in (PRs #9/#10 + the 2026-06-12 forge_batch/forge_version/
+  web-module split), with all 40 adversarial-review fix commits ported
+  onto the new layout.
+
+**Adversarial-review fix branch (2026-07-19/20):**
+`fix/adversarial-review-2026-07-19` carries 40 commits across three
+review rounds. Most important by theme: `Name=`/filename
+win-attribution invariant (new `dck_meta.py`, all deck writers);
+pod-failure surfacing in compare/run_match/iteration_loop (no more
+silently diluted stats); proposer legality guards (cuts/singleton/99-card
+invariant); shared robust LLM-JSON extractor (`_llm_json.py`, loud errors
+instead of misleading fallbacks); BYO-key threading + `ANTHROPIC_API_KEY`
+scrubbed from subprocess env + token-level secret scanner in CI; same-id
+re-import overwrite with bracket-aware name uniquify + pre-revert
+backups; turn-sample-weighted A/B recombination + draw-policy labels;
+`_apply_swaps_to_dck` cut/add validation with drop reporting. See
+CHANGELOG 2026-07-19 for the full list.
 
 ### 2026-07-04 session — stale PRs merged + looper-credit salvage fixed
 
@@ -153,6 +175,9 @@ documented at `tests/fixtures/real_oracles.py`.
 ---
 
 ## Open backlog (ranked)
+
+- License is TBD — repo is effectively all-rights-reserved until one is
+  chosen.
 
 ### Active — promoted from Parked plans (2026-05-22)
 

@@ -15,7 +15,9 @@ from commander_builder.forge_runner import (
     SimResult,
     _run_blocking,
     _run_streaming,
+    coerce_output_text,
     detect_forge_version,
+    scrubbed_child_env,
 )
 
 
@@ -42,6 +44,35 @@ def test_run_blocking_handles_timeout(monkeypatch):
     assert timed_out is True
     assert stdout == "partial"
     assert "Timed out" in error
+
+
+def test_run_blocking_timeout_with_bytes_stdout_yields_str(monkeypatch):
+    """TimeoutExpired.stdout is BYTES on POSIX even when encoding= was set
+    (CPython re-raises the raw pipe contents; the text decode only happens
+    on the CompletedProcess path). SimResult.stdout flows into log_parser's
+    regexes which require str — so the handler must decode defensively."""
+    import subprocess
+    def raise_timeout(*a, **kw):
+        # \xf0 alone is invalid UTF-8 — exercises errors="replace" too.
+        raise subprocess.TimeoutExpired(
+            cmd="fake", timeout=10, output=b"partial \xf0 bytes", stderr=b"e",
+        )
+    monkeypatch.setattr("commander_builder.forge_runner.subprocess.run", raise_timeout)
+    stdout, stderr, rc, timed_out, error = _run_blocking(
+        ["fake"], timeout=10, cwd="/tmp",
+    )
+    assert timed_out is True
+    assert isinstance(stdout, str) and isinstance(stderr, str)
+    assert "partial" in stdout and "�" in stdout
+    assert stderr == "e"
+
+
+def test_coerce_output_text_normalizes_all_shapes():
+    assert coerce_output_text(None) == ""
+    assert coerce_output_text("already str") == "already str"
+    assert coerce_output_text(b"ok bytes") == "ok bytes"
+    # Invalid UTF-8 degrades to U+FFFD instead of raising.
+    assert coerce_output_text(b"bad \xf0 byte") == "bad � byte"
 
 
 def test_run_streaming_drains_stdout_via_callback(monkeypatch):
@@ -116,6 +147,56 @@ def test_run_streaming_handles_popen_failure(monkeypatch):
     assert rc is None
     assert error is not None
     assert "java not found" in error
+
+
+# --- Anthropic credential scrubbing (2026-07-19) --------------------------
+#
+# _secrets.load_credentials() exports ANTHROPIC_API_KEY into os.environ, and
+# subprocesses inherit the parent env by default — so without an explicit
+# env= scrub every Forge JVM would silently hold a live Anthropic credential.
+# These tests pin the scrub on both launch paths.
+
+def test_scrubbed_child_env_drops_anthropic_credentials(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-inherit")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-should-not-inherit")
+    monkeypatch.setenv("SOME_HARMLESS_VAR", "keep-me")
+    env = scrubbed_child_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    # Everything else is inherited — Forge needs PATH/JAVA_HOME/etc.
+    assert env["SOME_HARMLESS_VAR"] == "keep-me"
+
+
+def test_run_blocking_env_excludes_anthropic_key(monkeypatch):
+    """The blocking Forge launch must pass an env= that excludes
+    ANTHROPIC_API_KEY even when the parent process holds one."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-must-not-reach-jvm")
+    fake_proc = MagicMock(stdout="", stderr="", returncode=0)
+    with patch(
+        "commander_builder.forge_runner.subprocess.run",
+        return_value=fake_proc,
+    ) as run_mock:
+        _run_blocking(["fake-java"], timeout=10, cwd="/tmp")
+    env = run_mock.call_args.kwargs.get("env")
+    assert env is not None, "Forge launch must pass an explicit env="
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_run_streaming_env_excludes_anthropic_key(monkeypatch):
+    """Same guarantee on the streaming (Popen) Forge launch path."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-must-not-reach-jvm")
+    fake_proc = MagicMock()
+    fake_proc.stdout = iter(["line\n"])
+    fake_proc.stderr = iter([])
+    fake_proc.wait = MagicMock(return_value=0)
+    with patch(
+        "commander_builder.forge_runner.subprocess.Popen",
+        return_value=fake_proc,
+    ) as popen_mock:
+        _run_streaming(["fake-java"], timeout=10, cwd="/tmp", stream=False)
+    env = popen_mock.call_args.kwargs.get("env")
+    assert env is not None, "Forge launch must pass an explicit env="
+    assert "ANTHROPIC_API_KEY" not in env
 
 
 # --- SimResult sanity ------------------------------------------------------
@@ -588,6 +669,17 @@ def test_ab_result_to_dict_is_json_safe():
     assert parsed["wins_b"] == 2
     assert parsed["games"] == 5
     assert parsed["status"] == "done"
+    # Draw-policy label (2026-07-19): the A/B harness resolves turn-cap
+    # draws to the surviving life leader; downstream analysis reads this
+    # to distinguish AB-shaped reports from plain-draw compare shapes.
+    assert parsed["draw_policy"] == "resolve_survivor_leader"
+
+
+def test_gauntlet_result_carries_draw_policy_label():
+    from dataclasses import asdict
+    from commander_builder.forge_runner import GauntletResult
+    d = asdict(GauntletResult(test_deck="t.dck"))
+    assert d["draw_policy"] == "resolve_survivor_leader"
 
 
 # --- run_ab_batch — concurrent A/B sims across a pool of profiles (FP-003) --
@@ -1176,6 +1268,9 @@ def test_run_ab_parallel_aggregates_chunk_results(tmp_path, monkeypatch):
             deck_a=da.name, deck_b=db.name,
             wins_a=wa, wins_b=wb, games=games,
             avg_turns_a=10.0, avg_turns_b=8.0,
+            # Every win carried an end_turn in this fake, so the turn-sample
+            # counts (what recombination weights by) equal the win counts.
+            turn_samples_a=wa, turn_samples_b=wb,
             status="done",
             seat_orders=[[da.name, db.name, "f1", "f2"]] * games,
         )
@@ -1197,6 +1292,53 @@ def test_run_ab_parallel_aggregates_chunk_results(tmp_path, monkeypatch):
     # Weighted avg turns collapses to the per-chunk constants.
     assert result.avg_turns_a == 10.0
     assert result.avg_turns_b == 8.0
+
+
+def test_run_ab_parallel_weights_avg_turns_by_turn_samples(tmp_path, monkeypatch):
+    """Chunk avg_turns are means over the chunk's turn-SAMPLE count (wins
+    with a known end_turn) — a timeout-salvaged win contributes to wins_a
+    but NOT to the mean. Recombination must therefore weight by the sample
+    counts the chunks carry, not by wins (the old bug)."""
+    from commander_builder.forge_runner import run_ab_parallel, ABResult
+    _stub_runners(monkeypatch)
+
+    deck_a = tmp_path / "[USER] DeckA [B3].dck"
+    deck_b = tmp_path / "[USER] DeckB [B3].dck"
+    deck_a.write_text("[Main]\n", encoding="utf-8")
+    deck_b.write_text("[Main]\n", encoding="utf-8")
+    profiles = [tmp_path / "forge", tmp_path / "forge2"]
+
+    # list.pop() is atomic under the GIL, so the two worker threads can't
+    # both receive the same canned chunk.
+    chunks = [
+        # Chunk 1: A won twice but ONE win was a timeout salvage with no
+        # end_turn — its 12.0 mean covers only 1 sample.
+        ABResult(wins_a=2, wins_b=1, games=4,
+                 avg_turns_a=12.0, avg_turns_b=9.0,
+                 turn_samples_a=1, turn_samples_b=1, status="done"),
+        # Chunk 2: both of A's wins sampled.
+        ABResult(wins_a=2, wins_b=2, games=4,
+                 avg_turns_a=8.0, avg_turns_b=9.0,
+                 turn_samples_a=2, turn_samples_b=2, status="done"),
+    ]
+
+    def fake_sim(da, db, *, games, runner, fillers, game_format, timeout_per_game):
+        return chunks.pop()
+
+    result = run_ab_parallel(
+        deck_a, deck_b, games=8,
+        fillers=["f1.dck", "f2.dck"],
+        profiles=profiles, max_workers=2,
+        _sim_fn=fake_sim,
+    )
+
+    assert result.wins_a == 4
+    assert result.turn_samples_a == 3
+    # Sample-weighted: (12.0*1 + 8.0*2) / 3 = 9.33. The win-weighted bug
+    # would have produced (12.0*2 + 8.0*2) / 4 = 10.0.
+    assert result.avg_turns_a == pytest.approx(9.33, abs=0.01)
+    assert result.avg_turns_b == pytest.approx(9.0, abs=0.01)
+    assert result.turn_samples_b == 3
 
 
 def test_run_ab_parallel_keeps_wins_when_one_chunk_fails(tmp_path, monkeypatch):

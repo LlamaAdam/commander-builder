@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,54 @@ VENDOR_FORGE = REPO_ROOT / "vendor" / "forge"
 # gives ~50% headroom and surfaces hung sims faster than the old 240s budget.
 DEFAULT_TIMEOUT_PER_GAME_SEC = 180
 MIN_TIMEOUT_SEC = 300
+
+# Anthropic credential vars that must NEVER reach a child process spawned
+# here. `_secrets.load_credentials()` exports ANTHROPIC_API_KEY into
+# os.environ for the SDK's benefit, and subprocesses inherit the parent env
+# by default — meaning every Forge JVM would silently hold a live Anthropic
+# credential. A card-game simulator has no business with that key (least
+# privilege; a JVM crash dump or Forge log must never be able to contain
+# it). The subscription-billing invariant for the `claude` CLI (never
+# inherit ANTHROPIC_API_KEY or it flips from subscription to API billing)
+# is enforced separately at its own launch site in proposer.py.
+_ANTHROPIC_CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def scrubbed_child_env() -> dict[str, str]:
+    """Copy of os.environ with Anthropic credential vars removed.
+
+    Passed as ``env=`` to every Forge JVM launch (blocking + streaming
+    paths, and verify_forge's probes). Everything else is inherited
+    unchanged — Forge needs PATH/JAVA_HOME/LOCALAPPDATA etc."""
+    return {
+        k: v for k, v in os.environ.items()
+        if k not in _ANTHROPIC_CREDENTIAL_VARS
+    }
+
+
+def coerce_output_text(data: "str | bytes | None") -> str:
+    """Normalize a captured subprocess stream to ``str``.
+
+    With ``encoding=`` set on ``subprocess.run``, a CompletedProcess always
+    carries str streams — but ``TimeoutExpired.stdout``/``.stderr`` are NOT
+    guaranteed to be: CPython's POSIX implementation re-raises the timeout
+    with the raw *bytes* read so far (the text decode happens only on the
+    successful CompletedProcess path), and both attributes are None when
+    nothing was captured before the kill. Downstream consumers
+    (``Path.write_text``, the log_parser regexes over ``SimResult.stdout``)
+    hard-require str, so every timeout handler funnels through here:
+
+      - None  -> ""  (nothing captured)
+      - bytes -> UTF-8 decode with replacement — Forge emits UTF-8 (deck
+        names carry emoji/non-Latin characters in practice), and replacement
+        keeps a partial capture usable instead of raising mid-error-path
+      - str   -> unchanged
+    """
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
 
 
 def _utcnow(tz=timezone.utc):
@@ -97,14 +146,21 @@ def _run_blocking(
             cwd=cwd,
             encoding="utf-8",
             errors="replace",
+            # Never hand the Forge JVM an Anthropic credential — see
+            # scrubbed_child_env() for the least-privilege rationale.
+            env=scrubbed_child_env(),
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         returncode = proc.returncode
     except subprocess.TimeoutExpired as exc:
         timed_out = True
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        # exc.stdout/.stderr can be bytes (POSIX re-raises the raw pipe
+        # contents) or None even though encoding= was set above — normalize
+        # so SimResult.stdout is always the str the parsers expect. See
+        # coerce_output_text for the full rationale.
+        stdout = coerce_output_text(exc.stdout)
+        stderr = coerce_output_text(exc.stderr)
         error = f"Timed out after {timeout}s"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -152,6 +208,9 @@ def _run_streaming(
             encoding="utf-8",
             errors="replace",
             bufsize=1,  # line-buffered
+            # Never hand the Forge JVM an Anthropic credential — see
+            # scrubbed_child_env() for the least-privilege rationale.
+            env=scrubbed_child_env(),
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -449,7 +508,6 @@ from .forge_batch import (  # noqa: E402,F401
     _AB_STATUS_SKIPPED,
     _AB_TIMEOUT_PER_GAME_SEC,
     _AB_TURN_LINE,
-    _ab_deck_name_for_match,
     _default_max_workers,
     _discover_profiles,
     _even_chunks,

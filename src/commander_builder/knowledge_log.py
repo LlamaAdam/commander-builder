@@ -24,6 +24,30 @@ Schema rationale:
     created_at      ISO timestamp
     deck_snapshot   .dck text content (full deck preserved for reproducibility)
 
+Win-rate convention (2026-07-20): ``win_rate_old`` / ``win_rate_new`` are
+wins / HEAD-TO-HEAD DECISIVE games, where decisive = wins_old + wins_new —
+the games one of the two compared versions actually won (draws,
+unattributed games, and filler-won pod games are all excluded; see
+``decisive_win_rate``). When decisive == 0 the columns are NULL, never a
+fabricated 0.0.
+
+Convention history — cross-run analyses that pool these columns must
+bucket rows by write date:
+
+  * Before 2026-07-19 the three writers used three different denominators
+    (all-games-including-draws, decisive-only, per-version-games).
+  * 2026-07-19 (611feff) unified the writers on "attributed-winner"
+    denominators — but the compare-shaped writers (iteration_loop,
+    save_iteration on total_games payloads) counted FILLER-won games in
+    their denominator (total_games - draws) while the AB-shaped writers
+    (_proposer_sim, merge_soak) counted only head-to-head wins
+    (wins_a + wins_b). Fillers take roughly half the games in a 4-player
+    pod, so rows written between 2026-07-19 and 2026-07-20 are a MIXED
+    population whose two halves differ by ~2x scale — do NOT pool them
+    as one convention.
+  * From 2026-07-20 all writers use head-to-head decisive
+    (wins_old + wins_new), the denominator every verdict gate counts.
+
 `deck_snapshot` keeps a copy of the .dck text so we can rebuild any historical
 state without depending on Moxfield not deleting the deck. The blobs are small
 (~2-5KB) so even hundreds of iterations stay well under a MB.
@@ -35,6 +59,7 @@ plain SQLite file.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -48,6 +73,81 @@ from . import dck_utils
 from .forge_runner import VENDOR_FORGE
 
 DEFAULT_DB_PATH = VENDOR_FORGE.parent.parent / "knowledge_log.sqlite"
+
+
+def _resolve_db_path(db_path: Optional[Path]) -> Path:
+    """Resolve ``db_path=None`` to the CURRENT ``DEFAULT_DB_PATH``.
+
+    Public functions take ``db_path: Optional[Path] = None`` and route
+    through this helper instead of using ``DEFAULT_DB_PATH`` as a
+    default parameter value. A ``def f(db_path=DEFAULT_DB_PATH)``
+    default is evaluated once at import time, which silently defeats
+    the test-suite's autouse fixture that monkeypatches
+    ``knowledge_log.DEFAULT_DB_PATH`` — every call would still hit the
+    production database. Reading the module attribute here, at call
+    time, makes that patch actually take effect."""
+    return db_path if db_path is not None else DEFAULT_DB_PATH
+
+
+def decisive_win_rate(wins: int, decisive: int) -> Optional[float]:
+    """Canonical win-rate for the ``win_rate_old`` / ``win_rate_new`` columns.
+
+    ONE convention (2026-07-20): wins / HEAD-TO-HEAD DECISIVE games, rounded
+    to 4 places, where ``decisive`` = wins_old + wins_new — the count of
+    games one of the TWO COMPARED VERSIONS actually won. Draws, unattributed
+    games, and FILLER-won pod games are all excluded. Head-to-head decisive
+    is the quantity every verdict gate counts (analyst margin checks,
+    ``_verdict_from_ab``'s MIN_DECISIVE_GAMES_FOR_VERDICT) and the only
+    attributed-winner count EVERY writer's sim shape can compute — an
+    ABResult never attributes filler wins, while a compare() report does, so
+    any denominator that includes filler wins (e.g. total_games - draws)
+    exists only for compare-shaped writers and differs from the AB writers'
+    by roughly 2x in a 4-player pod.
+
+    Returns ``None`` when ``decisive <= 0`` so callers persist NULL rather
+    than a fabricated 0.0 that would read as an observed "never wins" result.
+
+    Every writer of those columns MUST pass decisive = wins_old + wins_new
+    through this helper so the values stay cross-run comparable (FP-002-style
+    row gates read them as one population):
+
+      - ``_proposer_sim._ab_to_iteration_fields``  (wins_a + wins_b)
+      - ``iteration_loop.run_one_iteration``       (old_stats.wins + new_stats.wins)
+      - ``web.routes_sim.save_iteration``          (old_wins + new_wins)
+      - ``scripts/merge_soak`` soak-fold           (wins_a + wins_b)
+    """
+    if decisive <= 0:
+        return None
+    return round(wins / decisive, 4)
+
+
+def canonical_content_hash(row: dict, exclude: frozenset = frozenset()) -> str:
+    """Canonical sha256 over a row-shaped dict, minus ``exclude`` keys.
+
+    Shared identity primitive for "have I already stored this content?"
+    checks. It originated as ``export._content_hash`` (99e8b53, the
+    import-merge dedupe) and was promoted here (2026-07-19) because
+    ``scripts/merge_soak.py``'s knowledge-log fold needs the exact same
+    canonicalization for its own idempotence check — sharing the one
+    implementation beats two copies that could drift and silently stop
+    hashing the same content to the same digest.
+
+    Canonicalization details that make cross-machine / cross-run hashes
+    comparable:
+      * ``sort_keys=True`` — nested dicts (audit_manifest, sim_report)
+        hash identically regardless of insertion order;
+      * ``default=str`` — non-JSON types (e.g. ``Path``) degrade to their
+        string form instead of crashing the dump.
+
+    Callers choose what identity MEANS by what dict they pass and which
+    keys they exclude: export/import excludes the machine-local
+    ``id``/``parent_id`` columns; merge_soak passes an explicit stable
+    subset of soak-row facts (no exclusions needed).
+    """
+    semantic = {k: v for k, v in row.items() if k not in exclude}
+    blob = json.dumps(semantic, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
 
 SCHEMA_VERSION = 2
 
@@ -192,7 +292,7 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
+def init_db(db_path: Optional[Path] = None) -> None:
     """Create the schema if missing, run any pending migrations,
     mark the version. Idempotent — safe to call from every entry
     point (CLIs, web routes, tests).
@@ -203,7 +303,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
       v1 → v2: add ``milestone`` column + partial index
                (``_migrate_to_v2``, AGENT_BACKLOG #012).
     """
-    with _connect(db_path) as conn:
+    with _connect(_resolve_db_path(db_path)) as conn:
         # Per-statement execute, NOT executescript(): executescript()
         # issues an implicit COMMIT before running, which detaches the
         # schema from the surrounding transaction and could leave a
@@ -230,8 +330,9 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
             )
 
 
-def record_iteration(it: Iteration, db_path: Path = DEFAULT_DB_PATH) -> int:
+def record_iteration(it: Iteration, db_path: Optional[Path] = None) -> int:
     """Insert one Iteration. Returns the new row id. Mutates `it.id`."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     row = it.to_row()
     cols = list(row.keys())
@@ -246,7 +347,7 @@ def record_iteration(it: Iteration, db_path: Path = DEFAULT_DB_PATH) -> int:
 def set_milestone(
     iteration_id: int,
     label: Optional[str],
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> None:
     """Tag (or clear) an iteration with a user-chosen milestone label
     (e.g. ``"baseline"``, ``"PR-ready"``, ``"reference build"``).
@@ -260,6 +361,7 @@ def set_milestone(
     AGENT_BACKLOG #012. Idempotent; no-op on unknown iteration_id
     (matches ``update_verdict``'s fail-quiet contract).
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     normalized: Optional[str]
     if label is None or not label.strip():
@@ -277,12 +379,12 @@ def update_verdict(
     iteration_id: int,
     verdict: str,
     notes: Optional[str] = None,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> None:
     """Mark an iteration's verdict (Phase 2 analyst writes this after sim)."""
     if verdict not in {"kept", "reverted", "neutral", "inconclusive", "pending"}:
         raise ValueError(f"verdict must be one of kept/reverted/neutral/inconclusive/pending, got {verdict!r}")
-    with _connect(db_path) as conn:
+    with _connect(_resolve_db_path(db_path)) as conn:
         conn.execute(
             "UPDATE iterations SET verdict = ?, verdict_notes = ? WHERE id = ?",
             (verdict, notes, iteration_id),
@@ -297,7 +399,7 @@ def update_iteration_sim(
     win_rate_new: Optional[float] = None,
     margin: Optional[int] = None,
     notes: Optional[str] = None,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> None:
     """Fold the A/B-sim outcome into a pending iteration row.
 
@@ -343,11 +445,12 @@ def update_iteration_sim(
         f"UPDATE iterations SET {', '.join(set_clauses)} "
         f"WHERE id = ?"
     )
-    with _connect(db_path) as conn:
+    with _connect(_resolve_db_path(db_path)) as conn:
         conn.execute(sql, params)
 
 
-def get_iteration(iteration_id: int, db_path: Path = DEFAULT_DB_PATH) -> Optional[Iteration]:
+def get_iteration(iteration_id: int, db_path: Optional[Path] = None) -> Optional[Iteration]:
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute("SELECT * FROM iterations WHERE id = ?", (iteration_id,))
@@ -355,9 +458,10 @@ def get_iteration(iteration_id: int, db_path: Path = DEFAULT_DB_PATH) -> Optiona
     return Iteration.from_row(row) if row else None
 
 
-def iterations_for_deck(deck_id: str, db_path: Path = DEFAULT_DB_PATH) -> list[Iteration]:
+def iterations_for_deck(deck_id: str, db_path: Optional[Path] = None) -> list[Iteration]:
     """All iterations of a deck, oldest first. Useful for reconstructing the
     full v1→v2→...→vN chain when training the Phase 3 model."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
@@ -367,9 +471,26 @@ def iterations_for_deck(deck_id: str, db_path: Path = DEFAULT_DB_PATH) -> list[I
         return [Iteration.from_row(r) for r in cur.fetchall()]
 
 
-def recent_iterations(limit: int = 50, db_path: Path = DEFAULT_DB_PATH) -> list[Iteration]:
+def all_iterations(db_path: Optional[Path] = None) -> list[Iteration]:
+    """Every iteration in the log, oldest first (id ASC).
+
+    Added for the export/import path: the full export previously faked
+    "all" through ``recent_iterations(limit=10_000)``, which silently
+    dropped everything past 10k rows while still reporting success.
+    Rows are a few KB each, so even a very large personal log is only
+    tens of MB — there is no memory reason for a cap. "All" means all.
+    """
+    db_path = _resolve_db_path(db_path)
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute("SELECT * FROM iterations ORDER BY id ASC")
+        return [Iteration.from_row(r) for r in cur.fetchall()]
+
+
+def recent_iterations(limit: int = 50, db_path: Optional[Path] = None) -> list[Iteration]:
     """Most recent N iterations across all decks. Sized to fit in one screen
     by default; bump for analytics queries."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
@@ -380,7 +501,7 @@ def recent_iterations(limit: int = 50, db_path: Path = DEFAULT_DB_PATH) -> list[
 
 
 def migrate_legacy_deck_ids(
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     dry_run: bool = False,
 ) -> dict:
     """Walk `iterations` and update rows whose `deck_id` looks like a filename
@@ -397,6 +518,7 @@ def migrate_legacy_deck_ids(
     legacy_re = re.compile(r"\[B[0-9?]\]\.dck$")
     moxfield_re = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
 
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     scanned = 0
     updated = 0
@@ -446,9 +568,10 @@ def migrate_legacy_deck_ids(
     }
 
 
-def stats_summary(db_path: Path = DEFAULT_DB_PATH) -> dict:
+def stats_summary(db_path: Optional[Path] = None) -> dict:
     """Aggregate counts useful as a one-glance sanity check on the log.
     Cheap query — runs every time the loop starts."""
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         rows = {
@@ -469,7 +592,7 @@ FP013_MIN_GAMES = 40
 
 
 def fp013_gate_progress(
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     *,
     min_games: int = FP013_MIN_GAMES,
     target: int = FP013_GATE_TARGET,
@@ -484,6 +607,7 @@ def fp013_gate_progress(
     ``total_games``). Soak rows live outside this DB and never count —
     they are labels without the question they answered.
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -512,7 +636,7 @@ def fp013_gate_progress(
 
 
 def pricing_series_for_deck(
-    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+    deck_id: str, db_path: Optional[Path] = None,
 ) -> list[dict]:
     """Walk one deck's iterations chronologically and extract the
     pricing snapshots saved on each.
@@ -527,6 +651,7 @@ def pricing_series_for_deck(
     Returns ``[{iteration_id, captured_at, total_price_usd}, ...]``
     in iteration-id order (== chronological).
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     series: list[dict] = []
     with _connect(db_path) as conn:
@@ -558,7 +683,7 @@ def pricing_series_for_deck(
 
 
 def verdict_breakdown_for_deck(
-    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+    deck_id: str, db_path: Optional[Path] = None,
 ) -> dict:
     """Per-audit-version verdict counts for one deck.
 
@@ -572,6 +697,7 @@ def verdict_breakdown_for_deck(
     v3 swaps, 2/3 v4 swaps" so the user can spot which audit prompt
     (or advisor source) is producing landings vs. reverts.
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     out: dict[str, dict[str, int]] = {}
     with _connect(db_path) as conn:
@@ -699,7 +825,7 @@ def _node_price_from_manifest(manifest: Optional[dict]) -> Optional[float]:
 
 
 def iteration_graph_for_deck(
-    deck_id: str, db_path: Path = DEFAULT_DB_PATH,
+    deck_id: str, db_path: Optional[Path] = None,
 ) -> dict:
     """Project one deck's iteration chain as a JSON-friendly graph.
 
@@ -722,6 +848,7 @@ def iteration_graph_for_deck(
         side lacks pricing; treating absence as 0 would lie.
       bracket_delta — child.bracket - parent.bracket. Signed int.
     """
+    db_path = _resolve_db_path(db_path)
     init_db(db_path)
     nodes_by_id: dict[int, dict] = {}
     iterations: list[Iteration] = []

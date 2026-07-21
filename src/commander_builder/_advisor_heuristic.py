@@ -480,7 +480,14 @@ def _heuristic_swap_recommendations(
     # Giada deck, for instance). Cache-only detection -- no network.
     commander_tribal = _commander_tribal_subtype(edhrec_page.commander_name)
 
-    for card in deck_cards:
+    # ``deck_cards`` is a set, and with more absence-candidates than
+    # ``cut_limit`` the truncation below would otherwise keep whichever
+    # cards happened to iterate first — set order varies per process
+    # (PYTHONHASHSEED), so two identical advisor runs could recommend
+    # DIFFERENT cuts. Cut candidacy is pure absence (no per-card score
+    # exists at this point), so plain name order is the deterministic
+    # tiebreak: same deck + same EDHREC page → same cut list, always.
+    for card in sorted(deck_cards):
         # Don't recommend cutting any land (basic, dual, fetch,
         # shock, MDFC, utility) or universal staples. The manabase
         # is a deliberate construction; a missing reference doesn't

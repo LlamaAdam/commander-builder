@@ -38,6 +38,14 @@ from typing import Callable, Optional
 
 from .forge_runner import VENDOR_FORGE
 from .intent import Intent, intent_protect_cards, learn_intent
+# Imported (not duplicated) so the sub-threshold warning and the
+# --sim-games default can never drift from the verdict gate in
+# _proposer_sim._verdict_from_ab.
+from ._proposer_sim import (
+    EXPECTED_DECISIVE_FRACTION,
+    MIN_DECISIVE_GAMES_FOR_VERDICT,
+    min_sim_games_for_verdict,
+)
 
 # Default Commander deck directory — mirrors compare_versions.DECK_DIR /
 # doctor.DECK_DIR so ``--deck <id>`` resolves against the same place the
@@ -165,6 +173,15 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
     games = sim_report.get("games") or 0
     wins_a = sim_report.get("wins_a")
     wins_b = sim_report.get("wins_b")
+    # CONVENTION DIVERGENCE (documented, not fixed — 2026-07-20): these
+    # RoundResult fields share the win_rate_old/new NAMES with the
+    # knowledge_log columns but use a different denominator: wins / ALL
+    # games (draws and filler wins included), not wins / head-to-head
+    # decisive (wins_a + wins_b). They are CLI progress display only —
+    # never persisted to knowledge_log (the auto-curate subprocess writes
+    # the row itself via _ab_to_iteration_fields, on the one convention) —
+    # so they are left as-is rather than silently changing the improve
+    # loop's printed/JSON output. Do NOT pool these with the DB columns.
     wr_old = round(wins_a / games, 4) if games and wins_a is not None else None
     wr_new = round(wins_b / games, 4) if games and wins_b is not None else None
     margin = (wins_b - wins_a) if (wins_a is not None and wins_b is not None) else None
@@ -462,8 +479,32 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                    help="Advisor backend (default heuristic).")
     p.add_argument("--model", default="claude-sonnet-4-5",
                    help="Anthropic model id for the curator step.")
-    p.add_argument("--sim-games", type=int, default=5,
-                   help="Games per A/B sim each round (default 5).")
+    # Default 45, NOT 5 or 25. UNITS: --sim-games is TOTAL 4-player-pod
+    # games, but the verdict gate (MIN_DECISIVE_GAMES_FOR_VERDICT = 20)
+    # counts DECISIVE games = wins_a + wins_b -- head-to-head wins only.
+    # The two filler seats win roughly half the pod games (see
+    # EXPECTED_DECISIVE_FRACTION), so the previous default of 25 total
+    # yielded only ~12-13 decisive: still below the gate, still ALWAYS
+    # 'inconclusive' -- and the greedy loop advances only on 'kept', so
+    # improve stayed structurally unable to move the base deck, now at
+    # 5x the Forge cost of the old 5-game default. (The old comment
+    # blamed "headroom for a few draws" -- wrong drain: filler WINS, not
+    # draws, eat the other half of the games.) 45 total -> ~22 expected
+    # decisive: clears the 20-decisive gate with headroom for filler
+    # variance, and sits in-family with the operator's standard 40-game
+    # soak convention.
+    p.add_argument("--sim-games", type=int, default=45,
+                   help="TOTAL 4-player pod games per A/B sim each "
+                        "round (default 45). Verdicts need >= 20 "
+                        "DECISIVE games -- games won by the old or new "
+                        "deck itself; the 2 filler seats win ~half the "
+                        "pod games, so expect decisive ~= total/2 (45 "
+                        "total ~= 22 decisive). Below ~40 total the "
+                        "verdict is likely 'inconclusive' and the round "
+                        "cannot advance the deck. NOTE the runtime "
+                        "cost: 45 Forge pod games per round is ~9x the "
+                        "old 5-game default -- budget a couple of "
+                        "hours per round, not minutes.")
     p.add_argument("--sim-margin", type=int, default=1,
                    help="Min (wins_new - wins_old) margin to call 'kept' "
                         "(default 1). Within margin = neutral.")
@@ -587,6 +628,37 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                 print(f"[improve] intent learning failed ({exc}); "
                       "proceeding without intent.", flush=True)
             args.intent = None
+
+    # LOUD up-front warning before any Forge/LLM time is spent, in the
+    # RIGHT units: --sim-games is TOTAL pod games, the verdict gate
+    # counts DECISIVE games, and the two filler seats win ~half of the
+    # pod games -- so the comparison is expected-decisive (sim_games *
+    # EXPECTED_DECISIVE_FRACTION) vs the gate. Comparing raw sim_games
+    # to the gate (the pre-2026-07-20 bug) let --sim-games 25 pass this
+    # check silently while every round still resolved 'inconclusive'
+    # (~12-13 decisive < 20). Below the gate the greedy loop -- which
+    # advances ONLY on 'kept' -- cannot, in expectation, ever move the
+    # base deck forward. On stderr so --json stdout stays
+    # machine-parseable and the warning is visible even when stdout is
+    # piped.
+    expected_decisive = args.sim_games * EXPECTED_DECISIVE_FRACTION
+    if expected_decisive < MIN_DECISIVE_GAMES_FOR_VERDICT:
+        print(
+            f"[improve] WARNING: --sim-games counts TOTAL pod games, "
+            f"but the verdict gate counts DECISIVE games (won by the "
+            f"old or new deck; the 2 filler seats take ~half). "
+            f"{args.sim_games} total pod games ~= "
+            f"{int(expected_decisive)} expected decisive, below the "
+            f"{MIN_DECISIVE_GAMES_FOR_VERDICT}-decisive gate -- every "
+            f"round's verdict will likely be 'inconclusive', and "
+            f"improve only advances the deck on 'kept', so this run "
+            f"will probably just burn Forge/LLM time. A verdict needs "
+            f"{MIN_DECISIVE_GAMES_FOR_VERDICT} decisive ~= "
+            f"{min_sim_games_for_verdict()}+ total games; pass "
+            f"--sim-games >= {min_sim_games_for_verdict()} "
+            f"(default 45).",
+            file=sys.stderr, flush=True,
+        )
 
     if not args.json:
         print(f"[improve] {deck_id} (B{args.bracket}) -- strategy={args.strategy}, "

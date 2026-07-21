@@ -9,7 +9,8 @@ distinct v1/v2 .dck files on disk:
     2. Run the Moxfield audit (separate Claude session with the v3 prompt)
        — the audit modifies the live Moxfield deck in place.
 
-    3. Re-pull the post-audit deck via moxfield_import (overwrites the local file)
+    3. Re-pull the post-audit deck via moxfield_import (same Moxfield id →
+       overwrites the local file in place, preserving local Protect= lines)
        python -m commander_builder.moxfield_import --user https://moxfield.com/decks/<id>
 
     4. After the audit: snapshot v2
@@ -21,9 +22,13 @@ distinct v1/v2 .dck files on disk:
            --new "[USER] My Deck v2 [B3].dck" \\
            --bracket 3 --games 10
 
-The snapshot is a simple file copy with the version token inserted before
-the bracket suffix so the resulting filename still ends with `[B<n>].dck`
-and remains visible to Forge's deck picker.
+The snapshot is a file copy with the version token inserted before the
+bracket suffix so the resulting filename still ends with `[B<n>].dck` and
+remains visible to Forge's deck picker. After the copy, the destination's
+`[metadata] Name=` is rewritten to its own filename stem — Forge reports
+Name= (not the filename) in Match Result lines, and win attribution in
+compare_versions keys on the filename, so a stale copied Name= would make
+every snapshot A/B score 0-0 (see dck_meta for the invariant).
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from .dck_meta import rewrite_name_to_stem
 from .forge_runner import VENDOR_FORGE
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
@@ -77,6 +83,13 @@ def snapshot(
             f"snapshot exists: {dst}. Use --overwrite to replace it."
         )
     shutil.copy2(src, dst)
+    # A plain copy carries the SOURCE deck's [metadata] Name= into the
+    # versioned file. Forge reports Name= (not the filename) in its Match
+    # Result lines, so compare_versions could never attribute wins to
+    # "My Deck v1" / "My Deck v2" — every snapshot A/B scored 0-0. Stamp
+    # the destination's own stem so log_parser._normalize(filename) equals
+    # _normalize(Name=) again (invariant documented in dck_meta).
+    rewrite_name_to_stem(dst)
     return dst
 
 

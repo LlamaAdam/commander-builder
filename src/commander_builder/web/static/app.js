@@ -189,6 +189,13 @@ async function selectDeck(deckId, li, opts) {
       fetchJSON(`/api/dashboard?deck=${encodeURIComponent(deckId)}`),
       fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
     ]);
+    // Stale-response guard: if the user clicked another deck while
+    // these fetches were in flight, drop this (slower) result instead
+    // of overwriting the newer deck's dashboard. Without this, every
+    // later action (audit / propose / save-iteration keys off
+    // _activeDeckId) would operate on deck B while the user LOOKS at
+    // deck A's data. Same check the audit auto-kick below already does.
+    if (_activeDeckId !== deckId) return;
     renderDashboard(data, iters.iterations || []);
     // Auto-kick a fast heuristic audit so the user sees recs
     // immediately instead of hunting for the "Run audit" button.
@@ -210,6 +217,9 @@ async function selectDeck(deckId, li, opts) {
       loadAdvise("heuristic");
     }
   } catch (e) {
+    // Same stale guard on the error path — a late failure for a deck
+    // the user already left must not blank the deck they're viewing.
+    if (_activeDeckId !== deckId) return;
     dash.innerHTML = `<p class="empty-state">Error loading: ${e.message}</p>`;
   } finally {
     const badge = document.getElementById("_soft-refresh-badge");
@@ -2027,9 +2037,12 @@ function renderDashboard(data, iterations) {
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: `verdict ${it.verdict}` }, it.verdict));
       row.appendChild(el("span", { class: "name" }, it.deck_name));
+      // `margin` is a raw game-count delta (wins_new - wins_old, see
+      // _proposer_sim._ab_to_iteration_fields) — NOT percentage points,
+      // so label it in games. "+2pp" here overstated a +2-game edge.
       const deltaText =
         it.margin != null
-          ? `${it.margin > 0 ? "+" : ""}${it.margin}pp`
+          ? `${it.margin > 0 ? "+" : ""}${it.margin} games`
           : it.win_rate_new != null
           ? `${Math.round(it.win_rate_new * 100)}%`
           : "";
@@ -2215,6 +2228,7 @@ async function loadVerdictBreakdown(deckId, dashContainer) {
       const kept = b.kept || 0;
       const reverted = b.reverted || 0;
       const neutral = b.neutral || 0;
+      const inconclusive = b.inconclusive || 0;
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: "name" }, v));
       // Color the verdict count pills like the iteration list.
@@ -2227,6 +2241,12 @@ async function loadVerdictBreakdown(deckId, dashContainer) {
       ));
       if (neutral) pills.appendChild(el(
         "span", { class: "verdict neutral" }, `${neutral} neutral`,
+      ));
+      // Without this pill, low-N sims (verdict='inconclusive', counted
+      // in `total` by knowledge_log.stats) silently deflate the
+      // "kept/total" ratio below with no visible explanation.
+      if (inconclusive) pills.appendChild(el(
+        "span", { class: "verdict inconclusive" }, `${inconclusive} inconclusive`,
       ));
       row.appendChild(pills);
       const keptPct = total ? Math.round((kept / total) * 100) : 0;
@@ -2288,10 +2308,19 @@ function legalityBanner(legality, data) {
   if (legality.deck_size_ok === false) {
     const total = legality.deck_total ?? "?";
     const target = legality.deck_target ?? 100;
-    wrap.appendChild(el(
-      "span", { class: "pill bad" },
-      `Deck is ${total}/${target} — needs ${target - total} more`,
-    ));
+    // Branch the copy on the sign of the shortfall: an oversized deck
+    // must not read "needs -2 more". NaN (unknown total) falls through
+    // to the bare count.
+    const diff = typeof total === "number" ? target - total : NaN;
+    let sizeMsg;
+    if (diff > 0) {
+      sizeMsg = `Deck is ${total}/${target} — needs ${diff} more`;
+    } else if (diff < 0) {
+      sizeMsg = `Deck is ${total}/${target} — over by ${-diff}`;
+    } else {
+      sizeMsg = `Deck is ${total}/${target}`;
+    }
+    wrap.appendChild(el("span", { class: "pill bad" }, sizeMsg));
   }
   // Game Changers pill.
   const gcCount = legality.n_game_changers || 0;
@@ -2382,7 +2411,14 @@ async function verifyAgainstSource() {
         style: "color: var(--accent);",
       }, resp.source_url),
     ));
-    if (resp.in_local_only.length === 0 && resp.in_remote_only.length === 0) {
+    // commander_changed is an additive server field (older responses
+    // simply lack it, which coerces to false — same as before the fix).
+    // It must gate the "In sync" pill: the [Main] diff can be empty
+    // while the deck was re-helmed on Moxfield, and a commander swap
+    // is the one drift that invalidates everything downstream.
+    const cmdrChanged = !!resp.commander_changed;
+    if (resp.in_local_only.length === 0 && resp.in_remote_only.length === 0
+        && !cmdrChanged) {
       body.appendChild(el(
         "p", {}, el("span", { class: "pill good" },
           `In sync — ${resp.matched} cards match`),
@@ -2394,8 +2430,22 @@ async function verifyAgainstSource() {
       el("span", { class: "pill warn" },
         `Drift detected — ${resp.matched} matched, ` +
         `${resp.in_local_only.length} only-local, ` +
-        `${resp.in_remote_only.length} only-remote`),
+        `${resp.in_remote_only.length} only-remote` +
+        (cmdrChanged ? ", commander changed" : "")),
     ));
+    if (cmdrChanged) {
+      body.appendChild(el("h4", {}, "Commander changed"));
+      const ul = el("ul");
+      ul.appendChild(el(
+        "li", {},
+        `Local: ${(resp.local_commanders || []).join(" / ") || "(none)"}`,
+      ));
+      ul.appendChild(el(
+        "li", {},
+        `Moxfield: ${(resp.remote_commanders || []).join(" / ") || "(none)"}`,
+      ));
+      body.appendChild(ul);
+    }
     if (resp.in_local_only.length) {
       body.appendChild(el("h4", {}, "In your local copy but not on Moxfield"));
       const ul = el("ul");
@@ -2458,17 +2508,24 @@ function bracketTile(t) {
   sel.addEventListener("change", async (ev) => {
     const newBracket = ev.target.value;
     if (!_activeDeckId) return;
+    // Pin the deck this reload was kicked off for so a deck switch
+    // mid-fetch doesn't let the stale response (or its error toast)
+    // overwrite the newly selected deck's dashboard — same guard as
+    // selectDeck.
+    const deckId = _activeDeckId;
     const dash = $("dashboard");
     dash.innerHTML = '<p class="empty-state">Reloading with bracket ' + newBracket + '…</p>';
     try {
       const [data, iters] = await Promise.all([
         fetchJSON(
-          `/api/dashboard?deck=${encodeURIComponent(_activeDeckId)}&bracket=${newBracket}`,
+          `/api/dashboard?deck=${encodeURIComponent(deckId)}&bracket=${newBracket}`,
         ),
-        fetchJSON(`/api/iterations?deck=${encodeURIComponent(_activeDeckId)}`),
+        fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
       ]);
+      if (_activeDeckId !== deckId) return;
       renderDashboard(data, iters.iterations || []);
     } catch (e) {
+      if (_activeDeckId !== deckId) return;
       dash.innerHTML = `<p class="empty-state">Error: ${e.message}</p>`;
     }
   });
@@ -2577,7 +2634,14 @@ async function deleteDeck() {
   try {
     const resp = await fetch(
       `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
-      { method: "DELETE" },
+      {
+        // No body, but the server's cross-origin mutation gate requires
+        // Content-Type: application/json on EVERY mutating method (it
+        // forces a CORS preflight so foreign pages can't drive this
+        // localhost API); a bare DELETE would now 415.
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+      },
     );
     if (!resp.ok) {
       flashStatus(`Delete failed: ${resp.status}`);

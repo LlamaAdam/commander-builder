@@ -32,8 +32,10 @@ from pathlib import Path
 from typing import Optional
 
 from .forge_runner import VENDOR_FORGE
+# ``db_path=None`` defaults below defer to knowledge_log's call-time
+# resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
+# production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
-    DEFAULT_DB_PATH,
     iterations_for_deck,
     recent_iterations,
     stats_summary,
@@ -50,6 +52,10 @@ _BRACKET_SUFFIX = re.compile(r"\s*\[B([1-5])\]\.dck$")
 _USER_PREFIX = re.compile(r"^\[USER\]\s*")
 _MOXFIELD_META = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
 _DECK_NAME_META = re.compile(r"^Name=(.+)$", re.MULTILINE)
+# DisplayName= carries the pretty (pre-sanitization) deck name now that
+# importers stamp Name= with the filename stem for match attribution — see
+# dck_meta.stamp_name_preserving_display. Preferred over Name= for display.
+_DECK_DISPLAY_NAME_META = re.compile(r"^DisplayName=(.+)$", re.MULTILINE)
 
 
 @dataclass
@@ -161,7 +167,7 @@ def collect_status(
     pool_dir: Path = POOL_DIR,
     match_dir: Path = MATCH_DIR,
     compare_dir: Path = COMPARE_DIR,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> StatusReport:
     """Gather all status signals into one StatusReport. Pure read — never
     writes anything (other than knowledge_log's idempotent schema-init via
@@ -326,8 +332,17 @@ def _parse_dck_metadata(deck_path: Path) -> tuple[Optional[str], Optional[str], 
     except OSError:
         return None, None, None
 
+    # Prefer DisplayName= (the pretty pre-sanitization name preserved by
+    # the importers) over Name= (now stamped with the filename stem so
+    # Forge win attribution works — dck_meta module docstring). Decks
+    # written before the stamping change have only Name= and keep their
+    # old display verbatim.
+    display_match = _DECK_DISPLAY_NAME_META.search(text)
     name_match = _DECK_NAME_META.search(text)
-    name = name_match.group(1).strip() if name_match else None
+    if display_match:
+        name = display_match.group(1).strip()
+    else:
+        name = name_match.group(1).strip() if name_match else None
 
     mox_match = _MOXFIELD_META.search(text)
     mox_id = mox_match.group(1).strip() if mox_match else None
@@ -437,7 +452,7 @@ def _iteration_summary(
 
 def collect_deck_status(
     deck_path: Path,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     meta_dir: Path = META_DIR,
 ) -> DeckStatusReport:
     """Assemble the per-deck dashboard payload. Returns even when the
@@ -609,7 +624,7 @@ def format_deck_text(report: DeckStatusReport, *, use_rich: bool = True) -> str:
 
 def collect_user_decks_summary(
     deck_dir: Path = DECK_DIR,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> list[dict]:
     """One-line summary per `[USER]*.dck`. Sorted by deck name (case-
     insensitive) so the listing is stable across runs."""

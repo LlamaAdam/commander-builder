@@ -27,8 +27,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# ``db_path=None`` defaults below defer to knowledge_log's call-time
+# resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
+# production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
-    DEFAULT_DB_PATH,
     Iteration,
     iterations_for_deck,
     recent_iterations,
@@ -116,7 +118,10 @@ def render_iteration(it: Iteration, position: int, total: int) -> str:
     lines.append("")
 
     # Rationale.
-    rationale = (it.audit_manifest or {}).get("rationale", "").strip()
+    # `or ""` (not a .get default): a manifest with an explicit JSON null
+    # ({"rationale": null}) makes .get return None despite the default, and
+    # None.strip() would kill the whole history render for one bad row.
+    rationale = ((it.audit_manifest or {}).get("rationale") or "").strip()
     if rationale:
         lines.append(f"**Rationale**: {rationale}")
         lines.append("")
@@ -144,7 +149,7 @@ def render_iteration(it: Iteration, position: int, total: int) -> str:
 
 def render_deck_history(
     deck_id: str,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> str:
     """Build the full Markdown report for one deck's iteration chain."""
     history = iterations_for_deck(deck_id, db_path=db_path)
@@ -192,7 +197,7 @@ def render_deck_history(
 
 def render_recent_iterations_summary(
     limit: int = 20,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
 ) -> str:
     """Cross-deck Markdown summary of recent iterations. Useful when you want
     a "what's been happening across the project" view rather than per-deck

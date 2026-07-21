@@ -55,6 +55,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from ._llm_json import LLMJsonError, extract_json_object, try_extract_json_object
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = REPO_ROOT / "prompts"
 
@@ -118,7 +120,25 @@ def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> P
     Order: Claude (if enabled) -> Ollama (if enabled) -> Manual fallback.
     Manual is the safety net because it's the only path guaranteed to work
     without external deps. If you set `use_claude=True` but the SDK isn't
-    installed, the call falls back to manual rather than crashing the loop."""
+    installed, the call falls back to manual rather than crashing the loop.
+
+    Fallback contract — three failure classes, handled differently:
+
+      NotImplementedError  — backend not wired (no key / SDK / daemon).
+                             Expected; quiet fall-through.
+      LLMJsonError         — backend responded but with garbage/truncated
+                             JSON. RE-RAISED, never swallowed: falling
+                             through used to end in manual_propose's
+                             ``FileNotFoundError: No manifest at ...``,
+                             which masked the real failure behind a
+                             misleading message. A garbage response is a
+                             loud error the caller must report as a
+                             failed proposal.
+      any other Exception  — backend genuinely unavailable at runtime
+                             (API outage, rate limit, network). WARN and
+                             fall through; manual is a sane degradation
+                             here because the LLM never answered at all.
+    """
     config = config or ProposerConfig()
 
     if config.use_claude:
@@ -126,6 +146,8 @@ def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> P
             return claude_propose(input_, config)
         except NotImplementedError:
             pass  # Fall through to next backend.
+        except LLMJsonError:
+            raise  # Garbage response — surface it; see contract above.
         except Exception as exc:  # noqa: BLE001
             print(f"  WARN: claude_propose failed ({type(exc).__name__}); "
                   f"falling back to ollama/manual.")
@@ -134,6 +156,8 @@ def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> P
             return ollama_propose(input_, config)
         except NotImplementedError:
             pass
+        except LLMJsonError:
+            raise  # Same rule as Claude: garbage output is a loud error.
         except Exception as exc:  # noqa: BLE001
             print(f"  WARN: ollama_propose failed ({type(exc).__name__}); "
                   f"falling back to manual.")
@@ -237,16 +261,22 @@ def claude_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     if not text.strip():
         raise RuntimeError("claude_propose: empty response from API")
 
-    # Tolerate Claude wrapping JSON in code fences despite the instruction.
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```", 2)
-        cleaned = cleaned[1] if len(cleaned) > 1 else text
-        # Strip optional language tag like ```json
-        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
-        cleaned = cleaned.rsplit("```", 1)[0].strip()
-
-    manifest = json.loads(cleaned)
+    # Shared robust extractor (see _llm_json): handles fenced JSON, prose
+    # preamble/trailer, and braces-in-strings. The old in-house strip only
+    # fired when the response STARTED with ``` — a reply like
+    # "Looking at this deck...\n```json\n{...}\n```" threw JSONDecodeError,
+    # which propose()'s broad except turned into a misleading
+    # manual_propose FileNotFoundError. On genuinely unparseable output
+    # this raises LLMJsonError carrying the model + response head/tail so
+    # the failure is diagnosable from the log alone; propose() re-raises
+    # it instead of falling back.
+    manifest = extract_json_object(
+        text,
+        context=(
+            f"claude_propose (model={config.claude_model}, "
+            f"response {len(text)} chars)"
+        ),
+    )
     return ProposerOutput(
         added=list(manifest.get("added", []) or []),
         removed=list(manifest.get("removed", []) or []),
@@ -309,7 +339,18 @@ def ollama_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     text = payload.get("response", "")
     if not text:
         raise RuntimeError("ollama_propose: empty response from daemon")
-    manifest = json.loads(text)
+    # format:"json" makes Ollama emit syntactically valid JSON, but small
+    # local models still occasionally wrap it or truncate. Same shared
+    # extractor + same loud-failure contract as claude_propose: a garbage
+    # response raises LLMJsonError, which propose() re-raises instead of
+    # burying it under manual_propose's "No manifest" error.
+    manifest = extract_json_object(
+        text,
+        context=(
+            f"ollama_propose (model={config.ollama_model}, "
+            f"response {len(text)} chars)"
+        ),
+    )
     return ProposerOutput(
         added=list(manifest.get("added", []) or []),
         removed=list(manifest.get("removed", []) or []),
@@ -402,6 +443,25 @@ class Proposal:
     applied_adds: list[str] = field(default_factory=list)
     applied_cuts: list[str] = field(default_factory=list)
     dropped_for_balance: list[str] = field(default_factory=list)
+    # Swap PAIRS dropped by apply-time decklist validation (2026-07-19
+    # fix). Each entry is ``{"cut": <name>, "add": <name>}`` — the pair
+    # is dropped as a unit so adds == cuts stays true and the written
+    # deck keeps a legal 99-card mainboard. Reasons:
+    #   dropped_unmatched_cut  -- the cut matched no [Main] card (LLM
+    #                             hallucination, DFC naming drift the
+    #                             matcher couldn't bridge, or an earlier
+    #                             cut consumed the last copy).
+    #   dropped_duplicate_add  -- the add is a non-basic already in
+    #                             [Main]; applying it would write an
+    #                             illegal ``2 <Name>`` singleton
+    #                             violation.
+    #   dropped_commander_add  -- the add names the [Commander] card.
+    # Every dropped swap appears under EXACTLY ONE reason field —
+    # protected cuts live only in dropped_for_protection, balance
+    # surplus only in dropped_for_balance, validated pairs here.
+    dropped_unmatched_cut: list[dict] = field(default_factory=list)
+    dropped_duplicate_add: list[dict] = field(default_factory=list)
+    dropped_commander_add: list[dict] = field(default_factory=list)
     padded_count: int = 0
     padded_breakdown: dict = field(default_factory=dict)
 
@@ -470,87 +530,18 @@ No code fences. No markdown. Just the raw JSON object.
 def _extract_curator_json(text: str) -> Optional[dict]:
     """Pull the curator's JSON object out of a Claude response.
 
-    The system prompt asks for a raw JSON object but real responses
-    sometimes have:
-      - Prose preamble ("Looking at this deck, I think...")
-      - Markdown code fences (```json ... ```)
-      - Trailing prose after the object
-      - Multiple ``{...}`` blocks if the curator includes an example
-        in its rationale
-
-    Strategy: try ``json.loads(text)`` first (covers the happy path
-    where the response IS just JSON). If that fails, locate the first
-    ``{`` and find its matching ``}`` by counting braces (handles
-    nested objects inside ``rationale`` strings). If parsing that
-    substring also fails, return None so the caller surfaces a
-    diagnostic.
-
-    Strings inside JSON can legally contain ``{`` and ``}``, so a
-    naive find-last-} approach mis-parses. The brace-counter respects
-    string context (skips braces inside double-quoted runs).
+    Back-compat wrapper: the robust layered extractor (whole-text parse,
+    fence strip, string-aware brace counting) was born here and has been
+    PROMOTED to the shared ``_llm_json`` module so every LLM parse site
+    (claude_propose, ollama_propose, analyst verdicts, the Claude
+    advisor) uses one implementation instead of divergent hand-rolled
+    strips. This name + its Optional contract stay because tests and
+    external callers import it from ``commander_builder.proposer``, and
+    ``auto_propose`` deliberately wants the None-return so it can raise
+    its own RuntimeError (which the auto-curate CLI catches and reports
+    as a failed proposal, exit code 3).
     """
-    cleaned = text.strip()
-
-    # Path 1: try the whole response as JSON. Common case under the
-    # strict prompt.
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    # Path 2: strip markdown code fences if present, then retry.
-    if "```" in cleaned:
-        fenced = cleaned.split("```", 2)
-        if len(fenced) >= 2:
-            inner = fenced[1]
-            # Strip optional language tag like ```json
-            inner = inner.split("\n", 1)[1] if "\n" in inner else inner
-            inner = inner.rsplit("```", 1)[0].strip()
-            try:
-                return json.loads(inner)
-            except json.JSONDecodeError:
-                pass
-
-    # Path 3: find the first balanced ``{...}`` block in the text.
-    # Walks character-by-character respecting string context so a
-    # ``{`` inside a JSON string doesn't confuse the counter.
-    start = cleaned.find("{")
-    while start != -1:
-        depth = 0
-        in_string = False
-        escape = False
-        end = -1
-        for i in range(start, len(cleaned)):
-            ch = cleaned[i]
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end != -1:
-            candidate = cleaned[start:end + 1]
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
-        # That block didn't parse — search for the next ``{`` and try
-        # again. Handles "prose with { in it } then the real JSON".
-        start = cleaned.find("{", start + 1)
-
-    return None
+    return try_extract_json_object(text)
 
 
 def _claude_cli_available() -> bool:
@@ -942,7 +933,9 @@ def apply_proposal_to_deck(
     Returns the path of the new file. In ``dry_run`` mode returns the
     path it WOULD have written without touching disk; the proposal's
     ``applied_*`` fields are still populated so the CLI can show what
-    would have landed.
+    would have landed. Dry-run runs the SAME 99-card guard as a real
+    run (invariant 4 below) — a preview that reports success on a deck
+    the real run would refuse is worse than useless.
 
     The new file lives next to the source with a bumped version
     (``[USER] Foo [B3].dck`` -> ``[USER] Foo v2 [B3].dck``). Bracket
@@ -958,12 +951,26 @@ def apply_proposal_to_deck(
          so the iteration log records what Claude wanted but didn't
          apply.
 
-      2. If the SOURCE deck was already short of 99 mainboard (some
+      2. Each surviving (cut, add) pair is validated against the
+         actual decklist (see ``_apply_swaps_to_dck``): unmatched
+         cuts, singleton-violating adds, and adds naming the
+         commander drop the WHOLE pair, reported on
+         ``proposal.dropped_unmatched_cut`` /
+         ``dropped_duplicate_add`` / ``dropped_commander_add``.
+
+      3. If the SOURCE deck was already short of 99 mainboard (some
          imports land at 71-95), the proposed deck inherits the
          deficit and gets padded with basics matching the deck's
          existing color distribution. Padded count + breakdown
          surface on ``proposal.padded_count`` /
          ``proposal.padded_breakdown``.
+
+      4. Last resort: the final mainboard is re-counted from the
+         proposed text and the write is REFUSED (RuntimeError) if it
+         isn't exactly 99 — a corrupt deck on disk poisons every
+         downstream sim/iteration, so failing loudly beats writing.
+         This guard fires under ``dry_run`` too, so preview and real
+         run always agree on whether a proposal is writable.
 
     This mirrors the invariants the web UI's /api/audit endpoint
     already enforces. The two flows are now in sync -- same balancing,
@@ -1015,8 +1022,13 @@ def apply_proposal_to_deck(
     ]
 
     text = src_path.read_text(encoding="utf-8")
+    # drop_report collects the per-reason swap drops the helper's
+    # decklist validation produced (unmatched cuts, singleton-violating
+    # adds, commander adds, balance surplus) so each dropped swap can
+    # be surfaced under exactly one reason below.
+    drop_report: dict = {}
     proposed_text, applied_adds, applied_cuts, kept_count = _apply_swaps_to_dck(
-        text, recs,
+        text, recs, drop_report=drop_report,
     )
 
     # Pad the proposed deck to 99 mainboard if it's short. The audit
@@ -1027,18 +1039,69 @@ def apply_proposal_to_deck(
         proposed_text, post_swap_main,
     )
 
+    # _apply_swaps_to_dck deliberately passes the [metadata] section
+    # through untouched, so at this point the v2 text still carries the
+    # SOURCE deck's Name=. Forge reports Name= (not the filename) in its
+    # Match Result lines, so a stale Name= makes the old and new decks
+    # indistinguishable to every name-keyed consumer (compare_versions,
+    # pool_curator, the Forge deck picker). Stamp the output file's own
+    # stem so log_parser._normalize maps results back to THIS file — the
+    # invariant is documented in dck_meta.
+    from .dck_meta import rewrite_name
+    proposed_text = rewrite_name(proposed_text, out_path.stem)
+
     # Record what actually happened so the CLI summary + iteration
     # log can distinguish "Claude wanted X" from "the new .dck has Y".
+    # Reason buckets come straight from the helper's drop_report so
+    # each dropped swap appears under EXACTLY ONE reason. (The old
+    # "everything requested minus everything applied" computation
+    # double-reported protected cuts: they landed in
+    # dropped_for_protection above AND in dropped_for_balance here.)
     proposal.applied_adds = list(applied_adds)
     proposal.applied_cuts = list(applied_cuts)
-    applied_add_set = {a.lower() for a in applied_adds}
-    applied_cut_set = {c.lower() for c in applied_cuts}
-    proposal.dropped_for_balance = (
-        [a for a in proposal.adds if a.lower() not in applied_add_set]
-        + [c for c in proposal.cuts if c.lower() not in applied_cut_set]
+    proposal.dropped_for_balance = list(
+        drop_report.get("dropped_for_balance", []),
+    )
+    proposal.dropped_unmatched_cut = list(
+        drop_report.get("dropped_unmatched_cut", []),
+    )
+    proposal.dropped_duplicate_add = list(
+        drop_report.get("dropped_duplicate_add", []),
+    )
+    proposal.dropped_commander_add = list(
+        drop_report.get("dropped_commander_add", []),
     )
     proposal.padded_count = padded_count
     proposal.padded_breakdown = dict(padded_breakdown)
+
+    # HARD GUARD — last-resort invariant before anything touches disk.
+    # Everything above (pair validation, balancing, padding) should
+    # have produced exactly 99 mainboard cards for a Commander deck;
+    # if it didn't (over-sized source deck, missing [Main] header, a
+    # future regression in the swap/pad pipeline), writing the file
+    # would hand Forge a deck it rejects — or worse, silently mis-sims
+    # — and every downstream iteration builds on the corrupt list.
+    # Refuse loudly instead.
+    #
+    # The guard runs BEFORE the dry_run early-return on purpose: the
+    # would-be final text is fully computed at this point, so dry-run
+    # can (and must) evaluate the exact same invariant. Otherwise a
+    # --dry-run preview reports success on precisely the deck a real
+    # run refuses — the preview lies, and the operator only finds out
+    # after committing to the real run. Dry-run still writes nothing;
+    # it just raises the same RuntimeError the real run would.
+    from .web._helpers import _count_main_cards
+    final_main = _count_main_cards(proposed_text)
+    if final_main != 99:
+        raise RuntimeError(
+            f"refusing to write {out_path.name}: proposed mainboard has "
+            f"{final_main} cards, not 99. The swap/padding pipeline "
+            "should have produced a legal Commander mainboard — this "
+            "deck would be rejected (or silently mis-simmed) by Forge. "
+            f"Source deck: {src_path.name}; adds applied: "
+            f"{len(applied_adds)}; cuts applied: {len(applied_cuts)}; "
+            f"basics padded: {padded_count}."
+        )
 
     if dry_run:
         return out_path

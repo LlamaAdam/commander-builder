@@ -30,7 +30,10 @@ from typing import Optional
 # (build_dashboard, knowledge_log functions, etc.) so they don't
 # need re-importing here.
 from ..forge_runner import detect_forge_version
-from ..knowledge_log import DEFAULT_DB_PATH as _DEFAULT_KLOG_DB
+# Module import (not ``from ..knowledge_log import DEFAULT_DB_PATH``) so the
+# default DB path is read at app-creation time — a from-import would freeze
+# the value at import time and bypass the test suite's isolation patch.
+from .. import knowledge_log as _knowledge_log
 
 # Pure helpers extracted to ``_helpers.py`` as part of the
 # 2026-05-13 blueprint refactor (tier-3 issue #3.1). Re-exported
@@ -66,7 +69,14 @@ def _cleanup_stale_staged_files(
     import time as _time
     if not deck_dir.exists():
         return 0
-    pattern = _re.compile(r"_(proposed|converted)_\d{8}_\d{6}\.dck$")
+    # Staged names are `<stem>_proposed_<ts>_<uid8>.dck` — the trailing
+    # 8-hex uid is routes_sim's per-request uniquifier (prevents
+    # same-second clobber races between concurrent A/B sims). The uid
+    # group is OPTIONAL so leftovers staged by pre-uid builds (bare
+    # `_proposed_<ts>.dck`) still get swept instead of orphaned.
+    pattern = _re.compile(
+        r"_(proposed|converted)_\d{8}_\d{6}(_[0-9a-f]{8})?\.dck$"
+    )
     now = _time.time()
     deleted = 0
     # Sweep the commander folder + the parallel constructed folder
@@ -111,7 +121,12 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
         if user_only and not p.stem.startswith("[USER]"):
             continue
         # Skip transient propose-swap working copies regardless of mode.
-        if _re.search(r"_(proposed|converted)_\d{8}_\d{6}$", p.stem):
+        # The optional trailing 8-hex uid matches routes_sim's per-request
+        # uniquifier (same-second collision fix); the bare-timestamp form
+        # is kept so leftovers from pre-uid builds stay hidden too.
+        if _re.search(
+            r"_(proposed|converted)_\d{8}_\d{6}(_[0-9a-f]{8})?$", p.stem,
+        ):
             continue
         display = _re.sub(r"^\[USER\]\s*", "", p.stem)
         out.append({
@@ -152,7 +167,7 @@ def create_app(
 
     if knowledge_db is None:
         env_db = os.environ.get("COMMANDER_BUILDER_KNOWLEDGE_DB")
-        knowledge_db = Path(env_db) if env_db else _DEFAULT_KLOG_DB
+        knowledge_db = Path(env_db) if env_db else _knowledge_log.DEFAULT_DB_PATH
     knowledge_db = Path(knowledge_db)
 
     # Sweep transient propose-swap staging files left over from
@@ -204,6 +219,38 @@ def create_app(
     app = Flask(__name__)
     app.config["DECK_DIR"] = deck_dir
     app.config["KNOWLEDGE_DB"] = knowledge_db
+
+    # --- Cross-origin mutation gate (2026-07-19 adversarial review) ---
+    # Every mutating endpoint used ``request.get_json(force=True)``,
+    # which happily parses a ``text/plain`` body as JSON. A text/plain
+    # POST is a CORS "simple request" — the browser sends it cross-
+    # origin WITHOUT a preflight, so any web page the user visits could
+    # drive this localhost server (start hours-long Forge sims, write
+    # decks, spam logs) via plain ``fetch()`` or DNS rebinding. The
+    # browser can't read the response, but the side effects land anyway.
+    #
+    # Requiring ``Content-Type: application/json`` on every mutating
+    # method makes such requests "non-simple": the browser sends an
+    # OPTIONS preflight first, we never answer it with CORS-allow
+    # headers, and the browser refuses to send the actual request.
+    # DELETE/PUT/PATCH are already non-simple methods, but they're
+    # gated too for defense-in-depth and a uniform contract.
+    #
+    # ``request.mimetype`` is the media type with any parameters
+    # (e.g. ``; charset=utf-8``) already stripped and lowercased, so
+    # charset-suffixed headers pass the check.
+    from flask import jsonify as _jsonify, request as _request
+
+    @app.before_request
+    def _require_json_for_mutations():
+        if _request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return None
+        if _request.mimetype != "application/json":
+            return _jsonify({
+                "error": "Content-Type must be application/json",
+                "received": _request.mimetype or None,
+            }), 415
+        return None
 
     # Cache-buster: a fresh token per process boot so static assets
     # are never served from a stale browser cache after a restart.

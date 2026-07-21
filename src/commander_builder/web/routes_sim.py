@@ -35,6 +35,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 
 from ..knowledge_log import (
     Iteration,
+    decisive_win_rate,
     get_iteration,
     record_iteration,
     stats_summary,
@@ -74,9 +75,11 @@ def make_sim_blueprint(
         Forge availability is required. If ForgeRunner.locate() fails
         (no JRE, no vendor/forge, etc) the endpoint returns 503.
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         deck_id = payload.get("deck")
@@ -93,6 +96,11 @@ def make_sim_blueprint(
             bracket = int(payload.get("bracket", 3))
         except (TypeError, ValueError):
             return jsonify({"error": "bracket must be int"}), 400
+        # Range check to match save_iteration: an out-of-range bracket
+        # would propagate into compare()'s filler-deck selection and
+        # produce a nonsense A/B baseline instead of failing fast.
+        if bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be 1..5"}), 400
         # Default to pod (4-player commander with shared filler
         # opposition) because that's the honest commander signal —
         # 1v1 reduces commander to a duel and misses politics /
@@ -135,7 +143,21 @@ def make_sim_blueprint(
         #   mystery. Strip the [USER]/[REF] prefix because Forge's CLI
         #   loader also chokes on filenames starting with `[`.
         from datetime import datetime as _dt
+        from uuid import uuid4
         ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        # The timestamp alone has 1-SECOND granularity, and Flask serves
+        # propose_swap concurrently (threaded, same process). Two A/B
+        # sims on the same deck started within the same second would
+        # build IDENTICAL staged paths: request B's write_text clobbers
+        # the file request A's Forge JVM is mid-reading (wrong deck gets
+        # simmed), and A's cleanup unlink deletes the file B's Forge
+        # still needs (FileNotFound / "0 games played"). Append a short
+        # random component to make every request's staged names unique.
+        # uuid4 — NOT os.getpid(): concurrent requests share one process,
+        # so the pid is identical exactly when it would need to differ.
+        # The timestamp stays because it's human-friendly for triaging
+        # leftover staged files (and the stale-file sweep keys on it).
+        uid = uuid4().hex[:8]
         bare_stem = old_path.stem
         for _prefix in ("[USER] ", "[REF] "):
             if bare_stem.startswith(_prefix):
@@ -146,30 +168,24 @@ def make_sim_blueprint(
             stage_dir.mkdir(parents=True, exist_ok=True)
         else:
             stage_dir = old_path.parent
-        new_path = stage_dir / f"{bare_stem}_proposed_{ts}.dck"
+        # Build the filename FROM staged_name (single source of truth)
+        # so the Name= metadata below can never drift from the stem —
+        # log_parser._normalize must map both to the same key for win
+        # attribution to work. _normalize strips only the [USER] prefix,
+        # the [B<n>] suffix and the .dck extension, so the _{ts}_{uid}
+        # suffix survives identically on both sides of the comparison.
+        staged_name = f"{bare_stem}_proposed_{ts}_{uid}"
+        new_path = stage_dir / f"{staged_name}.dck"
         # Rewrite the [metadata] Name= field so Forge displays this
         # deck distinctly from the original. Without this both decks
         # report 'Name=Hakbal of the Surging Soul' in Forge's Match
         # Result lines and log_parser can't attribute wins to either
         # side — every game looks like a tie regardless of who won.
-        import re as _re_meta
-        staged_name = f"{bare_stem}_proposed_{ts}"
-        if _re_meta.search(r"^Name=.+$", new_text, flags=_re_meta.MULTILINE):
-            new_text_staged = _re_meta.sub(
-                r"^Name=.+$", f"Name={staged_name}", new_text,
-                count=1, flags=_re_meta.MULTILINE,
-            )
-        else:
-            # No metadata Name line — synthesize one at the top.
-            if "[metadata]" in new_text.lower():
-                new_text_staged = _re_meta.sub(
-                    r"(\[metadata\][^\n]*\n)", rf"\1Name={staged_name}\n",
-                    new_text, count=1, flags=_re_meta.IGNORECASE,
-                )
-            else:
-                new_text_staged = (
-                    f"[metadata]\nName={staged_name}\n\n" + new_text
-                )
+        # The rewrite logic itself lives in dck_meta (shared with the
+        # snapshot / proposer / meta_test deck writers, which hit the
+        # same misattribution).
+        from ..dck_meta import rewrite_name
+        new_text_staged = rewrite_name(new_text, staged_name)
 
         # When mode='1v1' the format is `constructed`, but the user's
         # decks are commander-format (have a [Commander] section).
@@ -187,20 +203,20 @@ def make_sim_blueprint(
 
         # The OLD deck file is the unchanged user deck — also has a
         # [Commander] section, also needs conversion for 1v1. Stage
-        # a sibling _converted_<timestamp>.dck holding the converted
+        # a sibling _converted_<timestamp>_<uid>.dck holding the converted
         # text so we don't mutate the user's actual deck file.
         old_converted_path: Optional[Path] = None
         old_for_compare = old_path.name
         if mode == "1v1":
             old_text = old_path.read_text(encoding="utf-8")
             # Ensure the old deck's metadata Name= is also distinct
-            # so log_parser can split wins between old + new.
-            old_staged_name = f"{bare_stem}_converted_{ts}"
-            if _re_meta.search(r"^Name=.+$", old_text, flags=_re_meta.MULTILINE):
-                old_text = _re_meta.sub(
-                    r"^Name=.+$", f"Name={old_staged_name}", old_text,
-                    count=1, flags=_re_meta.MULTILINE,
-                )
+            # so log_parser can split wins between old + new. Reuse the
+            # same per-request uid — the _proposed_/_converted_ infix
+            # already separates the two sides within a request, and one
+            # uid per request makes "which files belong together" obvious
+            # when triaging leftovers.
+            old_staged_name = f"{bare_stem}_converted_{ts}_{uid}"
+            old_text = rewrite_name(old_text, old_staged_name)
             old_text = _to_constructed_format(old_text)
             old_converted_path = stage_dir / f"{old_staged_name}.dck"
             try:
@@ -354,12 +370,25 @@ def make_sim_blueprint(
             "pods_completed": len(report.pods),
             "pods_planned": report.pods_planned or len(report.pods),
             "stopped_early": bool(report.stopped_early),
+            # Pod-failure telemetry ("no silent failures"): crashed /
+            # dead-timed-out pods are EXCLUDED from total_games by
+            # compare(); tell the UI so a verdict built on fewer games
+            # than requested isn't presented as a full-strength result.
+            # getattr defaults keep this endpoint working with report
+            # doubles (tests fake compare() with SimpleNamespace) and any
+            # pre-fix report shape that lacks the failure fields.
+            "failed_pods": getattr(report, "failed_pods", 0),
+            "timed_out_pods": getattr(report, "timed_out_pods", 0),
+            "excluded_games": getattr(report, "excluded_games", 0),
+            "pod_failures": getattr(report, "pod_failures", []),
             # Sprint 1C telemetry: per-pod intra-pod abort summary so
             # the UI can show "Pod 2 stopped at game 3/5 (decisive)".
             "pod_summaries": [
                 {
                     "pod_index": p.get("pod_index", i + 1),
                     "intra_pod_aborted": bool(p.get("intra_pod_aborted")),
+                    "pod_failed": bool(p.get("pod_failed")),
+                    "failure_reason": p.get("failure_reason"),
                     "games_actually_played": int(
                         p.get("games_actually_played") or 0
                     ),
@@ -383,7 +412,8 @@ def make_sim_blueprint(
                 "audit_manifest": {"added": [...], "removed": [...],
                                     "rationale": "..."} (optional),
                 "sim_report": { ...full propose_swap response... } (optional),
-                "verdict": "kept" | "reverted" | "neutral" | "pending",
+                "verdict": "kept" | "reverted" | "neutral"
+                           | "inconclusive" | "pending",
                 "verdict_notes": "..." (optional),
                 "deck_snapshot": "<.dck text>" (optional),
                 "parent_id": int (optional)
@@ -392,9 +422,11 @@ def make_sim_blueprint(
         Returns ``{"id": <new row id>, "stats": <stats_summary>}`` so the
         UI can show "Saved iteration #N — knowledge_log now has X rows."
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         deck_id = (payload.get("deck_id") or "").strip()
@@ -412,9 +444,16 @@ def make_sim_blueprint(
             return jsonify({"error": "bracket must be 1..5"}), 400
 
         verdict = (payload.get("verdict") or "pending").strip()
-        if verdict not in ("kept", "reverted", "neutral", "pending"):
+        # 'inconclusive' must be accepted here: the web UI *defaults* the
+        # save-verdict radio to it whenever the sim had < 20 decisive games
+        # (see app.js renderSaveIterationBlock), and both the PATCH verdict
+        # endpoint and knowledge_log already treat it as valid. Rejecting it
+        # made the UI's own default save path 400.
+        if verdict not in ("kept", "reverted", "neutral", "inconclusive",
+                           "pending"):
             return jsonify({
-                "error": "verdict must be one of kept, reverted, neutral, pending",
+                "error": "verdict must be one of kept, reverted, neutral, "
+                         "inconclusive, pending",
             }), 400
 
         audit_manifest = payload.get("audit_manifest")
@@ -463,19 +502,31 @@ def make_sim_blueprint(
 
         # Pull win-rate / margin out of sim_report if present so the
         # row is queryable without parsing the JSON blob every time.
+        #
+        # Win-rate convention (2026-07-20, see knowledge_log's schema
+        # docstring): wins / HEAD-TO-HEAD DECISIVE games via the shared
+        # helper, where decisive = old_wins + new_wins — the games one of
+        # the two compared versions actually won. BOTH payload shapes
+        # (the /api/propose_swap response body carrying total_games, and
+        # hand-built / legacy AB-shaped payloads without it) compute this
+        # same denominator. The previous pass (611feff) used total_games
+        # - draws when total_games was present — but that count includes
+        # FILLER-won pod games the head-to-head pair can never win
+        # (fillers take roughly half the games in a 4-player pod), so the
+        # two shapes wrote rates ~2x apart for the same outcome, and this
+        # writer's compare-shaped rows were incomparable with the
+        # AB-shaped writers'. When decisive == 0 the helper returns None
+        # and the columns stay NULL.
         win_rate_old = None
         win_rate_new = None
         margin = None
         if isinstance(sim_report, dict):
             try:
-                old_g = int(sim_report.get("old_games") or 0)
-                new_g = int(sim_report.get("new_games") or 0)
                 old_w = int(sim_report.get("old_wins") or 0)
                 new_w = int(sim_report.get("new_wins") or 0)
-                if old_g > 0:
-                    win_rate_old = old_w / old_g
-                if new_g > 0:
-                    win_rate_new = new_w / new_g
+                decisive = old_w + new_w
+                win_rate_old = decisive_win_rate(old_w, decisive)
+                win_rate_new = decisive_win_rate(new_w, decisive)
                 if "margin" in sim_report and sim_report["margin"] is not None:
                     margin = int(sim_report["margin"])
                 else:

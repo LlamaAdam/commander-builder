@@ -74,9 +74,12 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             })
 
         if request.method == "PUT":
-            try:
-                payload = request.get_json(force=True) or {}
-            except Exception:
+            # silent=True (not force=True): the app-level before_request
+            # gate already guarantees Content-Type: application/json for
+            # mutating methods, so parsing honors the header; a malformed
+            # body surfaces as None -> 400 rather than an exception.
+            payload = request.get_json(silent=True)
+            if payload is None:
                 return jsonify({"error": "expected JSON body"}), 400
             new_text = payload.get("text") or ""
             if not new_text.strip():
@@ -106,18 +109,38 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         Filename is derived from ``name`` with a ``[USER]`` prefix and
         ``[B?]`` suffix so the deck shows up in the user-only sidebar.
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         name = (payload.get("name") or "").strip()
         url = (payload.get("moxfield_url") or "").strip()
         paste = (payload.get("paste_text") or "").strip()
-        try:
-            bracket = int(payload.get("bracket") or 3)
-        except (TypeError, ValueError):
+        # Bracket must be a valid Commander bracket (1..5). The value
+        # is baked into the filename as a "[B<n>]" suffix, and
+        # ``_bracket_from_filename`` downstream only recognizes
+        # single-digit 1..5 — an unvalidated "[B9]" (or "[B-1]")
+        # filename would silently break bracket resolution for the
+        # deck's whole lifetime. Absent/empty means "not specified"
+        # and defaults to 3 (Upgraded); an explicitly-provided bad
+        # value is a client error and gets a 400.
+        bracket_raw = payload.get("bracket")
+        if bracket_raw in (None, ""):
             bracket = 3
+        else:
+            try:
+                bracket = int(bracket_raw)
+            except (TypeError, ValueError):
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
+            if bracket not in (1, 2, 3, 4, 5):
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
 
         if not url and not paste:
             return jsonify({
@@ -165,6 +188,16 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 "error": "deck with this name already exists",
                 "filename": filename,
             }), 409
+        # Stamp Name= from the final filename stem so Forge's deck picker
+        # and every name-keyed pipeline (compare_versions, pool_curator)
+        # can map this file back to itself even when the sanitizer above
+        # rewrote characters the Moxfield name contained (':', emoji, ...).
+        # The pretty name is preserved as DisplayName= for the status CLI;
+        # bare pastes with no Name= get one synthesized from the stem.
+        from ..dck_meta import stamp_name_preserving_display
+        deck_text_out = stamp_name_preserving_display(
+            deck_text_out, target.stem,
+        )
         try:
             # Defensive: a fresh checkout or first-run-after-config-change
             # may not have created the deck dir yet. Create parents so
@@ -204,9 +237,11 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         outcomes tell the UI what to render. 400 only on bad input.
         502 when EVERY url failed (likely network down).
         """
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         urls = payload.get("urls")
@@ -275,9 +310,11 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             })
 
         # PUT — update / clear the Moxfield URL.
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
 
         url = (payload.get("moxfield_url") or "").strip()
@@ -334,7 +371,17 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
               "in_local_only": [...],   # cards in our copy, not Moxfield
               "in_remote_only": [...],  # cards on Moxfield, not local
               "matched": int,
+              "commander_changed": bool,  # [Commander] section drifted
+              "local_commanders": [...],  # names in our [Commander]
+              "remote_commanders": [...], # names in Moxfield's
             }
+
+        The commander_* fields exist because ``diff_deck_text`` only
+        reads the [Main] section — a commander swap on Moxfield (e.g.
+        the user re-helmed the deck) used to report "no drift" here,
+        which is exactly the change that invalidates every sim result
+        and EDHREC recommendation downstream. Additive fields only, so
+        pre-existing consumers of the response keep working.
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
@@ -365,12 +412,35 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
 
         from ..compare_versions import diff_deck_text
         diff = diff_deck_text(text, remote_text)
+
+        # diff_deck_text is [Main]-only by design (it diffs the 99),
+        # so compare the [Commander] section separately. Reuses
+        # intent's parser — it already strips qty prefixes and
+        # ``|SET|CN`` edition suffixes, so a reprint on Moxfield
+        # doesn't false-positive as a commander swap; only a NAME
+        # change does. Compare as case-folded sets: partner
+        # commanders can legitimately appear in either order, and
+        # to_dck vs. our importer may disagree on casing.
+        from ..intent import _parse_commander_names
+        local_commanders = _parse_commander_names(text)
+        remote_commanders = _parse_commander_names(remote_text)
+        commander_changed = (
+            {c.casefold() for c in local_commanders}
+            != {c.casefold() for c in remote_commanders}
+        )
+
         return jsonify({
             "deck": deck_id,
             "source_url": f"https://moxfield.com/decks/{mox_id}",
             "in_local_only": diff["removed"],
             "in_remote_only": diff["added"],
             "matched": int(diff["unchanged_count"][0]) if diff["unchanged_count"] else 0,
+            # Additive fields (2026-07 fix) — see docstring. Old and
+            # new names ship alongside the bool so the UI can say
+            # WHICH commander changed, not just that one did.
+            "commander_changed": commander_changed,
+            "local_commanders": local_commanders,
+            "remote_commanders": remote_commanders,
         })
 
     @bp.route("/api/moxfield_format")
@@ -418,10 +488,23 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
             return jsonify({"error": "deck not found"}), 404
-        try:
-            bracket_raw = request.args.get("bracket")
-            bracket = int(bracket_raw) if bracket_raw else None
-        except ValueError:
+        # Explicitly-provided brackets must be a real Commander bracket
+        # (1..5) — silently falling back to the filename on garbage hid
+        # client bugs and made the warnings below reflect a bracket the
+        # caller never asked about. Absent means "use the filename".
+        bracket_raw = request.args.get("bracket")
+        if bracket_raw:
+            try:
+                bracket = int(bracket_raw)
+            except ValueError:
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
+            if bracket not in (1, 2, 3, 4, 5):
+                return jsonify({
+                    "error": "bracket must be an integer 1..5",
+                }), 400
+        else:
             bracket = None
         # Default to the deck filename's [B?] suffix.
         if bracket is None:
@@ -459,8 +542,15 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             if m:
                 names.append(m.group(1).strip())
 
-        # Cross-reference Game Changers list.
-        present_gc = sorted({n for n in names if n in gc_set})
+        # Cross-reference Game Changers list. Case-folded membership:
+        # the GC list ships canonical casing but deck files are user-
+        # or importer-authored ("Rhystic study" happens), and
+        # deck_dashboard._count_game_changers already lower-cases —
+        # exact-case matching here made the audit count disagree with
+        # the dashboard tile for the same deck. Displayed names keep
+        # the deck line's original casing.
+        gc_lc = {g.lower() for g in gc_set}
+        present_gc = sorted({n for n in names if n.lower() in gc_lc})
 
         # Banned-in-Commander list. We use commander_builder.doctor's
         # check if available, else hand-roll a small core list.

@@ -86,6 +86,13 @@ class ABResult:
     games: int = 0
     avg_turns_a: float = 0.0
     avg_turns_b: float = 0.0
+    # How many games back each avg_turns_* mean: wins with a KNOWN
+    # end_turn and resolved seat. Timeout-salvaged wins carry no end_turn,
+    # so these can be smaller than wins_a/wins_b — run_ab_parallel must
+    # weight chunk means by THESE counts (weighting by wins skewed the
+    # recombined average whenever a chunk held salvaged wins).
+    turn_samples_a: int = 0
+    turn_samples_b: int = 0
     status: str = _AB_STATUS_PENDING
     error: Optional[str] = None
     duration_sec: float = 0.0
@@ -93,23 +100,16 @@ class ABResult:
     # debugging seat-order alternation and for showing the user which
     # filler decks the harness picked.
     seat_orders: list[list[str]] = field(default_factory=list)
+    # Draw-policy label (2026-07-19): this harness resolves turn-cap draws
+    # to the surviving life leader and credits them as wins (operator
+    # verdict-scoring policy point 1). Compare-based reports
+    # (ComparisonReport / MatchupReport / meta_test) count 'plain_draw'
+    # instead — the label lets downstream analysis tell the two apart.
+    # Label only; no behavior change.
+    draw_policy: str = "resolve_survivor_leader"
 
     def to_dict(self) -> dict:
         return asdict(self)
-
-
-def _ab_deck_name_for_match(deck_path: Path) -> str:
-    """Normalize a deck path to the name Forge writes into Match Result
-    lines. The runner accepts filename-style decks (e.g.
-    ``[USER] Goblin [B4].dck``) but the parser keys on the deck's
-    internal Name= field, which strips the [USER] prefix and the
-    `.dck`/[B<n>] suffix. log_parser._normalize encodes that mapping —
-    reuse it so the test fakes and the production path stay aligned."""
-    # Imported lazily to avoid a module-level cycle (log_parser depends
-    # on nothing in forge_runner, but downstream callers may have
-    # patched things at import time).
-    from .log_parser import _normalize
-    return _normalize(deck_path.stem)
 
 
 def run_ab_simulation(
@@ -252,10 +252,15 @@ def run_ab_simulation(
             # Finalize avg_turns from the games completed BEFORE the timeout —
             # otherwise a batch that ran several decisive games then looped on
             # the last one reports avg_turns_a/b = 0.0 (silent data loss).
+            # turn_samples_* records how many games back each mean — the
+            # salvaged win just credited above has NO end_turn, which is
+            # exactly why parallel recombination can't weight by wins.
             if a_turns:
                 result.avg_turns_a = round(sum(a_turns) / len(a_turns), 2)
             if b_turns:
                 result.avg_turns_b = round(sum(b_turns) / len(b_turns), 2)
+            result.turn_samples_a = len(a_turns)
+            result.turn_samples_b = len(b_turns)
             result.duration_sec = round((time.monotonic() - started), 2)
             return result
 
@@ -311,6 +316,8 @@ def run_ab_simulation(
         result.avg_turns_a = round(sum(a_turns) / len(a_turns), 2)
     if b_turns:
         result.avg_turns_b = round(sum(b_turns) / len(b_turns), 2)
+    result.turn_samples_a = len(a_turns)
+    result.turn_samples_b = len(b_turns)
     result.status = _AB_STATUS_DONE
     result.duration_sec = round((time.monotonic() - started), 2)
     return result
@@ -352,6 +359,10 @@ class GauntletResult:
     error: Optional[str] = None
     duration_sec: float = 0.0
     seat_orders: list[list[str]] = field(default_factory=list)
+    # Same draw-resolution policy label as ABResult — this harness also
+    # resolves turn-cap draws to the surviving life leader ('draws' here
+    # only counts games with NO resolvable leader). Label only.
+    draw_policy: str = "resolve_survivor_leader"
 
 
 def run_gauntlet_simulation(
@@ -765,17 +776,24 @@ def run_ab_parallel(
         result.wins_b += res.wins_b
         result.games += res.games
         result.seat_orders.extend(res.seat_orders)
-        # Weight each chunk's avg_turns by the wins it averaged over, so the
-        # combined mean stays a true per-win average (not a mean of means).
-        a_turn_weight += res.avg_turns_a * res.wins_a
-        b_turn_weight += res.avg_turns_b * res.wins_b
+        result.turn_samples_a += res.turn_samples_a
+        result.turn_samples_b += res.turn_samples_b
+        # Weight each chunk's avg_turns by its turn-SAMPLE count — the games
+        # that actually entered that chunk's mean (wins with a known
+        # end_turn) — so the combined mean is a true per-sample average.
+        # Weighting by wins was wrong: a timeout-salvaged win has NO
+        # end_turn, so a chunk's wins can exceed its samples and its mean
+        # got over-weighted (or, with avg_turns=0.0 from an all-salvage
+        # chunk, dragged the combined mean toward zero).
+        a_turn_weight += res.avg_turns_a * res.turn_samples_a
+        b_turn_weight += res.avg_turns_b * res.turn_samples_b
         if res.error:
             errors.append(f"chunk {ci} ({res.status}): {res.error}")
 
-    if result.wins_a:
-        result.avg_turns_a = round(a_turn_weight / result.wins_a, 2)
-    if result.wins_b:
-        result.avg_turns_b = round(b_turn_weight / result.wins_b, 2)
+    if result.turn_samples_a:
+        result.avg_turns_a = round(a_turn_weight / result.turn_samples_a, 2)
+    if result.turn_samples_b:
+        result.avg_turns_b = round(b_turn_weight / result.turn_samples_b, 2)
     result.duration_sec = round((time.monotonic() - started), 2)
 
     # Status precedence: any genuine failure -> failed (wins from completed

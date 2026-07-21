@@ -252,6 +252,212 @@ def test_turn_cap_draw_with_tied_top_life_stays_a_draw():
     assert g.resolved_is_draw is True
 
 
+# --- Non-life eliminations ("Game Outcome: ... has lost <reason>") ----------
+#
+# Real headless Forge logs (vendor/forge*/userdata/forge*.log) emit a per-seat
+# outcome block at game end:
+#   Game Outcome: Turn 20
+#   Game Outcome: Ai(1)-X has won because all opponents have lost   <- buggy
+#   Game Outcome: Ai(2)-Y has lost because life total reached 0     <- reliable
+# Commander damage / poison / mill / spell losses use the same "has lost" stem
+# but leave the seat at POSITIVE life, invisible to the Life: stream.
+
+
+def test_game_outcome_lost_line_marks_elimination_at_positive_life():
+    """A commander-damage loss ends a seat at positive life. The 'has lost'
+    outcome line must set eliminated=True even though life never hit 0, and
+    the reason tail is preserved."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 35\n"     # positive life, but dead below
+        "Life: Life: Ai(2)-B 40 > 30\n"
+        "Game Outcome: Turn 12\n"
+        "Game Outcome: Ai(1)-A has lost due to accumulation of 21 damage from generals\n"
+        "Game Outcome: Ai(2)-B has won because all opponents have lost\n"
+        "Game Result: Game 1 ended in 60000 ms. Ai(2)-B has won!\n"
+    )
+    g = analyze(log).games[0]
+    a = next(d for d in g.deck_stats if d.seat == 1)
+    b = next(d for d in g.deck_stats if d.seat == 2)
+    assert a.ending_life == 35              # positive — the old blind spot
+    assert a.eliminated is True
+    assert a.loss_reason == "due to accumulation of 21 damage from generals"
+    # eliminated_turn stays None: the outcome block fires at game END, so
+    # it carries no information about WHEN the commander kill landed.
+    assert a.eliminated_turn is None
+    assert b.eliminated is False
+    assert b.loss_reason is None
+    # Decisive game: winner still comes from the Game Result line.
+    assert g.winner_seat == 2
+
+
+def test_mill_out_loss_line_marks_elimination():
+    """'has lost trying to draw cards from empty library' has no 'because'
+    connective — the parser must match on the bare 'has lost' stem."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 33\n"
+        "Game Outcome: Turn 9\n"
+        "Game Outcome: Ai(1)-A has lost trying to draw cards from empty library\n"
+        "Game Result: Game 1 ended in 45000 ms. Ai(2)-B has won!\n"
+    )
+    g = analyze(log).games[0]
+    a = next(d for d in g.deck_stats if d.seat == 1)
+    assert a.eliminated is True
+    assert a.loss_reason == "trying to draw cards from empty library"
+
+
+def test_turn_cap_draw_excludes_commander_damage_victim_from_life_leader():
+    """THE bug: seat 1 dies to commander damage at 35 life (the highest
+    ending total on the table). Pre-fix, _resolve_life_leader crowned it the
+    turn-cap-draw winner. It must be excluded; the leader among LIVING seats
+    (seat 2 @ 30) wins instead."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 35\n"     # highest life on the table...
+        "Life: Life: Ai(2)-B 40 > 30\n"
+        "Life: Life: Ai(3)-C 40 > 12\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Outcome: Ai(1)-A has lost due to accumulation of 21 damage from generals\n"
+        "Game Result: Game 1 ended in 240000 ms\n"  # no "has won!" clause
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    a = next(d for d in g.deck_stats if d.seat == 1)
+    assert a.eliminated is True and a.ending_life == 35
+    # ...but a dead seat can't lead: seat 2 is the living life leader.
+    assert g.resolved_winner_seat == 2
+    assert g.resolved_winner_name == "B"
+    assert g.resolved_is_draw is False
+
+
+def test_turn_cap_draw_sole_survivor_wins_even_when_not_life_leader():
+    """Turn-cap draw where the ONLY living seat has the LOWEST life: seat 3
+    at 4 life survives while seats 1 and 2 died (commander damage at positive
+    life; life to 0). The survivor must win the resolution — the higher
+    ending totals belong to dead players."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 38\n"     # dies to commander damage below
+        "Life: Life: Ai(2)-B 40 > 0\n"      # dies to life loss
+        "Life: Life: Ai(3)-C 40 > 4\n"      # alive, lowest life
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Outcome: Ai(1)-A has lost due to accumulation of 21 damage from generals\n"
+        "Game Outcome: Ai(2)-B has lost because life total reached 0\n"
+        "Game Result: Game 1 ended in 240000 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    assert g.resolved_winner_seat == 3
+    assert g.resolved_winner_name == "C"
+    assert g.resolved_is_draw is False
+
+
+def test_turn_cap_draw_all_seats_lost_lines_stays_a_true_draw():
+    """If every seat carries a 'has lost' outcome line (mutual destruction),
+    nobody may be crowned — resolved winner stays None and downstream
+    consumers (run_ab_simulation / run_gauntlet_simulation) keep it a draw."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 22\n"
+        "Life: Life: Ai(2)-B 40 > 18\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Outcome: Ai(1)-A has lost due to effect of spell 'Door to Nothingness'\n"
+        "Game Outcome: Ai(2)-B has lost because of obtaining 10 poison counters\n"
+        "Game Result: Game 1 ended in 240000 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    assert g.resolved_winner_seat is None
+    assert g.resolved_is_draw is True
+
+
+def test_cap_stop_survivors_are_not_marked_lost_real_log_shape():
+    """Verified against real cap-stopped games (2026-07-20, see the
+    evidence comment in game_analyzer._summarize_game): when Forge stops a
+    slow match, SURVIVING seats get the (ignored, known-buggy) 'has won
+    because all opponents have lost' line — never a 'has lost' line. Only
+    genuinely-eliminated seats carry 'has lost because life total reached
+    0'. Shape mirrors vendor/forge10/userdata/forge.log (seats 1+2 dead,
+    3+4 alive at the cap), with the Game Result winner clause dropped to
+    exercise the draw-resolution path. Survivors must stay un-eliminated
+    so the life leader among them is crowned — the feared all-seats-lost
+    degradation to a plain draw must not happen."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 0\n"
+        "Life: Life: Ai(2)-B 40 > 0\n"
+        "Life: Life: Ai(3)-C 40 > 25\n"
+        "Life: Life: Ai(4)-D 40 > 12\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 21\n"
+        "Game Outcome: Ai(1)-A has lost because life total reached 0\n"
+        "Game Outcome: Ai(2)-B has lost because life total reached 0\n"
+        "Game Outcome: Ai(3)-C has won because all opponents have lost\n"
+        "Game Outcome: Ai(4)-D has won because all opponents have lost\n"
+        "Game Result: Game 1 ended in 120175 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    dead = [d for d in g.deck_stats if d.eliminated]
+    # ONLY the two genuine eliminations — the cap did not mark survivors.
+    assert sorted(d.seat for d in dead) == [1, 2]
+    # Draw resolution stays intact: the living life leader (seat 3 @ 25)
+    # is crowned instead of the game silently degrading to a plain draw.
+    assert g.resolved_winner_seat == 3
+    assert g.resolved_winner_name == "C"
+    assert g.resolved_is_draw is False
+
+
+def test_cap_stop_with_zero_lost_lines_keeps_all_seats_alive():
+    """The other real cap-stop shape (vendor/forge2/userdata/forge0.log):
+    the match hits the cap with ALL FOUR seats alive — the outcome block
+    contains ZERO 'has lost' lines, all four read 'has won because all
+    opponents have lost'. Every seat must stay un-eliminated and the
+    unique life leader resolves the draw."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 31\n"
+        "Life: Life: Ai(2)-B 40 > 17\n"
+        "Life: Life: Ai(3)-C 40 > 8\n"
+        "Life: Life: Ai(4)-D 40 > 22\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 20\n"
+        "Game Outcome: Ai(1)-A has won because all opponents have lost\n"
+        "Game Outcome: Ai(2)-B has won because all opponents have lost\n"
+        "Game Outcome: Ai(3)-C has won because all opponents have lost\n"
+        "Game Outcome: Ai(4)-D has won because all opponents have lost\n"
+        "Game Result: Game 1 ended in 120112 ms\n"
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is True
+    assert all(not d.eliminated for d in g.deck_stats)
+    assert g.resolved_winner_seat == 1   # 31 life, strict maximum
+    assert g.resolved_winner_name == "A"
+
+
+def test_truncated_log_fallback_crowns_sole_survivor_not_life_leader():
+    """No 'has won!' clause on Game Result and no draw marker (truncated
+    log): the fallback may only crown the SOLE seat with no elimination
+    signal. Here the life leader (seat 1) died to commander damage, so the
+    surviving seat 2 gets the win despite lower life."""
+    log = (
+        "Turn: Turn 1 (Ai(1)-A)\n"
+        "Life: Life: Ai(1)-A 40 > 33\n"
+        "Life: Life: Ai(2)-B 40 > 11\n"
+        "Game Outcome: Turn 30\n"
+        "Game Outcome: Ai(1)-A has lost due to accumulation of 21 damage from generals\n"
+        "Game Result: Game 1 ended in 180000 ms\n"  # no "has won!" clause
+    )
+    g = analyze(log).games[0]
+    assert g.is_draw is False
+    assert g.winner_seat == 2
+    assert g.winner_name == "B"
+
+
 def test_turn_cap_draw_does_not_crown_eliminated_seat():
     """If the highest-ending_life seat was ELIMINATED (life hit <= 0), it must
     not be crowned the draw winner. Here all three seats died (life <= 0), so

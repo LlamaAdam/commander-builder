@@ -9,6 +9,10 @@ detailed metrics ``update_iteration_sim`` persists.
 Public symbols:
 
   ``_DEFAULT_SIM_MARGIN``         — minimum delta to call kept/reverted.
+  ``EXPECTED_DECISIVE_FRACTION``  — expected decisive share of TOTAL pod
+                                    games (filler seats win the rest).
+  ``min_sim_games_for_verdict()`` — smallest --sim-games whose expected
+                                    decisive count reaches the verdict gate.
   ``_verdict_from_ab(ab_result)`` — pure ABResult → verdict mapping.
   ``_ab_to_iteration_fields(...)``— project ABResult into the
                                     update_iteration_sim kwargs shape.
@@ -25,6 +29,8 @@ the orchestrator under the 800-line guideline. Re-exported from
 """
 from __future__ import annotations
 
+import math
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +47,36 @@ _DEFAULT_SIM_MARGIN = 1
 # curator swap actually has. Below the threshold the verdict is 'inconclusive'
 # rather than a confident kept/reverted that a single-game flip could invert.
 MIN_DECISIVE_GAMES_FOR_VERDICT = 20
+
+# Unit converter between --sim-games and the gate above. --sim-games is
+# TOTAL 4-player-pod games, but the gate counts DECISIVE games -- games
+# won by the head-to-head pair (old deck or new deck), because only
+# those move wins_a/wins_b. The pod seats FOUR decks: old, new, and two
+# bracket-matched fillers (_pick_filler_decks deliberately picks
+# competitive opponents). With four evenly matched seats each wins ~1/4
+# of the games, so the pair together takes ~2/4 = 0.5 of the total and
+# the two filler seats absorb the other half (true turn-cap draws are a
+# rounding error next to that -- filler wins, not draws, are the drain).
+# No recorded soak run in this repo measures the pair share more
+# precisely, so we use the seat-symmetry estimate 0.5. Comparing
+# sim_games directly against MIN_DECISIVE_GAMES_FOR_VERDICT is a UNITS
+# error: 25 total games looks comfortably above the 20-decisive gate
+# but actually yields only ~12-13 decisive -- structurally
+# 'inconclusive' in expectation.
+EXPECTED_DECISIVE_FRACTION = 0.5
+
+
+def min_sim_games_for_verdict() -> int:
+    """Smallest --sim-games (TOTAL pod games) whose EXPECTED decisive
+    count (total * EXPECTED_DECISIVE_FRACTION) reaches the
+    MIN_DECISIVE_GAMES_FOR_VERDICT gate. Currently ceil(20 / 0.5) = 40.
+
+    This is an expectation, not a guarantee -- an unlucky filler streak
+    can still leave a 40-game run under 20 decisive -- so callers that
+    want headroom should budget a few games above this floor (improve's
+    default is 45).
+    """
+    return math.ceil(MIN_DECISIVE_GAMES_FOR_VERDICT / EXPECTED_DECISIVE_FRACTION)
 
 
 def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
@@ -83,21 +119,36 @@ def _ab_to_iteration_fields(ab_result) -> dict:
     """Extract win_rate_old / win_rate_new / margin / sim_report from
     an ABResult into the shape ``update_iteration_sim`` expects.
 
-    Win rates are computed as wins/total_games (ignoring draws since
-    Forge's AI rarely produces them). When the sim was skipped or
-    games=0, win rates are None -- caller passes None to
-    ``update_iteration_sim`` which preserves existing column values.
+    Win-rate convention (2026-07-19, see knowledge_log's schema docstring):
+    wins / DECISIVE games, where decisive = wins_a + wins_b -- the same
+    denominator ``_verdict_from_ab`` gates on. The old wins/games denominator
+    counted filler-won and unresolved-draw games the head-to-head pair can
+    never "win", deflating both rates relative to the other knowledge_log
+    writers (iteration_loop, save_iteration) and making the columns
+    incomparable across runs.
+
+    When decisive == 0 (all games drew or went to fillers -- or the sim was
+    skipped with games=0) the win_rate keys are OMITTED: the caller passes
+    the fields straight into ``update_iteration_sim``, which leaves absent
+    columns untouched, so a fresh 'pending' row keeps its NULL win rates
+    rather than recording a fabricated 0.0/0.0.
     """
+    from .knowledge_log import decisive_win_rate
+
     fields: dict = {
         "sim_report": ab_result.to_dict() if hasattr(ab_result, "to_dict") else None,
     }
     total = getattr(ab_result, "games", 0) or 0
+    wins_a = getattr(ab_result, "wins_a", 0) or 0
+    wins_b = getattr(ab_result, "wins_b", 0) or 0
     if total > 0:
-        wins_a = getattr(ab_result, "wins_a", 0) or 0
-        wins_b = getattr(ab_result, "wins_b", 0) or 0
-        fields["win_rate_old"] = round(wins_a / total, 4)
-        fields["win_rate_new"] = round(wins_b / total, 4)
+        # Margin is defined whenever the sim actually ran (0 is a real
+        # observation there), independent of whether any game was decisive.
         fields["margin"] = wins_b - wins_a
+    decisive = wins_a + wins_b
+    if decisive > 0:
+        fields["win_rate_old"] = decisive_win_rate(wins_a, decisive)
+        fields["win_rate_new"] = decisive_win_rate(wins_b, decisive)
     return fields
 
 
@@ -260,6 +311,34 @@ def _run_sim_and_record(
                       f"{type(exc).__name__}: {exc}", flush=True)
         return None, msg, "pending"
 
+    # LOUD sub-threshold warning, in the RIGHT units: --sim-games is
+    # TOTAL pod games but the verdict gate counts DECISIVE games, and
+    # the two filler seats win ~half the pod games (see
+    # EXPECTED_DECISIVE_FRACTION). So the comparison must be
+    # expected-decisive (sim_games * fraction) vs the gate -- comparing
+    # raw sim_games to the gate (the pre-2026-07-20 bug) let 25 total
+    # games pass silently while every verdict still landed
+    # 'inconclusive' (~12-13 decisive < 20). Below the gate the Forge
+    # time is spent on a verdict that -- in expectation -- can't
+    # resolve. Printed on stderr deliberately: --json mode keeps stdout
+    # machine-parseable, and commander-improve captures auto-curate's
+    # stdout per round -- stderr is the only channel that reaches the
+    # operator in all three invocation modes.
+    expected_decisive = args.sim_games * EXPECTED_DECISIVE_FRACTION
+    if expected_decisive < MIN_DECISIVE_GAMES_FOR_VERDICT:
+        print(
+            f"[sim] WARNING: --sim-games counts TOTAL 4-player pod games, "
+            f"but the verdict gate counts DECISIVE games (won by the old "
+            f"or new deck; the 2 filler seats take ~half the wins). "
+            f"{args.sim_games} total pod games ~= "
+            f"{int(expected_decisive)} expected decisive, below the "
+            f"{MIN_DECISIVE_GAMES_FOR_VERDICT}-decisive gate "
+            f"(MIN_DECISIVE_GAMES_FOR_VERDICT) -- expect 'inconclusive', "
+            f"not kept/reverted/neutral. A verdict needs "
+            f"{MIN_DECISIVE_GAMES_FOR_VERDICT} decisive ~= "
+            f"{min_sim_games_for_verdict()}+ total games.",
+            file=sys.stderr, flush=True,
+        )
     if not args.json:
         print(f"[4/4] Running Forge A/B sim ({args.sim_games} games, "
               f"fillers={filler_names})...", flush=True)
@@ -273,6 +352,28 @@ def _run_sim_and_record(
     sim_payload = ab_result.to_dict()
     verdict = _verdict_from_ab(ab_result, margin=args.sim_margin)
     sim_fields = _ab_to_iteration_fields(ab_result)
+
+    # Post-sim honesty: the pre-sim warning above is an ESTIMATE
+    # (expected fraction 0.5); this reports the MEASURED outcome. When
+    # the sim completed but produced fewer decisive games than the gate,
+    # say exactly how many decisives the run actually got and what
+    # total-games budget a verdict needs -- "got 11 decisive of 25
+    # games" teaches the operator the real total->decisive conversion
+    # for their pod, instead of leaving them to wonder why a
+    # 25-games-looks-plenty run came back 'inconclusive'. Same stderr
+    # channel as the pre-sim warning, for the same three-invocation-mode
+    # reasons.
+    if ab_result.status == "done":
+        actual_decisive = (ab_result.wins_a or 0) + (ab_result.wins_b or 0)
+        if actual_decisive < MIN_DECISIVE_GAMES_FOR_VERDICT:
+            print(
+                f"[sim] got {actual_decisive} decisive of "
+                f"{ab_result.games} total games (filler seats/draws took "
+                f"the rest); a verdict needs "
+                f"{MIN_DECISIVE_GAMES_FOR_VERDICT} decisive ~= "
+                f"{min_sim_games_for_verdict()}+ total games.",
+                file=sys.stderr, flush=True,
+            )
 
     # Build a human-readable note that captures the sim status + result
     # for the iteration row's verdict_notes column. Future analysts /
@@ -361,6 +462,13 @@ def _log_auto_curate_iteration(
         "dropped_for_protection": list(proposal.dropped_for_protection),
         "dropped_for_color_identity": list(proposal.dropped_for_color_identity),
         "dropped_for_balance": list(proposal.dropped_for_balance),
+        # Pair-drops from apply-time decklist validation — each entry
+        # is {"cut": ..., "add": ...}. Persisted so iteration analysis
+        # can spot proposals the LLM built against a stale/imagined
+        # decklist (high pair-drop counts = curator quality signal).
+        "dropped_unmatched_cut": list(proposal.dropped_unmatched_cut),
+        "dropped_duplicate_add": list(proposal.dropped_duplicate_add),
+        "dropped_commander_add": list(proposal.dropped_commander_add),
         "padded_count": proposal.padded_count,
         "padded_breakdown": dict(proposal.padded_breakdown),
         "requested_adds": list(proposal.adds),

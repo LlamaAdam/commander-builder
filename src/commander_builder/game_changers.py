@@ -203,8 +203,16 @@ def load_game_changers(force_refresh: bool = False) -> set[str]:
 
 
 def is_game_changer(card_name: str) -> bool:
-    """Convenience wrapper — `True` if `card_name` is on the GC list."""
-    return card_name in load_game_changers()
+    """Convenience wrapper — `True` if `card_name` is on the GC list.
+
+    Case-insensitive: every other consumer of card-name sets in this
+    codebase folds case before membership tests (deck files, EDHREC
+    slugs, and user input all disagree on capitalization), and an
+    exact-case check here silently missed e.g. "smothering tithe".
+    casefold (not lower) for parity with how Python recommends caseless
+    matching; the GC list is small so folding it per call is cheap."""
+    folded = card_name.casefold()
+    return folded in {c.casefold() for c in load_game_changers()}
 
 
 if __name__ == "__main__":

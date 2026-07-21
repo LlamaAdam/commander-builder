@@ -30,6 +30,16 @@ from flask import Blueprint, Response, jsonify, render_template, request
 from ._image_cache import ALLOWED_SIZES, serve_image
 
 
+# Hard ceiling on the browser-error sink file (item: unbounded log
+# sink). /api/log_error appends caller-supplied text; without a cap a
+# hot error loop in the browser (or any local process spamming the
+# endpoint) grows _js_errors.log without bound and eats the disk. Past
+# the cap we silently stop writing — the endpoint is best-effort
+# diagnostics, so the client still gets a 200 and keeps running; the
+# operator truncates the file to resume logging. Module-level so tests
+# can monkeypatch a tiny cap.
+_JS_ERROR_LOG_MAX_BYTES = 5 * 1024 * 1024  # ~5 MB
+
 # Tunable for tests: how long to back off before retrying a 429.
 _CARD_IMAGE_429_RETRY_DELAY_SEC = 1.5
 
@@ -194,9 +204,11 @@ def make_meta_blueprint(
 
     @bp.route("/api/log_error", methods=["POST"])
     def log_error():
-        try:
-            payload = request.get_json(force=True) or {}
-        except Exception:
+        # silent=True (not force=True): the app-level before_request gate
+        # already guarantees Content-Type: application/json here, so
+        # parsing honors the header; malformed JSON -> None -> 400.
+        payload = request.get_json(silent=True)
+        if payload is None:
             return jsonify({"error": "expected JSON body"}), 400
         msg = (payload.get("message") or "").strip()
         if not msg:
@@ -216,6 +228,20 @@ def make_meta_blueprint(
         kind = _one_line((payload.get("kind") or "error")[:40])
         from datetime import datetime as _dt, timezone as _tz
         ts = _dt.now(_tz.utc).isoformat()
+        # Size cap: past _JS_ERROR_LOG_MAX_BYTES, skip the write but
+        # still 200 — the endpoint is best-effort diagnostics and a
+        # browser error-handler must never see its own error sink fail
+        # (that would recurse). ``logged: false`` tells a curious
+        # client why nothing landed. OSError on stat (racing rotate/
+        # delete) falls through to the append attempt below.
+        try:
+            if (
+                js_error_log.exists()
+                and js_error_log.stat().st_size >= _JS_ERROR_LOG_MAX_BYTES
+            ):
+                return jsonify({"logged": False, "reason": "log full"}), 200
+        except OSError:
+            pass
         # Append-only; never read from this endpoint.
         try:
             js_error_log.parent.mkdir(parents=True, exist_ok=True)

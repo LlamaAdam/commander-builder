@@ -29,6 +29,49 @@ def test_ref_destination_unknown_bracket(tmp_path):
     assert "[B?]" in p.name
 
 
+# --- _import_reference — Name= alignment (regression) ----------------------
+
+def test_import_reference_rewrites_name_to_ref_filename_stem(tmp_path):
+    """Regression: ``to_dck`` stamps the raw Moxfield/EDHREC deck name into
+    Name= while the file lands as ``[REF] <tag> <name> [Bn].dck``.
+    ``log_parser._normalize`` never strips the '[REF] <tag>' prefix, so the
+    normalized filename could never equal the normalized Name= — Forge's
+    Match Result wins for the reference were attributed to nobody, every
+    reference scored 0, and meta-test systematically flattered the user
+    deck. The importer must stamp the on-disk Name= to the filename stem."""
+    import re
+
+    from commander_builder.log_parser import _normalize
+    from commander_builder.meta_test import _import_reference
+
+    deck_json = {
+        "name": "Cool Reference Deck", "publicId": "mx-9", "bracket": 3,
+        "boards": {
+            "commanders": {"cards": {
+                "k1": {"quantity": 1, "card": {"name": "Hakbal"}},
+            }},
+            "mainboard": {"cards": {
+                "k2": {"quantity": 1, "card": {"name": "Sol Ring"}},
+            }},
+        },
+    }
+    ref = _import_reference(deck_json, "moxfield_top_likes", deck_dir=tmp_path)
+    path = tmp_path / ref.deck_filename
+    text = path.read_text(encoding="utf-8")
+
+    m = re.search(r"^Name=(.+)$", text, re.MULTILINE)
+    assert m, "reference deck must carry a Name= line"
+    # Forge reports Name=; compare_versions queries by filename. The two
+    # must normalize identically or the reference's wins vanish.
+    assert m.group(1) == path.stem
+    assert _normalize(m.group(1)) == _normalize(path.stem)
+    assert len(re.findall(r"^Name=", text, re.MULTILINE)) == 1
+    # Display name (used in the report header) keeps the human label.
+    assert ref.name == "Cool Reference Deck"
+    # Card content unaffected by the rewrite.
+    assert "Sol Ring" in text
+
+
 # --- _parse_main_card_names ------------------------------------------------
 
 def test_parse_main_card_names_strips_qty_and_set(tmp_path):
@@ -465,3 +508,188 @@ def test_extra_url_routes_moxfield_unchanged(tmp_path, monkeypatch):
     )
     assert len(refs) == 1
     assert refs[0].source == "manual"
+
+
+# --- run_meta_test — seat-parity alternation across references -------------
+
+def test_run_meta_test_alternates_seat_parity_across_references(
+    tmp_path, monkeypatch,
+):
+    """With the default filler_pairs=1 each comparison is a single pod, so
+    compare()'s intra-call seat alternation has nothing to alternate — the
+    user deck would sit in seat 1 (on the play, in Forge) for EVERY
+    reference. run_meta_test therefore shifts compare()'s seat_parity by
+    the reference index so the user's seat-1 share balances across the
+    whole meta-test batch instead."""
+    from commander_builder import meta_test as mt
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir(parents=True)
+    user = deck_dir / "[USER] Mine [B3].dck"
+    user.write_text(
+        "[metadata]\nName=Mine\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+
+    refs = [
+        mt.ReferenceDeck(
+            source="manual", moxfield_id=None, name=f"Ref{i}", bracket=3,
+            deck_filename=f"[REF] Ref{i} [B3].dck", main_cards=["Forest"],
+        )
+        for i in range(3)
+    ]
+    monkeypatch.setattr(mt, "_parse_commander_names_from_dck", lambda p: ["Cmdr"])
+    monkeypatch.setattr(mt, "fetch_reference_decks", lambda *a, **kw: refs)
+
+    captured: list[dict] = []
+
+    def fake_compare(**kwargs):
+        captured.append(kwargs)
+        return ComparisonReport(
+            old_deck=kwargs["old_deck"], new_deck=kwargs["new_deck"],
+            bracket=3, timestamp="x", mode="pod",
+            games_per_pod=kwargs["games_per_pod"],
+            old_stats=VersionStats(deck_filename=kwargs["old_deck"], wins=1),
+            new_stats=VersionStats(deck_filename=kwargs["new_deck"], wins=1),
+        )
+
+    monkeypatch.setattr(mt, "compare", fake_compare)
+
+    mt.run_meta_test(
+        user_deck=user.name, bracket=3,
+        out_dir=tmp_path / "_meta", deck_dir=deck_dir,
+    )
+
+    # One compare() per reference, parity alternating 0, 1, 0 — the user
+    # deck (old_deck) is seated first on even parities only.
+    assert [c["seat_parity"] for c in captured] == [0, 1, 0]
+    assert all(c["old_deck"] == user.name for c in captured)
+
+
+def test_run_meta_test_quiets_per_call_note_and_prints_one_aggregate(
+    tmp_path, monkeypatch, capsys,
+):
+    """Round 3: with filler_pairs=1 every per-reference compare() is a
+    single (odd) pod, so compare()'s odd-pod residual note would print once
+    per reference — N copies of a warning about a residual that is
+    deliberate and cancels across the batch. run_meta_test must (a) pass
+    suppress_seat_note=True to every compare() call and (b) print exactly
+    ONE aggregate seat-balance line built from the reports'
+    h2h_seat_balance fields."""
+    from commander_builder import meta_test as mt
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir(parents=True)
+    user = deck_dir / "[USER] Mine [B3].dck"
+    user.write_text(
+        "[metadata]\nName=Mine\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+    refs = [
+        mt.ReferenceDeck(
+            source="manual", moxfield_id=None, name=f"Ref{i}", bracket=3,
+            deck_filename=f"[REF] Ref{i} [B3].dck", main_cards=["Forest"],
+        )
+        for i in range(3)
+    ]
+    monkeypatch.setattr(mt, "_parse_commander_names_from_dck", lambda p: ["Cmdr"])
+    monkeypatch.setattr(mt, "fetch_reference_decks", lambda *a, **kw: refs)
+
+    captured: list[dict] = []
+
+    def fake_compare(**kwargs):
+        captured.append(kwargs)
+        # Mirror the real single-pod balance: even parity seats the user
+        # (old) first, odd parity seats the reference (new) first.
+        user_first = kwargs["seat_parity"] % 2 == 0
+        return ComparisonReport(
+            old_deck=kwargs["old_deck"], new_deck=kwargs["new_deck"],
+            bracket=3, timestamp="x", mode="pod",
+            games_per_pod=kwargs["games_per_pod"],
+            old_stats=VersionStats(deck_filename=kwargs["old_deck"], wins=1),
+            new_stats=VersionStats(deck_filename=kwargs["new_deck"], wins=1),
+            h2h_seat_balance={
+                "old_first": 1 if user_first else 0,
+                "new_first": 0 if user_first else 1,
+            },
+        )
+
+    monkeypatch.setattr(mt, "compare", fake_compare)
+
+    mt.run_meta_test(
+        user_deck=user.name, bracket=3,
+        out_dir=tmp_path / "_meta", deck_dir=deck_dir,
+    )
+
+    # Every compare() call was told to hold the per-call note.
+    assert all(c["suppress_seat_note"] is True for c in captured)
+    out = capsys.readouterr().out
+    # ONE aggregate line: parities 0,1,0 seat the user first in 2 of 3.
+    assert out.count("seat balance") == 1
+    assert "user deck took seat 1 (on the play) in 2 of 3" in out
+    assert "across 3 reference(s)" in out
+
+
+def test_run_meta_test_total_games_includes_filler_wins(tmp_path, monkeypatch):
+    """Honest totals (2026-07-19): user_record.total_games is ALL attributed
+    games played, not just user W + L + D — games a filler seat won used to
+    vanish from the total ('over 11 games' for a 20-game run). filler_wins
+    makes the arithmetic transparent: W + L + D + filler_wins == total."""
+    from commander_builder import meta_test as mt
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir(parents=True)
+    user = deck_dir / "[USER] Mine [B3].dck"
+    user.write_text(
+        "[metadata]\nName=Mine\n[Commander]\n1 Cmdr\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+    refs = [
+        mt.ReferenceDeck(
+            source="manual", moxfield_id=None, name=f"Ref{i}", bracket=3,
+            deck_filename=f"[REF] Ref{i} [B3].dck", main_cards=["Forest"],
+        )
+        for i in range(2)
+    ]
+    monkeypatch.setattr(mt, "_parse_commander_names_from_dck", lambda p: ["Cmdr"])
+    monkeypatch.setattr(mt, "fetch_reference_decks", lambda *a, **kw: refs)
+
+    def fake_compare(**kwargs):
+        # Per comparison: 10 attributed games — user 3, ref 4, 1 draw,
+        # and 2 won by the filler seats (10 - 3 - 4 - 1).
+        return ComparisonReport(
+            old_deck=kwargs["old_deck"], new_deck=kwargs["new_deck"],
+            bracket=3, timestamp="x", mode="pod",
+            games_per_pod=kwargs["games_per_pod"],
+            total_games=10, draws=1,
+            old_stats=VersionStats(deck_filename=kwargs["old_deck"], wins=3),
+            new_stats=VersionStats(deck_filename=kwargs["new_deck"], wins=4),
+        )
+
+    monkeypatch.setattr(mt, "compare", fake_compare)
+
+    report = mt.run_meta_test(
+        user_deck=user.name, bracket=3,
+        out_dir=tmp_path / "_meta", deck_dir=deck_dir,
+    )
+
+    rec = report.user_record
+    assert rec["user_wins"] == 6
+    assert rec["user_losses"] == 8
+    assert rec["draws"] == 2
+    assert rec["filler_wins"] == 4
+    assert rec["total_games"] == 20  # the TRUE games-played count
+    # W + L + D + filler == total: the arithmetic is transparent.
+    assert (rec["user_wins"] + rec["user_losses"] + rec["draws"]
+            + rec["filler_wins"]) == rec["total_games"]
+
+    # The summary line is honest about the total and shows filler wins.
+    text = format_report_text(report)
+    assert "over 20 games" in text
+    assert "4 won by filler seats" in text
+
+    # Draw-policy label rides along in the persisted dict shape.
+    assert report.to_dict()["draw_policy"] == "plain_draw"

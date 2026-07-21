@@ -39,3 +39,31 @@ def test_commander_list_is_diverse_and_sized():
     assert 25 <= len(mod.COMMANDERS) <= 35
     assert all(br in (3, 4, 5) for _, br in mod.COMMANDERS)
     assert len({c for c, _ in mod.COMMANDERS}) == len(mod.COMMANDERS)
+
+
+def test_adopt_v2_renames_and_restamps_name(tmp_path):
+    """The v2-rename fallback must restamp Name= after the rename. The
+    curator stamped Name= from the file's ORIGINAL stem; a bare rename()
+    breaks the dck_meta invariant (Name= == filename stem), and Forge
+    locates decks by Name= — a renamed-but-not-restamped v2 is a deck the
+    gauntlet can't load."""
+    src = tmp_path / "[USER] Korvold FP2 curatorname v2 [B5].dck"
+    src.write_text(
+        "[metadata]\nName=[USER] Korvold FP2 curatorname v2 [B5]\n"
+        "[Commander]\n1 Korvold, Fae-Cursed King\n[Main]\n1 Forest\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "[USER] Korvold FP2 v2 [B5].dck"
+
+    mod._adopt_v2(src, dest)
+
+    assert not src.exists()
+    assert dest.exists()
+    text = dest.read_text(encoding="utf-8")
+    # Name= now matches the NEW stem (the soak-pair contract filename)...
+    assert "Name=[USER] Korvold FP2 v2 [B5]\n" in text
+    # ...and the stale curator-stem Name= is gone.
+    assert "Name=[USER] Korvold FP2 curatorname v2 [B5]" not in text
+    # Card sections pass through untouched.
+    assert "1 Korvold, Fae-Cursed King" in text
+    assert "1 Forest" in text

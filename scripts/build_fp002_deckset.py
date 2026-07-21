@@ -29,6 +29,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from commander_builder.dck_meta import (
+    rewrite_name_to_stem, stamp_name_preserving_display,
+)
 from commander_builder.forge_runner import VENDOR_FORGE
 from commander_builder.moxfield_import import (
     find_top_liked_deck_for_commander, to_dck,
@@ -103,6 +106,21 @@ def _fetch_base(cmd: str, br: int) -> dict | None:
     return dj
 
 
+def _adopt_v2(src: Path, v2: Path) -> None:
+    """Rename a curator-named v2 into the soak-pair filename AND restamp
+    its ``Name=`` to the new stem.
+
+    WHY the restamp: the curator stamped ``Name=`` from the file's
+    ORIGINAL stem at write time (dck_meta invariant: Name= == filename
+    stem). A bare ``rename()`` silently breaks that invariant — Forge's
+    deck picker locates a deck by the ``Name=`` matching the filename we
+    pass on the sim command line, so a renamed-but-not-restamped v2 would
+    be a deck the gauntlet can't even load. ``rewrite_name_to_stem`` is
+    the canonical fix-after-rename helper (see dck_meta)."""
+    src.rename(v2)
+    rewrite_name_to_stem(v2)
+
+
 def _curate(base: Path, br: int, source: str) -> bool:
     """Run commander-auto-curate to write the paired v2. Returns True on rc 0."""
     cmd = [
@@ -152,7 +170,16 @@ def main(argv=None) -> int:
                 print("    no popular deck found -> SKIP commander", flush=True)
                 failed += 1
                 continue
-            base.write_text(to_dck(dj), encoding="utf-8")
+            # Stamp Name= from the FP2 filename stem. NOT for win
+            # attribution — the gauntlet has attributed wins by SEAT, not
+            # name, since e8777b6 — but Forge's own deck picker still
+            # locates a deck by the Name= matching the filename we pass,
+            # and to_dck's raw Moxfield name never matches
+            # "[USER] <short> FP2 [Bn]" (see dck_meta).
+            base.write_text(
+                stamp_name_preserving_display(to_dck(dj), base.stem),
+                encoding="utf-8",
+            )
             made_base += 1
             print(f"    + {base.name}  (moxfield: {dj.get('name')!r})", flush=True)
 
@@ -174,9 +201,14 @@ def main(argv=None) -> int:
                     if " v2 " in p.name and p.name.startswith(stem.split(" [B")[0])
                     and f"[B{br}]" in p.name)
                 if cand:
-                    cand[-1].rename(v2)
+                    # Capture the source name BEFORE the rename — after
+                    # _adopt_v2, cand[-1].name still prints the old string
+                    # (Path is immutable) but keeping the read explicit
+                    # avoids that trap biting a future edit.
+                    src_name = cand[-1].name
+                    _adopt_v2(cand[-1], v2)
                     made_v2 += 1
-                    print(f"    + {v2.name}  (renamed from {cand[-1].name})",
+                    print(f"    + {v2.name}  (renamed from {src_name})",
                           flush=True)
                 else:
                     print("    curate ran but no v2 found", flush=True)

@@ -862,7 +862,12 @@ def confidence_tier(count: int, total: int) -> int:
 # norms documented in STAPLES.md:
 #
 #   ramp: 8-10 standard, 12+ is bloat → threshold 10
-#   draw: 8-10 standard, 12+ is bloat → threshold 9
+#   draw: 8-10 standard, 12+ is bloat → threshold 10
+#     (was 9, raised 2026-07: a saturation ceiling BELOW the
+#     ROLE_TARGETS floor of 10 made the same audit say "needs more
+#     draw" while the redundancy guard refused every draw add — the
+#     ceiling must be >= the floor for every role; see the
+#     saturation-vs-target invariant test in test_staples.py)
 #   removal: 6-8 standard             → threshold 8
 #   wipe: 2-4 standard                → threshold 4
 #   protection: 3-5 standard          → threshold 5
@@ -881,7 +886,7 @@ def confidence_tier(count: int, total: int) -> int:
 # "too many of these" failure mode.
 ROLE_SATURATION_THRESHOLDS: dict[str, int] = {
     "ramp": 10,
-    "draw": 9,
+    "draw": 10,
     "removal": 8,
     "wipe": 4,
     "protection": 5,

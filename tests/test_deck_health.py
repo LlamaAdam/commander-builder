@@ -89,6 +89,24 @@ def test_count_mdfc_lands_finds_known_mdfcs():
     assert "Sol Ring" not in result["cards"]
 
 
+def test_count_mdfc_lands_includes_skyclave_cleric():
+    """Skyclave Cleric IS a ZNR MDFC (back face: Skyclave Basilica).
+
+    Regression: it was wrongly listed in the not-MDFC filter set inside
+    deck_health.py, so decks running it under-counted their MDFC land
+    equivalents. True non-MDFCs from the same curation pass (Felidar
+    Retreat) must stay excluded.
+    """
+    deck = (
+        "[Main]\n"
+        "1 Skyclave Cleric\n"
+        "1 Felidar Retreat\n"   # genuinely not an MDFC — stays filtered
+    )
+    result = deck_health.count_mdfc_lands(deck)
+    assert result["count"] == 1
+    assert result["cards"] == ["Skyclave Cleric"]
+
+
 def test_count_mdfc_lands_zero_when_none_present():
     """Deck with no MDFCs returns count=0 and empty card list."""
     deck = "[Main]\n1 Sol Ring\n1 Cultivate\n27 Mountain\n"
@@ -312,38 +330,52 @@ def test_compute_spell_density_returns_none_ratio_for_empty(fake_lookup):
     assert result["ratio"] is None
 
 
-def test_compute_spell_density_treats_missing_card_as_unknown(fake_lookup):
-    """Cards Scryfall doesn't return (typo, custom card, outage) are
-    counted in total_main_count but not in non_permanent_count -- the
-    type is unknown, can't classify."""
+def test_compute_spell_density_partial_failure_uses_successful_subset(
+    fake_lookup,
+):
+    """Cards Scryfall doesn't return (typo, custom card) still count in
+    total_main_count, but the RATIO is computed from the cards that
+    could be classified -- an unknown card must not silently count as
+    'permanent'. The miss count is surfaced via lookup_failures so the
+    UI can annotate the tile. (Half-or-fewer misses stay below the
+    outage threshold; see the all-fail test below.)"""
     fake_lookup["lightning bolt"] = "Instant"
     # "Madeup Card" is not in fake_lookup -> lookup returns None.
     deck = "[Main]\n1 Lightning Bolt\n1 Madeup Card\n"
     result = deck_health.compute_spell_density(deck)
+    assert result is not None  # 1 of 2 misses == half, NOT an outage
     assert result["non_permanent_count"] == 1
     assert result["total_main_count"] == 2
-    # 1/2 = 0.5 (the conservative interpretation -- unknown cards
-    # don't contribute to either side).
-    assert result["ratio"] == 0.5
+    # Ratio from the classified subset: 1 instant / 1 classified card.
+    assert result["ratio"] == 1.0
+    assert result["lookup_failures"] == 1
 
 
-def test_compute_spell_density_treats_scryfall_failure_as_unknown(
+def test_compute_spell_density_returns_none_when_all_lookups_fail(
     monkeypatch,
 ):
-    """If Scryfall is unreachable / throws, the per-card lookup
-    returns None and the card is counted as 'type unknown' rather
-    than crashing the whole signal."""
+    """Module contract: 'Scryfall unreachable -> the signal returns
+    None instead of a misleading zero.' Pre-fix, an all-lookups-fail
+    outage yielded ratio == 0.0 ('0% spells', warn styling) on a
+    healthy deck."""
     def _boom(name, **_kw):
         raise ConnectionError("Scryfall down")
     monkeypatch.setattr(
         "commander_builder.scryfall_client.lookup_card", _boom,
     )
+    deck = "[Main]\n1 Lightning Bolt\n1 Sol Ring\n1 Forest\n"
+    assert deck_health.compute_spell_density(deck) is None
+
+
+def test_compute_spell_density_healthy_path_has_no_failures(fake_lookup):
+    """When every lookup succeeds the shape carries lookup_failures == 0
+    and the ratio matches the classic full-deck computation."""
+    fake_lookup["lightning bolt"] = "Instant"
+    fake_lookup["sol ring"] = "Artifact"
     deck = "[Main]\n1 Lightning Bolt\n1 Sol Ring\n"
     result = deck_health.compute_spell_density(deck)
-    # Both cards unclassified -> non_permanent=0, total=2, ratio=0.
-    assert result["non_permanent_count"] == 0
-    assert result["total_main_count"] == 2
-    assert result["ratio"] == 0.0
+    assert result["ratio"] == 0.5
+    assert result["lookup_failures"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +590,43 @@ def test_count_mana_sinks_does_not_double_count_x_spell_with_activation(monkeypa
     result = deck_health.count_mana_sinks(deck)
     assert result["count"] == 1
     assert result["cards"] == ["Walking Ballista"]
+
+
+def test_count_mana_sinks_returns_none_when_all_lookups_fail(monkeypatch):
+    """Same outage contract as spell density: an all-lookups-fail
+    Scryfall outage returns None, NOT {'count': 0} -- pre-fix the zero
+    rendered as a warn-flavored 'no mana sinks' on unclassifiable
+    decks."""
+    def _boom(name, **_kw):
+        raise ConnectionError("Scryfall down")
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _boom,
+    )
+    deck = "[Main]\n1 Genesis Wave\n1 Walking Ballista\n"
+    assert deck_health.count_mana_sinks(deck) is None
+
+
+def test_count_mana_sinks_partial_failure_counts_successes(monkeypatch):
+    """Half-or-fewer lookup misses stay below the outage threshold:
+    the count comes from the cards that DID resolve, and the miss
+    count is surfaced via lookup_failures."""
+    def _fake(name, **_kw):
+        if name.lower() == "madeup card":
+            return None  # simulated single-card miss
+        return {
+            "name": name,
+            "type_line": "Sorcery",
+            "mana_cost": "{X}{G}{G}{G}",  # X-cost -> mana sink
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    deck = "[Main]\n1 Genesis Wave\n1 Madeup Card\n"
+    result = deck_health.count_mana_sinks(deck)
+    assert result is not None  # 1 of 2 misses == half, NOT an outage
+    assert result["count"] == 1
+    assert result["cards"] == ["Genesis Wave"]
+    assert result["lookup_failures"] == 1
 
 
 # ---------------------------------------------------------------------------

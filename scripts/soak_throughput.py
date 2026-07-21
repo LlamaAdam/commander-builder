@@ -70,7 +70,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--games", type=int, default=5, help="Games per A/B sim.")
     p.add_argument("--out", type=Path, default=VENDOR_FORGE.parent / "_soak_throughput.jsonl")
     p.add_argument("--summary", type=Path, default=VENDOR_FORGE.parent / "_soak_summary.json")
+    p.add_argument("--force", action="store_true",
+                   help="Overwrite an existing non-empty --out JSONL. "
+                        "Without this flag the script refuses, so hours of "
+                        "prior soak rows can't be truncated by a re-run.")
     args = p.parse_args(argv)
+
+    # Refuse to clobber prior results. The truncation below used to be
+    # unconditional, so re-launching with the same --out silently threw
+    # away every row from the previous soak. This is purely the LOCAL
+    # file-open behavior — nothing about share/publish paths changes.
+    try:
+        out_has_rows = args.out.stat().st_size > 0
+    except OSError:  # missing file (or unreadable) — nothing to protect
+        out_has_rows = False
+    if out_has_rows and not args.force:
+        raise SystemExit(
+            f"refusing to overwrite existing non-empty {args.out} — "
+            f"pass --force to truncate it, or point --out elsewhere"
+        )
 
     pairs = _deck_pairs()
     if not pairs:
@@ -171,13 +189,22 @@ def main(argv: list[str] | None = None) -> int:
                   f"({sims_done/elapsed*3600:.0f} sims/hr)", flush=True)
 
     write_summary(final=True)
-    el = time.time() - start
+    # Guard el against a 0.0 wall-clock delta (immediate exit + coarse
+    # Windows timer) so the games/hr math below can't divide by zero.
+    el = max(time.time() - start, 1e-9)
+    sims_per_hour = sims_done / el * 3600
     print(f"[soak] DONE: {sims_done} sims / {games_done} games in {el/3600:.2f}h "
-          f"= {games_done/el*3600:.0f} games/hr, {sims_done/el*3600:.1f} sims/hr",
+          f"= {games_done/el*3600:.0f} games/hr, {sims_per_hour:.1f} sims/hr",
           flush=True)
-    print(f"[soak] projection: ~200 rows in "
-          f"{200/(sims_done/el*3600):.1f}h, ~2000 rows in "
-          f"{2000/(sims_done/el*3600):.1f}h", flush=True)
+    # sims_done == 0 (budget expired before any sim finished, or every
+    # sim failed) used to ZeroDivisionError right here at exit — after
+    # the whole soak had already run — losing the DONE/summary output.
+    if sims_per_hour > 0:
+        print(f"[soak] projection: ~200 rows in "
+              f"{200/sims_per_hour:.1f}h, ~2000 rows in "
+              f"{2000/sims_per_hour:.1f}h", flush=True)
+    else:
+        print("[soak] projection: n/a (no sims completed)", flush=True)
     return 0
 
 

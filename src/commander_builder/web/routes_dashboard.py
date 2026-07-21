@@ -78,6 +78,11 @@ def make_dashboard_blueprint(
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be an integer 1..5"}), 400
+        # Enforce the range the error message above already promises —
+        # an out-of-range bracket (9, -1) would flow into the power-
+        # bracket heuristic and render nonsense tiles.
+        if bracket is not None and bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be an integer 1..5"}), 400
         # Default to the [B?] suffix in the filename when the request
         # didn't explicitly pass a bracket — the filename is the user's
         # declared bracket and should beat the heuristic.

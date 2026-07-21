@@ -46,9 +46,13 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 from .deck_pricing import _total_price_for_deck_text  # noqa: F401
 from .deck_text_ops import (  # noqa: F401
+    _BASIC_LAND_KEYS,
     _BASIC_LANDS,
     _apply_swaps_to_dck,
+    _count_main_cards,
+    _dck_name_key,
     _format_added_line,
+    _is_basic_land_name,
     _normalize_pasted_deck,
     _pad_main_to_99,
     _to_constructed_format,
@@ -160,8 +164,13 @@ def _match_pct_from_evidence(evidence: dict | None) -> int | None:
     inclusion = float(inclusion or 0)
     synergy = min(float(synergy or 0), 20.0)
     raw = inclusion + synergy
-    if raw <= 0:
-        return None
+    # At least one field was explicitly provided (the both-None case
+    # returned above), so this IS a real scoring signal — even when
+    # negative EDHREC synergy drags the sum <= 0, or both fields are an
+    # explicit 0. Clamp to a floor of 1 rather than returning None:
+    # None must stay reserved for "no data at all" (the UI renders a
+    # source-tag badge for null), while a genuinely weak match should
+    # show as a real low pct, not masquerade as missing data.
     return max(1, min(100, round(raw)))
 
 

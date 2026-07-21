@@ -1259,6 +1259,44 @@ def test_apply_proposal_bumps_version_in_filename(tmp_path):
     assert out.name == "[USER] Foo v2 [B3].dck"
 
 
+def test_apply_proposal_rewrites_name_to_new_stem(tmp_path):
+    """Regression: ``_apply_swaps_to_dck`` deliberately preserves the
+    [metadata] section, so the v2 deck used to keep the v1 deck's Name=.
+    Forge then emitted the SAME ``Ai(N)-<Name>`` token for both sides of
+    an A/B sim, and any name-keyed attribution (compare_versions,
+    pool_curator) either credited nobody or piled both decks' wins onto
+    one side. The output must carry its OWN filename stem as Name= so
+    ``log_parser._normalize`` maps results back to the right file."""
+    import re
+
+    from commander_builder.log_parser import _normalize
+
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck", ["Sol Ring", "OldCard A"],
+    )
+    proposal = Proposal(
+        adds=["NewCard"], cuts=["OldCard A"], rationale="x",
+        source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    new_text = out.read_text(encoding="utf-8")
+
+    old_name = re.search(
+        r"^Name=(.+)$", src.read_text(encoding="utf-8"), re.MULTILINE,
+    ).group(1)
+    m = re.search(r"^Name=(.+)$", new_text, re.MULTILINE)
+    assert m, "v2 deck must carry a Name= line"
+    new_name = m.group(1)
+    # The old bug: new_name == old_name ('Test'). The fix: the v2 deck is
+    # named after its own file, distinct from the source.
+    assert new_name != old_name
+    assert _normalize(new_name) == _normalize(out.stem) == "Foo v2"
+    # Only Name= changes — the rest of the metadata section survives so
+    # resolve_deck_id can still read the Moxfield= id from the v2 file.
+    assert "Moxfield=abc" in new_text
+    assert len(re.findall(r"^Name=", new_text, re.MULTILINE)) == 1
+
+
 def test_apply_proposal_increments_existing_version(tmp_path):
     src = _make_dck(tmp_path, "[USER] Foo v3 [B3].dck", ["Sol Ring"])
     proposal = Proposal(adds=["NewCard"], cuts=[], rationale="x")
@@ -1456,6 +1494,167 @@ def test_apply_proposal_records_applied_fields_on_dry_run(tmp_path):
     assert proposal.applied_adds == ["NewA"]  # min(3, 1) = 1
     assert proposal.applied_cuts == ["OldA"]
     assert set(proposal.dropped_for_balance) == {"NewB", "NewC"}
+
+
+# ---------------------------------------------------------------------------
+# Decklist validation + the never-write-a-non-99-mainboard guard
+# (2026-07-19 fix). Cuts that match nothing in [Main] used to be
+# silently skipped while their paired adds still landed, writing
+# 100-card mainboards Forge rejects (or silently mis-sims).
+# ---------------------------------------------------------------------------
+
+def _count_main(text: str) -> int:
+    from commander_builder.web._helpers import _count_main_cards
+    return _count_main_cards(text)
+
+
+def test_apply_proposal_drops_unmatched_cut_pair_and_stays_legal(tmp_path):
+    """A hallucinated cut (card not in the deck) drops its paired add
+    too, is reported under dropped_unmatched_cut, and the written deck
+    still lands at exactly 99 mainboard."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate", "Brainstorm", "Filler"],
+    )
+    proposal = Proposal(
+        adds=["Lotus Cobra"],
+        cuts=["Card That Does Not Exist"],
+        rationale="x", source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    # Neither half of the invalid pair landed.
+    assert "1 Lotus Cobra" not in text
+    assert proposal.applied_adds == []
+    assert proposal.applied_cuts == []
+    # Reported under exactly one reason — not silently lost, not
+    # misfiled under balance.
+    assert proposal.dropped_unmatched_cut == [
+        {"cut": "Card That Does Not Exist", "add": "Lotus Cobra"},
+    ]
+    assert proposal.dropped_for_balance == []
+    # The written deck is legal: padding topped the 4-card fixture up
+    # to exactly 99.
+    assert _count_main(text) == 99
+
+
+def test_apply_proposal_guard_refuses_to_write_non_99_mainboard(tmp_path):
+    """Last-resort invariant: if the swap/pad pipeline somehow ends at
+    != 99 mainboard (here: an over-sized 100-card source that padding
+    can only top UP, never trim), apply_proposal_to_deck raises instead
+    of writing a deck Forge would reject."""
+    import pytest
+
+    # 100 distinct main cards — swaps preserve size, padding is a
+    # no-op above 99, so the output would be a 100-card mainboard.
+    main_cards = [f"Card {i}" for i in range(99)] + ["Sol Ring"]
+    src = _make_dck(tmp_path, "[USER] Fat [B3].dck", main_cards)
+    proposal = Proposal(
+        adds=["Lotus Cobra"], cuts=["Sol Ring"], rationale="x",
+    )
+    with pytest.raises(RuntimeError, match="not 99"):
+        apply_proposal_to_deck(src, proposal)
+    # And nothing landed on disk.
+    assert not (tmp_path / "[USER] Fat v2 [B3].dck").exists()
+
+
+def test_apply_proposal_guard_fires_on_dry_run_too(tmp_path):
+    """Regression (2026-07-20): the ``if dry_run: return`` used to sit
+    BEFORE the 99-card guard, so --dry-run previewed "success" on
+    exactly the deck a real run refuses to write. Preview and real run
+    must agree: dry-run raises the SAME RuntimeError (and, as always,
+    writes nothing)."""
+    import pytest
+
+    # Same over-sized fixture as the real-run guard test above: 100
+    # distinct main cards, which padding can never trim down to 99.
+    main_cards = [f"Card {i}" for i in range(99)] + ["Sol Ring"]
+    src = _make_dck(tmp_path, "[USER] Fat [B3].dck", main_cards)
+    proposal = Proposal(
+        adds=["Lotus Cobra"], cuts=["Sol Ring"], rationale="x",
+    )
+    with pytest.raises(RuntimeError, match="not 99"):
+        apply_proposal_to_deck(src, proposal, dry_run=True)
+    # Dry-run never touches disk — doubly so when refusing.
+    assert not (tmp_path / "[USER] Fat v2 [B3].dck").exists()
+    # And the source is untouched.
+    assert "1 Sol Ring" in src.read_text(encoding="utf-8")
+
+
+def test_apply_proposal_duplicate_add_pair_dropped_and_reported(tmp_path):
+    """An add for a non-basic already in [Main] would write an illegal
+    ``2 <Name>`` line — the pair drops and lands under
+    dropped_duplicate_add."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate", "Brainstorm"],
+    )
+    proposal = Proposal(
+        adds=["Sol Ring"], cuts=["Cultivate"], rationale="x",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    assert "2 Sol Ring" not in text
+    assert "1 Sol Ring" in text
+    # The cut half didn't apply either — Cultivate survives.
+    assert "1 Cultivate" in text
+    assert proposal.dropped_duplicate_add == [
+        {"cut": "Cultivate", "add": "Sol Ring"},
+    ]
+    assert _count_main(text) == 99
+
+
+def test_apply_proposal_commander_add_pair_dropped_and_reported(tmp_path):
+    """An add naming the [Commander] card drops with its paired cut
+    and lands under dropped_commander_add."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate"],
+    )
+    proposal = Proposal(
+        adds=["Test Commander"], cuts=["Cultivate"], rationale="x",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    assert "1 Cultivate" in text
+    # Commander appears only in the [Commander] section.
+    assert text.count("Test Commander") == 1
+    assert proposal.dropped_commander_add == [
+        {"cut": "Cultivate", "add": "Test Commander"},
+    ]
+    assert _count_main(text) == 99
+
+
+def test_apply_proposal_protected_cut_reported_under_single_reason(tmp_path):
+    """Regression for the double-report bug: a protected cut stripped
+    inside apply_proposal_to_deck used to ALSO land in
+    dropped_for_balance (it was 'requested but not applied'). Each
+    dropped swap must appear under exactly one reason."""
+    src = _make_dck(
+        tmp_path, "[USER] Foo [B3].dck",
+        ["Sol Ring", "Cultivate", "Brainstorm"],
+    )
+    text = src.read_text(encoding="utf-8")
+    text = text.replace("Moxfield=abc\n", "Moxfield=abc\nProtect=Sol Ring\n")
+    src.write_text(text, encoding="utf-8")
+
+    proposal = Proposal(
+        adds=["Lotus Cobra", "Tireless Tracker"],
+        cuts=["Sol Ring", "Cultivate"],
+        rationale="x", source="claude-auto",
+    )
+    apply_proposal_to_deck(src, proposal)
+
+    # Sol Ring: protection only. Tireless Tracker: balance surplus
+    # only (after Sol Ring was stripped, 2 adds vs 1 cut).
+    assert proposal.dropped_for_protection == ["Sol Ring"]
+    assert "Sol Ring" not in proposal.dropped_for_balance
+    assert proposal.dropped_for_balance == ["Tireless Tracker"]
+    assert proposal.applied_adds == ["Lotus Cobra"]
+    assert proposal.applied_cuts == ["Cultivate"]
 
 
 # ---------------------------------------------------------------------------
@@ -2302,8 +2501,9 @@ def test_verdict_from_ab_pending_when_sim_did_not_complete():
 
 
 def test_ab_to_iteration_fields_includes_win_rates(tmp_path):
-    """Win rates are wins/total, rounded to 4 decimals (matches the
-    knowledge_log column precision). Margin is wins_b - wins_a."""
+    """Win rates are wins/DECISIVE (2026-07-19 convention: decisive =
+    wins_a + wins_b, the same denominator _verdict_from_ab gates on),
+    rounded to 4 decimals. Margin is wins_b - wins_a."""
     from commander_builder.proposer import _ab_to_iteration_fields
     from commander_builder.forge_runner import ABResult
     ab = ABResult(wins_a=2, wins_b=3, games=5, status="done",
@@ -2313,6 +2513,20 @@ def test_ab_to_iteration_fields_includes_win_rates(tmp_path):
     assert fields["win_rate_new"] == 0.6
     assert fields["margin"] == 1
     assert fields["sim_report"]["wins_b"] == 3
+
+
+def test_ab_to_iteration_fields_excludes_filler_and_draw_games():
+    """The old wins/games denominator counted filler-won and unresolved-
+    draw games the head-to-head pair can never win, deflating both rates
+    vs the other knowledge_log writers. decisive = wins_a + wins_b."""
+    from commander_builder.proposer import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    # 20 games: A won 8, B won 10, and 2 went to fillers/unresolved draws.
+    ab = ABResult(wins_a=8, wins_b=10, games=20, status="done")
+    fields = _ab_to_iteration_fields(ab)
+    assert fields["win_rate_old"] == round(8 / 18, 4)
+    assert fields["win_rate_new"] == round(10 / 18, 4)
+    assert fields["margin"] == 2
 
 
 def test_ab_to_iteration_fields_omits_rates_when_zero_games():
@@ -2328,6 +2542,19 @@ def test_ab_to_iteration_fields_omits_rates_when_zero_games():
     assert "win_rate_new" not in fields
     assert "margin" not in fields
     assert fields["sim_report"]["status"] == "skipped"
+
+
+def test_ab_to_iteration_fields_null_rates_when_no_decisive_games():
+    """Sim ran (games > 0) but every game drew or went to a filler:
+    decisive == 0 -> win_rate keys omitted (columns stay NULL), while
+    margin=0 is still a real observation and is recorded."""
+    from commander_builder.proposer import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    ab = ABResult(wins_a=0, wins_b=0, games=5, status="done")
+    fields = _ab_to_iteration_fields(ab)
+    assert "win_rate_old" not in fields
+    assert "win_rate_new" not in fields
+    assert fields["margin"] == 0
 
 
 def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):
@@ -2520,12 +2747,13 @@ def test_auto_curate_main_run_sim_records_verdict(
     from commander_builder.forge_runner import ABResult
 
     def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
-        # 5-15 over 20 decisive games: same 0.25/0.75 win rates as a 1-3, but
-        # at/above the min-decisive threshold so the verdict resolves to 'kept'
-        # rather than being gated to 'inconclusive'.
+        # 10-30 over 40 total games, all decisive: same 0.25/0.75 win
+        # rates as a 1-3, but the 40 decisive clear both the 20-decisive
+        # verdict gate ('kept', not 'inconclusive') and the post-sim
+        # low-decisive honesty check (no stderr note).
         return ABResult(
             deck_a=deck_a_path.name, deck_b=deck_b_path.name,
-            wins_a=5, wins_b=15, games=20,
+            wins_a=10, wins_b=30, games=40,
             avg_turns_a=12.0, avg_turns_b=10.5,
             status="done",
         )
@@ -2547,7 +2775,7 @@ def test_auto_curate_main_run_sim_records_verdict(
     from commander_builder.proposer import auto_curate_main
     rc = auto_curate_main([
         str(deck), "--bracket", "3", "--db-path", str(db),
-        "--run-sim", "--sim-games", "20",
+        "--run-sim", "--sim-games", "40",
     ])
     assert rc == 0
 
@@ -2556,16 +2784,24 @@ def test_auto_curate_main_run_sim_records_verdict(
     its = iterations_for_deck("sim-id", db_path=db)
     assert len(its) == 1
     it = its[0]
-    assert it.verdict == "kept"               # new won 15-5
-    assert it.win_rate_old == 0.25            # 5/20
-    assert it.win_rate_new == 0.75            # 15/20
-    assert it.margin == 10                     # 15 - 5
+    assert it.verdict == "kept"               # new won 30-10
+    assert it.win_rate_old == 0.25            # 10/40
+    assert it.win_rate_new == 0.75            # 30/40
+    assert it.margin == 20                     # 30 - 10
     assert it.sim_report is not None
-    assert it.sim_report["wins_b"] == 15
+    assert it.sim_report["wins_b"] == 30
 
-    out = capsys.readouterr().out
-    assert "A/B sim" in out
-    assert "verdict: kept" in out
+    captured = capsys.readouterr()
+    assert "A/B sim" in captured.out
+    assert "verdict: kept" in captured.out
+    # UNITS: --sim-games is TOTAL pod games; 40 total ~= 20 expected
+    # decisive (the 2 filler seats win ~half) meets MIN_DECISIVE_GAMES_
+    # FOR_VERDICT -> no sub-threshold warning on stderr. (20 total, the
+    # pre-2026-07-20 value here, would now warn: ~10 expected decisive.)
+    assert "WARNING" not in captured.err
+    # ... and the mocked run's 40 actual decisive also clears the
+    # post-sim low-decisive honesty note.
+    assert "decisive of" not in captured.err
 
 
 def test_auto_curate_main_run_sim_skipped_when_no_fillers(
@@ -2683,13 +2919,91 @@ def test_auto_curate_main_json_mode_surfaces_sim_block(
         "--run-sim", "--sim-games", "5", "--sim-margin", "2", "--json",
     ])
     assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    # Stdout must stay pure JSON: the sub-threshold warning goes to
+    # stderr precisely so batch drivers (and commander-improve's
+    # stdout capture) can keep parsing this blob.
+    payload = json.loads(captured.out)
     assert payload["sim_run"] is True
     # 3-2 over only 5 decisive games is below the min-decisive threshold ->
     # 'inconclusive' (the low-N gate fires before the margin check).
     assert payload["sim_verdict"] == "inconclusive"
     assert payload["sim_report"]["wins_b"] == 3
     assert payload["sim_error"] is None
+    # ... and the operator was told, loudly, why the verdict can't
+    # resolve at 5 total games (the pre-sim warning speaks in decisive
+    # units: 5 total ~= 2 expected decisive, gate needs 20 ~= 40+ total).
+    assert "WARNING" in captured.err
+    assert "inconclusive" in captured.err
+    assert "decisive" in captured.err
+    assert "40" in captured.err
+    # ... and the post-sim honesty note reports the MEASURED decisive
+    # count (all 5 mocked games were decisive) plus the total budget a
+    # verdict actually needs.
+    assert "got 5 decisive of 5 total games" in captured.err
+    assert "40+ total games" in captured.err
+
+
+def test_auto_curate_main_post_sim_reports_actual_decisive_shortfall(
+    tmp_path, monkeypatch, capsys,
+):
+    """The pre-sim warning is an EXPECTATION (total * 0.5); a run whose
+    total cleared the 40-game floor can still come up short on decisive
+    games when the filler seats run hot. The post-sim honesty note must
+    then report the MEASURED decisive count and the suggested total --
+    otherwise the operator sees a 40-game run land 'inconclusive' with
+    no explanation and no warning ever fired."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers",
+        lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A"], "cuts": ["C"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    from commander_builder.forge_runner import ABResult
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        # Unlucky pod: fillers took 29 of 40 games -- only 4+7=11
+        # decisive, below the 20-decisive gate despite the healthy total.
+        return ABResult(
+            deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+            wins_a=4, wins_b=7, games=40, status="done",
+        )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation", fake_ab_sim,
+    )
+
+    deck = tmp_path / "[USER] Shortfall [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Sf\nMoxfield=sf-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B.dck").write_text("a", encoding="utf-8")
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db),
+        "--run-sim", "--sim-games", "40",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # 40 total games clears the expected-decisive pre-sim check ...
+    assert "WARNING" not in captured.err
+    # ... but the measured outcome fell short, and the note says by
+    # exactly how much and what to budget instead.
+    assert "got 11 decisive of 40 total games" in captured.err
+    assert "40+ total games" in captured.err
+
+    from commander_builder.knowledge_log import iterations_for_deck
+    its = iterations_for_deck("sf-id", db_path=db)
+    assert len(its) == 1
+    assert its[0].verdict == "inconclusive"
 
 
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
@@ -3293,3 +3607,311 @@ def test_auto_curate_main_batch_no_hint_when_single_deck(
     assert rc == 0
     err = capsys.readouterr().err
     assert "tip:" not in err
+
+
+# ---------------------------------------------------------------------------
+# Batch argv rewriting is flag-AWARE (adversarial-review 2026-07-19)
+# ---------------------------------------------------------------------------
+#
+# The original _build_per_deck_argv dropped "the positional deck token"
+# by dropping the first bare token ending in .dck — but flag VALUES can
+# end in .dck too (--sim-fillers "PodA.dck,PodB.dck" is the documented
+# value shape; --protect-from list.dck is a plausible filename). The
+# rewriter ate the value, leaving a dangling flag that argparse then fed
+# the next unrelated token (or errored on). And because argparse errors
+# raise SystemExit (BaseException, not Exception), that error blew
+# through the per-deck isolation boundary and killed the whole
+# overnight batch. These tests pin both fixes.
+
+
+def _capture_per_deck_argv_build(monkeypatch):
+    """Stub _process_one_deck to capture its (batch_argv, value_flags)
+    inputs without running the pipeline. Returns the capture list;
+    each entry is the fully rebuilt per-deck argv, computed with the
+    REAL _build_per_deck_argv so the assertion covers the production
+    rewrite against the production parser's flag set."""
+    import commander_builder._proposer_cli as cli
+
+    built: list[list[str]] = []
+
+    def fake_process(deck_path, batch_argv, force, value_flags):
+        built.append(
+            cli._build_per_deck_argv(deck_path, batch_argv, value_flags),
+        )
+        return {"deck": str(deck_path), "status": "ok", "rc": 0, "result": {}}
+
+    monkeypatch.setattr(cli, "_process_one_deck", fake_process)
+    return built
+
+
+def test_batch_argv_keeps_dck_flag_values(tmp_path, monkeypatch, capsys):
+    """--sim-fillers "PodA.dck,PodB.dck" and --protect-from list.dck are
+    flag VALUES, not the deck positional — the rewriter must copy them
+    through verbatim and still substitute the per-deck path up front."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+    protect_file = tmp_path / "list.dck"
+    protect_file.write_text("Some Unrelated Card\n", encoding="utf-8")
+
+    built = _capture_per_deck_argv_build(monkeypatch)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--sim-fillers", "PodA.dck,PodB.dck",
+        "--protect-from", str(protect_file),
+    ])
+    assert rc == 0
+    assert len(built) == 1
+    argv = built[0]
+    # The per-deck path is the (only) positional, substituted up front.
+    assert argv[0] == str(deck)
+    # Both value-taking flags kept their values, adjacent as passed.
+    assert argv[argv.index("--sim-fillers") + 1] == "PodA.dck,PodB.dck"
+    assert argv[argv.index("--protect-from") + 1] == str(protect_file)
+    # Batch-only flags were stripped.
+    assert "--batch" not in argv
+    assert str(tmp_path / "[USER]*.dck") not in argv
+
+
+def test_batch_argv_inline_equals_dck_value_safe(tmp_path, monkeypatch, capsys):
+    """The one-token '--flag=value.dck' form carries its value inline;
+    the rewriter must pass it through as a single untouched token."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+
+    built = _capture_per_deck_argv_build(monkeypatch)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--sim-fillers=PodA.dck,PodB.dck",
+    ])
+    assert rc == 0
+    argv = built[0]
+    assert argv[0] == str(deck)
+    assert "--sim-fillers=PodA.dck,PodB.dck" in argv
+
+
+def test_batch_with_dck_flag_values_runs_end_to_end(
+    tmp_path, monkeypatch, capsys,
+):
+    """Full-pipeline regression: pre-fix, --protect-from list.dck lost
+    its value to the positional-stripper, argparse choked on the
+    dangling flag, and the SystemExit killed the batch. Now the batch
+    completes with every deck ok."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    for n in ["A", "B"]:
+        _write_minimal_deck(tmp_path / f"[USER] {n} [B3].dck", n)
+    protect_file = tmp_path / "list.dck"
+    protect_file.write_text("Some Unrelated Card\n", encoding="utf-8")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--protect-from", str(protect_file),
+        "--sim-fillers", "PodA.dck,PodB.dck",
+    ])
+    assert rc == 0
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    deck_records = [r for r in records if "deck" in r]
+    assert len(deck_records) == 2
+    assert all(r["status"] == "ok" for r in deck_records)
+    assert records[-1]["batch_summary"]["failed"] == 0
+
+
+def test_value_taking_flags_derived_from_parser():
+    """_value_taking_flags keys off nargs: store_true-style actions
+    (nargs == 0) take no value; plain store / append actions do."""
+    import argparse
+
+    from commander_builder._proposer_cli import _value_taking_flags
+
+    p = argparse.ArgumentParser()
+    p.add_argument("positional")
+    p.add_argument("--takes-value")
+    p.add_argument("--appends", action="append")
+    p.add_argument("--boolean", action="store_true")
+    flags = _value_taking_flags(p)
+    assert "--takes-value" in flags
+    assert "--appends" in flags
+    assert "--boolean" not in flags
+    assert "positional" not in flags
+
+
+# ---------------------------------------------------------------------------
+# SystemExit isolation at the per-deck boundary
+# ---------------------------------------------------------------------------
+
+
+def _force_bad_argv_for(monkeypatch, marker: str):
+    """Wrap the real _build_per_deck_argv so decks whose filename
+    contains ``marker`` get an argv argparse rejects (unknown flag).
+    This is the cleanest way to reproduce a per-deck-only parse
+    failure: the batch-level parse of the same flags already
+    succeeded, so a naturally occurring bad per-deck argv requires a
+    rewriter bug — which the flag-aware rewrite just fixed."""
+    import commander_builder._proposer_cli as cli
+
+    real_build = cli._build_per_deck_argv
+
+    def evil_build(deck_path, batch_argv, value_flags):
+        argv = real_build(deck_path, batch_argv, value_flags)
+        if marker in deck_path.name:
+            argv = [*argv, "--definitely-not-a-real-flag"]
+        return argv
+
+    monkeypatch.setattr(cli, "_build_per_deck_argv", evil_build)
+
+
+def test_batch_systemexit_recorded_and_batch_continues(
+    tmp_path, monkeypatch, capsys,
+):
+    """A deck whose per-deck argv makes argparse exit must be recorded
+    as an error for THAT deck (with argparse's stderr message in the
+    record) while the batch continues to the next deck. Pre-fix the
+    SystemExit sailed past `except Exception` and aborted everything."""
+    _setup_batch_env(tmp_path, monkeypatch)
+    _write_minimal_deck(tmp_path / "[USER] Bad [B3].dck", "Bad")
+    _write_minimal_deck(tmp_path / "[USER] Good [B3].dck", "Good")
+    _force_bad_argv_for(monkeypatch, "Bad")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+    ])
+    assert rc == 0  # mixed outcome: Good succeeded
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    by_stem = {Path(r["deck"]).stem: r for r in records if "deck" in r}
+    bad = by_stem["[USER] Bad [B3]"]
+    assert bad["status"] == "error"
+    assert "SystemExit" in bad["exception"]
+    # argparse's actual error text (written to stderr pre-exit) is
+    # captured into the record so overnight logs are actionable.
+    assert "--definitely-not-a-real-flag" in bad["exception"]
+    good = by_stem["[USER] Good [B3]"]
+    assert good["status"] == "ok"
+    summary = records[-1]["batch_summary"]
+    assert summary["failed"] == 1
+    assert summary["succeeded"] == 1
+
+
+def test_batch_parallel_systemexit_isolated_and_proxies_restored(
+    tmp_path, monkeypatch, capsys,
+):
+    """Same isolation under parallel dispatch, plus: the thread-local
+    stdout/stderr proxies installed for the pool are restored by the
+    outer finally even when a worker's deck died via SystemExit."""
+    import sys as _sys
+
+    from commander_builder._proposer_cli import _ThreadLocalStdoutProxy
+
+    _setup_batch_env(tmp_path, monkeypatch)
+    _write_minimal_deck(tmp_path / "[USER] Bad [B3].dck", "Bad")
+    _write_minimal_deck(tmp_path / "[USER] Good [B3].dck", "Good")
+    _force_bad_argv_for(monkeypatch, "Bad")
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        "--batch", str(tmp_path / "[USER]*.dck"),
+        "--bracket", "3", "--dry-run", "--no-log",
+        "--parallelism", "2",
+    ])
+    assert rc == 0
+    # Proxies swapped back — a leaked proxy would silently reroute all
+    # later stdout/stderr through batch thread-local dispatch.
+    assert not isinstance(_sys.stdout, _ThreadLocalStdoutProxy)
+    assert not isinstance(_sys.stderr, _ThreadLocalStdoutProxy)
+    records = [
+        json.loads(ln) for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    ]
+    by_stem = {Path(r["deck"]).stem: r for r in records if "deck" in r}
+    assert by_stem["[USER] Bad [B3]"]["status"] == "error"
+    assert "SystemExit" in by_stem["[USER] Bad [B3]"]["exception"]
+    assert by_stem["[USER] Good [B3]"]["status"] == "ok"
+
+
+@pytest.mark.parametrize("exit_code", [0, None])
+def test_process_one_deck_systemexit_zero_is_not_an_error(
+    tmp_path, monkeypatch, exit_code,
+):
+    """SystemExit with code 0/None is a SUCCESSFUL early exit (e.g.
+    ``--help`` sneaking into the per-deck argv makes argparse print
+    usage and raise SystemExit(0)). Recording it as status 'error' made
+    the batch summary count a clean exit as a failure."""
+    import commander_builder._proposer_cli as cli
+
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+
+    def exit_cleanly(argv):
+        raise SystemExit(exit_code)
+
+    monkeypatch.setattr(cli, "auto_curate_main", exit_cleanly)
+    record = cli._process_one_deck(deck, ["--bracket", "3"], False, frozenset())
+    assert record["status"] == "ok"
+    assert record["rc"] == 0
+    # The note explains why there's no per-deck JSON payload.
+    assert "SystemExit" in record.get("note", "")
+
+
+def test_process_one_deck_systemexit_stderr_capped_but_replayed(
+    tmp_path, monkeypatch, capsys,
+):
+    """The captured stderr is replayed VERBATIM to the real stderr (so
+    diagnostics stay visible) while the copy embedded in the failure
+    record is trimmed to a cap — pre-fix the full text landed in BOTH
+    places, bloating the NDJSON stream."""
+    import sys as _sys
+
+    import commander_builder._proposer_cli as cli
+
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+    huge = "x" * 5000
+
+    def exit_noisily(argv):
+        _sys.stderr.write(huge)
+        raise SystemExit(2)
+
+    monkeypatch.setattr(cli, "auto_curate_main", exit_noisily)
+    record = cli._process_one_deck(deck, ["--bracket", "3"], False, frozenset())
+    assert record["status"] == "error"
+    # Record copy: capped (1000 chars + truncation marker + prefix).
+    assert len(record["exception"]) < 1200
+    assert "truncated" in record["exception"]
+    # Real stderr: the full text was replayed untrimmed.
+    assert huge in capsys.readouterr().err
+
+
+def test_process_one_deck_keyboard_interrupt_propagates(
+    tmp_path, monkeypatch,
+):
+    """The SystemExit catch is deliberately narrow: KeyboardInterrupt
+    (also BaseException) must still escape the per-deck boundary so
+    Ctrl-C actually stops an overnight batch instead of being logged
+    as N per-deck 'errors'."""
+    import commander_builder._proposer_cli as cli
+
+    deck = tmp_path / "[USER] A [B3].dck"
+    _write_minimal_deck(deck, "A")
+
+    def raise_interrupt(argv):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli, "auto_curate_main", raise_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        cli._process_one_deck(deck, ["--bracket", "3"], False, frozenset())

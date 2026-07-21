@@ -672,6 +672,26 @@ def test_init_db_migration_is_idempotent(tmp_path):
     assert row.milestone == "still-works"
 
 
+# --- decisive_win_rate — the one win-rate convention (2026-07-19) -----------
+
+
+def test_decisive_win_rate_is_wins_over_decisive_rounded_4():
+    """Canonical convention every win_rate_old/new writer routes through:
+    wins / decisive, 4-decimal rounding."""
+    from commander_builder.knowledge_log import decisive_win_rate
+    assert decisive_win_rate(8, 18) == round(8 / 18, 4)
+    assert decisive_win_rate(0, 18) == 0.0     # a real observed 0-for-18
+    assert decisive_win_rate(18, 18) == 1.0
+
+
+def test_decisive_win_rate_returns_none_on_zero_decisive():
+    """decisive <= 0 means nothing was measured — NULL, never a fabricated
+    0.0 that would read as an observed 'never wins'."""
+    from commander_builder.knowledge_log import decisive_win_rate
+    assert decisive_win_rate(0, 0) is None
+    assert decisive_win_rate(5, 0) is None     # defensive: bad caller math
+    assert decisive_win_rate(0, -1) is None
+
 # ---------------------------------------------------------------------------
 # fp013_gate_progress -- "N / 1,000 high-confidence curator iterations"
 # ---------------------------------------------------------------------------

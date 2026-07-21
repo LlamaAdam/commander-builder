@@ -14,7 +14,7 @@ every subsequent request.
 
 Layout::
 
-    <mtg_cards>/images/<size>/<slug>.jpg
+    <mtg_cards>/images/<size>/<slug>_<sha1-8>.jpg
 
 ``<size>`` is one of Scryfall's published image-version strings
 (``small`` / ``normal`` / ``large`` / ``png`` / ``art_crop`` /
@@ -22,8 +22,10 @@ Layout::
 ``.jpg`` otherwise (Scryfall's published encoding per size).
 
 ``<slug>`` is the same ``re.sub('[^a-z0-9]+', '_', name.lower())``
-slug used by ``scryfall_client._cache_path`` so the same card lands
-under a predictable filename across both caches.
+slug used by ``scryfall_client._cache_path``; ``<sha1-8>`` is the
+first 8 hex chars of the exact card name's SHA-1, appended because
+the lossy slug alone collides for distinct names like ``Fire // Ice``
+vs. ``Fire Ice`` (see ``cache_path``).
 
 Public surface (all pure-helper, side-effect-localized to disk +
 optional injected HTTP fetcher):
@@ -119,9 +121,27 @@ def _looks_like_image(data: bytes) -> bool:
 
 
 def cache_path(name: str, size: str, root: Optional[Path] = None) -> Path:
-    """Disk path for the cached ``<name>`` / ``<size>`` image. No IO."""
+    """Disk path for the cached ``<name>`` / ``<size>`` image. No IO.
+
+    The filename is ``<slug>_<sha1-8>.<ext>``. The slug alone is NOT
+    collision-free: it collapses every non-alnum run to one underscore,
+    so distinct cards like ``Fire // Ice`` and a hypothetical
+    ``Fire Ice`` both slug to ``fire_ice`` — and whichever was fetched
+    first would be served (``immutable``, week-long Cache-Control) for
+    the other. Appending the first 8 hex chars of the exact name's
+    SHA-1 disambiguates while keeping filenames human-greppable.
+
+    Migration note: pre-hash cache entries (bare ``<slug>.<ext>``) are
+    simply never matched again — they miss and the image is refetched
+    under the new name; the stale files age out via the LRU quota
+    eviction in ``_enforce_quota``. No migration pass needed.
+    """
+    import hashlib
+    digest = hashlib.sha1((name or "").encode("utf-8")).hexdigest()[:8]
     base = root if root is not None else _cards_root()
-    return base / "images" / size / f"{_slug(name)}{_ext_for(size)}"
+    return base / "images" / size / (
+        f"{_slug(name)}_{digest}{_ext_for(size)}"
+    )
 
 
 def _scryfall_image_url(name: str, size: str) -> str:
