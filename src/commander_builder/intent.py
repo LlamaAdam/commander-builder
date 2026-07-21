@@ -15,7 +15,7 @@ identity.  The result is used by ``run_improve_loop`` to:
 Why soft-bias + protect, not a hard constraint (reject swaps that
 change archetype): hard constraints risk stalling the loop on noisy
 sims; soft-bias + protect keeps the optimizer in control while giving
-the intent a meaningful voice.  See ``docs/fp012-next-slices.md``
+the intent a meaningful voice.  See ``docs/archive/fp012-next-slices.md``
 (Slice A design decision).
 
 Callers

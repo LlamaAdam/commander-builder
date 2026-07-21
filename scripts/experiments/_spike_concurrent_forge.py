@@ -43,7 +43,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 FORGE_DIR = REPO_ROOT / "vendor" / "forge"
 DECK_DIR = FORGE_DIR / "userdata" / "decks" / "commander"
 

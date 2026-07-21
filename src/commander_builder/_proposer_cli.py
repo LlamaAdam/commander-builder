@@ -897,7 +897,7 @@ def _run_batch(args, parser, batch_argv: list[str]) -> int:
 
     ``args.parallelism > 1`` dispatches per-deck work to a
     ThreadPoolExecutor. The 2026-05-19 feasibility spike
-    (scripts/_spike_concurrent_forge.py) confirmed two Forge JVMs
+    (scripts/experiments/_spike_concurrent_forge.py) confirmed two Forge JVMs
     co-exist in the same install cwd with zero lock contention, so no
     cwd isolation is required. Per-thread stdout writes are
     serialized through a Lock so the NDJSON stream stays parseable

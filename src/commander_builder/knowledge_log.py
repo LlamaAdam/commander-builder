@@ -586,7 +586,7 @@ def stats_summary(db_path: Optional[Path] = None) -> dict:
 
 
 # FP-013 gate: promote the project-tuned-LLM spike when the live log holds
-# this many high-confidence curator iterations (see docs/fp013-scope.md).
+# this many high-confidence curator iterations (see docs/archive/fp013-scope.md).
 FP013_GATE_TARGET = 1000
 FP013_MIN_GAMES = 40
 
