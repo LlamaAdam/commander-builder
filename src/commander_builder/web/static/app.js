@@ -2088,6 +2088,14 @@ function renderDashboard(data, iterations) {
   }
   dash.appendChild(sugPanel);
 
+  // Lift picks (ManaFoundry parity — "Lift Web"). Cards that co-occur
+  // with this deck's cards across the locally harvested corpus far
+  // more often than chance predicts. Backend attaches `lift_picks`
+  // fail-quiet (same contract as printing_savings), so absence /
+  // empty picks just skips the panel (liftPicksPanel returns null).
+  const liftPanel = liftPicksPanel(data.lift_picks);
+  if (liftPanel) dash.appendChild(liftPanel);
+
   // Iteration history
   if (iterations.length) {
     const ul = el("ul", { class: "iteration-list" });
@@ -3155,6 +3163,52 @@ function panel(title, content) {
   p.appendChild(el("h3", {}, title));
   p.appendChild(content);
   return p;
+}
+
+// Lift picks panel (ManaFoundry parity — "Lift Web"). `lp` is the
+// dashboard payload's `lift_picks` object:
+// {corpus_size, band, picks: [{card, score, n_pairs, rationale}],
+//  reason}. Returns null when there is nothing to show (backend
+// failed, corpus too small, or no candidate cleared the lift bar) so
+// the caller can skip the panel entirely — a permanently-empty
+// "Lift picks" box would just read as broken. The pick list lives in
+// a collapsed <details> matching the priceTile savings pattern: the
+// summary is the teaser, expansion costs zero JS state and is
+// keyboard-accessible for free.
+function liftPicksPanel(lp) {
+  if (!lp || !(lp.picks || []).length) return null;
+  const wrap = el("div");
+  wrap.appendChild(el(
+    "p", { class: "muted" },
+    `Cards that appear alongside this deck's cards across `
+      + `${lp.corpus_size} harvested decks far more often than chance `
+      + `(band: ${lp.band}). Lift 2.0 = together twice as often as `
+      + `popularity alone predicts.`,
+  ));
+  const details = el("details", { open: "" });
+  details.appendChild(el(
+    "summary",
+    { class: "muted", style: "cursor: pointer; font-size: 12px;" },
+    `${lp.picks.length} lift pick${lp.picks.length === 1 ? "" : "s"}`,
+  ));
+  const ul = el("ul", {
+    style: "margin: 6px 0 0; padding-left: 16px; font-size: 12px; "
+         + "text-align: left;",
+  });
+  for (const p of lp.picks) {
+    // "Card (score 2.4, 5 pairs): appears with X in 6/8 harvested
+    // decks (lift 2.6)" — the rationale string is server-built so the
+    // CLI, advisor evidence, and this panel all read identically.
+    ul.appendChild(el(
+      "li", { style: "margin-bottom: 3px;" },
+      `${p.card} (score ${Number(p.score).toFixed(2)}, `
+        + `${p.n_pairs} pair${p.n_pairs === 1 ? "" : "s"}): `
+        + `${p.rationale}`,
+    ));
+  }
+  details.appendChild(ul);
+  wrap.appendChild(details);
+  return panel("Lift picks", wrap);
 }
 
 function curveBars(curve) {

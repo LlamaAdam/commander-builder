@@ -129,6 +129,25 @@ def make_dashboard_blueprint(
             payload["printing_savings"] = {
                 "total": 0.0, "count": 0, "suggestions": [],
             }
+        # Lift picks (ManaFoundry parity — 'Lift Web'). Candidate adds
+        # ranked by co-occurrence lift over the harvested (non-[USER]/
+        # [CONTROL]) deck corpus in this deck_dir. Computed in
+        # lift_analysis (core layer — stats never live in routes) and
+        # attached so the UI can render "pairs well with your deck"
+        # without a second request. Same fail-quiet contract as
+        # printing_savings above: a corpus/scan failure degrades to an
+        # empty picks list, never a dashboard 500.
+        try:
+            from ..lift_analysis import lift_picks_payload
+            payload["lift_picks"] = lift_picks_payload(
+                path, deck_dir=deck_dir, bracket=bracket,
+            )
+        except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
+            current_app.logger.warning("lift picks failed: %s", exc)
+            payload["lift_picks"] = {
+                "corpus_size": 0, "band": "overall", "picks": [],
+                "reason": "unavailable",
+            }
         return jsonify(payload)
 
     @bp.route("/api/iterations")

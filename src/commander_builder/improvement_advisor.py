@@ -848,9 +848,33 @@ def _advise_steps(
     except OSError:
         pass
 
+    # --- Lift Web (ManaFoundry parity): a few co-occurrence picks from
+    # the harvested corpus, appended AFTER manabase + primary so dedup
+    # always lets the established sources win a collision — lift only
+    # ever contributes cards nobody else surfaced, clearly labeled
+    # source='lift'. Fail-quiet like every supplemental signal: a
+    # missing/too-small corpus or an I/O blip yields zero lift recs,
+    # never a broken audit. Appending BEFORE the dedup/ownership/
+    # saturation/CI stages below means lift adds flow through the
+    # exact same post-processing as every other source (verified
+    # ordering: ownership annotates/drops them, saturation checks
+    # their role tag, enforce_color_identity strips off-color picks).
+    lift_recs: list[SwapRecommendation] = []
+    try:
+        from .lift_analysis import lift_recommendations
+        lift_recs = lift_recommendations(
+            deck_path, deck_dir=deck_dir, bracket=bracket,
+        )
+    except Exception as exc:  # noqa: BLE001 — supplemental evidence only
+        print(
+            f"WARN: lift analysis skipped "
+            f"({type(exc).__name__}: {exc}); no lift picks this audit.",
+            flush=True,
+        )
+
     # Prepend manabase so curated essentials surface at the top,
     # then deduplicate so the same card never appears in both the
-    # manabase + primary slices.
+    # manabase + primary slices (lift picks trail last — see above).
     #
     # Real failure mode caught in the 2026-05-13 live-browser audit:
     # manabase prepends shock lands (Steam Vents, Blood Crypt, etc.)
@@ -868,7 +892,7 @@ def _advise_steps(
     # source-badge rendering.
     seen_lc: set[str] = set()
     deduped: list[SwapRecommendation] = []
-    for rec in list(manabase_recs) + list(recs):
+    for rec in list(manabase_recs) + list(recs) + list(lift_recs):
         # Only de-dup add candidates — cuts are user-deck cards
         # already present and naturally singleton.
         if rec.action == "add":
@@ -1194,6 +1218,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             "tagged '[not owned]'."
         ),
     )
+    p.add_argument(
+        "--show-lift", action="store_true",
+        help=(
+            "Append a Lift Web section: the deck's strongest in-deck "
+            "card pairs and the top 'pairs well with your deck' "
+            "candidate adds, both ranked by co-occurrence lift over "
+            "the locally harvested (non-[USER]/[CONTROL]) deck corpus. "
+            "Purely informational — does not change the manifest."
+        ),
+    )
     p.add_argument("--output", help="Write JSON manifest here (audit_manifest schema).")
     args = p.parse_args(argv)
 
@@ -1264,6 +1298,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(text)
     except UnicodeEncodeError:
         sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+
+    # Lift Web section (opt-in). Resolves the deck against DECK_DIR at
+    # call time (same relative-filename contract as advise()) and uses
+    # the same dir as the corpus root. User asked for it explicitly, so
+    # a failure prints a visible one-liner instead of vanishing — but
+    # it still never sinks the advice output above.
+    if args.show_lift:
+        try:
+            from .lift_analysis import format_lift_report
+            _lift_deck = Path(args.user)
+            if not _lift_deck.is_absolute():
+                _lift_deck = DECK_DIR / _lift_deck
+            lift_text = format_lift_report(
+                _lift_deck, DECK_DIR, bracket=args.bracket,
+            )
+        except Exception as exc:  # noqa: BLE001 — informational section
+            lift_text = (
+                f"Lift analysis unavailable ({type(exc).__name__}: {exc})"
+            )
+        try:
+            print(lift_text)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write(
+                (lift_text + "\n").encode("utf-8", errors="replace"),
+            )
 
     if args.output:
         Path(args.output).write_text(
