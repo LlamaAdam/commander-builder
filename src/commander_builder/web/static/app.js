@@ -240,6 +240,15 @@ async function selectDeck(deckId, li, opts) {
       // call.
       loadAdvise("heuristic");
     }
+
+    // FP-014.4 hand-off: the "Tune it" button on a fresh build selects the
+    // deck with ``improveAfterLoad`` so the advisor runs immediately — the
+    // web-exposed equivalent of the improve loop (advisor -> A/B sim). Fire
+    // it even when auto-audit-on-load is off (the user explicitly asked to
+    // tune), and guard on the deck still being selected.
+    if (opts && opts.improveAfterLoad && _activeDeckId === deckId) {
+      loadAdvise("heuristic");
+    }
   } catch (e) {
     // Same stale guard on the error path — a late failure for a deck
     // the user already left must not blank the deck they're viewing.
@@ -3011,7 +3020,42 @@ function openNewDeckModal() {
   if (bulkUrls) bulkUrls.value = "";
   const bulkResult = $("new-bulk-result");
   if (bulkResult) bulkResult.innerHTML = "";
+  // FP-014.4 build tab — clear the last run's inputs + summary.
+  const bCmdr = $("new-build-commander");
+  if (bCmdr) bCmdr.value = "";
+  const bName = $("new-build-name");
+  if (bName) bName.value = "";
+  const bSummary = $("new-build-summary");
+  if (bSummary) bSummary.innerHTML = "";
+  // The "prefer owned" toggle is only meaningful with a registered
+  // collection; grey it out (with a note) otherwise so the user isn't
+  // misled into thinking an inert option does something.
+  refreshBuildOwnedToggle();
   $("new-deck-modal").hidden = false;
+}
+
+// Enable/disable the build "prefer owned" toggle based on whether a
+// collection is registered. Owned-bias (and its buy-list) do nothing
+// without one, so we disable + annotate rather than silently no-op.
+async function refreshBuildOwnedToggle() {
+  const cb = $("new-build-owned");
+  const note = $("new-build-owned-note");
+  if (!cb) return;
+  try {
+    const st = await fetchJSON("/api/collection");
+    if (st.configured) {
+      cb.disabled = false;
+      if (note) note.textContent = `(${st.count} cards registered)`;
+    } else {
+      cb.disabled = true;
+      cb.checked = false;
+      if (note) note.textContent = "(no collection registered — Settings)";
+    }
+  } catch (e) {
+    // Non-fatal: leave the toggle usable; the backend no-ops owned-bias
+    // anyway when no collection exists.
+    if (note) note.textContent = "";
+  }
 }
 
 function switchTab(name) {
@@ -3193,6 +3237,175 @@ async function createPasteDeck() {
   } catch (e) {
     status.textContent = `Network error: ${e.message}`;
   }
+}
+
+// FP-014.4 — "Build from scratch". POST /api/build_deck returns a job_id
+// immediately (the build hits EDHREC + the lift/steer loops, too slow to
+// hold an HTTP connection), then we poll GET /api/build_job/<id> exactly the
+// way the propose-swap async flow polls sim jobs. On done we load the freshly
+// built deck into the dashboard and render the summary + the optional
+// "Tune it" hand-off.
+async function buildFromScratch() {
+  const commander = $("new-build-commander").value.trim();
+  const name = $("new-build-name").value.trim();
+  const bracket = parseInt($("new-build-bracket").value, 10);
+  const noLift = $("new-build-no-lift").checked;
+  const noSteer = $("new-build-no-steer").checked;
+  const ownedCb = $("new-build-owned");
+  // A disabled checkbox (no collection) means owned-bias is inert; send
+  // false so the backend doesn't even try to resolve a collection.
+  const ownedBias = !!(ownedCb && !ownedCb.disabled && ownedCb.checked);
+  const status = $("new-deck-status");
+  const summary = $("new-build-summary");
+  const btn = $("new-build-run");
+  summary.innerHTML = "";
+  if (!commander) {
+    status.textContent = "Enter a commander name.";
+    return;
+  }
+  status.textContent = `Building ${commander} (B${bracket})… seeding from EDHREC.`;
+  btn.disabled = true;
+  try {
+    const startResp = await fetch("/api/build_deck", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        commander,
+        bracket,
+        name: name || undefined,
+        options: { no_lift: noLift, no_steer: noSteer, owned_bias: ownedBias },
+      }),
+    });
+    const startBody = await startResp.json();
+    if (!startResp.ok) {
+      // Validation errors (bad bracket / missing commander) come back
+      // synchronously before any job is created.
+      status.textContent = `Error: ${startBody.error || startResp.status}`;
+      return;
+    }
+    const jobId = startBody.job_id;
+
+    // Poll with a gentle backoff (1s creeping to 4s): a build is usually
+    // a handful of seconds, quicker than a pod sim, so start tighter.
+    let delay = 1000;
+    const result = await new Promise((resolve, reject) => {
+      const tick = async () => {
+        try {
+          const pollResp = await fetch(
+            `/api/build_job/${encodeURIComponent(jobId)}`,
+          );
+          const job = await pollResp.json();
+          if (!pollResp.ok) {
+            reject(new Error(job.error || `HTTP ${pollResp.status}`));
+            return;
+          }
+          if (job.status === "done") { resolve(job.result); return; }
+          if (job.status === "failed") {
+            reject(new Error(job.error || "build failed"));
+            return;
+          }
+          delay = Math.min(delay + 500, 4000);
+          setTimeout(tick, delay);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      setTimeout(tick, delay);
+    });
+
+    status.textContent = `Built ${result.filename}.`;
+    // Refresh the sidebar so the new deck appears, then select it so the
+    // dashboard loads it (same path the import flows use). We keep the
+    // modal open long enough to render the summary; selecting a deck also
+    // closes the modal via selectDeck's own close logic.
+    await loadDecks();
+    renderBuildSummary(summary, result);
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Render the post-build summary: provenance (seed vs fallback), manabase
+// per-color coverage, estimated-vs-target bracket, N synergy swaps, buy-list
+// count — plus the "Load deck" + optional "Tune it (Forge sim)" actions.
+function renderBuildSummary(container, result) {
+  container.innerHTML = "";
+  const s = result.summary || {};
+  const mb = s.manabase || {};
+  const wrap = el("div", { style: "margin-top: 10px;" });
+
+  wrap.appendChild(el("h4", { style: "margin: 6px 0;" }, `Built: ${result.name}`));
+
+  const facts = [];
+  facts.push(`Source: ${s.source || "?"}`);
+  facts.push(
+    `Colors: ${s.colors || "colorless"} · ${s.nonland_count} nonland / ${s.land_count} land`,
+  );
+  // Manabase per-color coverage (have/target sources) — the FP-014.2 signal.
+  const cov = mb.coverage || {};
+  const covStr = Object.keys(cov)
+    .map((c) => `${c}:${cov[c].have}/${cov[c].target}`)
+    .join("  ");
+  if (covStr) facts.push(`Manabase sources (have/target): ${covStr}`);
+  if (mb.degraded) facts.push("Manabase degraded to basics-only (land data unavailable).");
+  // Bracket estimate vs target.
+  if (s.bracket_estimate != null) {
+    const verdict = s.bracket_estimate === s.bracket_target
+      ? "meets target"
+      : (s.bracket_estimate < s.bracket_target ? "below target" : "above target");
+    facts.push(`Bracket: estimate B${s.bracket_estimate} vs target B${s.bracket_target} (${verdict})`);
+  } else {
+    facts.push(`Bracket target: B${s.bracket_target}`);
+  }
+  facts.push(`Synergy (lift) swaps: ${(s.lift_swaps || []).length}`);
+  if (s.buy_list && s.buy_list.length) {
+    facts.push(`Buy-list (still unowned): ${s.buy_list.length} card(s)`);
+  }
+  const ul = el("ul", { style: "margin: 4px 0; padding-left: 18px; font-size: 13px;" });
+  for (const f of facts) ul.appendChild(el("li", {}, f));
+  wrap.appendChild(ul);
+
+  // Actions row.
+  const actions = el("div", { style: "margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;" });
+  const loadBtn = el("button", { class: "advise-btn" }, "Load deck");
+  loadBtn.addEventListener("click", () => {
+    $("new-deck-modal").hidden = true;
+    const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
+    if (li) selectDeck(result.id, li);
+  });
+  actions.appendChild(loadBtn);
+
+  // HAND-OFF (explicit opt-in): "Tune it" loads the deck and kicks the
+  // existing web improve/tune path on it. Scope note: the autonomous
+  // multi-round improve LOOP (commander-improve) is not web-exposed; what IS
+  // web-exposed and equivalent is the audit (advisor) -> propose (A/B Forge
+  // sim) flow the dashboard already offers. So "Tune it" loads the built deck
+  // and triggers that flow — the same underlying advisor+sim machinery, just
+  // one round and user-visible. The full loop stays on the CLI (commander-
+  // build --improve). This is deliberately gated behind the button (never
+  // auto-run) because a sim costs Forge time + Anthropic tokens.
+  const tuneBtn = el("button", { class: "advise-btn" }, "Tune it (Forge sim)");
+  tuneBtn.title =
+    "Load the deck and run the advisor + A/B Forge sim on it. Costs Forge "
+    + "time and Anthropic tokens.";
+  tuneBtn.addEventListener("click", () => {
+    $("new-deck-modal").hidden = true;
+    const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
+    if (li) selectDeck(result.id, li, { improveAfterLoad: true });
+  });
+  actions.appendChild(tuneBtn);
+  wrap.appendChild(actions);
+
+  container.appendChild(wrap);
+}
+
+// CSS.escape shim for the attribute selector above (deck ids contain
+// spaces + brackets). Falls back to a manual escape on ancient engines.
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/["\\\]\[]/g, "\\$&");
 }
 
 function tile(label, value, sub) {
@@ -3420,6 +3633,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (pasteCreate) pasteCreate.addEventListener("click", createPasteDeck);
   const bulkImport = $("new-bulk-import");
   if (bulkImport) bulkImport.addEventListener("click", bulkImportFromTextarea);
+  const buildRun = $("new-build-run");
+  if (buildRun) buildRun.addEventListener("click", buildFromScratch);
 });
 
 loadHealth();

@@ -1542,6 +1542,193 @@ def test_sim_job_reports_pod_progress(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# FP-014.4 — POST /api/build_deck + GET /api/build_job/<id>
+#
+# The build runs on a background thread (EDHREC + lift/steer are too slow to
+# hold an HTTP connection), so these mirror the sim-job async tests: every
+# test fakes commander_builder.deck_builder._assemble via the module attribute
+# the endpoint resolves at call time, so no EDHREC/Scryfall/Forge is touched.
+# ---------------------------------------------------------------------------
+
+def _fake_build_result(commander="Krenko, Mob Boss", bracket=3, name=None,
+                       lift_swaps=None, buy_list=None, bracket_estimate=3):
+    """Construct a real BuildResult (with a real ManabaseSummary) shaped like
+    a from-scratch build — the exact object the endpoint projects to JSON."""
+    from commander_builder.deck_builder import BuildResult
+    from commander_builder.deck_builder_manabase import ManabaseSummary
+    display = name or f"{commander} Build"
+    # The stem is the dashboard-loadability contract: [USER] <name> [B<n>].
+    from commander_builder.moxfield_import import safe_filename
+    stem = f"[USER] {safe_filename(display)} [B{bracket}]"
+    text = (
+        "[metadata]\n"
+        f"Name={stem}\n\n"
+        "[Commander]\n"
+        f"1 {commander}\n\n"
+        "[Main]\n"
+        + "1 Mountain\n" * 36
+        + "1 Goblin Instigator\n" * 63
+    )
+    summary = ManabaseSummary(
+        land_count=36, sources={"R": 36}, targets={"R": 34},
+        fixing_land_count=0, basic_count=36, kept_seed_lands=0, degraded=False,
+    )
+    return BuildResult(
+        text=text, name=display, stem=stem, colors="R",
+        nonland_count=63, land_count=36, source="average-deck seed",
+        dropped_off_color=[], manabase=summary,
+        bracket_target=bracket, bracket_estimate=bracket_estimate,
+        lift_swaps=lift_swaps or [], buy_list=buy_list or [],
+    )
+
+
+def _install_build_stub(monkeypatch, result=None, raises=None):
+    """Patch deck_builder._assemble to a fake. ``raises`` (an exception
+    instance) makes it raise instead — for the failure-path tests."""
+    from commander_builder import deck_builder
+
+    def fake_assemble(commander, bracket, collection_path=None, **kw):
+        if raises is not None:
+            raise raises
+        return result if result is not None else _fake_build_result(
+            commander=commander, bracket=bracket, name=kw.get("name"),
+        )
+    monkeypatch.setattr(deck_builder, "_assemble", fake_assemble)
+
+
+def _wait_for_build(client, job_id, statuses, timeout=8.0):
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        resp = client.get(f"/api/build_job/{job_id}")
+        assert resp.status_code == 200, resp.get_json()
+        job = resp.get_json()
+        if job["status"] in statuses:
+            return job
+        _time.sleep(0.02)
+    raise AssertionError(f"build job {job_id} never reached {statuses}")
+
+
+def test_build_deck_returns_job_id(client, monkeypatch):
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 3,
+    })
+    assert resp.status_code == 202, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert isinstance(job_id, str) and len(job_id) == 32
+
+
+def test_build_deck_writes_loadable_deck_and_summary(client, deck_dir, monkeypatch):
+    """The happy path: job -> done, a stem-named [USER] .dck lands on disk
+    (so the sidebar/dashboard load it), and the summary carries manabase
+    coverage + bracket estimate + swap/buy-list provenance."""
+    _install_build_stub(monkeypatch, result=_fake_build_result(
+        lift_swaps=["- Goblin X -> + Goblin Y (synergy)"],
+        buy_list=["Goblin Recruiter"], bracket_estimate=3,
+    ))
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 3,
+    })
+    job_id = resp.get_json()["job_id"]
+    job = _wait_for_build(client, job_id, {"done", "failed"})
+    assert job["status"] == "done", job
+    result = job["result"]
+    # The written file is a [USER]-prefixed, [B3]-suffixed .dck the dashboard
+    # enumerates (the loadability invariant).
+    assert result["id"].startswith("[USER]") and result["id"].endswith("[B3]")
+    assert (deck_dir / result["filename"]).exists()
+    listed = {d["id"] for d in _list_decks(deck_dir)}
+    assert result["id"] in listed
+    # Summary shape.
+    s = result["summary"]
+    assert s["source"] == "average-deck seed"
+    assert s["manabase"]["coverage"]["R"] == {"have": 36, "target": 34}
+    assert s["bracket_estimate"] == 3 and s["bracket_target"] == 3
+    assert len(s["lift_swaps"]) == 1
+    assert s["buy_list"] == ["Goblin Recruiter"]
+
+
+def test_build_deck_content_type_gate_415s_non_json(client, monkeypatch):
+    """A non-JSON POST is rejected by the app-wide mutation gate before the
+    route runs — no job created."""
+    _install_build_stub(monkeypatch)
+    resp = client.post(
+        "/api/build_deck",
+        data="commander=Krenko",
+        content_type="text/plain",
+    )
+    assert resp.status_code == 415
+
+
+def test_build_deck_bracket_9_is_400(client, monkeypatch):
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 9,
+    })
+    assert resp.status_code == 400
+    assert "bracket" in resp.get_json()["error"]
+
+
+def test_build_deck_missing_commander_is_400(client, monkeypatch):
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={"bracket": 3})
+    assert resp.status_code == 400
+    assert "commander" in resp.get_json()["error"]
+
+
+def test_build_deck_defaults_bracket_to_3(client, deck_dir, monkeypatch):
+    """Absent bracket defaults to 3 (Upgraded) — the file gets a [B3] suffix."""
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={"commander": "Krenko, Mob Boss"})
+    assert resp.status_code == 202
+    job = _wait_for_build(client, resp.get_json()["job_id"], {"done", "failed"})
+    assert job["status"] == "done", job
+    assert job["result"]["id"].endswith("[B3]")
+
+
+def test_build_job_failed_when_assemble_raises_valueerror(client, monkeypatch):
+    """A clean build error (no EDHREC data) lands the job as 'failed' with the
+    message — not a 500, not a dead thread."""
+    _install_build_stub(
+        monkeypatch,
+        raises=ValueError("cannot build: no EDHREC data for Nobody"),
+    )
+    resp = client.post("/api/build_deck", json={
+        "commander": "Nobody", "bracket": 3,
+    })
+    job = _wait_for_build(client, resp.get_json()["job_id"], {"failed", "done"})
+    assert job["status"] == "failed"
+    assert "no EDHREC data" in job["error"]
+
+
+def test_build_job_unknown_id_returns_404(client):
+    resp = client.get("/api/build_job/deadbeefdeadbeefdeadbeefdeadbeef")
+    assert resp.status_code == 404
+
+
+def test_build_deck_owned_bias_off_without_collection(client, deck_dir, monkeypatch):
+    """owned_bias defaults on, but with no registered collection the worker
+    passes no collection_path — assert it never blows up and still builds."""
+    seen = {}
+
+    from commander_builder import deck_builder
+
+    def fake_assemble(commander, bracket, collection_path=None, **kw):
+        seen["collection_path"] = collection_path
+        return _fake_build_result(commander=commander, bracket=bracket)
+    monkeypatch.setattr(deck_builder, "_assemble", fake_assemble)
+    # No collection registered in the test's isolated config, so
+    # collection_path must come through as None.
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 3,
+        "options": {"owned_bias": True},
+    })
+    _wait_for_build(client, resp.get_json()["job_id"], {"done", "failed"})
+    assert seen["collection_path"] is None
+
+
+# ---------------------------------------------------------------------------
 # /api/deck_text PUT + DELETE
 # ---------------------------------------------------------------------------
 

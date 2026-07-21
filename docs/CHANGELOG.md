@@ -6,6 +6,41 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-21 — FP-014 build-from-scratch, first cut (4 commits, UNMERGED)
+
+Lives on `feature/fp014-build-from-scratch`, pending PR. The first vertical
+slice of build-from-scratch deck assembly: commander + bracket → a legal
+exactly-99. Coherence is borrowed from EDHREC's average-deck aggregate (not
+from-atoms synthesis) and the improve loop is the intended quality path — see
+FP-014 in [future-plans.md](future-plans.md) for the honest limitations. One
+bullet per commit, oldest first. Fast lane after this branch: 2155 passed /
+155 skipped.
+
+#### Added
+
+- **`feat(build)`** (`76f1ca7`): core assembler + `commander-build` CLI. New
+  `deck_builder.py` orchestrator — seeds a legal 99 from
+  `edhrec_client.fetch_average_deck` (or a role-target-filled shell from the
+  commander page when no average deck exists), enforces
+  commander/singleton/exactly-99/color-identity, and renders the `.dck`.
+  `commander-build --commander "<name>" --bracket <n>` console script.
+- **`feat(build)`** (`d02fc62`): color-source manabase (the "hard 20%"). New
+  `deck_builder_manabase.py` replaces the FP-014.1 basics-only placeholder —
+  keeps the seed's tuned duals/fetches, tops up fixing from the advisor's
+  land tiers, and sizes basics to a per-color source target from a
+  simplified Karsten-anchored pip model; land count from the curve. Degrades
+  to basics-only when card/land data can't be resolved.
+- **`feat(build)`** (`dd818b1`): personalization stages. New
+  `deck_builder_personalize.py` — three net-zero like-for-like passes over
+  the nonland spells (lift co-occurrence picks, bracket-steer toward the
+  target, owned-collection bias), each preserving exactly-99 / singleton /
+  color-identity. Lift stage skips without a harvested corpus (≥10 decks).
+- **`feat(build)`** (`545b2db`): web build-from-scratch flow + improve
+  hand-off. Async `POST /api/build_deck` → `GET /api/build_job/<id>` job
+  endpoints, a "Build from scratch" tab in the web UI, and
+  `commander-build --improve N` handing the assembled deck to the existing
+  `commander-improve` empirical loop.
+
 ### 2026-07-21 — ManaFoundry-parity features (6 commits, UNMERGED)
 
 Lives on `feature/manafoundry-parity`, pending merge. Six user-facing

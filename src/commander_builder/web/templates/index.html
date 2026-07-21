@@ -180,6 +180,7 @@
         <button class="tab active" data-tab="moxfield">Moxfield URL</button>
         <button class="tab" data-tab="paste">Paste deck list</button>
         <button class="tab" data-tab="bulk">Bulk URLs</button>
+        <button class="tab" data-tab="build">Build from scratch</button>
       </div>
       <div class="tab-panel" id="tab-moxfield">
         <label>Display name (optional — defaults to Moxfield deck name)</label>
@@ -220,6 +221,40 @@
         </p>
         <button class="advise-btn" id="new-bulk-import">Import all</button>
         <div id="new-bulk-result"></div>
+      </div>
+      <div class="tab-panel" id="tab-build" hidden>
+        <label>Commander</label>
+        <input id="new-build-commander" type="text" autocomplete="off"
+               placeholder="e.g. Krenko, Mob Boss">
+        <label>Display name (optional — defaults to "&lt;Commander&gt; Build")</label>
+        <input id="new-build-name" type="text" placeholder="e.g. Krenko Goblins">
+        <label>Target bracket</label>
+        <select id="new-build-bracket">
+          <option value="1">1 — Exhibition</option>
+          <option value="2">2 — Core</option>
+          <option value="3" selected>3 — Upgraded</option>
+          <option value="4">4 — Optimized</option>
+          <option value="5">5 — cEDH</option>
+        </select>
+        <fieldset class="build-toggles" style="border: none; padding: 0; margin: 8px 0;">
+          <label style="display: block; font-weight: normal;">
+            <input type="checkbox" id="new-build-no-lift"> Skip synergy (lift) swaps
+          </label>
+          <label style="display: block; font-weight: normal;">
+            <input type="checkbox" id="new-build-no-steer"> Skip bracket steering
+          </label>
+          <label style="display: block; font-weight: normal;" id="new-build-owned-label">
+            <input type="checkbox" id="new-build-owned" checked> Prefer cards I own
+            <span class="muted" id="new-build-owned-note" style="font-size: 12px;"></span>
+          </label>
+        </fieldset>
+        <p class="muted" style="font-size: 12px; margin-top: 4px;">
+          Coherence is seeded from EDHREC's average deck for this commander,
+          then personalized. A build hits EDHREC live, so it can take a few
+          seconds.
+        </p>
+        <button class="advise-btn" id="new-build-run">Build deck</button>
+        <div id="new-build-summary"></div>
       </div>
       <div id="new-deck-status" class="muted"></div>
     </div>

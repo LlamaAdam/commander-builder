@@ -9,12 +9,16 @@ The primary use case: *"I have a Commander deck. Make it better, prove
 it's better, and learn what kinds of changes actually move the needle so
 future audits get smarter."*
 
-It is **not YET** a deck builder from scratch (that's a planned
-direction — see FP-014 in [docs/future-plans.md](docs/future-plans.md)),
-not a Moxfield clone, not a real-time game client. It's an iteration
-engine where Forge provides ground-truth simulation and an LLM (Claude or
-local Ollama) acts as the analyst that reads sim deltas and decides what
-to try next.
+It now also **assembles a first-cut deck from a commander**
+(`commander-build`, FP-014) — EDHREC-seeded, given a real color-source
+manabase, then empirically tuned via the improve loop. It is **not** a
+from-atoms synthesizer: coherence is borrowed from EDHREC's community
+aggregate and the improve loop does the tuning (see FP-014 in
+[docs/future-plans.md](docs/future-plans.md)). It's not a Moxfield clone,
+not a real-time game client. At its core it's still an iteration engine
+where Forge provides ground-truth simulation and an LLM (Claude or local
+Ollama) acts as the analyst that reads sim deltas and decides what to try
+next.
 
 **Source-of-truth docs:**
 - [STATUS.md](docs/STATUS.md) — current state, open backlog, parked plans
@@ -58,7 +62,10 @@ Sidebar deck list + dashboard with hero / stat tiles / mana curve /
 categories / suggested adds. Propose-swap drives A/B sims through the
 parallel-pod harness; "Save iteration" persists to
 `knowledge_log.sqlite`. The Claude analyst is opt-in per request via the
-LLM toggle row.
+LLM toggle row. A **"Build from scratch"** tab assembles a first-cut deck
+from a commander + bracket (FP-014) — it kicks off an async build job
+(`POST /api/build_deck` → poll `GET /api/build_job/<id>`) and drops the
+finished legal-99 into the deck list, ready to improve.
 
 The dashboard and audit also surface (ManaFoundry-parity additions):
 
@@ -76,6 +83,13 @@ The dashboard and audit also surface (ManaFoundry-parity additions):
 ## CLI commands
 
 ```bash
+# Build a first-cut deck from scratch: commander + target bracket → a legal
+# exactly-99 (EDHREC-seeded, color-source manabase, then personalized).
+# --improve N hands the assembled deck straight to the empirical improve loop.
+commander-build --commander "Krenko, Mob Boss" --bracket 3
+# --collection PATH biases fill toward owned cards; --no-lift / --no-steer
+# toggle personalization stages; --improve 3 runs 3 improve rounds after build.
+
 # Import a Moxfield deck as your baseline
 commander-import --user https://moxfield.com/decks/<id>
 
