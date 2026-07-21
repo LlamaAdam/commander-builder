@@ -688,3 +688,253 @@ def test_compute_deck_health_realistic_deck_signals(monkeypatch):
     assert health["mana_sinks"]["count"] == 1
     # Spell density: Genesis Wave is the only Sorcery; 1 / 6 = 0.166
     assert health["spell_density"]["ratio"] == pytest.approx(1 / 6, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# compute_health_grade -- letter grade aggregating the signals
+# ---------------------------------------------------------------------------
+#
+# The grade tests pass a synthetic ``health`` dict (compute_deck_health
+# shape) directly so only the land-count walk needs the fake Scryfall
+# lookup -- keeps each test hermetic and focused on the aggregation
+# math, not the underlying signal detectors (tested above).
+
+def _health_fixture(
+    *,
+    role_counts: dict | None = None,
+    mana_sinks_count: int | None = 4,
+    wincon_count: int = 3,
+) -> dict:
+    """Build a compute_deck_health-shaped dict. ``role_counts`` maps
+    role -> count against staples.ROLE_TARGETS; default = every role
+    exactly at target. ``mana_sinks_count=None`` simulates the Scryfall
+    outage contract (signal is None)."""
+    from commander_builder.staples import ROLE_TARGETS
+    counts = dict(role_counts or {})
+    roles = {
+        role: {
+            "count": counts.get(role, target),
+            "target": target,
+            "deficit": max(0, target - counts.get(role, target)),
+        }
+        for role, target in ROLE_TARGETS.items()
+    }
+    under = sorted(
+        (r for r, v in roles.items() if v["deficit"] > 0),
+        key=lambda r: roles[r]["deficit"], reverse=True,
+    )
+    return {
+        "mdfc": {"count": 0, "cards": []},
+        "spell_density": {
+            "non_permanent_count": 0, "total_main_count": 99,
+            "ratio": 0.0, "lookup_failures": 0,
+        },
+        "mana_sinks": (
+            None if mana_sinks_count is None
+            else {"count": mana_sinks_count, "cards": [], "lookup_failures": 0}
+        ),
+        "wincon_protection": {"count": wincon_count, "cards": []},
+        "self_mill": {"count": 0, "cards": []},
+        "role_targets": {"roles": roles, "under_built": under},
+    }
+
+
+# 37 lands (inside the 33-38 healthy band) + creatures filling to 99.
+_BALANCED_DECK = "[Main]\n37 Mountain\n62 Grizzly Bears\n"
+
+
+def test_health_grade_weights_sum_to_one():
+    """The documented weighting dict must be a full partition of the
+    score -- reweighting on unavailability divides by the available
+    subset, so the full-availability case must sum to exactly 1.0."""
+    assert sum(deck_health._GRADE_WEIGHTS.values()) == pytest.approx(1.0)
+
+
+def test_health_grade_healthy_deck_gets_a(fake_lookup):
+    """Every role at target + lands in band + sinks/protection at the
+    UI's 'good' cutoff (>=3) -> perfect score, grade A."""
+    fake_lookup["mountain"] = "Basic Land — Mountain"
+    fake_lookup["grizzly bears"] = "Creature — Bear"
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK, health=_health_fixture(),
+    )
+    assert grade["grade"] == "A"
+    assert grade["score"] == 100
+    assert grade["reasons"] == []
+    assert all(c["available"] for c in grade["components"].values())
+
+
+def test_health_grade_missing_ramp_and_draw_reasons_first(fake_lookup):
+    """A deck with zero ramp and zero draw (everything else healthy)
+    drops to C, and the two engine-role deficits are the FIRST reasons
+    -- they are the largest weighted point-losses, and the stable sort
+    keeps ramp (ROLE_TARGETS order) ahead of the equal-severity draw."""
+    fake_lookup["mountain"] = "Basic Land — Mountain"
+    fake_lookup["grizzly bears"] = "Creature — Bear"
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK,
+        health=_health_fixture(role_counts={"ramp": 0, "draw": 0}),
+    )
+    # role component: 100 * (1 - 20/35) = 42.857; weighted:
+    # 0.40*42.857 + 0.25*100 + 0.35*100 = 77.14 -> 77 -> C band.
+    assert grade["score"] == 77
+    assert grade["grade"] == "C"
+    assert "ramp" in grade["reasons"][0].lower()
+    assert "draw" in grade["reasons"][1].lower()
+    assert len(grade["reasons"]) == 2
+
+
+def test_health_grade_land_shortage_reason_and_penalty(fake_lookup):
+    """20 lands is 13 under the 33-38 band -> mana_health floors at 0
+    and the land-count reason surfaces first (it outweighs everything
+    else when the rest of the deck is healthy)."""
+    fake_lookup["mountain"] = "Basic Land — Mountain"
+    fake_lookup["grizzly bears"] = "Creature — Bear"
+    deck = "[Main]\n20 Mountain\n79 Grizzly Bears\n"
+    grade = deck_health.compute_health_grade(deck, health=_health_fixture())
+    # 0.40*100 + 0.25*0 + 0.35*100 = 75 -> C band (B needs >= 80).
+    assert grade["score"] == 75
+    assert grade["grade"] == "C"
+    assert "lands" in grade["reasons"][0]
+    assert "below" in grade["reasons"][0]
+
+
+def test_health_grade_unavailable_signal_excluded_from_denominator(
+    monkeypatch,
+):
+    """The outage contract carries through to the grade: with the
+    mana walk unavailable (all Scryfall lookups fail) and mana_sinks
+    None, the grade is computed from the REMAINING components with
+    weights renormalized -- pinned value, not dragged down by zeros."""
+    def _boom(name, **_kw):
+        raise ConnectionError("Scryfall down")
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _boom,
+    )
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK,
+        health=_health_fixture(mana_sinks_count=None, wincon_count=1),
+    )
+    # Available: role_deficits (100) + construction_signals (wincon
+    # only, count 1 -> neutral 70). Reweighted over 0.40+0.35:
+    # (0.40*100 + 0.35*70) / 0.75 = 86.0 -> B.
+    assert grade["score"] == 86
+    assert grade["grade"] == "B"
+    assert grade["components"]["mana_health"]["available"] is False
+    assert grade["components"]["mana_health"]["score"] is None
+    assert grade["components"]["role_deficits"]["available"] is True
+    # The unavailable component must NOT appear among the reasons.
+    assert not any("band" in r for r in grade["reasons"])
+
+
+def test_health_grade_all_unavailable_is_na_for_empty_deck():
+    """No parseable [Main] cards -> nothing to grade -> 'N/A' with a
+    None score. NEVER 'F': absence of data is not an unhealthy deck."""
+    grade = deck_health.compute_health_grade("")
+    assert grade["grade"] == "N/A"
+    assert grade["score"] is None
+    assert grade["reasons"] == []
+    assert all(
+        c["available"] is False for c in grade["components"].values()
+    )
+
+
+def test_health_grade_all_unavailable_is_na_for_degraded_health(
+    monkeypatch,
+):
+    """Total-outage shape: roles degraded to empty, mana_sinks None,
+    wincon key missing, and every Scryfall lookup failing (so the
+    land walk is None too). Every component is excluded -> 'N/A'."""
+    def _boom(name, **_kw):
+        raise ConnectionError("Scryfall down")
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _boom,
+    )
+    degraded = {
+        "role_targets": {"roles": {}, "under_built": []},
+        "mana_sinks": None,
+        # wincon_protection deliberately absent (degraded payload).
+    }
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK, health=degraded,
+    )
+    assert grade["grade"] == "N/A"
+    assert grade["score"] is None
+
+
+def test_health_grade_payload_shape(fake_lookup):
+    """The payload contract the audit route and both UIs rely on:
+    grade/score/reasons/components keys, and per-component
+    score/weight/available with weights echoing _GRADE_WEIGHTS."""
+    fake_lookup["mountain"] = "Basic Land — Mountain"
+    fake_lookup["grizzly bears"] = "Creature — Bear"
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK, health=_health_fixture(),
+    )
+    assert set(grade.keys()) == {"grade", "score", "reasons", "components"}
+    assert set(grade["components"].keys()) == set(
+        deck_health._GRADE_WEIGHTS.keys()
+    )
+    for name, comp in grade["components"].items():
+        assert set(comp.keys()) == {"score", "weight", "available"}
+        assert comp["weight"] == deck_health._GRADE_WEIGHTS[name]
+    assert isinstance(grade["reasons"], list)
+    assert len(grade["reasons"]) <= 3
+
+
+def test_health_grade_construction_warns_surface_as_reasons(fake_lookup):
+    """Zero mana sinks + zero wincon protection hit the UI's 'warn'
+    cutoff (score 30 each) and both surface as reasons."""
+    fake_lookup["mountain"] = "Basic Land — Mountain"
+    fake_lookup["grizzly bears"] = "Creature — Bear"
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK,
+        health=_health_fixture(mana_sinks_count=0, wincon_count=0),
+    )
+    # 0.40*100 + 0.25*100 + 0.35*30 = 75.5 -> rounds to 75/76 either
+    # side of float noise; both land in the C band (B needs >= 80).
+    assert grade["grade"] in {"C", "D"}
+    joined = " ".join(grade["reasons"]).lower()
+    assert "mana sink" in joined
+    assert "wincon protection" in joined
+
+
+# CLI surface: the commander-advise report header renders the grade
+# next to the Estimated-bracket block. Tested here (not in the slow
+# advisor module) so it runs in the default suite.
+
+def test_cli_report_renders_health_grade_line():
+    """_format_report_text places 'Health grade: <L> (<score>/100)'
+    plus indented reasons in the header; None keeps legacy output."""
+    from commander_builder.improvement_advisor import (
+        AdviceReport, _format_report_text,
+    )
+    report = AdviceReport(
+        deck_filename="X.dck", deck_id=None, bracket=3,
+        commander_names=["Hakbal"],
+    )
+    grade = {
+        "grade": "B", "score": 82,
+        "reasons": ["Ramp 4/10 — 6 below target"],
+        "components": {},
+    }
+    text = _format_report_text(report, health_grade=grade)
+    assert "Health grade: B (82/100)" in text
+    assert "Ramp 4/10" in text
+    # Legacy path: without the grade the line is absent entirely.
+    assert "Health grade" not in _format_report_text(report)
+
+
+def test_cli_report_renders_na_health_grade_explicitly():
+    """'N/A' (all signals unavailable) prints an explicit availability
+    note instead of masquerading as a real grade."""
+    from commander_builder.improvement_advisor import (
+        AdviceReport, _format_report_text,
+    )
+    report = AdviceReport(
+        deck_filename="X.dck", deck_id=None, bracket=3,
+        commander_names=["Hakbal"],
+    )
+    grade = {"grade": "N/A", "score": None, "reasons": [], "components": {}}
+    text = _format_report_text(report, health_grade=grade)
+    assert "Health grade: N/A (signals unavailable)" in text

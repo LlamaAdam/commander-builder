@@ -146,6 +146,26 @@ def _compute_deck_health_safe(deck_text: str) -> dict:
         return dict(_EMPTY_DECK_HEALTH)
 
 
+# Failure shape for the health grade. 'N/A' (never 'F') mirrors
+# compute_health_grade's own all-unavailable contract: a route-layer
+# exception is an availability problem, not a deck-construction one.
+_EMPTY_HEALTH_GRADE = {
+    "grade": "N/A", "score": None, "reasons": [], "components": {},
+}
+
+
+def _compute_health_grade_safe(deck_text: str, health_signals: dict) -> dict:
+    """Wrap ``deck_health.compute_health_grade`` so grade aggregation
+    can never take down the audit. Reuses the already-computed
+    ``deck_health`` signals dict (avoids a second Scryfall walk for
+    the signal-derived components)."""
+    try:
+        from ..deck_health import compute_health_grade
+        return compute_health_grade(deck_text, health=health_signals)
+    except Exception:  # noqa: BLE001 -- defensive at the route layer
+        return dict(_EMPTY_HEALTH_GRADE)
+
+
 _EMPTY_COMBO_ASSESSMENT = {
     "combos": [], "recommended_bracket": 1, "violations": [],
     "within_bracket": True,
@@ -287,6 +307,9 @@ def _build_audit_payload(
     warning = _fallback_warning(
         requested, actual_source, fallback_reason, byo_key,
     )
+    # Health signals computed once; the letter grade aggregates them
+    # (plus the land-count walk) without recomputing the signal set.
+    health_signals = _compute_deck_health_safe(original)
     return {
         "deck": deck_id,
         "bracket": bracket,
@@ -328,7 +351,10 @@ def _build_audit_payload(
         ),
         "salt_warning": project_salt_warning(original, salt_map, bracket),
         "protected_cards": read_protected_cards(original),
-        "deck_health": _compute_deck_health_safe(original),
+        "deck_health": health_signals,
+        # At-a-glance letter grade over the deck_health signals
+        # (ManaFoundry parity). Rendered as the tile row's header.
+        "health_grade": _compute_health_grade_safe(original, health_signals),
         "combo_assessment": _assess_combos_safe(original, bracket),
     }
 

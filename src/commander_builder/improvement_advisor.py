@@ -986,6 +986,7 @@ def _advise_steps(
 def _format_report_text(
     report: AdviceReport,
     bracket_estimate: Optional[dict] = None,
+    health_grade: Optional[dict] = None,
 ) -> str:
     lines = []
     lines.append("=" * 60)
@@ -1015,6 +1016,23 @@ def _format_report_text(
         )
         for reason in bracket_estimate.get("reasons", []):
             lines.append(f"    {reason}")
+    # Health grade (ManaFoundry parity) — one letter aggregating the
+    # deck-health signals, rendered right beside the Estimated-bracket
+    # block so the report header carries both at-a-glance verdicts.
+    # ``health_grade`` is the deck_health.compute_health_grade dict;
+    # None keeps the legacy output byte-identical. 'N/A' (the
+    # all-signals-unavailable / Scryfall-outage contract) prints
+    # explicitly rather than masquerading as a real grade.
+    if health_grade and health_grade.get("grade"):
+        if health_grade["grade"] == "N/A":
+            lines.append("Health grade: N/A (signals unavailable)")
+        else:
+            lines.append(
+                f"Health grade: {health_grade['grade']} "
+                f"({health_grade.get('score')}/100)"
+            )
+            for reason in health_grade.get("reasons", []):
+                lines.append(f"    {reason}")
     lines.append(f"Commander(s): {', '.join(report.commander_names)}")
     lines.append(f"Source: {report.source}")
     lines.append("")
@@ -1124,7 +1142,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
     except Exception:  # noqa: BLE001 — advice must print regardless
         bracket_estimate = None
-    text = _format_report_text(report, bracket_estimate=bracket_estimate)
+    # Health grade for the report header, mirroring the bracket-estimate
+    # wiring above: fail-quiet, computed from the same deck text. A
+    # Scryfall outage inside the grade yields 'N/A' by contract; any
+    # unexpected exception just drops the line.
+    health_grade = None
+    try:
+        from .deck_health import compute_health_grade
+        health_grade = compute_health_grade(
+            Path(args.user).read_text(encoding="utf-8"),
+        )
+    except Exception:  # noqa: BLE001 — advice must print regardless
+        health_grade = None
+    text = _format_report_text(
+        report,
+        bracket_estimate=bracket_estimate,
+        health_grade=health_grade,
+    )
     try:
         print(text)
     except UnicodeEncodeError:

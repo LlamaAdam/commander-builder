@@ -563,3 +563,353 @@ def _role_targets_signal(deck_text: str) -> dict:
         return role_target_report(names)
     except Exception:  # noqa: BLE001
         return {"roles": {}, "under_built": []}
+
+
+# ---------------------------------------------------------------------------
+# Health grade -- ManaFoundry-parity letter grade over the signals above
+# ---------------------------------------------------------------------------
+#
+# ``compute_health_grade`` compresses the panel's individual signals into
+# ONE at-a-glance letter (A..F) with the top reasons the deck lost
+# points. It lives here (not in the route layer) because this module
+# owns the signals; the grade is nothing but their aggregation.
+
+# Component weights -- THE single source of truth for how much each
+# component contributes to the 0-100 score. Why these numbers:
+#
+#   role_deficits (0.40)        -- the broadest construction measure we
+#       have: ramp/draw/removal/wipe/protection counts vs the
+#       gold-standard template minimums (staples.ROLE_TARGETS). A deck
+#       missing its engine roles misfires every game, so this is the
+#       heaviest component.
+#   mana_health (0.25)          -- land count vs the healthy Commander
+#       band (MDFC-adjusted). Wrong land counts cause mana screw/flood,
+#       but the failure is probabilistic per game rather than
+#       structural, so it weighs less than role deficits.
+#   construction_signals (0.35) -- the tile row's objectively
+#       "warn"-able signals: mana sinks + wincon protection. These are
+#       the two tiles deck_health_ui.js is willing to paint warn-red
+#       when absent. The other tiles (MDFC, spell density, self-mill)
+#       are deliberately EXCLUDED from the grade: the UI never assigns
+#       them worse than "muted" because their absence is
+#       archetype-dependent (a stax deck doesn't want self-mill; a
+#       creature deck doesn't want 25% instants), so counting them
+#       would punish healthy decks for not being spellslinger/
+#       graveyard decks.
+#
+# Weights sum to 1.0 (pinned by a test). When a component's underlying
+# signal is unavailable (the Scryfall-outage None contract), that
+# component is EXCLUDED and the remaining weights are renormalized --
+# an outage must never read as an unhealthy deck.
+_GRADE_WEIGHTS: dict[str, float] = {
+    "role_deficits": 0.40,
+    "mana_health": 0.25,
+    "construction_signals": 0.35,
+}
+
+# Flavor -> sub-score mapping for the construction signals. These reuse
+# the EXACT count cutoffs deck_health_ui.js applies to the mana-sink and
+# wincon-protection tiles (>=3 good, >=1 neutral, 0 warn) rather than
+# inventing parallel thresholds. The 100/70/30 spacing is chosen so a
+# component that is all-good sits in the A band, all-neutral lands
+# around C, and all-warn drags hard toward F.
+_FLAVOR_SCORES: dict[str, int] = {"good": 100, "neutral": 70, "warn": 30}
+
+# Healthy effective-land band for a Commander deck. The module docstring
+# (MDFC section) documents the underlying guidance: 36-38 lands is the
+# classic default, and an MDFC-heavy deck legitimately drops to 32-34
+# because each spell-front MDFC is "half a land". Counting MDFC spell
+# fronts at 0.5 lands each and accepting 33..38 covers both shapes with
+# one band. Each effective land outside the band costs
+# ``_LAND_BAND_PENALTY`` points (linear, floored at 0) -- steep enough
+# that a 27-land greed manabase scores under 30.
+_LAND_BAND: tuple[int, int] = (33, 38)
+_LAND_BAND_PENALTY: float = 12.0
+
+# Letter bands over the weighted 0-100 score. Tuned so that a deck
+# missing BOTH engine roles (ramp and draw at zero) with everything
+# else perfect computes to ~77 and lands in C -- "playable but the
+# engine is missing" -- rather than B. Descending order matters.
+#   >= 90  A   template-clean deck
+#   >= 80  B   minor gaps
+#   >= 65  C   real construction problems
+#   >= 50  D   multiple core failures
+#   else   F   fundamentally unbuilt
+_GRADE_BANDS: tuple[tuple[int, str], ...] = (
+    (90, "A"), (80, "B"), (65, "C"), (50, "D"),
+)
+
+
+def _mana_health_signal(deck_text: str) -> Optional[dict]:
+    """Land-count signal feeding the grade's ``mana_health`` component.
+
+    Walks [Main] once, classifying each card by its FRONT-face type
+    line ("Sorcery // Land" MDFCs are spells you sometimes play as
+    lands, so the front face decides). Cards whose front face is a
+    land count fully; cards in the curated MDFC list whose front face
+    is a SPELL count as half a land (``effective_lands``), matching
+    the module docstring's "6+ MDFCs ~= 2-3 fewer lands" guidance.
+
+    Same Scryfall-outage contract as compute_spell_density /
+    count_mana_sinks: MORE than half the lookups failing returns
+    ``None`` (signal unavailable), never a fabricated low land count.
+    An empty deck is also ``None`` -- there is nothing to grade.
+    """
+    lands = 0
+    mdfc_spell_fronts = 0
+    lines = 0
+    failed_lines = 0
+    for qty, name in _iter_main_cards(deck_text):
+        lines += 1
+        card = _lookup_card_safe(name)
+        if card is None:
+            failed_lines += 1
+            continue
+        type_line = card.get("type_line") or ""
+        if not type_line:
+            # MDFC/split layouts sometimes carry type only per-face.
+            faces = card.get("card_faces") or []
+            if faces:
+                type_line = " // ".join(
+                    (f or {}).get("type_line") or "" for f in faces
+                )
+        front = type_line.split("//")[0].lower()
+        if "land" in front:
+            lands += qty
+        elif name.lower() in _MDFC_LANDS:
+            # Spell-front MDFC (Bala Ged Recovery class): half a land.
+            mdfc_spell_fronts += qty
+    if not lines:
+        return None  # empty deck -> nothing to measure
+    if failed_lines * 2 > lines:
+        return None  # outage contract: majority of lookups failed
+    return {
+        "lands": lands,
+        "mdfc_spell_fronts": mdfc_spell_fronts,
+        "effective_lands": lands + 0.5 * mdfc_spell_fronts,
+        "lookup_failures": failed_lines,
+    }
+
+
+def _score_role_deficits(role_targets: Optional[dict]) -> Optional[float]:
+    """0-100 score from the role_target_report shape.
+
+    Target-weighted: score = 100 * (1 - total_deficit / total_target),
+    so the big-target engine roles (ramp 10, draw 10) dominate the
+    small ones (wipe 3) in proportion to how much the template says
+    they matter. Reuses ROLE_TARGETS via the report -- no parallel
+    thresholds. ``None`` (unavailable) when the roles dict is empty,
+    which is _role_targets_signal's documented degraded shape.
+    """
+    roles = (role_targets or {}).get("roles") or {}
+    if not roles:
+        return None
+    total_target = sum(int(v.get("target", 0) or 0) for v in roles.values())
+    if total_target <= 0:
+        return None
+    total_deficit = sum(int(v.get("deficit", 0) or 0) for v in roles.values())
+    return 100.0 * (1.0 - min(1.0, total_deficit / total_target))
+
+
+def _score_mana_health(mana: Optional[dict]) -> Optional[float]:
+    """0-100 score from the ``_mana_health_signal`` shape (None -> None).
+
+    100 inside the ``_LAND_BAND`` effective-land band; linear penalty
+    of ``_LAND_BAND_PENALTY`` per effective land outside; floored at 0.
+    """
+    if not mana:
+        return None
+    eff = float(mana.get("effective_lands") or 0.0)
+    lo, hi = _LAND_BAND
+    if lo <= eff <= hi:
+        return 100.0
+    distance = (lo - eff) if eff < lo else (eff - hi)
+    return max(0.0, 100.0 - _LAND_BAND_PENALTY * distance)
+
+
+def _count_flavor_score(count: int) -> int:
+    """Map a tile count to a sub-score via the UI's flavor cutoffs
+    (>=3 good, >=1 neutral, 0 warn) -- deck_health_ui.js applies these
+    to both the mana-sink and wincon-protection tiles."""
+    if count >= 3:
+        return _FLAVOR_SCORES["good"]
+    if count >= 1:
+        return _FLAVOR_SCORES["neutral"]
+    return _FLAVOR_SCORES["warn"]
+
+
+def compute_health_grade(
+    deck_text: str, health: Optional[dict] = None,
+) -> dict:
+    """Compress the deck-health signals into one letter grade.
+
+    Returns::
+
+        {
+          "grade": "A" | "B" | "C" | "D" | "F" | "N/A",
+          "score": int 0-100 | None,      # None only when grade == N/A
+          "reasons": [str, ...],          # top <=3 worst contributors
+          "components": {
+            name: {"score": int|None, "weight": float, "available": bool},
+          },
+        }
+
+    ``health`` is an optional precomputed ``compute_deck_health`` dict
+    (the audit route already has one -- passing it avoids a second
+    Scryfall walk for those signals). When omitted it is computed here.
+
+    Unavailability rules (MUST stay consistent with the Scryfall-outage
+    None contract established in 6f89c6c):
+
+      - A component whose underlying signal is unavailable is EXCLUDED
+        from the denominator; the remaining components' weights are
+        renormalized so the score stays 0-100.
+      - If EVERY component is unavailable (empty deck, or a degraded
+        health payload during a total outage), the grade is 'N/A' --
+        never 'F'. An outage is not a deck-construction failure.
+
+    The reasons list is an exact decomposition of the points lost:
+    each candidate's severity is the number of (renormalized-)weighted
+    points it drags off the final score, so sorting by severity puts
+    the genuinely worst contributor first.
+    """
+    weights = _GRADE_WEIGHTS
+
+    # N/A skeleton shared by both all-unavailable exits below.
+    def _na() -> dict:
+        return {
+            "grade": "N/A",
+            "score": None,
+            "reasons": [],
+            "components": {
+                name: {"score": None, "weight": w, "available": False}
+                for name, w in weights.items()
+            },
+        }
+
+    # No parseable [Main] cards -> nothing to grade. This also covers
+    # garbage input handed to the route defensively.
+    if not any(True for _ in _iter_main_cards(deck_text)):
+        return _na()
+
+    if health is None:
+        health = compute_deck_health(deck_text)
+
+    # --- component: role_deficits ------------------------------------
+    role_targets = health.get("role_targets")
+    role_score = _score_role_deficits(role_targets)
+
+    # --- component: mana_health --------------------------------------
+    mana = _mana_health_signal(deck_text)
+    mana_score = _score_mana_health(mana)
+
+    # --- component: construction_signals -----------------------------
+    # Sub-signals scored via the UI's flavor cutoffs. mana_sinks can be
+    # None (outage contract); wincon_protection is a named-list count
+    # and only goes missing when the health payload itself is degraded.
+    subs: list[tuple[str, int, int]] = []  # (label, count, sub_score)
+    sinks = health.get("mana_sinks")
+    if isinstance(sinks, dict):
+        c = int(sinks.get("count", 0) or 0)
+        subs.append(("mana_sinks", c, _count_flavor_score(c)))
+    wincon = health.get("wincon_protection")
+    if isinstance(wincon, dict):
+        c = int(wincon.get("count", 0) or 0)
+        subs.append(("wincon_protection", c, _count_flavor_score(c)))
+    construction_score: Optional[float] = (
+        sum(s for _n, _c, s in subs) / len(subs) if subs else None
+    )
+
+    component_scores: dict[str, Optional[float]] = {
+        "role_deficits": role_score,
+        "mana_health": mana_score,
+        "construction_signals": construction_score,
+    }
+
+    # Reweight over the AVAILABLE components only (outage exclusion).
+    available_w = sum(
+        weights[name] for name, s in component_scores.items() if s is not None
+    )
+    if available_w <= 0:
+        return _na()
+    eff_w = {
+        name: (weights[name] / available_w if s is not None else 0.0)
+        for name, s in component_scores.items()
+    }
+
+    score = round(sum(
+        eff_w[name] * s
+        for name, s in component_scores.items()
+        if s is not None
+    ))
+
+    grade = "F"
+    for cutoff, letter in _GRADE_BANDS:
+        if score >= cutoff:
+            grade = letter
+            break
+
+    # --- reasons: exact decomposition of the points lost --------------
+    # Each candidate carries (severity, text) where severity == the
+    # renormalized-weighted points that piece removed from the score.
+    candidates: list[tuple[float, str]] = []
+    if role_score is not None:
+        roles = (role_targets or {}).get("roles") or {}
+        total_target = sum(
+            int(v.get("target", 0) or 0) for v in roles.values()
+        ) or 1
+        for role, v in roles.items():
+            deficit = int(v.get("deficit", 0) or 0)
+            if deficit <= 0:
+                continue
+            severity = eff_w["role_deficits"] * 100.0 * deficit / total_target
+            candidates.append((
+                severity,
+                f"{role.capitalize()} {v.get('count', 0)}/{v.get('target', 0)}"
+                f" — {deficit} below target",
+            ))
+    if mana_score is not None and mana_score < 100.0 and mana:
+        lo, hi = _LAND_BAND
+        eff = mana["effective_lands"]
+        side = "below" if eff < lo else "above"
+        candidates.append((
+            eff_w["mana_health"] * (100.0 - mana_score),
+            f"{mana['lands']} lands ({eff:g} effective with MDFCs) — "
+            f"{side} the {lo}-{hi} healthy band",
+        ))
+    if construction_score is not None and subs:
+        sub_reason = {
+            "mana_sinks": lambda c: (
+                "No mana sinks — risks flooding out in long games"
+                if c == 0 else f"Only {c} mana sink(s) — 3+ recommended"
+            ),
+            "wincon_protection": lambda c: (
+                "No wincon protection (Silence / Veil of Summer class)"
+                if c == 0
+                else f"Only {c} wincon-protection card(s) — 3+ recommended"
+            ),
+        }
+        for name, c, s in subs:
+            if s >= 100:
+                continue
+            candidates.append((
+                eff_w["construction_signals"] * (100.0 - s) / len(subs),
+                sub_reason[name](c),
+            ))
+
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    reasons = [text for _sev, text in candidates[:3]]
+
+    return {
+        "grade": grade,
+        "score": int(score),
+        "reasons": reasons,
+        "components": {
+            name: {
+                "score": (round(s) if s is not None else None),
+                "weight": weights[name],
+                "available": s is not None,
+            }
+            for name, s in component_scores.items()
+        },
+    }

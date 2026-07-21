@@ -2819,6 +2819,71 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     assert health["spell_density"] is None
 
 
+def test_audit_endpoint_surfaces_health_grade(
+    client, monkeypatch, deck_dir,
+):
+    """The audit response carries ``health_grade`` -- the at-a-glance
+    letter aggregating the deck_health signals -- with the documented
+    payload shape (grade/score/reasons/components) so the UI can
+    render it as the deck-health panel header."""
+    from types import SimpleNamespace
+
+    p = deck_dir / "Graded.dck"
+    p.write_text(
+        "[metadata]\nName=Graded\n"
+        "[Commander]\n1 Test Commander\n"
+        "[Main]\n"
+        "37 Forest\n"
+        "62 Llanowar Visionary\n",
+        encoding="utf-8",
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # Offline Scryfall stub: lands classify as lands, everything else
+    # as a creature (fed to spell-density / mana-sink / land walks and
+    # staples.count_deck_roles alike).
+    def fake_lookup(name, **_kw):
+        return {
+            "name": name,
+            "type_line": (
+                "Basic Land — Forest" if "Forest" in name
+                else "Creature — Elf Druid"
+            ),
+            "oracle_text": "",
+            "mana_cost": "",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    # staples imported lookup_card by value at module load; patch its
+    # copy too so count_deck_roles stays offline.
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+
+    resp = client.get("/api/audit?deck=Graded&bracket=3")
+    assert resp.status_code == 200, resp.get_json()
+    grade = resp.get_json().get("health_grade")
+    assert grade is not None
+    assert set(grade.keys()) == {"grade", "score", "reasons", "components"}
+    assert grade["grade"] in {"A", "B", "C", "D", "F", "N/A"}
+    # This deck IS gradable (roles + lands classify offline), so a
+    # real letter with a numeric score must come back.
+    assert grade["grade"] != "N/A"
+    assert isinstance(grade["score"], int)
+    assert 0 <= grade["score"] <= 100
+    for comp in grade["components"].values():
+        assert set(comp.keys()) == {"score", "weight", "available"}
+
+
 def test_audit_endpoint_surfaces_protected_cards_from_metadata(
     client, monkeypatch, deck_dir,
 ):

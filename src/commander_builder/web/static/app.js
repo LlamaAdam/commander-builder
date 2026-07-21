@@ -1276,8 +1276,12 @@ function renderAuditResult(container, body) {
   // enablement. Each tile is clickable to expand a tooltip with the
   // contributing card names. Renders only when the server shipped a
   // deck_health payload (legacy clients without the field stay clean).
+  // health_grade (when the server ships it) renders as the panel's
+  // header: one letter grade aggregating the signals below it.
   if (body.deck_health) {
-    container.appendChild(renderDeckHealthTiles(body.deck_health));
+    container.appendChild(
+      renderDeckHealthTiles(body.deck_health, body.health_grade),
+    );
   }
 
   // Infinite/win-combo + bracket-pressure assessment. Renders a red
