@@ -931,6 +931,20 @@ def main(argv=None) -> int:
                         help="Disable owned-card bias even when a "
                              "--collection is given (FP-014.3).")
     parser.set_defaults(enable_lift=True, enable_steer=True, owned_bias=True)
+    # FP-014.4 HAND-OFF (the validation moat): after building, optionally
+    # hand the fresh .dck straight to commander-improve so the from-scratch
+    # pile gets MEASURED (Forge A/B sims) and tuned. Gated behind explicit
+    # opt-in because it costs real Forge wall-time AND Anthropic tokens — a
+    # from-scratch build must never silently trigger that. ``--improve`` with
+    # no value runs a sensible default number of rounds; ``--improve N`` sets
+    # the round budget.
+    parser.add_argument(
+        "--improve", dest="improve_rounds", nargs="?", type=int,
+        const=3, default=None, metavar="ROUNDS",
+        help="After building, hand the deck to commander-improve for ROUNDS "
+             "greedy Forge-sim tuning rounds (default 3). Costs Forge time + "
+             "Anthropic tokens — opt-in only.",
+    )
     args = parser.parse_args(argv)
 
     if args.bracket not in (1, 2, 3, 4, 5):
@@ -999,6 +1013,27 @@ def main(argv=None) -> int:
             print(f"    - {note}")
     if collection_path is not None and args.owned_bias:
         print(f"  buy-list (still unowned): {len(result.buy_list)} card(s)")
+
+    # ---- FP-014.4 HAND-OFF to commander-improve (explicit opt-in) --------
+    # We DELEGATE to improve_main rather than re-implement the loop: it owns
+    # deck resolution, bracket inference, the sub-threshold sim-games warning,
+    # intent learning, and the greedy keep-if-better contract. Passing the
+    # freshly-written stem + the same deck-dir + bracket means improve reads
+    # exactly the file we just wrote (Name= stamped, dashboard-loadable). Its
+    # exit code is returned so a failed tuning run is visible to the caller.
+    if args.improve_rounds is not None:
+        print(
+            f"\n[build] handing {result.stem!r} to commander-improve for "
+            f"{args.improve_rounds} round(s) (Forge + Anthropic time)...",
+            flush=True,
+        )
+        from .improve import improve_main
+        return improve_main([
+            "--deck", result.stem,
+            "--deck-dir", str(deck_dir),
+            "--bracket", str(args.bracket),
+            "--rounds", str(args.improve_rounds),
+        ])
     return 0
 
 

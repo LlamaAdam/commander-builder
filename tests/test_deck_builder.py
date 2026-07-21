@@ -294,6 +294,51 @@ def test_main_cli_smoke(tmp_path, monkeypatch):
     assert count_main_cards(files[0].read_text(encoding="utf-8")) == 99
 
 
+def test_main_cli_improve_handoff_only_on_opt_in(tmp_path, monkeypatch):
+    """FP-014.4 hand-off: commander-build hands the fresh deck to
+    commander-improve ONLY when --improve is passed (it costs Forge +
+    Anthropic time). We stub improve_main so no sim runs, and assert it is
+    invoked with the freshly-written stem + deck-dir + bracket."""
+    cards = ["Krenko, Mob Boss"] + [f"Goblin {i}" for i in range(60)]
+    monkeypatch.setattr(
+        deck_builder, "fetch_average_deck", lambda c, b: _avg(cards),
+    )
+    monkeypatch.setattr(deck_builder, "fetch_commander_page", lambda c: None)
+    monkeypatch.setattr(deck_builder, "lookup_card", _fake_lookup)
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake_lookup,
+    )
+
+    calls = []
+    # Patch on the improve module (the hand-off imports it at call time).
+    import commander_builder.improve as improve_mod
+    monkeypatch.setattr(
+        improve_mod, "improve_main", lambda argv: calls.append(argv) or 0,
+    )
+
+    # WITHOUT --improve: never invoked.
+    rc = deck_builder.main([
+        "--commander", "Krenko, Mob Boss", "--bracket", "3",
+        "--deck-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    assert calls == []
+
+    # WITH --improve 2: invoked once, targeting the written stem.
+    rc = deck_builder.main([
+        "--commander", "Krenko, Mob Boss", "--bracket", "3",
+        "--deck-dir", str(tmp_path), "--improve", "2",
+    ])
+    assert rc == 0
+    assert len(calls) == 1
+    argv = calls[0]
+    assert "--deck" in argv
+    stem = argv[argv.index("--deck") + 1]
+    assert stem == "[USER] Krenko, Mob Boss Build [B3]"
+    assert argv[argv.index("--rounds") + 1] == "2"
+    assert argv[argv.index("--bracket") + 1] == "3"
+
+
 def test_main_cli_reports_clean_error_on_no_data(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(deck_builder, "fetch_average_deck", lambda c, b: None)
     monkeypatch.setattr(deck_builder, "fetch_commander_page", lambda c: None)

@@ -19,7 +19,11 @@ refactor (tier-3 issue #3.1).
 
 from __future__ import annotations
 
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
+from uuid import uuid4
 
 from flask import Blueprint, jsonify, request
 
@@ -33,6 +37,124 @@ from ._helpers import (
 _BRACKET_NAMES = {
     1: "Exhibition", 2: "Core", 3: "Upgraded", 4: "Optimized", 5: "cEDH",
 }
+
+
+# ---------------------------------------------------------------------------
+# FP-014.4 — async "Build from scratch" jobs.
+#
+# WHY ASYNC (the timing decision, documented):
+#   build_deck (deck_builder._assemble) is NOT a cheap call. Its critical
+#   path is:
+#     1. fetch_average_deck / fetch_commander_page — one or two live EDHREC
+#        HTTP round-trips (seconds each, and slower on a cold cache);
+#     2. the lift stage — reads/builds the deck-corpus synergy matrix;
+#     3. the bracket-steer loop — re-renders the deck and re-estimates the
+#        bracket on EACH swap iteration, and every estimate resolves cards
+#        through Scryfall (more cached I/O per card).
+#   Individually any one is fine; stacked, a real build routinely exceeds the
+#   3-5s a synchronous POST can safely hold before a browser or reverse-proxy
+#   read-timeout risks silently dropping the response — the exact failure the
+#   propose-swap async migration (#43) was built to avoid. So the build runs
+#   on a background thread: POST returns a job_id immediately, the browser
+#   polls a cheap GET. This mirrors routes_sim's sim-job contract.
+#
+# WHY A SEPARATE REGISTRY (not routes_sim's generalized one):
+#   The sim-job registry carries sim-specific machinery (a disk sidecar so a
+#   done REPORT survives a server restart, pod-progress plumbing) and a large
+#   test surface. A build is short-lived and its result is a freshly-written
+#   .dck the dashboard reloads anyway — page-reload recovery buys nothing, so
+#   there's no disk sidecar here. Keeping this registry independent means the
+#   sim-job tests stay untouched and green, and neither feature's failure mode
+#   can leak into the other. It's the same shape (a Lock-guarded module dict),
+#   just leaner.
+#
+# The registry is process-global (shared across Flask's threaded worker
+# threads) but NOT persisted across a restart — acceptable for a single-user
+# local tool, and documented.
+# ---------------------------------------------------------------------------
+
+# job_id -> {status, created_at, result, error}. status is one of
+# queued|running|done|failed. ``result`` is None until done, then the JSON
+# body the poll returns (deck id/name + the BuildResult summary).
+_BUILD_JOBS: dict[str, dict] = {}
+# One coarse lock guards every read/write of _BUILD_JOBS. Critical sections
+# are tiny dict ops, so there's no meaningful contention — a poll GET waits
+# microseconds at most behind a status update.
+_BUILD_JOBS_LOCK = threading.Lock()
+
+
+def _new_build_job() -> str:
+    """Register a fresh queued build job and return its uuid4-hex id."""
+    job_id = uuid4().hex
+    with _BUILD_JOBS_LOCK:
+        _BUILD_JOBS[job_id] = {
+            "status": "queued",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "result": None,
+            "error": None,
+        }
+    return job_id
+
+
+def _set_build_job(job_id: str, **fields) -> None:
+    """Merge ``fields`` into a build job's record under the lock.
+
+    No-ops on an unknown id so a late thread update can never KeyError and
+    kill the worker (same guard as routes_sim._set_job)."""
+    with _BUILD_JOBS_LOCK:
+        rec = _BUILD_JOBS.get(job_id)
+        if rec is not None:
+            rec.update(fields)
+
+
+def _get_build_job(job_id: str) -> Optional[dict]:
+    """Return a COPY of a build job's record, or None if unknown. A copy so
+    the caller can serialize it without holding the lock or racing a worker."""
+    with _BUILD_JOBS_LOCK:
+        rec = _BUILD_JOBS.get(job_id)
+        return dict(rec) if rec is not None else None
+
+
+def _build_summary(result) -> dict:
+    """Project a ``deck_builder.BuildResult`` into the JSON summary the UI
+    renders after a build.
+
+    Keeps the wire shape flat and self-describing: the manabase block carries
+    the per-color have/target source counts (so the UI can show fixing
+    coverage per color, not just a land total), and the personalization
+    provenance (lift swaps, bracket estimate-vs-target, owned swaps, buy-list)
+    is surfaced so the "building… done" state can explain WHAT the build did,
+    not merely THAT it finished. All fields degrade to empty/zero when a stage
+    was disabled or made no change, mirroring the CLI's summary."""
+    mb = result.manabase
+    # human-readable per-color "have/target" pairs, WUBRG-ordered, only for
+    # colors the manabase actually targets (mono-color decks stay terse).
+    coverage = {
+        c: {"have": mb.sources.get(c, 0), "target": mb.targets.get(c, 0)}
+        for c in "WUBRG" if c in mb.targets
+    }
+    return {
+        "source": result.source,
+        "colors": result.colors,
+        "nonland_count": result.nonland_count,
+        "land_count": result.land_count,
+        "dropped_off_color": result.dropped_off_color,
+        "manabase": {
+            "land_count": mb.land_count,
+            "fixing_land_count": mb.fixing_land_count,
+            "basic_count": mb.basic_count,
+            "kept_seed_lands": mb.kept_seed_lands,
+            "degraded": mb.degraded,
+            "coverage": coverage,
+        },
+        "bracket_target": result.bracket_target,
+        "bracket_estimate": result.bracket_estimate,
+        "lift_swaps": result.lift_swaps,
+        "lift_skipped": result.lift_skipped,
+        "steer_notes": result.steer_notes,
+        "owned_swaps": result.owned_swaps,
+        "buy_list": result.buy_list,
+    }
 
 
 def make_decks_blueprint(deck_dir: Path) -> Blueprint:
@@ -226,6 +348,167 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             "filename": filename,
             "path": str(target),
         })
+
+    @bp.route("/api/build_deck", methods=["POST"])
+    def build_deck_route():
+        """FP-014.4 — build a legal 99 from a commander + target bracket.
+
+        Body::
+
+            {"commander": "Krenko, Mob Boss", "bracket": 3,
+             "options": {"no_lift": false, "no_steer": false,
+                         "owned_bias": true}}
+
+        ASYNC (see the module-level rationale): a real build hits EDHREC plus
+        the lift/steer loops and can outlast a synchronous POST's safe
+        connection window. So validation happens HERE, on the request thread
+        (bad commander/bracket -> immediate 4xx), and only the long
+        _assemble() call moves to a background thread. Returns ``{"job_id"}``
+        (HTTP 202); the client polls ``GET /api/build_job/<id>``.
+
+        The written .dck goes through the SAME contract the import path uses —
+        ``deck_dir / f"{result.stem}.dck"`` where the stem is
+        ``[USER] <name> [B<n>]`` and ``Name=`` is already stamped to match it
+        (deck_builder stamps it) — so the dashboard sidebar, bracket
+        resolution, and the improve loop all accept the output unchanged.
+        """
+        # silent=True: the app-wide before_request gate already guarantees
+        # Content-Type: application/json for POST, so a malformed body
+        # surfaces as None -> 400 rather than an exception.
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return jsonify({"error": "expected JSON body"}), 400
+
+        commander = (payload.get("commander") or "").strip()
+        if not commander:
+            return jsonify({"error": "commander is required"}), 400
+
+        # Bracket 1..5. Absent/empty defaults to 3 (Upgraded) — matches the
+        # import route and the CLI default. An explicitly-bad value is a
+        # client error (a nonsense bracket would steer the build into a
+        # meaningless target), so 400 it rather than silently coercing.
+        bracket_raw = payload.get("bracket")
+        if bracket_raw in (None, ""):
+            bracket = 3
+        else:
+            try:
+                bracket = int(bracket_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "bracket must be an integer 1..5"}), 400
+            if bracket not in (1, 2, 3, 4, 5):
+                return jsonify({"error": "bracket must be an integer 1..5"}), 400
+
+        # Options: each toggle is a bool with a build-appropriate default.
+        # Personalization is the POINT of a from-scratch build, so lift + steer
+        # are ON unless the user opts out; owned-bias is ON but only bites when
+        # a collection is actually registered (resolved in the worker).
+        opts = payload.get("options") or {}
+        if not isinstance(opts, dict):
+            return jsonify({"error": "options must be an object"}), 400
+        no_lift = bool(opts.get("no_lift", False))
+        no_steer = bool(opts.get("no_steer", False))
+        owned_bias = bool(opts.get("owned_bias", True))
+        # Optional display name; defaults inside _assemble to "<commander>
+        # Build". Kept here so the UI can offer a rename field later without
+        # an API change.
+        display_name = (payload.get("name") or "").strip() or None
+
+        job_id = _new_build_job()
+
+        def _worker():
+            # Runs on a background daemon thread. EVERY path MUST land the job
+            # in a terminal state (done/failed) — a thread that died without
+            # updating the registry would leave the client polling forever.
+            _set_build_job(job_id, status="running")
+            try:
+                # Import at call time (not module load) so a test's
+                # monkeypatch of commander_builder.deck_builder._assemble is
+                # honored — re-reading the attribute here resolves the patched
+                # object. _assemble (not build_deck) because we need the full
+                # BuildResult for the summary, not just the .dck text.
+                from .. import deck_builder
+                from .. import collection as collection_store
+
+                # Owned-bias only means anything with a registered collection.
+                # load_collection() returns None when unconfigured, so pass a
+                # path only when one exists AND the toggle is on — otherwise
+                # the whole owned-aware stage (and its buy-list) stays inert,
+                # exactly as --no-owned-bias would leave it.
+                coll_path = None
+                if owned_bias and collection_store.load_collection() is not None:
+                    coll_path = collection_store.collection_path()
+
+                result = deck_builder._assemble(
+                    commander,
+                    bracket,
+                    coll_path,
+                    name=display_name,
+                    enable_lift=not no_lift,
+                    enable_steer=not no_steer,
+                    owned_bias=owned_bias,
+                    # Read the lift corpus from the same dir we write into —
+                    # the pool the harvester/improve loop share (mirrors the
+                    # commander-build CLI).
+                    deck_dir=deck_dir,
+                )
+
+                # Write via the import path's invariant: stem-named file, Name=
+                # already stamped to the stem inside _assemble. Overwrite is
+                # allowed — a from-scratch build is an explicit regenerate, and
+                # the deterministic stem means "build Krenko B3 again" should
+                # refresh, not 409.
+                deck_dir.mkdir(parents=True, exist_ok=True)
+                target = deck_dir / f"{result.stem}.dck"
+                target.write_text(result.text, encoding="utf-8")
+
+                import re as _re
+                _set_build_job(job_id, status="done", result={
+                    "id": target.stem,
+                    "name": _re.sub(r"^\[USER\]\s*", "", target.stem),
+                    "filename": target.name,
+                    "path": str(target),
+                    "summary": _build_summary(result),
+                })
+            except ValueError as exc:
+                # Clean, user-facing build error (e.g. "cannot build: no
+                # EDHREC data for <commander>", or a bad bracket that slipped
+                # past validation). Surface the message, no stacktrace.
+                _set_build_job(job_id, status="failed", error=str(exc))
+            except Exception as exc:  # noqa: BLE001 — never die silently
+                _set_build_job(
+                    job_id, status="failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+        # daemon=True: a build thread must never keep the process alive at
+        # shutdown. Losing an in-flight build on restart is acceptable (the
+        # user just rebuilds); nothing persistent is at stake.
+        threading.Thread(
+            target=_worker, name=f"build-{job_id[:8]}", daemon=True,
+        ).start()
+        return jsonify({"job_id": job_id}), 202
+
+    @bp.route("/api/build_job/<job_id>", methods=["GET"])
+    def build_job(job_id: str):
+        """Poll a background build job's status.
+
+        GET (exempt from the JSON content-type gate, which only guards
+        mutating methods). Returns::
+
+            {"job_id", "status": queued|running|done|failed,
+             "created_at", "result": {...}|null, "error": str|null}
+
+        ``result`` is the deck id/name + BuildResult summary, embedded once
+        ``status == "done"``. Unknown id -> 404. Unlike sim jobs there's no
+        disk re-attach: a build is short-lived and its output is the .dck
+        itself, so a lost in-memory record just means "rebuild".
+        """
+        rec = _get_build_job(job_id)
+        if rec is None:
+            return jsonify({"error": "job not found", "job_id": job_id}), 404
+        body = dict(rec)
+        body["job_id"] = job_id
+        return jsonify(body)
 
     @bp.route("/api/bulk_import", methods=["POST"])
     def bulk_import_route():
