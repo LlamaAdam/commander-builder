@@ -214,8 +214,8 @@ documented at `tests/fixtures/real_oracles.py`.
 
 ## Open backlog (ranked)
 
-- License is TBD — repo is effectively all-rights-reserved until one is
-  chosen.
+- ~~License is TBD~~ ✅ **MIT** (2026-07-21) — `LICENSE` at repo root,
+  `pyproject.toml` `license = "MIT"`.
 
 ### Active — promoted from Parked plans (2026-05-22)
 

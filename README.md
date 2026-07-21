@@ -238,5 +238,5 @@ short version:
 
 ## License
 
-`pyproject.toml` reads `license = { text = "TBD" }`. Personal-use repo today;
-adopt MIT (or similar) if the project ever goes public.
+MIT — see [LICENSE](LICENSE). Free to use, modify, and distribute with
+attribution.
