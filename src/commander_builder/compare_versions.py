@@ -49,15 +49,28 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import dck_utils
-from .forge_runner import ForgeRunner, VENDOR_FORGE
+from .forge_runner import (
+    ForgeRunner,
+    VENDOR_FORGE,
+    # Per-worker Forge-profile provisioning (recommendation #3). These are the
+    # SAME helpers run_ab_parallel / run_ab_batch use to discover the host's
+    # cwd-isolated profiles (vendor/forge, forge2..N) and bind a ForgeRunner to
+    # each — imported (not duplicated) so both parallel dispatch paths agree on
+    # what a profile is. Re-exported from forge_runner, so tests can
+    # monkeypatch these module-level names the same way they patch
+    # ThreadPoolExecutor / _load_pool.
+    _discover_profiles,
+    _runner_for,
+)
 from .game_analyzer import analyze
 from .log_parser import _normalize, parse
 from .run_match import _fallback_opponents, _load_pool
@@ -493,13 +506,16 @@ def _salvage_wins_from_stdout(stdout: str) -> dict:
 
 
 
-# Marker substituted for SimResult.forge_log_tail when pods run in
-# parallel within the ONE shared Forge profile. The real tail would be
-# an interleaved mix of every concurrent pod's log lines, so any stack
-# trace in it may belong to a DIFFERENT pod — an honest "unavailable"
-# beats confidently-wrong post-mortem data. See _run_one_pod's
-# ``shared_profile_parallel`` and the shared-profile comment at
-# compare()'s parallel dispatch. Tests assert on this exact string.
+# Marker substituted for SimResult.forge_log_tail ONLY in the fallback
+# shared-profile case — i.e. when the host has a single Forge profile and
+# compare() must run every parallel pod inside it (see compare()'s parallel
+# dispatch). In that case the real tail is an interleaved mix of every
+# concurrent pod's log lines, so any stack trace in it may belong to a
+# DIFFERENT pod — an honest "unavailable" beats confidently-wrong
+# post-mortem data. When >= 2 profiles exist compare() now isolates each
+# worker on its OWN profile (recommendation #3) and the real per-pod tail
+# survives, so this marker never fires. See _run_one_pod's
+# ``shared_profile_parallel``. Tests assert on this exact string.
 _PARALLEL_LOG_TAIL_MARKER = (
     "(forge.log tail unavailable under parallel dispatch — shared profile)"
 )
@@ -534,12 +550,16 @@ def _run_one_pod(
     truncated run.
 
     ``shared_profile_parallel`` (default False) tells the worker it is
-    running concurrently with sibling pods in the SAME Forge profile.
-    In that case ``SimResult.forge_log_tail`` — read from the shared
+    running concurrently with sibling pods in the SAME Forge profile —
+    the FALLBACK case where the host has only one profile to share. In
+    that case ``SimResult.forge_log_tail`` — read from the shared
     ``userdata/forge.log`` after the run — is an unattributable
     interleaving of whichever pods happened to be running, so we replace
     it with ``_PARALLEL_LOG_TAIL_MARKER`` rather than hand post-mortems
-    another pod's stack trace. Sequential mode keeps the real tail.
+    another pod's stack trace. Sequential mode AND the isolated
+    per-worker-profile path (recommendation #3, >= 2 profiles) both keep
+    the real tail, because in neither case does another pod write this
+    profile's forge.log while the sim runs.
     """
     print(
         f"--- Pod {pod_index + 1}/{total_pods} starting: {pod} ---",
@@ -671,6 +691,7 @@ def compare(
     early_stop: bool = True,
     seat_parity: int = 0,
     suppress_seat_note: bool = False,
+    progress_cb: Optional["Callable[[int, int], None]"] = None,
 ) -> ComparisonReport:
     """Run the head-to-head comparison and persist the report.
 
@@ -720,6 +741,13 @@ def compare(
     call's "residual" is by design and cancels across the batch. Those
     callers pass True and print ONE aggregate line themselves from the
     ``h2h_seat_balance`` fields.
+
+    ``progress_cb`` (default None) is an optional ``(pods_done,
+    pods_total)`` callback fired once per absorbed pod. It exists for the
+    web async-sim job registry so a polling client can render
+    'running (pod 2/4)…'; it is best-effort telemetry (wrapped so an
+    exception in the callback can never break or slow the sim) and has no
+    effect on the report.
     """
     if mode not in {"pod", "1v1"}:
         raise ValueError(f"mode must be 'pod' or '1v1', got {mode!r}")
@@ -896,47 +924,131 @@ def compare(
             report.old_stats.wins, report.new_stats.wins, games_remaining,
         )
 
+    def _fire_progress() -> None:
+        """Report coarse pod-completion progress to an optional caller
+        (the web async-sim job registry, 2026-07-21). Fires once per
+        absorbed pod with (pods_done, pods_total). Wrapped so a buggy
+        callback can never break — or even slow — the simulation: progress
+        reporting is strictly best-effort telemetry."""
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(len(completed_pods), len(pods))
+        except Exception:  # noqa: BLE001 - telemetry must never break a sim
+            pass
+
     if use_parallel:
         workers = max_workers or min(len(pods), os.cpu_count() or 4)
-        print(
-            f"\n--- Dispatching {len(pods)} pods in parallel "
-            f"(workers={workers}) ---",
-            flush=True,
-        )
-        # SHARED-PROFILE PARALLELISM — reconciling with forge_runner's own
-        # warnings. run_ab_batch / run_ab_parallel refuse to let two Forge
-        # instances share a profile ("they'd collide on the deck dir,
-        # cache, and forge.log" — ForgeRunner.for_profile) and hand each
-        # worker its own cwd-isolated vendor/forge{N} profile. This
-        # dispatch DOES run every pod concurrently in the one shared
-        # profile. Taking the three collision surfaces honestly:
-        #   - deck dir: safe HERE. Those helpers' callers stage/copy decks
-        #     into the profile as part of each job; compare() writes
-        #     nothing during dispatch — every pod only READS .dck files
-        #     that already exist before the first submit (old/new are
-        #     verified above; web callers stage before calling). Concurrent
-        #     readers don't collide.
-        #   - cache: read-mostly in headless sim (the card DB/pics were
-        #     populated long before any compare() runs). A cold, never-run
-        #     profile could race on first-time cache population; accepted
-        #     risk, since every deployed profile is warmed.
-        #   - forge.log: the collision is REAL and unavoidable — every JVM
-        #     appends to the one userdata/forge.log, so a per-pod tail read
-        #     is an unattributable interleaving. We don't pretend
-        #     otherwise: _run_one_pod(shared_profile_parallel=True)
-        #     replaces forge_log_tail with an explicit marker.
-        # The robust alternative is run_ab_parallel's per-worker profiles
-        # (vendor/forge2..N); adopting it here is deliberately out of
-        # scope — it would change profile discovery and deck staging for
-        # every compare() caller.
+        # PER-WORKER FORGE PROFILES (recommendation #3) — retire the
+        # shared-profile forge.log collision that bac47c1 could only work
+        # AROUND by blanking forge_log_tail.
+        #
+        # run_ab_batch / run_ab_parallel already refuse to let two Forge
+        # instances share a profile ("they'd collide on the deck dir, cache,
+        # and forge.log" — ForgeRunner.for_profile) and hand each worker its
+        # own cwd-isolated vendor/forge{N} profile. compare() historically ran
+        # EVERY pod inside the one shared profile and accepted that collision.
+        # Re-examining the three surfaces with the fix in hand:
+        #   - deck dir: always safe — compare() writes nothing during dispatch;
+        #     every pod only READS .dck files staged before the first submit.
+        #   - cache: read-mostly in headless sim (card DB/pics warmed long
+        #     before any compare()); isolated profiles remove even the cold-
+        #     start race since each has its own userdata/.
+        #   - forge.log: the ONLY genuinely unavoidable collision under a
+        #     shared profile — every JVM appends to the one userdata/forge.log,
+        #     making a per-pod tail an unattributable interleaving. Giving each
+        #     worker its own profile removes it: nobody else writes this
+        #     profile's forge.log while the pod runs, so the REAL tail is
+        #     attributable again.
+        #
+        # We reuse forge_batch's OWN discovery (_discover_profiles: vendor/
+        # forge, forge2..N) rather than duplicate it, so this dispatch and
+        # run_ab_parallel agree on what a profile is and where it lives.
+        profiles = _discover_profiles()
+        isolated = len(profiles) >= 2
+        free_runners: "Optional[queue.Queue]" = None
+        if isolated:
+            # WORKER-vs-POD assignment (think carefully — this is the crux).
+            # A profile may be used by at most ONE pod at a time: concurrent
+            # writers to its forge.log is precisely the collision we are
+            # removing. So we assign a profile PER CONCURRENT WORKER, never per
+            # pod. Cap the pool at the profiles the host actually has (mirroring
+            # run_ab_parallel's "cap concurrency at len(profiles)" — it never
+            # synthesizes profiles it lacks) and hand out one runner per profile
+            # through a queue. Because max_workers == len(pool_runners), the
+            # executor runs at most that many pods at once, so free_runners.get()
+            # always finds a runner and every IN-FLIGHT pod holds a DISTINCT
+            # profile. When pods > profiles the surplus pods queue in the
+            # executor; a runner returned to the queue by a finished pod is
+            # safely REUSED serially by the next waiting pod — the prior pod's
+            # Forge process has already exited and is done writing that profile's
+            # forge.log, so there is no live overlap. (Same free-queue pattern as
+            # run_ab_batch, which multiplexes many ABJobs over few profile-bound
+            # runners.)
+            workers = min(workers, len(profiles))
+            pool_runners = [_runner_for(p) for p in profiles[:workers]]
+            free_runners = queue.Queue()
+            for _pooled in pool_runners:
+                free_runners.put(_pooled)
+            print(
+                f"\n--- Dispatching {len(pods)} pods in parallel "
+                f"(workers={workers}, {len(pool_runners)} isolated Forge "
+                f"profile(s)) ---",
+                flush=True,
+            )
+        else:
+            # FALLBACK — a single Forge profile on this host (the common
+            # single-install box, and every offline test). Keep bac47c1's
+            # behavior exactly: run every pod concurrently in the one shared
+            # profile passed as ``runner`` and blank forge_log_tail, because a
+            # per-pod tail read from one shared forge.log is still an
+            # unattributable interleaving. With one profile run_ab_parallel
+            # likewise degenerates to a single serial chunk — we mirror that
+            # "don't synthesize profiles you don't have" decision here.
+            print(
+                f"\n--- Dispatching {len(pods)} pods in parallel "
+                f"(workers={workers}, shared Forge profile — real forge.log "
+                f"tail unavailable) ---",
+                flush=True,
+            )
+
+        def _run_pod_isolated(i: int, pod: list[str]) -> dict:
+            """Isolated-mode worker: borrow a free profile-bound runner for the
+            WHOLE sim, then return it. Bracketing get()/put() around the entire
+            _run_one_pod call keeps the profile exclusively held across its full
+            lifetime — deck read -> forge.log write -> tail read — so no sibling
+            pod ever touches this forge.log concurrently. That exclusivity is
+            exactly why shared_profile_parallel=False here: the tail this pod
+            reads is genuinely its own."""
+            assert free_runners is not None  # only called on the isolated path
+            pooled = free_runners.get()
+            try:
+                return _run_one_pod(
+                    pooled, pod, mode, games_per_pod, i, len(pods),
+                    shared_profile_parallel=False,
+                )
+            finally:
+                free_runners.put(pooled)
+
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = {
-                ex.submit(
-                    _run_one_pod, runner, pod, mode, games_per_pod, i, len(pods),
-                    shared_profile_parallel=True,
-                ): i
-                for i, pod in enumerate(pods)
-            }
+            if isolated:
+                # Each pod acquires its own profile from the free-runner queue
+                # inside _run_pod_isolated (per-worker, distinct, real tail).
+                futures = {
+                    ex.submit(_run_pod_isolated, i, pod): i
+                    for i, pod in enumerate(pods)
+                }
+            else:
+                # Shared-profile fallback: every pod uses the one ``runner`` and
+                # blanks its tail. Submit shape (positional pod_index at args[4])
+                # is load-bearing for the scripted-executor drain test.
+                futures = {
+                    ex.submit(
+                        _run_one_pod, runner, pod, mode, games_per_pod, i, len(pods),
+                        shared_profile_parallel=True,
+                    ): i
+                    for i, pod in enumerate(pods)
+                }
             # `stop_decided` latches the first decisive verdict so late
             # absorptions can't re-trigger (or un-trigger) the early-stop
             # decision: after the cancel sweep every future is done,
@@ -953,6 +1065,7 @@ def compare(
                     # OWN pod_index, so absent indices simply don't appear.
                     continue
                 _absorb(fut.result())
+                _fire_progress()
                 if stop_decided or not _check_early_stop():
                     continue
                 # Verdict locked in. Cancel any still-QUEUED pods —
@@ -981,6 +1094,7 @@ def compare(
             _absorb(
                 _run_one_pod(runner, pod, mode, games_per_pod, i, len(pods)),
             )
+            _fire_progress()
             remaining = len(pods) - len(completed_pods)
             # Only flag early-stop when there are still pods we can
             # actually skip; otherwise the decisive check just

@@ -6,6 +6,84 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-21 — FP-014 build-from-scratch, first cut (4 commits, UNMERGED)
+
+Lives on `feature/fp014-build-from-scratch`, pending PR. The first vertical
+slice of build-from-scratch deck assembly: commander + bracket → a legal
+exactly-99. Coherence is borrowed from EDHREC's average-deck aggregate (not
+from-atoms synthesis) and the improve loop is the intended quality path — see
+FP-014 in [future-plans.md](future-plans.md) for the honest limitations. One
+bullet per commit, oldest first. Fast lane after this branch: 2155 passed /
+155 skipped.
+
+#### Added
+
+- **`feat(build)`** (`76f1ca7`): core assembler + `commander-build` CLI. New
+  `deck_builder.py` orchestrator — seeds a legal 99 from
+  `edhrec_client.fetch_average_deck` (or a role-target-filled shell from the
+  commander page when no average deck exists), enforces
+  commander/singleton/exactly-99/color-identity, and renders the `.dck`.
+  `commander-build --commander "<name>" --bracket <n>` console script.
+- **`feat(build)`** (`d02fc62`): color-source manabase (the "hard 20%"). New
+  `deck_builder_manabase.py` replaces the FP-014.1 basics-only placeholder —
+  keeps the seed's tuned duals/fetches, tops up fixing from the advisor's
+  land tiers, and sizes basics to a per-color source target from a
+  simplified Karsten-anchored pip model; land count from the curve. Degrades
+  to basics-only when card/land data can't be resolved.
+- **`feat(build)`** (`dd818b1`): personalization stages. New
+  `deck_builder_personalize.py` — three net-zero like-for-like passes over
+  the nonland spells (lift co-occurrence picks, bracket-steer toward the
+  target, owned-collection bias), each preserving exactly-99 / singleton /
+  color-identity. Lift stage skips without a harvested corpus (≥10 decks).
+- **`feat(build)`** (`545b2db`): web build-from-scratch flow + improve
+  hand-off. Async `POST /api/build_deck` → `GET /api/build_job/<id>` job
+  endpoints, a "Build from scratch" tab in the web UI, and
+  `commander-build --improve N` handing the assembled deck to the existing
+  `commander-improve` empirical loop.
+
+### 2026-07-21 — ManaFoundry-parity features (6 commits, UNMERGED)
+
+Lives on `feature/manafoundry-parity`, pending merge. Six user-facing
+features that close the gap with from-scratch builders like ManaFoundry.gg
+(the assembly angle itself is planned as FP-014). One bullet per commit,
+oldest first. Fast lane after this branch: 2089 passed / 155 skipped.
+
+#### Added
+
+- **`feat(pricing)`** (`9d16fb2`): cheaper-printing savings. `/api/dashboard`
+  attaches a `printing_savings` block and the Est. price tile grows a "Save
+  up to $X with cheaper printings (N cards)" list. New
+  `scryfall_client.lookup_card_prints` (lazily-cached `/cards/search?unique=prints`
+  walk) + `deck_pricing.printing_savings_for_deck_text`; legality-filtered,
+  qty-aware, biggest-saving-first.
+- **`feat(bracket)`** (`6b00ef5`): explainable bracket estimator. New core
+  `bracket_estimator.py` estimates a deck's Commander bracket (1–5) from its
+  list using the repo's existing rule encodings (Game-Changer / combo / MLD
+  floors + weighted signals) and reports estimate/floor/confidence/reasons;
+  `|est−declared| ≥ 1` soft-flags, `≥ 2` hard-flags a mismatch. Surfaced in
+  the dashboard payload.
+- **`feat(import)`** (`c110041`): MTGA + CSV paste import. New core
+  `import_formats.py` (`arena_to_dck`, `csv_to_lines`, conservative
+  `detect_paste_format`) lets the single paste textarea accept MTG Arena
+  exports and CSV card lists on top of `.dck` / Moxfield-bulk paste;
+  ambiguity always falls back to plain, malformed lines in a positively
+  detected format raise a named error.
+- **`feat(health)`** (`194dba1`): at-a-glance letter grade.
+  `deck_health.compute_health_grade` aggregates the existing health signals
+  into one A–F grade (0–100 score + worst-first reasons) via one documented
+  weight dict; unavailable signals renormalize out, all-unavailable grades
+  N/A. Rendered as the deck-health panel header + shipped in `/api/audit`.
+- **`feat(collection)`** (`95a6ee7`): owned-card registry. New
+  `collection.py` reads `~/.commander-builder/collection.txt` (plain or CSV,
+  reusing `import_formats.csv_to_lines`); `commander-advise` /
+  `commander-auto-curate` gain `--collection PATH` + `--owned-only` to
+  exclude or flag unowned adds through the advisor's disclosure contract.
+- **`feat(lift)`** (`e51f9cf`): co-occurrence lift analysis. New stdlib-only
+  `lift_analysis.py` computes pairwise lift over the harvested deck corpus
+  (support-floored, band sub-matrices, sha256-keyed cache) and surfaces
+  "pairs well with your deck" candidate adds — as a dashboard "Lift picks"
+  panel, `source='lift'` advisor evidence, and `commander-advise --show-lift`.
+
 ### 2026-07-20 — adversarial-review round 3 (5 commits, UNMERGED)
 
 Third pass: an audit of round 2's own commits plus a completeness check

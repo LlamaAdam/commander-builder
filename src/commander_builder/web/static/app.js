@@ -135,6 +135,27 @@ function highlight(li) {
   if (li) li.classList.add("active");
 }
 
+// --- Mobile sidebar drawer -------------------------------------------
+// A single `drawer-open` class on <body> drives the CSS slide-in
+// (mirrors the .active class-toggle pattern used for the rail buttons).
+// All drawer styling lives behind the <=768px media query in app.css,
+// so on desktop these toggles are inert: the hamburger + scrim are
+// display:none and the sidebar/rail keep their grid positions.
+function openDrawer() {
+  document.body.classList.add("drawer-open");
+  const t = document.getElementById("btn-drawer-toggle");
+  if (t) t.setAttribute("aria-expanded", "true");
+}
+function closeDrawer() {
+  document.body.classList.remove("drawer-open");
+  const t = document.getElementById("btn-drawer-toggle");
+  if (t) t.setAttribute("aria-expanded", "false");
+}
+function toggleDrawer() {
+  if (document.body.classList.contains("drawer-open")) closeDrawer();
+  else openDrawer();
+}
+
 let _activeDeckId = null;
 // AbortController for the currently in-flight audit stream. Reset on
 // every loadAdvise() call so switching decks / re-running the audit
@@ -162,6 +183,9 @@ async function selectDeck(deckId, li, opts) {
   }
   _activeDeckId = deckId;
   highlight(li);
+  // Selecting a deck on mobile closes the slide-in drawer so the freshly
+  // loaded dashboard is visible. Inert on desktop (no drawer-open class).
+  closeDrawer();
   const dash = $("dashboard");
   if (!soft) {
     dash.innerHTML = '<p class="empty-state">Loading…</p>';
@@ -214,6 +238,15 @@ async function selectDeck(deckId, li, opts) {
       // resolves; if the user switches decks first, the existing
       // AbortController-based cancellation halts the in-flight
       // call.
+      loadAdvise("heuristic");
+    }
+
+    // FP-014.4 hand-off: the "Tune it" button on a fresh build selects the
+    // deck with ``improveAfterLoad`` so the advisor runs immediately — the
+    // web-exposed equivalent of the improve loop (advisor -> A/B sim). Fire
+    // it even when auto-audit-on-load is off (the user explicitly asked to
+    // tune), and guard on the deck still being selected.
+    if (opts && opts.improveAfterLoad && _activeDeckId === deckId) {
       loadAdvise("heuristic");
     }
   } catch (e) {
@@ -369,8 +402,21 @@ async function runProposeSwap() {
   status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} `
     + `games on B${bracket} via Forge — ${etaStr}…`;
   btn.disabled = true;
+  // Guard against the stale-response race (the _activeDeckId pattern from
+  // 13f16de): a pod sim can run for minutes, and the user may switch decks
+  // while it runs. Capture which deck we kicked this off for; every async
+  // continuation below bails if the active deck has since changed, so a
+  // poll that resolves after a deck switch never renders onto the wrong
+  // deck's panel.
+  const simDeckId = _activeDeckId;
   try {
-    const resp = await fetch("/api/propose_swap", {
+    // Async contract (2026-07-21): POST returns {job_id} immediately, then
+    // we poll GET /api/sim_job/<id>. The old sync POST held the HTTP
+    // connection open for the whole sim — a pod-mode 40-game run could
+    // outlast a browser/proxy read timeout and lose the response even
+    // though Forge finished and wrote its report. Polling keeps every
+    // request short.
+    const startResp = await fetch("/api/propose_swap_async", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -381,20 +427,79 @@ async function runProposeSwap() {
         mode,
       }),
     });
-    const body = await resp.json();
-    if (!resp.ok) {
-      status.textContent = `Error: ${body.error || resp.status}${
-        body.detail ? " — " + body.detail : ""
+    const startBody = await startResp.json();
+    if (!startResp.ok) {
+      // Validation/staging/availability errors still come back
+      // synchronously here (before any job is created), so surface them
+      // exactly as before.
+      status.textContent = `Error: ${startBody.error || startResp.status}${
+        startBody.detail ? " — " + startBody.detail : ""
       }`;
       return;
     }
+    const jobId = startBody.job_id;
+
+    // Poll with a gentle backoff: 2s, then creeping up to 5s so a long pod
+    // sim doesn't hammer the server. No hard timeout — the server keeps the
+    // job until it finishes; the user can also just close the modal.
+    let delay = 2000;
+    const body = await new Promise((resolve, reject) => {
+      const tick = async () => {
+        // Stop polling entirely if the user navigated away from this deck.
+        if (_activeDeckId !== simDeckId) {
+          reject(new Error("__deck_switched__"));
+          return;
+        }
+        try {
+          const pollResp = await fetch(
+            `/api/sim_job/${encodeURIComponent(jobId)}`,
+          );
+          const job = await pollResp.json();
+          if (!pollResp.ok) {
+            reject(new Error(job.error || `HTTP ${pollResp.status}`));
+            return;
+          }
+          if (job.status === "done") {
+            resolve(job.report);
+            return;
+          }
+          if (job.status === "failed") {
+            reject(new Error(job.error || "sim failed"));
+            return;
+          }
+          // queued/running — update the status line with coarse progress
+          // when compare() has reported a completed pod.
+          if (_activeDeckId === simDeckId) {
+            const prog = job.progress;
+            if (prog && prog.pods_total) {
+              status.textContent =
+                `Running ${games} ${mode === "pod" ? "pod" : "1v1"} games `
+                + `on B${bracket} via Forge — pod ${prog.pods_done}/${prog.pods_total}…`;
+            }
+          }
+          delay = Math.min(delay + 500, 5000);
+          setTimeout(tick, delay);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      setTimeout(tick, delay);
+    });
+
+    // A poll that resolved after the user switched decks must not render.
+    if (_activeDeckId !== simDeckId) return;
     status.textContent = `Done. ${body.total_games} games played.`;
     _lastSimReport = body;
     renderProposeResult(result, body);
   } catch (e) {
+    // Swallow the deck-switch sentinel silently — it isn't an error, the
+    // user just moved on.
+    if (e && e.message === "__deck_switched__") return;
     status.textContent = `Network error: ${e.message}`;
   } finally {
-    btn.disabled = false;
+    // Only re-enable the button if we're still on the deck we started on;
+    // a deck switch rebuilt the panel and its own button.
+    if (_activeDeckId === simDeckId) btn.disabled = false;
   }
 }
 
@@ -662,6 +767,12 @@ const _LLM_PREF_KEY = "cb.audit.llm";
 const _ANTHROPIC_KEY = "cb.audit.anthropic_key";  // legacy; cleared on load
 const _CLAUDE_MODEL_KEY = "cb.audit.claude_model";
 const _BUDGET_KEY = "cb.audit.budget";
+// Owned-only audit pref (ManaFoundry parity). The collection itself is
+// server-side state (Settings panel → /api/collection); this toggle
+// only decides whether unowned adds are DROPPED (checked) or kept with
+// a "not owned" badge (unchecked, the flag-mode default). Inert when
+// no collection is registered.
+const _OWNED_ONLY_KEY = "cb.audit.owned_only";
 
 function getBudgetPref() {
   try { return localStorage.getItem(_BUDGET_KEY) === "1"; }
@@ -669,6 +780,15 @@ function getBudgetPref() {
 }
 function setBudgetPref(v) {
   try { localStorage.setItem(_BUDGET_KEY, v ? "1" : "0"); }
+  catch (_e) { /* ignore */ }
+}
+
+function getOwnedOnlyPref() {
+  try { return localStorage.getItem(_OWNED_ONLY_KEY) === "1"; }
+  catch (_e) { return false; }
+}
+function setOwnedOnlyPref(v) {
+  try { localStorage.setItem(_OWNED_ONLY_KEY, v ? "1" : "0"); }
   catch (_e) { /* ignore */ }
 }
 
@@ -1044,6 +1164,9 @@ async function loadAdvise(sourceOverride) {
     if (getBudgetPref()) {
       url += `&budget=1`;
     }
+    if (getOwnedOnlyPref()) {
+      url += `&owned_only=1`;
+    }
     const headers = {};
     if (keyFinal) headers["X-Anthropic-API-Key"] = keyFinal;
     // EventSource doesn't support custom headers (the BYO Claude
@@ -1214,6 +1337,25 @@ function renderAuditBackendRow(body) {
   budgetLabel.appendChild(document.createTextNode(" Budget mode"));
   row.appendChild(budgetLabel);
 
+  // Owned-only toggle — drops adds outside the registered collection
+  // (Settings → Card collection) from the *next* audit. Mirrors the
+  // Budget-mode checkbox pattern: localStorage pref, re-run to apply.
+  // Unchecked with a collection registered still badges unowned adds.
+  const ownedLabel = el("label",
+    { style: "font-size: 12px; display: flex; gap: 4px; "
+           + "align-items: center;",
+      title: "Only recommend cards in your registered collection "
+           + "(Settings → Card collection). Basic lands always count "
+           + "as owned. No effect until a collection is registered." });
+  const ownedBox = el("input", { type: "checkbox" });
+  ownedBox.checked = getOwnedOnlyPref();
+  ownedBox.addEventListener("change", () => {
+    setOwnedOnlyPref(ownedBox.checked);
+  });
+  ownedLabel.appendChild(ownedBox);
+  ownedLabel.appendChild(document.createTextNode(" Owned only"));
+  row.appendChild(ownedLabel);
+
   // Manage-key button — opens the unified Settings panel. FP-011: the
   // Anthropic key is stored server-side (config.json) and set in ONE
   // place (Settings), instead of a separate plaintext copy per browser.
@@ -1276,8 +1418,12 @@ function renderAuditResult(container, body) {
   // enablement. Each tile is clickable to expand a tooltip with the
   // contributing card names. Renders only when the server shipped a
   // deck_health payload (legacy clients without the field stay clean).
+  // health_grade (when the server ships it) renders as the panel's
+  // header: one letter grade aggregating the signals below it.
   if (body.deck_health) {
-    container.appendChild(renderDeckHealthTiles(body.deck_health));
+    container.appendChild(
+      renderDeckHealthTiles(body.deck_health, body.health_grade),
+    );
   }
 
   // Infinite/win-combo + bracket-pressure assessment. Renders a red
@@ -1582,6 +1728,25 @@ function renderAuditResult(container, body) {
             title: "Not found in Scryfall — likely a hallucinated card name",
           },
           "⚠ not in Scryfall",
+        ));
+      }
+      // Ownership pill — only on an EXPLICIT owned === false (the
+      // advisor's flag mode annotates every add when a collection is
+      // registered; absent/null means the feature isn't in use, so
+      // legacy payloads and collection-less users see no pill).
+      // "warn" not "bad": an unowned card is a purchase decision,
+      // not an error like a hallucinated name.
+      if (a.owned === false) {
+        nameDiv.appendChild(el(
+          "span",
+          {
+            class: "pill warn",
+            style: "margin-left: 6px; font-size: 11px;",
+            title: "Not in your registered collection (Settings → "
+                 + "Card collection). Check 'Owned only' to hide "
+                 + "cards you don't own.",
+          },
+          "not owned",
         ));
       }
       // EDHREC salt-score pill — surfaces when a rec is in the
@@ -1961,13 +2126,11 @@ function renderDashboard(data, iterations) {
   // Bracket tile: heuristic recommendation + dropdown to override.
   // `bracket_name` carries the human label. The override re-fetches
   // /api/dashboard with the chosen bracket, so the user sees how
-  // the heuristic shifts power-related fields.
-  tiles.appendChild(bracketTile(t));
-  tiles.appendChild(tile(
-    "Est. price",
-    t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",
-    t.n_priced_cards != null ? `${t.n_priced_cards} priced cards` : null,
-  ));
+  // the heuristic shifts power-related fields. Second arg is the
+  // explainable estimator payload (ManaFoundry parity) — estimated
+  // vs declared with expandable reasons.
+  tiles.appendChild(bracketTile(t, data.bracket_estimate));
+  tiles.appendChild(priceTile(t, data.printing_savings));
   tiles.appendChild(tile(
     "Deck progress",
     `${data.deck_progress?.current ?? 0} / ${data.deck_progress?.target ?? 100}`,
@@ -2029,6 +2192,14 @@ function renderDashboard(data, iterations) {
     ));
   }
   dash.appendChild(sugPanel);
+
+  // Lift picks (ManaFoundry parity — "Lift Web"). Cards that co-occur
+  // with this deck's cards across the locally harvested corpus far
+  // more often than chance predicts. Backend attaches `lift_picks`
+  // fail-quiet (same contract as printing_savings), so absence /
+  // empty picks just skips the panel (liftPicksPanel returns null).
+  const liftPanel = liftPicksPanel(data.lift_picks);
+  if (liftPanel) dash.appendChild(liftPanel);
 
   // Iteration history
   if (iterations.length) {
@@ -2463,7 +2634,7 @@ async function verifyAgainstSource() {
   }
 }
 
-function bracketTile(t) {
+function bracketTile(t, estimate) {
   const t_node = el("div", { class: "tile" });
   t_node.appendChild(el("div", { class: "label" }, "Bracket"));
   const num = t.bracket ?? t.power_level ?? "—";
@@ -2474,6 +2645,48 @@ function bracketTile(t) {
       "div", { class: "sub" },
       `${t.n_game_changers} game changer${t.n_game_changers === 1 ? "" : "s"}`,
     ));
+  }
+  // Explainable bracket estimate (ManaFoundry parity). Backend rule:
+  // |estimate - declared| >= 2 is a hard "mismatch" (warn styling),
+  // == 1 is a soft "check" — mismatch_level carries which. Reasons
+  // render inside a collapsed <details>, matching the lazy-expand
+  // pattern used by priceTile's savings breakdown.
+  if (estimate && estimate.estimate != null) {
+    const declared = estimate.declared;
+    const level = estimate.mismatch_level; // null | "check" | "mismatch"
+    let text;
+    if (declared == null) {
+      text = `Estimated bracket: ${estimate.estimate}`;
+    } else if (level === "mismatch") {
+      text = `Estimated bracket: ${estimate.estimate} — declared ${declared} ⚠ mismatch`;
+    } else if (level === "check") {
+      text = `Estimated bracket: ${estimate.estimate} — declared ${declared} (check)`;
+    } else {
+      text = `Estimated bracket: ${estimate.estimate} — declared ${declared} ✓`;
+    }
+    const style = level === "mismatch"
+      ? "color: var(--warn, #d4a017); font-weight: 600;"
+      : level === "check"
+      ? "color: var(--warn, #d4a017);"
+      : "";
+    t_node.appendChild(el("div", { class: "sub", style }, text));
+    if ((estimate.reasons || []).length) {
+      const details = el("details", { style: "margin-top: 6px;" });
+      details.appendChild(el(
+        "summary",
+        { class: "muted", style: "cursor: pointer; font-size: 12px;" },
+        `Why B${estimate.estimate}? (${estimate.confidence} confidence)`,
+      ));
+      const ul = el("ul", {
+        style: "margin: 6px 0 0; padding-left: 16px; font-size: 12px; "
+             + "text-align: left; max-height: 180px; overflow: auto;",
+      });
+      for (const r of estimate.reasons) {
+        ul.appendChild(el("li", { style: "margin-bottom: 3px;" }, r));
+      }
+      details.appendChild(ul);
+      t_node.appendChild(details);
+    }
   }
   // Bracket auto-inference divergence warning. When the heuristic
   // disagrees with the user's declared bracket, surface that so they
@@ -2807,7 +3020,42 @@ function openNewDeckModal() {
   if (bulkUrls) bulkUrls.value = "";
   const bulkResult = $("new-bulk-result");
   if (bulkResult) bulkResult.innerHTML = "";
+  // FP-014.4 build tab — clear the last run's inputs + summary.
+  const bCmdr = $("new-build-commander");
+  if (bCmdr) bCmdr.value = "";
+  const bName = $("new-build-name");
+  if (bName) bName.value = "";
+  const bSummary = $("new-build-summary");
+  if (bSummary) bSummary.innerHTML = "";
+  // The "prefer owned" toggle is only meaningful with a registered
+  // collection; grey it out (with a note) otherwise so the user isn't
+  // misled into thinking an inert option does something.
+  refreshBuildOwnedToggle();
   $("new-deck-modal").hidden = false;
+}
+
+// Enable/disable the build "prefer owned" toggle based on whether a
+// collection is registered. Owned-bias (and its buy-list) do nothing
+// without one, so we disable + annotate rather than silently no-op.
+async function refreshBuildOwnedToggle() {
+  const cb = $("new-build-owned");
+  const note = $("new-build-owned-note");
+  if (!cb) return;
+  try {
+    const st = await fetchJSON("/api/collection");
+    if (st.configured) {
+      cb.disabled = false;
+      if (note) note.textContent = `(${st.count} cards registered)`;
+    } else {
+      cb.disabled = true;
+      cb.checked = false;
+      if (note) note.textContent = "(no collection registered — Settings)";
+    }
+  } catch (e) {
+    // Non-fatal: leave the toggle usable; the backend no-ops owned-bias
+    // anyway when no collection exists.
+    if (note) note.textContent = "";
+  }
 }
 
 function switchTab(name) {
@@ -2975,7 +3223,12 @@ async function createPasteDeck() {
     });
     const body = await resp.json();
     if (!resp.ok) {
-      status.textContent = `Error: ${body.error || resp.status}`;
+      // `detail` carries the parser's line-level diagnosis for a
+      // malformed Arena/CSV paste — without it the user only sees the
+      // generic "could not parse" headline and has no idea which line
+      // to fix.
+      const detail = body.detail ? ` — ${body.detail}` : "";
+      status.textContent = `Error: ${body.error || resp.status}${detail}`;
       return;
     }
     status.textContent = `Created ${body.filename}.`;
@@ -2986,6 +3239,175 @@ async function createPasteDeck() {
   }
 }
 
+// FP-014.4 — "Build from scratch". POST /api/build_deck returns a job_id
+// immediately (the build hits EDHREC + the lift/steer loops, too slow to
+// hold an HTTP connection), then we poll GET /api/build_job/<id> exactly the
+// way the propose-swap async flow polls sim jobs. On done we load the freshly
+// built deck into the dashboard and render the summary + the optional
+// "Tune it" hand-off.
+async function buildFromScratch() {
+  const commander = $("new-build-commander").value.trim();
+  const name = $("new-build-name").value.trim();
+  const bracket = parseInt($("new-build-bracket").value, 10);
+  const noLift = $("new-build-no-lift").checked;
+  const noSteer = $("new-build-no-steer").checked;
+  const ownedCb = $("new-build-owned");
+  // A disabled checkbox (no collection) means owned-bias is inert; send
+  // false so the backend doesn't even try to resolve a collection.
+  const ownedBias = !!(ownedCb && !ownedCb.disabled && ownedCb.checked);
+  const status = $("new-deck-status");
+  const summary = $("new-build-summary");
+  const btn = $("new-build-run");
+  summary.innerHTML = "";
+  if (!commander) {
+    status.textContent = "Enter a commander name.";
+    return;
+  }
+  status.textContent = `Building ${commander} (B${bracket})… seeding from EDHREC.`;
+  btn.disabled = true;
+  try {
+    const startResp = await fetch("/api/build_deck", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        commander,
+        bracket,
+        name: name || undefined,
+        options: { no_lift: noLift, no_steer: noSteer, owned_bias: ownedBias },
+      }),
+    });
+    const startBody = await startResp.json();
+    if (!startResp.ok) {
+      // Validation errors (bad bracket / missing commander) come back
+      // synchronously before any job is created.
+      status.textContent = `Error: ${startBody.error || startResp.status}`;
+      return;
+    }
+    const jobId = startBody.job_id;
+
+    // Poll with a gentle backoff (1s creeping to 4s): a build is usually
+    // a handful of seconds, quicker than a pod sim, so start tighter.
+    let delay = 1000;
+    const result = await new Promise((resolve, reject) => {
+      const tick = async () => {
+        try {
+          const pollResp = await fetch(
+            `/api/build_job/${encodeURIComponent(jobId)}`,
+          );
+          const job = await pollResp.json();
+          if (!pollResp.ok) {
+            reject(new Error(job.error || `HTTP ${pollResp.status}`));
+            return;
+          }
+          if (job.status === "done") { resolve(job.result); return; }
+          if (job.status === "failed") {
+            reject(new Error(job.error || "build failed"));
+            return;
+          }
+          delay = Math.min(delay + 500, 4000);
+          setTimeout(tick, delay);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      setTimeout(tick, delay);
+    });
+
+    status.textContent = `Built ${result.filename}.`;
+    // Refresh the sidebar so the new deck appears, then select it so the
+    // dashboard loads it (same path the import flows use). We keep the
+    // modal open long enough to render the summary; selecting a deck also
+    // closes the modal via selectDeck's own close logic.
+    await loadDecks();
+    renderBuildSummary(summary, result);
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Render the post-build summary: provenance (seed vs fallback), manabase
+// per-color coverage, estimated-vs-target bracket, N synergy swaps, buy-list
+// count — plus the "Load deck" + optional "Tune it (Forge sim)" actions.
+function renderBuildSummary(container, result) {
+  container.innerHTML = "";
+  const s = result.summary || {};
+  const mb = s.manabase || {};
+  const wrap = el("div", { style: "margin-top: 10px;" });
+
+  wrap.appendChild(el("h4", { style: "margin: 6px 0;" }, `Built: ${result.name}`));
+
+  const facts = [];
+  facts.push(`Source: ${s.source || "?"}`);
+  facts.push(
+    `Colors: ${s.colors || "colorless"} · ${s.nonland_count} nonland / ${s.land_count} land`,
+  );
+  // Manabase per-color coverage (have/target sources) — the FP-014.2 signal.
+  const cov = mb.coverage || {};
+  const covStr = Object.keys(cov)
+    .map((c) => `${c}:${cov[c].have}/${cov[c].target}`)
+    .join("  ");
+  if (covStr) facts.push(`Manabase sources (have/target): ${covStr}`);
+  if (mb.degraded) facts.push("Manabase degraded to basics-only (land data unavailable).");
+  // Bracket estimate vs target.
+  if (s.bracket_estimate != null) {
+    const verdict = s.bracket_estimate === s.bracket_target
+      ? "meets target"
+      : (s.bracket_estimate < s.bracket_target ? "below target" : "above target");
+    facts.push(`Bracket: estimate B${s.bracket_estimate} vs target B${s.bracket_target} (${verdict})`);
+  } else {
+    facts.push(`Bracket target: B${s.bracket_target}`);
+  }
+  facts.push(`Synergy (lift) swaps: ${(s.lift_swaps || []).length}`);
+  if (s.buy_list && s.buy_list.length) {
+    facts.push(`Buy-list (still unowned): ${s.buy_list.length} card(s)`);
+  }
+  const ul = el("ul", { style: "margin: 4px 0; padding-left: 18px; font-size: 13px;" });
+  for (const f of facts) ul.appendChild(el("li", {}, f));
+  wrap.appendChild(ul);
+
+  // Actions row.
+  const actions = el("div", { style: "margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;" });
+  const loadBtn = el("button", { class: "advise-btn" }, "Load deck");
+  loadBtn.addEventListener("click", () => {
+    $("new-deck-modal").hidden = true;
+    const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
+    if (li) selectDeck(result.id, li);
+  });
+  actions.appendChild(loadBtn);
+
+  // HAND-OFF (explicit opt-in): "Tune it" loads the deck and kicks the
+  // existing web improve/tune path on it. Scope note: the autonomous
+  // multi-round improve LOOP (commander-improve) is not web-exposed; what IS
+  // web-exposed and equivalent is the audit (advisor) -> propose (A/B Forge
+  // sim) flow the dashboard already offers. So "Tune it" loads the built deck
+  // and triggers that flow — the same underlying advisor+sim machinery, just
+  // one round and user-visible. The full loop stays on the CLI (commander-
+  // build --improve). This is deliberately gated behind the button (never
+  // auto-run) because a sim costs Forge time + Anthropic tokens.
+  const tuneBtn = el("button", { class: "advise-btn" }, "Tune it (Forge sim)");
+  tuneBtn.title =
+    "Load the deck and run the advisor + A/B Forge sim on it. Costs Forge "
+    + "time and Anthropic tokens.";
+  tuneBtn.addEventListener("click", () => {
+    $("new-deck-modal").hidden = true;
+    const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
+    if (li) selectDeck(result.id, li, { improveAfterLoad: true });
+  });
+  actions.appendChild(tuneBtn);
+  wrap.appendChild(actions);
+
+  container.appendChild(wrap);
+}
+
+// CSS.escape shim for the attribute selector above (deck ids contain
+// spaces + brackets). Falls back to a manual escape on ancient engines.
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/["\\\]\[]/g, "\\$&");
+}
+
 function tile(label, value, sub) {
   const t = el("div", { class: "tile" });
   t.appendChild(el("div", { class: "label" }, label));
@@ -2994,11 +3416,108 @@ function tile(label, value, sub) {
   return t;
 }
 
+// Est. price tile + cheaper-printing savings (ManaFoundry parity).
+// `savings` is the dashboard payload's `printing_savings` object:
+// {total, count, suggestions: [{card, qty, current_price, current_set,
+// cheapest_price, cheapest_set, cheapest_collector, savings}]}.
+// Renders the standard price tile, then — only when the backend found
+// actual savings — a collapsed <details> whose summary is the
+// "Save up to $X" teaser. <details> matches the existing lazy-expand
+// pattern (proposed-deck preview, iteration graph): zero JS state,
+// keyboard-accessible for free.
+function priceTile(t, savings) {
+  const tl = tile(
+    "Est. price",
+    t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",
+    t.n_priced_cards != null ? `${t.n_priced_cards} priced cards` : null,
+  );
+  if (!savings || !savings.count || !(savings.suggestions || []).length) {
+    return tl; // Offline / nothing worth swapping — plain tile.
+  }
+  const details = el("details", { style: "margin-top: 6px;" });
+  details.appendChild(el(
+    "summary",
+    { class: "muted", style: "cursor: pointer; font-size: 12px;" },
+    `Save up to $${Number(savings.total).toFixed(2)} `
+      + `with cheaper printings (${savings.count} `
+      + `card${savings.count === 1 ? "" : "s"})`,
+  ));
+  const ul = el("ul", {
+    style: "margin: 6px 0 0; padding-left: 16px; font-size: 12px; "
+         + "text-align: left; max-height: 180px; overflow: auto;",
+  });
+  for (const s of savings.suggestions) {
+    // "Card: $9.50 (2xm) → $2.10 (mm2 #43) — save $7.40". Set codes +
+    // collector number are exactly what the user types into a store
+    // search to find the cheap printing, so they earn their space.
+    const qty = s.qty > 1 ? ` ×${s.qty}` : "";
+    ul.appendChild(el(
+      "li", { style: "margin-bottom: 3px;" },
+      `${s.card}${qty}: `
+        + `$${Number(s.current_price).toFixed(2)}`
+        + `${s.current_set ? ` (${s.current_set})` : ""} → `
+        + `$${Number(s.cheapest_price).toFixed(2)}`
+        + ` (${s.cheapest_set || "?"}`
+        + `${s.cheapest_collector ? ` #${s.cheapest_collector}` : ""})`
+        + ` — save $${Number(s.savings).toFixed(2)}`,
+    ));
+  }
+  details.appendChild(ul);
+  tl.appendChild(details);
+  return tl;
+}
+
 function panel(title, content) {
   const p = el("section", { class: "panel" });
   p.appendChild(el("h3", {}, title));
   p.appendChild(content);
   return p;
+}
+
+// Lift picks panel (ManaFoundry parity — "Lift Web"). `lp` is the
+// dashboard payload's `lift_picks` object:
+// {corpus_size, band, picks: [{card, score, n_pairs, rationale}],
+//  reason}. Returns null when there is nothing to show (backend
+// failed, corpus too small, or no candidate cleared the lift bar) so
+// the caller can skip the panel entirely — a permanently-empty
+// "Lift picks" box would just read as broken. The pick list lives in
+// a collapsed <details> matching the priceTile savings pattern: the
+// summary is the teaser, expansion costs zero JS state and is
+// keyboard-accessible for free.
+function liftPicksPanel(lp) {
+  if (!lp || !(lp.picks || []).length) return null;
+  const wrap = el("div");
+  wrap.appendChild(el(
+    "p", { class: "muted" },
+    `Cards that appear alongside this deck's cards across `
+      + `${lp.corpus_size} harvested decks far more often than chance `
+      + `(band: ${lp.band}). Lift 2.0 = together twice as often as `
+      + `popularity alone predicts.`,
+  ));
+  const details = el("details", { open: "" });
+  details.appendChild(el(
+    "summary",
+    { class: "muted", style: "cursor: pointer; font-size: 12px;" },
+    `${lp.picks.length} lift pick${lp.picks.length === 1 ? "" : "s"}`,
+  ));
+  const ul = el("ul", {
+    style: "margin: 6px 0 0; padding-left: 16px; font-size: 12px; "
+         + "text-align: left;",
+  });
+  for (const p of lp.picks) {
+    // "Card (score 2.4, 5 pairs): appears with X in 6/8 harvested
+    // decks (lift 2.6)" — the rationale string is server-built so the
+    // CLI, advisor evidence, and this panel all read identically.
+    ul.appendChild(el(
+      "li", { style: "margin-bottom: 3px;" },
+      `${p.card} (score ${Number(p.score).toFixed(2)}, `
+        + `${p.n_pairs} pair${p.n_pairs === 1 ? "" : "s"}): `
+        + `${p.rationale}`,
+    ));
+  }
+  details.appendChild(ul);
+  wrap.appendChild(details);
+  return panel("Lift picks", wrap);
 }
 
 function curveBars(curve) {
@@ -3061,12 +3580,20 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // ESC closes any open modal.
+  // Mobile drawer: hamburger toggles it; the scrim (and Escape, below)
+  // close it. Selecting a deck also closes it (see selectDeck).
+  const drawerToggle = $("btn-drawer-toggle");
+  if (drawerToggle) drawerToggle.addEventListener("click", toggleDrawer);
+  const drawerScrim = $("drawer-scrim");
+  if (drawerScrim) drawerScrim.addEventListener("click", closeDrawer);
+
+  // ESC closes any open modal (and the mobile drawer).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       ["propose-modal", "new-deck-modal", "alert-modal"].forEach((id) => {
         const m = $(id); if (m) m.hidden = true;
       });
+      closeDrawer();
     }
   });
 
@@ -3106,6 +3633,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (pasteCreate) pasteCreate.addEventListener("click", createPasteDeck);
   const bulkImport = $("new-bulk-import");
   if (bulkImport) bulkImport.addEventListener("click", bulkImportFromTextarea);
+  const buildRun = $("new-build-run");
+  if (buildRun) buildRun.addEventListener("click", buildFromScratch);
 });
 
 loadHealth();

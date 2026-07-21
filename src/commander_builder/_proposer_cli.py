@@ -142,6 +142,20 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                    help="Path to a file with one card name per line, "
                         "all protected against cuts. Unioned with "
                         "--protect and [metadata] Protect=.")
+    p.add_argument("--collection", default=None, metavar="PATH",
+                   help="Path to your card-collection file (one card "
+                        "name per line; '<qty> Name' also accepted). "
+                        "Default: the registered collection at "
+                        "~/.commander-builder/collection.txt (or "
+                        "$COMMANDER_BUILDER_COLLECTION).")
+    p.add_argument("--owned-only", action="store_true",
+                   help="Restrict curation to cards in your collection "
+                        "(basic lands always count as owned): the "
+                        "advisor drops unowned candidates and any "
+                        "unowned add Claude proposes anyway is "
+                        "post-filtered to dropped_for_unowned. "
+                        "Requires a registered collection file — "
+                        "inert with a warning otherwise.")
     p.add_argument("--run-sim", action="store_true",
                    help="After applying the proposal, run a Forge A/B "
                         "head-to-head between the old and new deck and "
@@ -298,11 +312,36 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     _intent_themes: list[str] = [
         s.strip() for s in _raw_intent_themes.split(",") if s.strip()
     ]
+
+    # Ownership resolution (ManaFoundry parity). Load ONCE here and
+    # thread to both pipeline stages: the advisor (owned_only=True →
+    # exclude mode, so the candidate pool Claude curates from is
+    # already ownership-clean) and auto_propose (collection_keys →
+    # post-response safety net for adds Claude invents outside the
+    # pool). Warn — don't fail — when --owned-only finds no
+    # collection: an unattended overnight batch shouldn't die over a
+    # missing optional file, and unfiltered curation is still useful.
+    from .collection import load_collection
+    _coll_path = Path(args.collection) if args.collection else None
+    collection_keys = None
+    if args.owned_only:
+        collection_keys = load_collection(_coll_path)
+        if collection_keys is None:
+            print(
+                "WARN: --owned-only requested but no collection file "
+                "found — curating without ownership filtering. "
+                "Register one via the web Settings panel or pass "
+                "--collection.",
+                file=sys.stderr, flush=True,
+            )
+
     report = advise(
         deck_path=args.deck_path,
         bracket=args.bracket,
         source=args.source,
         intent_themes=_intent_themes if _intent_themes else None,
+        collection_path=_coll_path,
+        owned_only=collection_keys is not None,
     )
     advice_dict = report.to_manifest()
     candidate_add_count = len(advice_dict.get("added", []))
@@ -360,6 +399,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             model=args.model,
             protected_cards=protected_combined,
             mode=args.mode,
+            collection_keys=collection_keys,
         )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", flush=True)
@@ -465,6 +505,11 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         print(f"Dropped for color identity (off-color): "
               f"{len(proposal.dropped_for_color_identity)}")
         for c in proposal.dropped_for_color_identity:
+            print(f"  ! {c}")
+    if proposal.dropped_for_unowned:
+        print(f"Dropped because not in your collection (--owned-only): "
+              f"{len(proposal.dropped_for_unowned)}")
+        for c in proposal.dropped_for_unowned:
             print(f"  ! {c}")
     if proposal.dropped_for_balance:
         print(f"Dropped to keep deck size legal "

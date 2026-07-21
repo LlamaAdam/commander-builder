@@ -7,6 +7,9 @@ names (typically curator adds) and returns ``(kept, dropped)``.
 
   ``enforce_bracket_caps``   — strip game-changers at B1/B2.
   ``enforce_color_identity`` — strip off-color adds.
+  ``enforce_ownership``      — strip adds outside the user's
+                               registered card collection (owned-only
+                               mode; None collection = pass-through).
 
 The matching ``dropped_for_protection`` and ``dropped_for_balance``
 filters live inside the auto_propose pipeline because they need the
@@ -125,6 +128,46 @@ def count_game_changers_in_deck(deck_text: str) -> int:
         if name.lower() in gc_lower:
             total += qty
     return total
+
+
+def enforce_ownership(
+    adds: list[str], collection_keys: "Optional[frozenset[str]]",
+) -> tuple[list[str], list[str]]:
+    """Split ``adds`` into (kept, dropped) by collection ownership.
+
+    ManaFoundry parity for the auto-curate pipeline: when the user
+    runs owned-only curation, an add the user doesn't own would
+    produce a deck they can't physically sleeve. The curator's
+    candidate pool is already ownership-filtered upstream (the
+    advisor's exclude mode), but Claude can propose cards OUTSIDE the
+    candidate pool — this is the post-response safety net, exactly
+    like ``enforce_color_identity`` catches off-color hallucinations.
+
+    ``collection_keys`` semantics mirror
+    ``collection.load_collection``:
+      frozenset  -- registered collection; unowned adds are dropped.
+                    Basic lands ALWAYS pass (everyone owns basics).
+      None       -- no collection registered / owned-only not
+                    requested. Pass-through — this filter must be a
+                    byte-identical no-op for callers that never opted
+                    in, matching enforce_color_identity's None
+                    contract.
+
+    Returns (kept, dropped) preserving input order — same shape as
+    the sibling filters so the auto_propose pipeline chains them
+    identically.
+    """
+    if collection_keys is None:
+        return list(adds), []
+    from .collection import owns
+    kept: list[str] = []
+    dropped: list[str] = []
+    for card in adds:
+        if owns(collection_keys, card):
+            kept.append(card)
+        else:
+            dropped.append(card)
+    return kept, dropped
 
 
 def _safe_lookup_card(lookup_fn, name: str):

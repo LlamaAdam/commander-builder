@@ -7,8 +7,14 @@
 // el (defined in app.js) resolve at user-render time.
 //
 // Exposes:
-//   renderDeckHealthTiles(health) — 5-tile row from /api/audit's
-//                                   deck_health block.
+//   renderDeckHealthTiles(health, grade)
+//                                 — 5-tile row from /api/audit's
+//                                   deck_health block; when a
+//                                   health_grade payload is passed,
+//                                   the row is wrapped with the
+//                                   letter-grade panel header.
+//   renderHealthGradeHeader(g)    — big-letter grade header (A..F /
+//                                   N/A + score + top reasons).
 //   renderHealthTile(opts)        — single tile builder used by
 //                                   renderDeckHealthTiles.
 //   renderSaltWarningBanner(w)    — yellow banner over the audit
@@ -27,7 +33,12 @@
 // Each tile shows a count + label and surfaces the contributing card
 // names in a hover tooltip. Tiles with zero entries render dimmed so
 // the visual weight tracks signal strength.
-function renderDeckHealthTiles(health) {
+//
+// `grade` (optional) is /api/audit's health_grade payload — the
+// at-a-glance letter aggregating these signals. When present the tile
+// row gets a panel header with the big letter + score + top reasons;
+// when absent (legacy servers) the bare row renders exactly as before.
+function renderDeckHealthTiles(health, grade) {
   const row = el("div", {
     class: "deck-health-row",
     style: "display: grid; "
@@ -182,7 +193,89 @@ function renderDeckHealthTiles(health) {
           : (under.length <= 2 ? "neutral" : "warn")),
   }));
 
+  // Grade header wrap: keep the bare-row return for legacy payloads so
+  // older servers (no health_grade field) render byte-identically.
+  if (grade && grade.grade) {
+    const panel = el("div", { class: "deck-health-panel" });
+    panel.appendChild(renderHealthGradeHeader(grade));
+    panel.appendChild(row);
+    return panel;
+  }
   return row;
+}
+
+// Panel header for the deck-health section: one big letter grade
+// (A..F, or N/A when every signal was unavailable — Scryfall outage),
+// the 0-100 score beside it, and the top 2-3 reasons the deck lost
+// points beneath. Letter colors reuse the tile flavor palette so the
+// header and the tiles read as one system: A/B green (good), C blue
+// (neutral), D amber (warn), F red (bad), N/A slate (muted).
+function renderHealthGradeHeader(grade) {
+  const letterColors = {
+    "A": "#4ade80",
+    "B": "#4ade80",
+    "C": "#60a5fa",
+    "D": "#f59e0b",
+    "F": "#ef4444",
+    "N/A": "#94a3b8",
+  };
+  const color = letterColors[grade.grade] || letterColors["N/A"];
+  // Component breakdown in the hover tooltip — same cursor:help
+  // affordance as the tiles. Unavailable components say so instead of
+  // showing a score (the outage contract: excluded, not zeroed).
+  const compLines = Object.entries(grade.components || {}).map(
+    ([name, c]) => {
+      const pct = Math.round((c.weight || 0) * 100);
+      return c.available
+        ? `${name}: ${c.score}/100 (weight ${pct}%)`
+        : `${name}: unavailable — excluded (weight ${pct}%)`;
+    },
+  );
+  const wrap = el("div", {
+    class: "health-grade-header",
+    style: "display: flex; align-items: center; gap: 14px; "
+         + "margin: 10px 0 0 0; padding: 10px 14px; "
+         + "background: var(--bg); "
+         + "border: 1px solid var(--border); "
+         + "border-radius: 6px; cursor: help;",
+    title: compLines.length
+      ? `Weighted components:\n${compLines.join("\n")}`
+      : "",
+  });
+  wrap.appendChild(el(
+    "div",
+    {
+      class: "health-grade-letter",
+      style: `font-size: 34px; font-weight: 700; line-height: 1; `
+           + `color: ${color};`,
+    },
+    grade.grade,
+  ));
+  const col = el("div", {});
+  col.appendChild(el(
+    "div",
+    { style: "font-weight: 600;" },
+    "Deck health"
+    + (grade.score != null ? ` — ${grade.score}/100` : ""),
+  ));
+  const reasons = grade.reasons || [];
+  if (reasons.length) {
+    const ul = el("ul", {
+      class: "muted",
+      style: "list-style: none; padding: 0; margin: 2px 0 0 0; "
+           + "font-size: 12px;",
+    });
+    for (const r of reasons) ul.appendChild(el("li", {}, r));
+    col.appendChild(ul);
+  } else if (grade.grade === "N/A") {
+    col.appendChild(el(
+      "div",
+      { class: "muted", style: "font-size: 12px;" },
+      "Signals unavailable (Scryfall unreachable or empty deck).",
+    ));
+  }
+  wrap.appendChild(col);
+  return wrap;
 }
 
 function renderHealthTile(opts) {

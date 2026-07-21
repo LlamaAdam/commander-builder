@@ -57,6 +57,17 @@ CACHE_DIR = (
     if _CARDS_DIR.name == "mtg_cards"
     else _CARDS_DIR / "scryfall"
 )
+# All-printings snapshots live in a SIBLING dir, not inside CACHE_DIR:
+# the oracle snapshots are one-file-per-name with a stable "this is THE
+# card" contract that forge_py also reads — mixing multi-printing lists
+# into the same dir would break that shared contract. Naming mirrors
+# the CACHE_DIR convention above (mtg_cards gets the descriptive name,
+# the legacy .cache/ fallback gets a scryfall_-prefixed one).
+PRINTS_CACHE_DIR = (
+    _CARDS_DIR / "prints_snapshots"
+    if _CARDS_DIR.name == "mtg_cards"
+    else _CARDS_DIR / "scryfall_prints"
+)
 SCRYFALL_BASE = "https://api.scryfall.com"
 USER_AGENT = "commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)"
 REQUEST_SLEEP_SEC = 0.1   # Scryfall's published rate-limit floor is 50-100ms.
@@ -65,11 +76,19 @@ REQUEST_SLEEP_SEC = 0.1   # Scryfall's published rate-limit floor is 50-100ms.
 _WUBRG = "WUBRG"
 
 
+def _slug(name: str) -> str:
+    """Slugify a card name to a cache filename stem. Uses lowercase + safe
+    chars only so cross-platform (Windows is the realistic target) doesn't
+    break."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "unknown"
+
+
 def _cache_path(name: str) -> Path:
-    """Slugify a card name to a cache filename. Uses lowercase + safe chars
-    only so cross-platform (Windows is the realistic target) doesn't break."""
-    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "unknown"
-    return CACHE_DIR / f"{slug}.json"
+    return CACHE_DIR / f"{_slug(name)}.json"
+
+
+def _prints_cache_path(name: str) -> Path:
+    return PRINTS_CACHE_DIR / f"{_slug(name)}.json"
 
 
 def _http_get_json(url: str) -> dict:
@@ -182,6 +201,122 @@ def lookup_card(name: str, cache: bool = True) -> Optional[dict]:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(data), encoding="utf-8")
     return data
+
+
+# --- All-printings lookup (cheaper-printing savings feature) -----------
+
+# Page cap for the paginated /cards/search?unique=prints walk. Scryfall
+# pages hold 175 cards; even Counterspell/Lightning Bolt-class reprint
+# champions fit in 2-3 pages, so 4 pages (~700 printings) is a safety
+# valve against pathological pagination loops, not a realistic limit.
+_PRINTS_PAGE_CAP = 4
+
+
+def _trim_printing(card: dict) -> dict:
+    """Project one Scryfall card object down to the fields the
+    cheaper-printing feature needs.
+
+    Full card objects are ~4-8KB each and a heavily reprinted card has
+    100+ printings — caching them verbatim would balloon the snapshot
+    dir by orders of magnitude for fields (oracle text, image URIs,
+    rulings links) that are identical across printings or unused here.
+    The trimmed shape keeps the cache small AND acts as documentation
+    of what downstream pricing code may rely on."""
+    prices = card.get("prices") or {}
+    legalities = card.get("legalities") or {}
+    return {
+        "set": card.get("set"),
+        "set_name": card.get("set_name"),
+        # set_type distinguishes "memorabilia" (gold-border World
+        # Championship decks, oversized promos) which are not legal
+        # game pieces — the pricing layer excludes them.
+        "set_type": card.get("set_type"),
+        "collector_number": card.get("collector_number"),
+        "border_color": card.get("border_color"),
+        "oversized": bool(card.get("oversized")),
+        # digital=True printings (MTGO/Arena) can't be sleeved in a
+        # paper Commander deck; kept so cached data filters correctly
+        # even though the fetch query already excludes most of them.
+        "digital": bool(card.get("digital")),
+        "prices": {
+            k: prices.get(k) for k in ("usd", "usd_foil", "usd_etched")
+        },
+        # Only the commander legality matters to this project; storing
+        # the full 20+-format map would be dead weight in every file.
+        "legalities": {"commander": legalities.get("commander")},
+    }
+
+
+def lookup_card_prints(
+    name: str, cache: bool = True, cache_only: bool = False,
+) -> Optional[list[dict]]:
+    """Fetch ALL printings of ``name`` (trimmed to pricing-relevant
+    fields — see ``_trim_printing``), cached one file per card under
+    ``PRINTS_CACHE_DIR``.
+
+    The oracle snapshots (``lookup_card``) carry exactly ONE printing
+    per name (Scryfall's /cards/named default), so printing-price
+    comparisons need this separate lazily-populated cache.
+
+    - ``cache_only=True`` never touches the network — returns the
+      cached list or None. Callers use this as an offline circuit
+      breaker: after one network failure, drain the remaining cards
+      from cache instead of eating a connect-timeout per card.
+    - Returns None on 404 (unknown card) or a cache-only miss.
+    - Network errors (URLError, timeouts, 5xx) PROPAGATE — unlike the
+      404 case they mean "unknown right now", not "doesn't exist", and
+      the caller needs to tell the two apart to degrade gracefully.
+    """
+    if not name:
+        return None
+    cache_path = _prints_cache_path(name)
+    if cache and cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            printings = data.get("printings")
+            if isinstance(printings, list):
+                return printings
+        except (OSError, ValueError):
+            pass  # Re-fetch on corruption (mirrors lookup_card).
+    if cache_only:
+        return None
+    # Exact-name search across all printings. ``game:paper`` drops
+    # digital-only printings server-side (they can't be bought for a
+    # paper deck and their usd prices are null anyway), shrinking the
+    # page walk for heavily reprinted cards.
+    query = urllib.parse.urlencode({
+        "q": f'!"{name}" game:paper',
+        "unique": "prints",
+        "order": "released",
+    })
+    url: Optional[str] = f"{SCRYFALL_BASE}/cards/search?{query}"
+    printings: list[dict] = []
+    pages = 0
+    try:
+        while url and pages < _PRINTS_PAGE_CAP:
+            time.sleep(REQUEST_SLEEP_SEC)  # Scryfall politeness floor.
+            data = _http_get_json(url)
+            printings.extend(
+                _trim_printing(c)
+                for c in data.get("data", [])
+                if isinstance(c, dict)
+            )
+            url = data.get("next_page") if data.get("has_more") else None
+            pages += 1
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None  # Card name doesn't exist — a real answer.
+        raise  # 5xx/429 → caller's offline/backoff handling.
+    if cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Store under a "printings" key (not a bare list) so the file
+        # format can grow metadata (fetched_at, schema version) without
+        # breaking old readers.
+        cache_path.write_text(
+            json.dumps({"name": name, "printings": printings}),
+            encoding="utf-8",
+        )
+    return printings
 
 
 def normalize_color_identity(colors: list[str]) -> str:

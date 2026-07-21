@@ -281,6 +281,14 @@ class DashboardData:
     # metadata line. None when the deck wasn't imported from
     # Moxfield (manually pasted, etc).
     moxfield_url: Optional[str] = None
+    # Explainable bracket estimate (ManaFoundry parity) — the
+    # ``bracket_estimator.estimate_bracket`` result dict: estimate,
+    # floor, confidence, reasons, signals, declared, mismatch. The UI
+    # renders "Estimated bracket: N — declared M" with expandable
+    # reasons under the Bracket tile. None only when the estimator's
+    # inputs couldn't be assembled (fail-quiet, same contract as the
+    # legality/salt probes).
+    bracket_estimate: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -543,6 +551,30 @@ def build_dashboard(
         "salt_cards": salt_in_deck[:10],
     }
 
+    # Explainable bracket estimate (ManaFoundry parity). Runs the
+    # rule-based estimator with the context this builder already
+    # computed (avg CMC + archetype) so the curve/archetype signals
+    # fire without extra Scryfall round-trips. ``bracket`` here is the
+    # user's DECLARED bracket (filename [Bn] tag or explicit query
+    # param) — exactly what the estimator compares against for the
+    # mismatch flag. Fail-quiet: estimate_bracket never raises by
+    # contract, but the deck read is guarded anyway.
+    bracket_estimate: Optional[dict] = None
+    try:
+        from .bracket_estimator import estimate_bracket
+        bracket_estimate = estimate_bracket(
+            deck_path.read_text(encoding="utf-8"),
+            declared=bracket,
+            avg_cmc=avg_cmc or None,
+            archetype=archetype if archetype != "unknown" else None,
+        )
+    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on estimate
+        print(
+            f"[dashboard] bracket estimate failed "
+            f"({type(exc).__name__}: {exc}); skipping",
+            flush=True,
+        )
+
     return DashboardData(
         commander={
             "name": primary_commander,
@@ -589,4 +621,5 @@ def build_dashboard(
         suggested_adds=sug,
         legality=legality,
         moxfield_url=moxfield_url,
+        bracket_estimate=bracket_estimate,
     )

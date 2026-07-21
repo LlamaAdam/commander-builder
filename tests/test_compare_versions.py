@@ -1899,3 +1899,199 @@ def test_format_summary_surfaces_pod_failures():
     s = _format_summary(r)
     assert "1 failed pod(s) EXCLUDED" in s
     assert "Forge exited with code 1" in s
+
+
+# ---------------------------------------------------------------------------
+# Recommendation #3 — per-worker Forge profiles for compare()'s parallel
+# dispatch. When >= 2 cwd-isolated profiles exist each worker gets its own,
+# so forge.log no longer collides and the REAL per-pod tail survives; with a
+# single profile we fall back to the bac47c1 shared-profile-with-blanking
+# behavior. These tests exercise the profile-ASSIGNMENT logic with fakes
+# (this worktree has no vendor/forge install, so end-to-end parallel sims
+# can't run here — that needs the sim box).
+# ---------------------------------------------------------------------------
+
+
+def _make_profile_tracking_runner_factory(tail, sleep=0.15):
+    """Build a ``_runner_for`` replacement + a shared tracker.
+
+    Each returned fake runner is bound to a profile dir. On run() it records,
+    under a lock, how many pods are CONCURRENTLY holding that same profile —
+    the exclusivity invariant we care about is that this never exceeds 1 (two
+    pods writing one profile's forge.log at once is exactly the collision the
+    feature removes). It also records the distinct profiles used, the profile
+    per run, and the SimResult objects handed out (so a test can check whether
+    compare() replaced forge_log_tail post-hoc)."""
+    import threading
+    import time
+
+    from commander_builder.forge_runner import SimResult
+
+    lock = threading.Lock()
+    tracker = {
+        "active": {},                      # profile str -> pods running now
+        "max_concurrent_per_profile": 0,
+        "violation": None,                 # set to a profile if 2 pods shared it
+        "distinct_profiles": set(),
+        "profiles_used": [],               # one entry per completed run
+        "sims": [],                        # SimResults handed out
+    }
+
+    class ProfileRunner:
+        def __init__(self, profile):
+            self.profile = str(profile)
+
+        def run(self, pod, *args, **kwargs):
+            with lock:
+                cur = tracker["active"].get(self.profile, 0) + 1
+                tracker["active"][self.profile] = cur
+                if cur > 1:
+                    tracker["violation"] = self.profile
+                tracker["max_concurrent_per_profile"] = max(
+                    tracker["max_concurrent_per_profile"], cur
+                )
+                tracker["distinct_profiles"].add(self.profile)
+            # Hold the profile long enough to widen the concurrency window so a
+            # genuine two-pods-one-profile bug would actually overlap.
+            time.sleep(sleep)
+            with lock:
+                tracker["active"][self.profile] -= 1
+                tracker["profiles_used"].append(self.profile)
+            sim = SimResult(
+                cmd=["x"], returncode=0, duration_sec=sleep,
+                stdout=_make_pod_stdout(1, 1), stderr="", timed_out=False,
+                error=None, forge_log_tail=tail,
+            )
+            tracker["sims"].append(sim)
+            return sim
+
+    def runner_for(profile):
+        return ProfileRunner(profile)
+
+    return runner_for, tracker
+
+
+class _ExplodingRunner:
+    """Shared runner that must NEVER be used on the isolated path — proves the
+    isolated dispatch binds each pod to a pooled profile runner instead."""
+
+    def run(self, *a, **k):
+        raise AssertionError(
+            "shared runner must not be used when isolated profiles exist"
+        )
+
+
+def test_compare_parallel_isolated_assigns_distinct_profile_per_worker(
+    tmp_path, monkeypatch,
+):
+    """Two profiles, two pods: each concurrent worker must get its OWN
+    profile (never share), and — because the profile is isolated — the REAL
+    forge_log_tail must survive (no marker)."""
+    from pathlib import Path
+
+    from commander_builder.compare_versions import _PARALLEL_LOG_TAIL_MARKER
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    monkeypatch.setattr(
+        cv, "_discover_profiles",
+        lambda: [Path("vendor/forge"), Path("vendor/forge2")],
+    )
+    runner_for, tracker = _make_profile_tracking_runner_factory("real pod tail")
+    monkeypatch.setattr(cv, "_runner_for", runner_for)
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=_ExplodingRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    # No two pods ever held the same profile at once.
+    assert tracker["violation"] is None
+    assert tracker["max_concurrent_per_profile"] == 1
+    # Both profiles were actually used (distinct per concurrent worker).
+    assert tracker["distinct_profiles"] == {
+        str(Path("vendor/forge")), str(Path("vendor/forge2")),
+    }
+    assert len(report.pods) == 2
+    assert report.total_games == 4
+    # Real tail preserved on every pod — the marker never fires when isolated.
+    assert len(tracker["sims"]) == 2
+    for sim in tracker["sims"]:
+        assert sim.forge_log_tail == "real pod tail"
+        assert sim.forge_log_tail != _PARALLEL_LOG_TAIL_MARKER
+
+
+def test_compare_parallel_isolated_pods_exceed_profiles_reuse_serially(
+    tmp_path, monkeypatch,
+):
+    """Three pods, two profiles: concurrency caps at the profile count and the
+    surplus pod REUSES a freed profile — safe because the prior pod's Forge
+    process has exited. The one-pod-per-profile-at-a-time invariant must hold
+    throughout, and all three pods must still run."""
+    from pathlib import Path
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=3)
+    monkeypatch.setattr(
+        cv, "_discover_profiles",
+        lambda: [Path("vendor/forge"), Path("vendor/forge2")],
+    )
+    runner_for, tracker = _make_profile_tracking_runner_factory("t")
+    monkeypatch.setattr(cv, "_runner_for", runner_for)
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=3,
+        runner=_ExplodingRunner(),
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+        suppress_seat_note=True,
+    )
+
+    # Exclusivity held even though pods (3) > profiles (2).
+    assert tracker["violation"] is None
+    assert tracker["max_concurrent_per_profile"] == 1
+    # Only two profiles existed, but all three pods ran (serial reuse).
+    assert tracker["distinct_profiles"] == {
+        str(Path("vendor/forge")), str(Path("vendor/forge2")),
+    }
+    assert len(tracker["profiles_used"]) == 3
+    assert len(report.pods) == 3
+    assert report.total_games == 6
+
+
+def test_compare_single_profile_fallback_blanks_tail_and_uses_shared_runner(
+    tmp_path, monkeypatch,
+):
+    """One profile on the host: fall back to bac47c1's shared-profile path —
+    every pod uses the passed-in ``runner`` and forge_log_tail is blanked with
+    the marker. _runner_for must NOT be consulted (no isolated pool built)."""
+    from pathlib import Path
+
+    from commander_builder.compare_versions import _PARALLEL_LOG_TAIL_MARKER
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    monkeypatch.setattr(cv, "_discover_profiles", lambda: [Path("vendor/forge")])
+
+    def _boom(_profile):
+        raise AssertionError("fallback path must not provision isolated profiles")
+
+    monkeypatch.setattr(cv, "_runner_for", _boom)
+    fr = _tail_capturing_runner(
+        _make_pod_stdout(1, 1),
+        "java.lang.NullPointerException — could be ANY concurrent pod's",
+    )
+
+    cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=fr,
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    # Shared runner served both pods; each tail replaced by the marker.
+    assert len(fr.sims) == 2
+    for sim in fr.sims:
+        assert sim.forge_log_tail == _PARALLEL_LOG_TAIL_MARKER

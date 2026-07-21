@@ -370,3 +370,119 @@ Setup installer + `build_installer.py` driver (`8146450`, PR #7).
 Producing the `.exe`/installer remains a local
 `python scripts/build_desktop.py` / `build_installer.py` run (deps are
 heavy); CI builds the artifact on tag.
+
+---
+
+# FP-014 — Build-from-scratch deck assembly
+
+**Status: SHIPPED — first cut (2026-07-21, `feature/fp014-build-from-scratch`,
+unmerged pending PR).** Four commits (`76f1ca7` core assembler + the
+`commander-build` CLI, `d02fc62` color-source manabase, `dd818b1`
+lift/bracket/collection personalization, `545b2db` web `POST /api/build_deck`
++ `GET /api/build_job/<id>` + a "Build from scratch" tab + a
+`commander-build --improve` hand-off). **Live-verified:** a real build of
+*Krenko, Mob Boss* against live EDHREC produced a legal exactly-99 mono-red
+deck, bracket-steered to B3, that loaded in the dashboard.
+
+## What the first cut actually does
+
+`commander-build --commander "<name>" --bracket <n>` runs the pipeline the
+scope sketch below describes: commander + bracket → **seed a legal 99** from
+EDHREC's average deck (the coherence source — see the honesty note) →
+**color-source manabase** (`deck_builder_manabase.py`) → **personalization**
+(`deck_builder_personalize.py` — lift / bracket-steer / owned-collection
+stages) → optional **`--improve N`** hand-off into the existing
+`commander-improve` empirical loop. The three modules are `deck_builder.py`
+(orchestrator), `deck_builder_manabase.py`, and `deck_builder_personalize.py`;
+the web surface is the "Build from scratch" tab wiring the async
+`build_deck` / `build_job` endpoints.
+
+## Honest limitations of the first cut (read before trusting output)
+
+- **Coherence is borrowed, not synthesized.** The deck's spine is EDHREC's
+  aggregate average deck taken largely verbatim — the community already made
+  it coherent. When no average deck is published we fall back to a
+  role-target-filled shell from the commander page: that path is a
+  *defensible pile*, not a coherent deck. This is the "hard 20%" below, and
+  it is **not** solved — it is deferred to the improve loop.
+- **The manabase uses a simplified Karsten source model**, not the full
+  per-CMC source table: a per-color source target derived from pip weight,
+  keeping the seed's tuned duals/fetches and topping up from the advisor's
+  land tiers. Good enough to cast on curve, not a precise Frank-Karsten
+  computation.
+- **Lift personalization needs a harvested corpus (≥10 decks) or it skips.**
+  With no corpus the lift stage is a no-op; bracket-steer and owned-bias
+  still run.
+- **First-cut decks are "legal + reasonable," not tuned.** The intended
+  quality path is the `--improve` loop — Forge A/B sims turn a plausible
+  pile into a measured one. Treat a raw `commander-build` output as a
+  starting point, not a finished deck.
+
+## Motivation
+
+ManaFoundry.gg (and similar tools) assemble a **full deck from a chosen
+commander** in one shot. commander-builder deliberately does the opposite
+today: it is an *iteration engine* that improves an **existing** deck (the
+README's own framing — "not a deck builder from scratch"). This plan
+reverses that — take a commander (+ target bracket / archetype) and emit a
+complete, legal 99 — with an angle the competitors structurally lack:
+**assembled decks get Forge-VALIDATED, not just heuristically scored.**
+Every other from-scratch builder stops at a static power heuristic; we can
+hand the assembled list straight to the existing empirical
+improve-loop and prove it out in simulation.
+
+## Scope sketch (cite what already exists)
+
+Seed and fill the shell from modules that are already built and tested:
+
+- **Seed the skeleton** from the EDHREC average deck for the commander —
+  `edhrec_client.fetch_average_deck` (coherent, no Moxfield dependency) —
+  shaped by **archetype templates** (`archetype.py`) and **role targets**
+  (`staples.ROLE_TARGETS`) so the ramp/draw/removal/wipe/protection counts
+  land in-band from the start.
+- **Synergy-driven picks** from the new **`lift_analysis.py`** — the
+  co-occurrence matrix over the harvested corpus surfaces "pairs well with
+  this commander/shell" candidates with empirical support, exactly the
+  pick-selection signal a from-scratch builder needs.
+- **Hit a target power level** with the new **`bracket_estimator.py`** —
+  estimate the assembled list's bracket and steer picks (Game Changers /
+  fast mana / combo density) up or down until the estimate matches the
+  requested bracket.
+- **Prefer owned cards** via **`collection.py`** — bias the fill toward
+  what the user already owns (the same exclude/flag machinery the advisor
+  now uses), so the first cut is buildable, not a wishlist.
+- **Validate legality** with the guards the adversarial-review fix
+  campaign hardened: the singleton / exactly-99-mainboard / drop-reporting
+  checks in `web/deck_text_ops._apply_swaps_to_dck`, plus
+  `_proposer_filters.enforce_color_identity` for color-identity legality.
+- **Empirically tune** by handing the assembled `.dck` to the existing
+  `commander-improve` loop — Forge A/B sims + knowledge_log verdicts turn
+  a plausible pile into a measured one. **This is the validation moat.**
+
+## The honest hard part
+
+The assembler above is the **easy 80%**. Going from *"a pile of
+role-appropriate, high-lift, in-color cards"* to *"a coherent 99 with a
+real manabase"* — curve, color-source counts, the actual land base, and
+the non-obvious glue that makes a deck *function* rather than merely
+satisfy per-role quotas — is the **hard 20%** and the real research. Role
+targets and lift scores get you a defensible shell; they do **not** get you
+coherence. Expect the first cut to produce legal-but-mediocre decks that
+the improve-loop then has to do heavy lifting on, and treat
+"curated-coherence" as the open problem this plan actually has to solve,
+not a detail.
+
+## Substrate that already exists (why it's cheap to start)
+
+`fetch_average_deck`, `archetype.py`, `staples.ROLE_TARGETS`,
+`lift_analysis.py`, `bracket_estimator.py`, `collection.py`, the
+legality/color-identity guards (`_apply_swaps_to_dck`,
+`enforce_color_identity`), and the whole `commander-improve` empirical
+loop are all shipped and tested. The first cut (above) composed them into
+`deck_builder.py` and built the color-source manabase step. **What remains
+open research is the coherence half of the hard 20%:** from-atoms synthesis
+(a coherent 99 without leaning on EDHREC's aggregate seed) and the full
+per-CMC Karsten source model. The first cut leans on the seed for coherence
+and hands the rest to the improve loop; closing that gap — genuine
+synthesis for commanders with no published average deck — is the remaining
+FP-014 research.

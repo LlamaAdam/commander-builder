@@ -374,3 +374,143 @@ def test_revert_deck_to_version_also_restamps(tmp_path):
     text = target.read_text(encoding="utf-8")
     assert re.findall(r"^Name=(.*)$", text, re.MULTILINE) == [target.stem]
     assert "DisplayName=Test Deck" in text
+
+
+# --- resolve-by-id when bracket drift renamed the deck ----------------------
+# moxfield_import._rename_for_bracket_drift renames "Foo [B3].dck" ->
+# "Foo [B4].dck" when a deck's Moxfield bracket changes on a re-pull. An
+# iteration recorded BEFORE that rename still carries the old deck_name. Naive
+# by-name reverts rewrite the stale "[B3]" filename, leaving TWO same-role
+# files claiming one Moxfield= id — the exact ambiguity the id map warns about
+# and bracket filters double-count on. The revert must resolve by Moxfield id
+# and restore into the RENAMED (live) file instead.
+
+# Snapshot as iteration_loop recorded it PRE-drift: Name= is the old [B3] stem
+# it was read from, and it carries the stable Moxfield= id.
+_SNAPSHOT_PRE_DRIFT = "\n".join([
+    "[metadata]",
+    "Name=[USER] Test [B3]",       # stale stem — the deck was at B3 back then
+    "Moxfield=stable-id",          # the identity that survives the rename
+    "[Commander]",
+    "1 Test Commander",
+    "[Main]",
+    "1 Sol Ring",
+    "1 Old Card",
+])
+
+
+def _seed_pre_drift_iteration(db: Path) -> int:
+    return record_iteration(
+        Iteration(
+            deck_id="stable-id", deck_name="[USER] Test [B3].dck", bracket=3,
+            audit_version="v3", audit_manifest={"added": [], "removed": []},
+            verdict="kept", deck_snapshot=_SNAPSHOT_PRE_DRIFT,
+        ), db_path=db,
+    )
+
+
+def test_revert_after_bracket_drift_restores_into_renamed_file(tmp_path):
+    """Deck was re-pulled at a new bracket and renamed [B3] -> [B4] since the
+    iteration was recorded. Reverting the pre-drift iteration must land in the
+    LIVE [B4] file (found by Moxfield id), not re-create the stale [B3] name."""
+    from commander_builder.log_parser import _normalize
+
+    db = tmp_path / "kl.sqlite"
+    rid = _seed_pre_drift_iteration(db)
+
+    # The live, post-rename file — same Moxfield id, new bracket tag, holding
+    # some current on-disk content that is NOT in the knowledge log.
+    renamed = tmp_path / "[USER] Test [B4].dck"
+    renamed.write_text("\n".join([
+        "[metadata]",
+        "Name=[USER] Test [B4]",
+        "Moxfield=stable-id",
+        "[Main]",
+        "1 Live Card",
+    ]) + "\n", encoding="utf-8")
+
+    # The old name the iteration recorded — no longer on disk after the rename.
+    stale = tmp_path / "[USER] Test [B3].dck"
+    assert not stale.exists()
+
+    result = revert_to_iteration(rid, deck_path=stale, db_path=db,
+                                 record_revert=False)
+
+    # Restored into the RENAMED file, not the stale name.
+    assert result.restored_path == renamed
+    text = renamed.read_text(encoding="utf-8")
+    assert "1 Old Card" in text          # snapshot content landed here
+    assert "Moxfield=stable-id" in text
+    # NO stale [B3] file was resurrected — that's the whole double-count bug.
+    assert not stale.exists()
+    assert set(p.name for p in tmp_path.glob("*.dck")) == {"[USER] Test [B4].dck"}
+    # Name= restamped to the LIVE stem so the dck_meta invariant holds for the
+    # renamed file (not the stale [B3] stem the snapshot arrived with).
+    name_values = re.findall(r"^Name=(.*)$", text, re.MULTILINE)
+    assert name_values == [renamed.stem]
+    assert _normalize(renamed.name) == _normalize(name_values[0])
+    # Pre-revert .bak of whatever we overwrote (the live [B4] content).
+    assert result.backup_path is not None
+    assert result.backup_path.parent == renamed.parent
+    assert "1 Live Card" in result.backup_path.read_text(encoding="utf-8")
+
+
+def test_revert_no_drift_common_case_restores_by_name(tmp_path):
+    """No rename happened: the recorded name still owns the id. The id lookup
+    resolves to the SAME file, so the by-name path is taken unchanged (no
+    redirect, no surprise second file)."""
+    db = tmp_path / "kl.sqlite"
+    rid = _seed_pre_drift_iteration(db)
+
+    # On-disk file at the recorded name, carrying the same id (no drift).
+    target = tmp_path / "[USER] Test [B3].dck"
+    target.write_text("\n".join([
+        "[metadata]", "Name=[USER] Test [B3]", "Moxfield=stable-id",
+        "[Main]", "1 Current Card",
+    ]) + "\n", encoding="utf-8")
+
+    result = revert_to_iteration(rid, deck_path=target, db_path=db,
+                                 record_revert=False)
+
+    assert result.restored_path == target
+    text = target.read_text(encoding="utf-8")
+    assert "1 Old Card" in text
+    assert re.findall(r"^Name=(.*)$", text, re.MULTILINE) == [target.stem]
+    # Exactly one deck file — the redirect never fired.
+    assert set(p.name for p in tmp_path.glob("*.dck")) == {"[USER] Test [B3].dck"}
+
+
+def test_revert_snapshot_without_moxfield_id_falls_back_to_by_name(tmp_path):
+    """A snapshot with no Moxfield= line can't be resolved by id — the revert
+    must fall back to the by-name behavior, restoring into the given path even
+    when an unrelated same-bracket file happens to sit alongside it."""
+    db = tmp_path / "kl.sqlite"
+    no_id_snapshot = "\n".join([
+        "[metadata]", "Name=[USER] Test [B3]",   # NO Moxfield= line
+        "[Commander]", "1 Test Commander",
+        "[Main]", "1 Sol Ring", "1 Old Card",
+    ])
+    rid = record_iteration(
+        Iteration(
+            deck_id="stable-id", deck_name="[USER] Test [B3].dck", bracket=3,
+            audit_version="v3", audit_manifest={"added": [], "removed": []},
+            verdict="kept", deck_snapshot=no_id_snapshot,
+        ), db_path=db,
+    )
+
+    # A same-role file carrying an id sits nearby — it must NOT be hijacked as
+    # the target, because the snapshot offers no id to match it against.
+    other = tmp_path / "[USER] Test [B4].dck"
+    other.write_text("\n".join([
+        "[metadata]", "Name=[USER] Test [B4]", "Moxfield=some-id",
+        "[Main]", "1 Other Card",
+    ]) + "\n", encoding="utf-8")
+
+    target = tmp_path / "[USER] Test [B3].dck"
+    result = revert_to_iteration(rid, deck_path=target, db_path=db,
+                                 record_revert=False)
+
+    # Restored by name into the given path; the nearby file is untouched.
+    assert result.restored_path == target
+    assert "1 Old Card" in target.read_text(encoding="utf-8")
+    assert "1 Other Card" in other.read_text(encoding="utf-8")

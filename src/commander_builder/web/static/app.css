@@ -583,3 +583,163 @@ body {
 .version-compare .diff-added h4   { color: var(--good); }
 .version-compare .diff-removed h4 { color: var(--bad); }
 .version-compare .diff-card-list { list-style: square; color: var(--text, #ddd); }
+
+/* =====================================================================
+   Responsive / mobile layout.
+   Everything below is ADDITIVE — the desktop rules above are unchanged
+   and the >1024px rendering is byte-identical. Two breakpoints:
+
+     <=1024px (tablet) — keep the 3-column shell but lean the sidebar
+                         column so the 1fr dashboard isn't crushed.
+     <=768px  (phone)  — collapse the grid: the 56px icon rail + 280px
+                         sidebar become one slide-in DRAWER driven by a
+                         `drawer-open` class on <body> (mirrors the
+                         .active class-toggle pattern used elsewhere);
+                         the dashboard goes full-width; dialogs go
+                         near-full-screen.
+
+   Only existing CSS variables are used, so the default dark theme and
+   any data-theme (light/dark) override are both honored — no hardcoded
+   colors are introduced. ==============================================*/
+
+/* Drawer controls are desktop-hidden; the phone query reveals them. */
+.hamburger { display: none; }
+.drawer-scrim { display: none; }
+
+/* --- Tablet: leaner sidebar column, same 3-column shell. ------------- */
+@media (max-width: 1024px) and (min-width: 769px) {
+  .layout { grid-template-columns: 56px 220px 1fr; }
+  .dashboard { padding: 20px; }
+  /* The full-width topbar buttons can exceed a ~800px tablet width and
+     push a trailing button off the right edge (horizontal body scroll).
+     Let the row wrap here too — the phone query already does this below
+     the 769px floor, but the tablet band kept the desktop no-wrap topbar. */
+  .topbar { flex-wrap: wrap; row-gap: 8px; }
+}
+
+/* --- Phone: sidebar+rail drawer, full-width dashboard. -------------- */
+@media (max-width: 768px) {
+  /* Hamburger (44px tap target) lives at the front of the topbar. */
+  .hamburger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 6px 10px;
+  }
+
+  /* Topbar: sticky so the hamburger stays reachable while the body
+     scrolls; wrap its controls to keep them tappable (>=44px). The flex
+     spacer is hidden so items flow/wrap left-to-right rather than being
+     pushed to opposite ends across rows. */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 8px 12px;
+  }
+  .topbar-spacer { display: none; }
+  .topbar h1 { font-size: 16px; }
+  .topbar-btn { min-height: 44px; }
+
+  /* Collapse the fixed 3-column grid to a single full-width dashboard in
+     normal document flow. The page body scrolls (native mobile feel)
+     instead of the desktop's nested fixed-height scroll panes. */
+  .layout {
+    display: block;
+    height: auto;
+    overflow: visible;
+  }
+  .dashboard {
+    height: auto;
+    padding: 16px 14px;
+    /* Cardinal rule: the body must never scroll sideways. Any too-wide
+       descendant (diff columns, tables, monospace blocks) scrolls HERE
+       instead. Height stays auto, so this adds no nested vertical
+       scrollbar — only a horizontal one when something overflows. */
+    overflow-x: auto;
+    overscroll-behavior: auto;
+  }
+
+  /* Sidebar + icon rail become one slide-in drawer. They stay adjacent
+     (rail on the left edge, sidebar beside it) and slide in together.
+     Folding the rail INTO the drawer — rather than the topbar — is the
+     simpler move: the rail already switches which sidebar SECTION is
+     shown (Decks/Cards/Rules), so it belongs next to the sidebar, and
+     keeping them adjacent needs zero DOM restructuring. */
+  .left-rail,
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    height: auto;
+    z-index: 60;
+    transform: translateX(-110%);
+    transition: transform 0.25s ease;
+  }
+  .left-rail { left: 0; width: 56px; }
+  .sidebar {
+    left: 56px;
+    /* Never wider than the viewport minus the rail and a scrim gutter. */
+    width: min(280px, calc(100vw - 56px - 40px));
+    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.4);
+  }
+  body.drawer-open .left-rail,
+  body.drawer-open .sidebar { transform: translateX(0); }
+
+  /* Scrim behind the open drawer; tap to close (wired in app.js). */
+  .drawer-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 55;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  body.drawer-open .drawer-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Stat/category tiles: lower the auto-fit floor so two tiles fit a
+     ~320-360px phone (the 170px desktop floor would force one column
+     and overflow narrow viewports). Desktop floors are untouched. */
+  .tile-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .category-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+
+  /* NOTE: the mana curve (.curve-bars / .curve-labels) uses
+     repeat(7, 1fr). 1fr tracks always shrink to fit their container, so
+     the curve can never overflow the page — no scroll wrapper needed. */
+
+  /* Dialogs (add-deck / alert / propose): near-full-screen, internally
+     scrollable (the .modal already has overflow-y:auto with a sticky
+     close button), textareas still usable. */
+  .modal-backdrop { padding: 8px; }
+  .modal {
+    width: 100%;
+    max-height: calc(100vh - 16px);
+    padding: 16px;
+  }
+  .modal textarea { height: 180px; max-height: 40vh; }
+  .tab-panel textarea { min-height: 140px; }
+  .tabs { flex-wrap: wrap; }
+
+  /* Native <dialog> settings panel: override the inline max-width so it
+     goes near-full-width. !important is needed only because the width
+     cap is an inline style on the element. */
+  #settings-dialog {
+    max-width: calc(100vw - 20px) !important;
+    width: calc(100vw - 20px);
+  }
+
+  /* Card-reference overlay (built in JS with inline flex styles): stack
+     the image above the details so its 240px image + 260px min-width
+     details column don't demand a >500px row. */
+  #_card-ref-overlay > div { flex-direction: column; }
+}

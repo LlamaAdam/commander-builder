@@ -12,24 +12,43 @@ from __future__ import annotations
 from typing import Optional
 
 from ..dck_utils import CARD_LINE_RE, count_main_cards, parse_card_line
+from ..import_formats import arena_to_dck, csv_to_lines, detect_paste_format
 
 
 def _normalize_pasted_deck(text: str) -> str:
-    """Accept either a Forge-format .dck blob or a Moxfield bulk-paste
-    line list and return a valid .dck. Bulk-paste shape is one line
-    per card: ``<qty> <Name>`` with no `[Main]` header. We detect that
-    by looking for any `[section]` markers; if none, wrap the lines
-    in a `[Main]` section.
+    """Accept a Forge-format .dck blob, an MTGA/Arena export, a CSV
+    card list, or a Moxfield bulk-paste line list and return a valid
+    .dck. This is the single dispatch point for the paste box:
+    ``import_formats.detect_paste_format`` classifies the text (its
+    ``"dck"`` test is byte-identical to the historical any-`[section]`
+    check here, so pre-existing pastes route unchanged) and each
+    branch produces the same .dck intermediate downstream writers
+    (Name= stamping, role prefixes) have always consumed.
+
+    May raise ``import_formats.ImportFormatError`` when a POSITIVELY
+    detected Arena/CSV paste contains a malformed line — the import
+    route turns that into a 400 naming the line. Ambiguous text never
+    errors; it falls through to the plain-lines wrap below.
     """
     text = text.strip()
     if not text:
         return ""
-    # If the paste already has section headers, trust the user.
-    has_section = any(
-        line.strip().startswith("[") and line.strip().endswith("]")
-        for line in text.splitlines()
-    )
-    if has_section:
+    fmt = detect_paste_format(text)
+    if fmt == "arena":
+        # Arena's Commander/Sideboard sections map to [Commander]/
+        # [Sideboard] — the only paste shape besides .dck that can
+        # carry an explicit commander.
+        return arena_to_dck(text)
+    if fmt == "csv":
+        # CSV degrades to the plain line list ON PURPOSE: exports have
+        # no commander column, so commander handling must be exactly
+        # whatever the plain-paste path does (today: nothing — all
+        # cards to [Main]). Fall through to the wrap below.
+        text = csv_to_lines(text).strip()
+        if not text:
+            return ""
+    elif fmt == "dck":
+        # The paste already has section headers — trust the user.
         return text + "\n"
     # Otherwise wrap in [Main]. Filter trivial header lines like
     # "Mainboard (99)" that Moxfield's UI sometimes includes.

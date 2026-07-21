@@ -88,6 +88,18 @@ def client(deck_dir, monkeypatch):
     monkeypatch.setattr(
         "commander_builder.deck_dashboard.lookup_card", fake_lookup,
     )
+    # The printing-savings probe on /api/dashboard resolves prices via
+    # scryfall_client directly (deck_pricing layer), so stub the source
+    # module too — and stub the prints lookup to "offline, nothing
+    # cached" so the suite never touches the network. Dedicated
+    # printing-savings tests inject their own multi-printing fakes.
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card_prints",
+        lambda name, **_: None,
+    )
 
     # Isolate the per-user config store: point it at a non-existent temp
     # path so the audit BYO-key resolver (header → config.json → env)
@@ -275,6 +287,16 @@ def test_root_loads_static_assets(client):
     assert "app.css" in body
 
 
+def test_root_has_mobile_drawer_markup(client):
+    """Responsive layout: the mobile sidebar drawer needs a hamburger
+    toggle and a scrim in the rendered index. Both are hidden >768px via
+    CSS; app.js wires the toggle/close handlers to these ids."""
+    resp = client.get("/")
+    body = resp.data.decode("utf-8")
+    assert 'id="btn-drawer-toggle"' in body
+    assert 'id="drawer-scrim"' in body
+
+
 def test_static_css_serves(client):
     resp = client.get("/static/app.css")
     try:
@@ -421,6 +443,70 @@ def test_dashboard_with_valid_bracket(client):
     }
 
 
+def test_dashboard_includes_printing_savings_key_offline(client):
+    """With the prints lookup stubbed to offline-nothing-cached, the
+    payload still carries a well-formed empty printing_savings block —
+    the UI relies on the key always being present."""
+    resp = client.get("/api/dashboard?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["printing_savings"] == {
+        "total": 0.0, "count": 0, "suggestions": [],
+    }
+
+
+def test_dashboard_printing_savings_with_cheaper_printings(client, monkeypatch):
+    """End-to-end through the route: multi-printing fakes produce
+    qty-aware suggestions in the dashboard payload."""
+    def fake_prints(name, **_):
+        if "Cultivate" in name:
+            # Current (fixture) price $1.50; threshold max($1, 30%) =
+            # $1 → the $0.25 printing qualifies ($1.25/copy).
+            return [
+                {"set": "c21", "set_type": "commander",
+                 "collector_number": "158", "border_color": "black",
+                 "oversized": False, "digital": False,
+                 "prices": {"usd": "0.25", "usd_foil": None,
+                            "usd_etched": None},
+                 "legalities": {"commander": "legal"}},
+                {"set": "m21", "set_type": "core",
+                 "collector_number": "177", "border_color": "black",
+                 "oversized": False, "digital": False,
+                 "prices": {"usd": "1.50", "usd_foil": None,
+                            "usd_etched": None},
+                 "legalities": {"commander": "legal"}},
+            ]
+        if "Cmdr" in name:
+            # Commander priced $10.00 in the fixture; $2 reprint saves $8.
+            return [
+                {"set": "cmm", "set_type": "masters",
+                 "collector_number": "7", "border_color": "black",
+                 "oversized": False, "digital": False,
+                 "prices": {"usd": "2.00", "usd_foil": None,
+                            "usd_etched": None},
+                 "legalities": {"commander": "legal"}},
+            ]
+        return None  # Forest et al: basic lands never get this far.
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card_prints", fake_prints,
+    )
+    resp = client.get("/api/dashboard?deck=Alpha")
+    assert resp.status_code == 200
+    ps = resp.get_json()["printing_savings"]
+    assert ps["count"] == 2
+    # Sorted by savings desc: commander ($8.00) before Cultivate.
+    assert [s["card"] for s in ps["suggestions"]] == ["Test Cmdr", "Cultivate"]
+    cmdr, cult = ps["suggestions"]
+    assert cmdr["savings"] == 8.0
+    assert cmdr["cheapest_set"] == "cmm"
+    assert cmdr["cheapest_collector"] == "7"
+    # Alpha lists "1 Cultivate" five times → qty folds to 5.
+    assert cult["qty"] == 5
+    assert cult["savings"] == pytest.approx(6.25)
+    assert ps["total"] == pytest.approx(14.25)
+
+
 def test_dashboard_traversal_blocked(client, tmp_path):
     outside = tmp_path / "evil.dck"
     outside.write_text("[Main]\n1 Forest\n", encoding="utf-8")
@@ -448,10 +534,17 @@ def seeded_client(deck_dir, tmp_path, monkeypatch):
     mod.seed_demo(db, deck_id="omnath")
 
     # Stub Scryfall (in case any dashboard call piggy-backs).
+    _fake = lambda name, **_: {  # noqa: E731 — tiny shared stub
+        "type_line": "Basic Land", "cmc": 0.0,
+        "color_identity": ["G"], "prices": {"usd": "0.05"},
+    }
+    monkeypatch.setattr("commander_builder.deck_dashboard.lookup_card", _fake)
+    # Same offline stubs as the `client` fixture: the dashboard's
+    # printing-savings probe reads scryfall_client directly.
+    monkeypatch.setattr("commander_builder.scryfall_client.lookup_card", _fake)
     monkeypatch.setattr(
-        "commander_builder.deck_dashboard.lookup_card",
-        lambda name: {"type_line": "Basic Land", "cmc": 0.0,
-                      "color_identity": ["G"], "prices": {"usd": "0.05"}},
+        "commander_builder.scryfall_client.lookup_card_prints",
+        lambda name, **_: None,
     )
 
     app = create_app(deck_dir=deck_dir, knowledge_db=db)
@@ -1163,6 +1256,479 @@ def test_propose_swap_400_on_empty_new_text(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /api/propose_swap_async + /api/sim_job/<id> (recommendation #2)
+#
+# The async endpoint dispatches compare() onto a background daemon thread
+# and returns {job_id} immediately; the client polls GET /api/sim_job/<id>.
+# Every test injects a fake compare (via the module attribute the endpoint
+# resolves at call time) so no Forge is needed. A blocking fake gated on a
+# threading.Event lets us observe intermediate states deterministically.
+# ---------------------------------------------------------------------------
+
+# A valid non-empty diff vs. the "Alpha"/"Bravo" fixture decks (adds Lotus
+# Cobra) so _prepare_swap's no-op guard passes.
+_ASYNC_NEW_TEXT = (
+    "[metadata]\nName=Alpha v2\n\n"
+    "[Commander]\n1 Test Cmdr\n\n"
+    "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+)
+
+
+def _fake_report(old_deck, new_deck, games_per_pod, mode,
+                 old_wins=4, new_wins=11, draws=0, winner="new"):
+    """Build a SimpleNamespace shaped like a ComparisonReport — the exact
+    duck-type _execute_swap reads to build its response body."""
+    from types import SimpleNamespace
+    total = old_wins + new_wins + draws
+    return SimpleNamespace(
+        old_deck=old_deck, new_deck=new_deck,
+        bracket=3, mode=mode, games_per_pod=games_per_pod,
+        old_stats=SimpleNamespace(deck_filename=old_deck, wins=old_wins,
+                                  games=total),
+        new_stats=SimpleNamespace(deck_filename=new_deck, wins=new_wins,
+                                  games=total),
+        draws=draws, total_games=games_per_pod,
+        timestamp="2026-07-21T00:00:00", winner=winner,
+        margin=abs(new_wins - old_wins), pods=[{}, {}],
+        pods_planned=2, stopped_early=False,
+    )
+
+
+def _install_forge_stub(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.ForgeRunner.locate",
+        classmethod(lambda cls: SimpleNamespace(name="stubbed")),
+    )
+
+
+def _wait_for(client, job_id, statuses, timeout=8.0):
+    """Poll /api/sim_job/<id> until status is in ``statuses`` or timeout.
+    Returns the final job dict. Raises AssertionError on timeout."""
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        resp = client.get(f"/api/sim_job/{job_id}")
+        assert resp.status_code == 200, resp.get_json()
+        job = resp.get_json()
+        if job["status"] in statuses:
+            return job
+        _time.sleep(0.02)
+    raise AssertionError(f"job {job_id} never reached {statuses}")
+
+
+def test_propose_swap_async_returns_job_id(client, monkeypatch):
+    _install_forge_stub(monkeypatch)
+
+    def fake_compare(**kw):
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"])
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    assert resp.status_code == 202, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    # uuid4 hex — 32 lowercase hex chars.
+    assert isinstance(job_id, str) and len(job_id) == 32
+
+
+def test_sim_job_lifecycle_running_then_done(client, monkeypatch):
+    """queued/running -> done: a blocking fake lets us observe 'running'
+    before releasing it to finish."""
+    import threading as _threading
+    _install_forge_stub(monkeypatch)
+    release = _threading.Event()
+
+    def fake_compare(**kw):
+        # Block until the test releases us so 'running' is observable.
+        release.wait(5.0)
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"])
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    # Observe running (compare is blocked).
+    job = _wait_for(client, job_id, {"running"})
+    assert job["status"] == "running"
+    assert job["report"] is None
+    # Release and observe done.
+    release.set()
+    job = _wait_for(client, job_id, {"done"})
+    assert job["report"]["winner"] == "new"
+    assert job["report"]["old_wins"] == 4
+    assert job["report"]["new_wins"] == 11
+
+
+def test_sim_job_poll_returns_full_report_when_done(client, monkeypatch):
+    _install_forge_stub(monkeypatch)
+
+    def fake_compare(**kw):
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"],
+                            old_wins=3, new_wins=7)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    job = _wait_for(client, job_id, {"done", "failed"})
+    assert job["status"] == "done", job
+    report = job["report"]
+    # Same body shape the synchronous endpoint returns.
+    assert report["games_per_pod"] == 10
+    assert report["old_wins"] == 3
+    assert report["new_wins"] == 7
+    assert any("Lotus Cobra" in s for s in report["diff"]["added"])
+
+
+def test_sim_job_failed_when_compare_raises(client, monkeypatch):
+    """A sim that raises -> status=failed with the message; no 500, and the
+    thread doesn't die silently (the registry is updated)."""
+    _install_forge_stub(monkeypatch)
+
+    def boom(**kw):
+        raise RuntimeError("forge exploded")
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", boom,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    # The POST itself still succeeds — the failure is inside the job.
+    assert resp.status_code == 202
+    job_id = resp.get_json()["job_id"]
+    job = _wait_for(client, job_id, {"failed"})
+    assert job["status"] == "failed"
+    assert "forge exploded" in job["error"]
+    assert job["report"] is None
+
+
+def test_sim_job_unknown_id_returns_404(client):
+    resp = client.get("/api/sim_job/deadbeefdeadbeefdeadbeefdeadbeef")
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "job not found"
+
+
+def test_two_concurrent_jobs_distinct_ids_no_clobber(client, monkeypatch):
+    """Two jobs get distinct ids and each keeps its OWN report — the
+    per-job registry entries never clobber each other."""
+    import threading as _threading
+    _install_forge_stub(monkeypatch)
+    # Gate BOTH sims so they are genuinely in flight at the same time.
+    release = _threading.Event()
+
+    def fake_compare(**kw):
+        release.wait(5.0)
+        # Distinct outcome keyed on which deck is being simmed so we can
+        # prove the reports didn't cross-contaminate.
+        if kw["old_deck"].startswith("Alpha"):
+            return _fake_report(kw["old_deck"], kw["new_deck"],
+                                kw["games_per_pod"], kw["mode"],
+                                old_wins=1, new_wins=9, winner="new")
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"],
+                            old_wins=8, new_wins=2, winner="old")
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    r1 = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    r2 = client.post("/api/propose_swap_async", json={
+        "deck": "Bravo", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    j1 = r1.get_json()["job_id"]
+    j2 = r2.get_json()["job_id"]
+    assert j1 != j2
+    release.set()
+    job1 = _wait_for(client, j1, {"done", "failed"})
+    job2 = _wait_for(client, j2, {"done", "failed"})
+    assert job1["status"] == "done", job1
+    assert job2["status"] == "done", job2
+    assert job1["report"]["winner"] == "new"
+    assert job1["report"]["new_wins"] == 9
+    assert job2["report"]["winner"] == "old"
+    assert job2["report"]["old_wins"] == 8
+
+
+def test_propose_swap_async_content_type_gate(client, monkeypatch):
+    """The POST is still gated: a non-JSON content-type -> 415, no job
+    created."""
+    _install_forge_stub(monkeypatch)
+    resp = client.post(
+        "/api/propose_swap_async",
+        data="deck=Alpha",
+        content_type="text/plain",
+    )
+    assert resp.status_code == 415
+
+
+def test_sim_job_reattach_from_persisted_sidecar(client, monkeypatch):
+    """A done job is fetchable even after the in-memory registry loses it
+    (simulating a server restart): the poll falls back to the persisted
+    _sim_jobs/<id>.json sidecar."""
+    from commander_builder.web import routes_sim
+    _install_forge_stub(monkeypatch)
+
+    def fake_compare(**kw):
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"],
+                            old_wins=5, new_wins=6)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    _wait_for(client, job_id, {"done"})
+    # Evict from the in-memory registry — as if the process restarted.
+    with routes_sim._SIM_JOBS_LOCK:
+        routes_sim._SIM_JOBS.pop(job_id, None)
+    assert routes_sim._get_job(job_id) is None
+    # Still fetchable from disk.
+    resp2 = client.get(f"/api/sim_job/{job_id}")
+    assert resp2.status_code == 200
+    job = resp2.get_json()
+    assert job["status"] == "done"
+    assert job["report"]["new_wins"] == 6
+
+
+def test_sim_job_reports_pod_progress(client, monkeypatch):
+    """When compare() fires its progress_cb, the poll surfaces coarse
+    'pod n/total' progress."""
+    import threading as _threading
+    _install_forge_stub(monkeypatch)
+    gate = _threading.Event()
+
+    def fake_compare(**kw):
+        cb = kw.get("progress_cb")
+        assert cb is not None, "async path must pass progress_cb"
+        cb(1, 2)  # one pod of two done
+        gate.wait(5.0)  # hold so the test can observe progress mid-run
+        cb(2, 2)
+        return _fake_report(kw["old_deck"], kw["new_deck"],
+                            kw["games_per_pod"], kw["mode"])
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare", fake_compare,
+    )
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    # Poll until progress shows the first pod done.
+    import time as _time
+    deadline = _time.time() + 5.0
+    prog = None
+    while _time.time() < deadline:
+        job = client.get(f"/api/sim_job/{job_id}").get_json()
+        if job["progress"] and job["progress"]["pods_done"] >= 1:
+            prog = job["progress"]
+            break
+        _time.sleep(0.02)
+    assert prog is not None, "progress never surfaced"
+    assert prog["pods_total"] == 2
+    gate.set()
+    _wait_for(client, job_id, {"done"})
+
+
+# ---------------------------------------------------------------------------
+# FP-014.4 — POST /api/build_deck + GET /api/build_job/<id>
+#
+# The build runs on a background thread (EDHREC + lift/steer are too slow to
+# hold an HTTP connection), so these mirror the sim-job async tests: every
+# test fakes commander_builder.deck_builder._assemble via the module attribute
+# the endpoint resolves at call time, so no EDHREC/Scryfall/Forge is touched.
+# ---------------------------------------------------------------------------
+
+def _fake_build_result(commander="Krenko, Mob Boss", bracket=3, name=None,
+                       lift_swaps=None, buy_list=None, bracket_estimate=3):
+    """Construct a real BuildResult (with a real ManabaseSummary) shaped like
+    a from-scratch build — the exact object the endpoint projects to JSON."""
+    from commander_builder.deck_builder import BuildResult
+    from commander_builder.deck_builder_manabase import ManabaseSummary
+    display = name or f"{commander} Build"
+    # The stem is the dashboard-loadability contract: [USER] <name> [B<n>].
+    from commander_builder.moxfield_import import safe_filename
+    stem = f"[USER] {safe_filename(display)} [B{bracket}]"
+    text = (
+        "[metadata]\n"
+        f"Name={stem}\n\n"
+        "[Commander]\n"
+        f"1 {commander}\n\n"
+        "[Main]\n"
+        + "1 Mountain\n" * 36
+        + "1 Goblin Instigator\n" * 63
+    )
+    summary = ManabaseSummary(
+        land_count=36, sources={"R": 36}, targets={"R": 34},
+        fixing_land_count=0, basic_count=36, kept_seed_lands=0, degraded=False,
+    )
+    return BuildResult(
+        text=text, name=display, stem=stem, colors="R",
+        nonland_count=63, land_count=36, source="average-deck seed",
+        dropped_off_color=[], manabase=summary,
+        bracket_target=bracket, bracket_estimate=bracket_estimate,
+        lift_swaps=lift_swaps or [], buy_list=buy_list or [],
+    )
+
+
+def _install_build_stub(monkeypatch, result=None, raises=None):
+    """Patch deck_builder._assemble to a fake. ``raises`` (an exception
+    instance) makes it raise instead — for the failure-path tests."""
+    from commander_builder import deck_builder
+
+    def fake_assemble(commander, bracket, collection_path=None, **kw):
+        if raises is not None:
+            raise raises
+        return result if result is not None else _fake_build_result(
+            commander=commander, bracket=bracket, name=kw.get("name"),
+        )
+    monkeypatch.setattr(deck_builder, "_assemble", fake_assemble)
+
+
+def _wait_for_build(client, job_id, statuses, timeout=8.0):
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        resp = client.get(f"/api/build_job/{job_id}")
+        assert resp.status_code == 200, resp.get_json()
+        job = resp.get_json()
+        if job["status"] in statuses:
+            return job
+        _time.sleep(0.02)
+    raise AssertionError(f"build job {job_id} never reached {statuses}")
+
+
+def test_build_deck_returns_job_id(client, monkeypatch):
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 3,
+    })
+    assert resp.status_code == 202, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert isinstance(job_id, str) and len(job_id) == 32
+
+
+def test_build_deck_writes_loadable_deck_and_summary(client, deck_dir, monkeypatch):
+    """The happy path: job -> done, a stem-named [USER] .dck lands on disk
+    (so the sidebar/dashboard load it), and the summary carries manabase
+    coverage + bracket estimate + swap/buy-list provenance."""
+    _install_build_stub(monkeypatch, result=_fake_build_result(
+        lift_swaps=["- Goblin X -> + Goblin Y (synergy)"],
+        buy_list=["Goblin Recruiter"], bracket_estimate=3,
+    ))
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 3,
+    })
+    job_id = resp.get_json()["job_id"]
+    job = _wait_for_build(client, job_id, {"done", "failed"})
+    assert job["status"] == "done", job
+    result = job["result"]
+    # The written file is a [USER]-prefixed, [B3]-suffixed .dck the dashboard
+    # enumerates (the loadability invariant).
+    assert result["id"].startswith("[USER]") and result["id"].endswith("[B3]")
+    assert (deck_dir / result["filename"]).exists()
+    listed = {d["id"] for d in _list_decks(deck_dir)}
+    assert result["id"] in listed
+    # Summary shape.
+    s = result["summary"]
+    assert s["source"] == "average-deck seed"
+    assert s["manabase"]["coverage"]["R"] == {"have": 36, "target": 34}
+    assert s["bracket_estimate"] == 3 and s["bracket_target"] == 3
+    assert len(s["lift_swaps"]) == 1
+    assert s["buy_list"] == ["Goblin Recruiter"]
+
+
+def test_build_deck_content_type_gate_415s_non_json(client, monkeypatch):
+    """A non-JSON POST is rejected by the app-wide mutation gate before the
+    route runs — no job created."""
+    _install_build_stub(monkeypatch)
+    resp = client.post(
+        "/api/build_deck",
+        data="commander=Krenko",
+        content_type="text/plain",
+    )
+    assert resp.status_code == 415
+
+
+def test_build_deck_bracket_9_is_400(client, monkeypatch):
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 9,
+    })
+    assert resp.status_code == 400
+    assert "bracket" in resp.get_json()["error"]
+
+
+def test_build_deck_missing_commander_is_400(client, monkeypatch):
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={"bracket": 3})
+    assert resp.status_code == 400
+    assert "commander" in resp.get_json()["error"]
+
+
+def test_build_deck_defaults_bracket_to_3(client, deck_dir, monkeypatch):
+    """Absent bracket defaults to 3 (Upgraded) — the file gets a [B3] suffix."""
+    _install_build_stub(monkeypatch)
+    resp = client.post("/api/build_deck", json={"commander": "Krenko, Mob Boss"})
+    assert resp.status_code == 202
+    job = _wait_for_build(client, resp.get_json()["job_id"], {"done", "failed"})
+    assert job["status"] == "done", job
+    assert job["result"]["id"].endswith("[B3]")
+
+
+def test_build_job_failed_when_assemble_raises_valueerror(client, monkeypatch):
+    """A clean build error (no EDHREC data) lands the job as 'failed' with the
+    message — not a 500, not a dead thread."""
+    _install_build_stub(
+        monkeypatch,
+        raises=ValueError("cannot build: no EDHREC data for Nobody"),
+    )
+    resp = client.post("/api/build_deck", json={
+        "commander": "Nobody", "bracket": 3,
+    })
+    job = _wait_for_build(client, resp.get_json()["job_id"], {"failed", "done"})
+    assert job["status"] == "failed"
+    assert "no EDHREC data" in job["error"]
+
+
+def test_build_job_unknown_id_returns_404(client):
+    resp = client.get("/api/build_job/deadbeefdeadbeefdeadbeefdeadbeef")
+    assert resp.status_code == 404
+
+
+def test_build_deck_owned_bias_off_without_collection(client, deck_dir, monkeypatch):
+    """owned_bias defaults on, but with no registered collection the worker
+    passes no collection_path — assert it never blows up and still builds."""
+    seen = {}
+
+    from commander_builder import deck_builder
+
+    def fake_assemble(commander, bracket, collection_path=None, **kw):
+        seen["collection_path"] = collection_path
+        return _fake_build_result(commander=commander, bracket=bracket)
+    monkeypatch.setattr(deck_builder, "_assemble", fake_assemble)
+    # No collection registered in the test's isolated config, so
+    # collection_path must come through as None.
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 3,
+        "options": {"owned_bias": True},
+    })
+    _wait_for_build(client, resp.get_json()["job_id"], {"done", "failed"})
+    assert seen["collection_path"] is None
+
+
+# ---------------------------------------------------------------------------
 # /api/deck_text PUT + DELETE
 # ---------------------------------------------------------------------------
 
@@ -1245,6 +1811,76 @@ def test_import_deck_dck_format_paste_preserved(client, deck_dir):
     on_disk = (deck_dir / fn).read_text(encoding="utf-8")
     assert "[Commander]" in on_disk
     assert "1 Edgar Markov" in on_disk
+
+
+def test_import_deck_arena_paste_maps_sections(client, deck_dir):
+    """An MTGA/Arena export pasted into the same textarea auto-detects
+    and lands as a .dck with the Commander section mapped — the one
+    paste shape besides .dck that can carry an explicit commander."""
+    paste = (
+        "About\n"
+        "Name Ignored Here\n"
+        "\n"
+        "Commander\n"
+        "1 Feather, the Redeemed (WAR) 197\n"
+        "\n"
+        "Deck\n"
+        "1 Lightning Bolt (M21) 159\n"
+        "30 Mountain\n"
+    )
+    resp = client.post("/api/import_deck", json={
+        "name": "Arena Brew", "paste_text": paste, "bracket": 2,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    on_disk = (deck_dir / resp.get_json()["filename"]).read_text(encoding="utf-8")
+    assert "[Commander]" in on_disk
+    assert "1 Feather, the Redeemed" in on_disk
+    # (SET) NUM printing tails are Arena syntax, not Forge's.
+    assert "(WAR)" not in on_disk and "(M21)" not in on_disk
+    assert "30 Mountain" in on_disk
+
+
+def test_import_deck_csv_paste_creates_deck(client, deck_dir):
+    paste = (
+        "Count,Name,Set,Price\n"
+        "1,Sol Ring,C21,1.50\n"
+        '1,"Krenko, Mob Boss",DOM,0.50\n'
+        "30,Mountain,ANA,0.05\n"
+    )
+    resp = client.post("/api/import_deck", json={
+        "name": "CSV Brew", "paste_text": paste, "bracket": 3,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    on_disk = (deck_dir / resp.get_json()["filename"]).read_text(encoding="utf-8")
+    # CSV reuses the plain-paste path: everything in [Main], no
+    # commander section (no commander column exists in exports).
+    assert "[Main]" in on_disk
+    assert "[Commander]" not in on_disk
+    assert "1 Krenko, Mob Boss" in on_disk
+    assert "30 Mountain" in on_disk
+
+
+def test_import_deck_malformed_arena_400_names_line(client):
+    """A paste POSITIVELY detected as Arena (Deck header) with a bad
+    card line must come back as a 400 naming the line — never a 500."""
+    resp = client.post("/api/import_deck", json={
+        "name": "Broken Arena",
+        "paste_text": "Deck\n1 Shock (M21) 160\nLightning Bolt\n",
+    })
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "could not parse pasted deck list"
+    assert "line 3" in body["detail"]
+    assert "Lightning Bolt" in body["detail"]
+
+
+def test_import_deck_malformed_csv_400_names_line(client):
+    resp = client.post("/api/import_deck", json={
+        "name": "Broken CSV",
+        "paste_text": "Count,Name\nlots,Sol Ring\n",
+    })
+    assert resp.status_code == 400
+    assert "whole number" in resp.get_json()["detail"]
 
 
 def test_import_deck_409_on_duplicate(client, deck_dir):
@@ -2664,6 +3300,71 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     # a fabricated zero. The UI renders these as "unavailable" tiles.
     assert health["mana_sinks"] is None
     assert health["spell_density"] is None
+
+
+def test_audit_endpoint_surfaces_health_grade(
+    client, monkeypatch, deck_dir,
+):
+    """The audit response carries ``health_grade`` -- the at-a-glance
+    letter aggregating the deck_health signals -- with the documented
+    payload shape (grade/score/reasons/components) so the UI can
+    render it as the deck-health panel header."""
+    from types import SimpleNamespace
+
+    p = deck_dir / "Graded.dck"
+    p.write_text(
+        "[metadata]\nName=Graded\n"
+        "[Commander]\n1 Test Commander\n"
+        "[Main]\n"
+        "37 Forest\n"
+        "62 Llanowar Visionary\n",
+        encoding="utf-8",
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # Offline Scryfall stub: lands classify as lands, everything else
+    # as a creature (fed to spell-density / mana-sink / land walks and
+    # staples.count_deck_roles alike).
+    def fake_lookup(name, **_kw):
+        return {
+            "name": name,
+            "type_line": (
+                "Basic Land — Forest" if "Forest" in name
+                else "Creature — Elf Druid"
+            ),
+            "oracle_text": "",
+            "mana_cost": "",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    # staples imported lookup_card by value at module load; patch its
+    # copy too so count_deck_roles stays offline.
+    monkeypatch.setattr(
+        "commander_builder.staples.lookup_card", fake_lookup,
+    )
+
+    resp = client.get("/api/audit?deck=Graded&bracket=3")
+    assert resp.status_code == 200, resp.get_json()
+    grade = resp.get_json().get("health_grade")
+    assert grade is not None
+    assert set(grade.keys()) == {"grade", "score", "reasons", "components"}
+    assert grade["grade"] in {"A", "B", "C", "D", "F", "N/A"}
+    # This deck IS gradable (roles + lands classify offline), so a
+    # real letter with a numeric score must come back.
+    assert grade["grade"] != "N/A"
+    assert isinstance(grade["score"], int)
+    assert 0 <= grade["score"] <= 100
+    for comp in grade["components"].values():
+        assert set(comp.keys()) == {"score", "weight", "available"}
 
 
 def test_audit_endpoint_surfaces_protected_cards_from_metadata(

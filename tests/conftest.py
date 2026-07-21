@@ -130,3 +130,29 @@ def _isolate_knowledge_log_default_path(tmp_path, monkeypatch):
     monkeypatch.setattr(
         _kl, "DEFAULT_DB_PATH", tmp_path / "_isolated_knowledge_log.sqlite",
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_collection_path(tmp_path, monkeypatch):
+    """Point the card-collection file at a per-test (nonexistent) temp
+    path so tests never read the developer's real
+    ``~/.commander-builder/collection.txt``.
+
+    Same hazard class as ``_isolate_knowledge_log_default_path`` above:
+    the ownership filters are contractually INERT when no collection
+    file exists, and most tests assert on that inert baseline. A
+    developer who has registered a real collection would otherwise see
+    advisor/proposer tests fail (or worse, pass for the wrong reason)
+    because their personal card list leaked into the pipeline under
+    test.
+
+    Works because ``collection.collection_path()`` consults the
+    ``COMMANDER_BUILDER_COLLECTION`` env var AT CALL TIME (the
+    DEFAULT_DB_PATH lesson — no import-time path constants). Tests
+    that want a real collection write to this tmp path (or set the
+    env var themselves / pass an explicit ``path=``).
+    """
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_COLLECTION",
+        str(tmp_path / "_isolated_collection.txt"),
+    )

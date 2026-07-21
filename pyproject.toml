@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Closed-loop MTG Commander deck improvement tool — Forge-validated swap recommendations"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "TBD" }
+license = { text = "MIT" }
 authors = [
     { name = "LlamaAdam" }
 ]
@@ -59,6 +59,7 @@ commander-improve     = "commander_builder.improve:improve_main"
 commander-oracle-refresh = "commander_builder.oracle_store:main"
 commander-bulk-import = "commander_builder.moxfield_import:bulk_main"
 commander-config      = "commander_builder._secrets:config_main"
+commander-build       = "commander_builder.deck_builder:main"
 commander-builder-desktop = "commander_builder.desktop:main"
 commander-builder-bootstrap = "commander_builder.bootstrap:main"
 

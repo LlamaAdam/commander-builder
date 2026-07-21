@@ -45,6 +45,7 @@ from .knowledge_log import (
     iterations_for_deck,
     record_iteration,
 )
+from .moxfield_import import _existing_moxfield_ids, _moxfield_id_from_text
 from .moxfield_push import dck_to_textarea, prepare_push
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
@@ -151,6 +152,43 @@ def revert_to_iteration(
         )
 
     out_path = deck_path or (DECK_DIR / target.deck_name)
+
+    # --- resolve-by-id when bracket drift renamed the deck ------------------
+    # The iteration row records the deck_name FROM WHEN the snapshot was taken.
+    # But moxfield_import._rename_for_bracket_drift can rename the live file
+    # since — e.g. "Foo [B3].dck" -> "Foo [B4].dck" when the deck's Moxfield
+    # bracket changed on a later re-pull. Reverting a PRE-drift iteration by
+    # that stale name would rewrite the OLD "Foo [B3].dck" filename, leaving
+    # TWO same-role files that both record the same Moxfield= id — which then
+    # trips _existing_moxfield_ids' deterministic sorted-first ambiguity WARN
+    # and makes bracket filters double-count until someone cleans up by hand.
+    #
+    # The stable identity across a rename is the Moxfield= publicId, not the
+    # filename. So: if the snapshot carries an id AND a DIFFERENT same-role
+    # file currently records that id, that different file IS this deck (post
+    # rename) — restore into IT, not the stale name. Parse the id from the
+    # snapshot TEXT (the on-disk file at out_path may not exist, or may be the
+    # stale copy) via the same reader moxfield_import uses. Scope the lookup to
+    # is_user=True: the revert target is always a user deck ([USER]-prefixed),
+    # and a same-id opponent-pool copy is a different ROLE we must not touch.
+    snapshot_id = _moxfield_id_from_text(target.deck_snapshot)
+    if snapshot_id:
+        # out_path.parent is the deck dir for both the CLI (DECK_DIR) and the
+        # explicit-path callers (tests point it at their tmp dir).
+        live = _existing_moxfield_ids(out_path.parent, is_user=True).get(snapshot_id)
+        # Redirect only when a live file OTHER than out_path owns the id. This
+        # covers both drift shapes — the recorded name no longer exists, or it
+        # exists as a stale sibling of the renamed file — while leaving the
+        # common no-drift case byte-for-byte unchanged (there the id resolves
+        # to out_path itself, so live == out_path and we don't move). When the
+        # snapshot has no id we can't resolve, so we fall through to by-name.
+        if live is not None and live != out_path:
+            print(
+                f"deck was renamed since this iteration; "
+                f"restoring into {live.name}"
+            )
+            out_path = live
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Restamp Name= to the DESTINATION stem before writing. iteration_loop
     # records deck_snapshot by reading the on-disk v2 FILE, and since every
