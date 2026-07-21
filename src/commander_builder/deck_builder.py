@@ -54,16 +54,18 @@ from __future__ import annotations
 
 import argparse
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import dck_meta
+from . import dck_meta, deck_builder_personalize as personalize, lift_analysis
 from ._proposer_filters import enforce_color_identity
-from .collection import load_collection, name_key, owns
+from .bracket_estimator import estimate_bracket
+from .collection import load_collection, name_key, owns, parse_collection_lines
 from .dck_utils import count_main_cards
 from .deck_builder_manabase import (
     ManabaseSummary,
+    _parse_cost,
     build_manabase,
     pip_stats,
     target_land_count,
@@ -71,7 +73,12 @@ from .deck_builder_manabase import (
 from .edhrec_client import fetch_average_deck, fetch_commander_page
 from .moxfield_import import DECK_OUT_DIR, safe_filename
 from .scryfall_client import lookup_card, normalize_color_identity
-from .staples import ROLE_TARGETS, detect_tribal_type, is_basic_land
+from .staples import (
+    ROLE_TARGETS,
+    classify_role_extended,
+    detect_tribal_type,
+    is_basic_land,
+)
 from .web.deck_text_ops import _pad_main_to_99
 
 # Commander decks are exactly 100 cards: 1 commander in the command zone +
@@ -115,6 +122,19 @@ class BuildResult:
     source: str  # "average-deck seed" | "commander-page fallback"
     dropped_off_color: list[str]
     manabase: ManabaseSummary  # per-color sources vs target (FP-014.2)
+
+    # ---- FP-014.3 personalization provenance -----------------------------
+    # Each is empty/None when its stage was disabled or made no change, so a
+    # plain FP-014.1/2 build reports exactly as before. ``field`` defaults
+    # keep the dataclass constructible without the new args (older callers
+    # and the tests that build BuildResult by hand).
+    bracket_target: int = 0             # the requested bracket.
+    bracket_estimate: Optional[int] = None  # steer's final estimate (or None).
+    lift_swaps: list[str] = field(default_factory=list)   # rationale strings.
+    lift_skipped: Optional[str] = None  # why the lift stage was skipped.
+    steer_notes: list[str] = field(default_factory=list)  # steer actions.
+    owned_swaps: list[str] = field(default_factory=list)  # owned-bias trades.
+    buy_list: list[str] = field(default_factory=list)     # still-unowned cards.
 
 
 # --------------------------------------------------------------------------
@@ -306,6 +326,22 @@ def _assemble(
     resolve_ci: Optional[Callable[[str], Optional[str]]] = None,
     lookup: Optional[Callable[[str], Optional[dict]]] = None,
     name: Optional[str] = None,
+    # ---- FP-014.3 personalization toggles + injectables ------------------
+    # Each stage is on by default (personalization is the point of a
+    # from-scratch build); a caller/CLI flag turns it off. The remaining
+    # kwargs are injectable seams so tests drive every stage from canned
+    # data with no network — they default to the real corpus/estimator/
+    # game-changer entry points, resolved at CALL time like the fetchers.
+    enable_lift: bool = True,
+    enable_steer: bool = True,
+    owned_bias: bool = True,
+    deck_dir: Optional[Path] = None,
+    lift_matrix: Optional[dict] = None,
+    estimate_fn: Optional[Callable[[str], dict]] = None,
+    is_game_changer: Optional[Callable[[str], bool]] = None,
+    is_fast_mana: Optional[Callable[[str], bool]] = None,
+    power_pool: Optional[list[str]] = None,
+    owned_names: Optional[list[str]] = None,
 ) -> BuildResult:
     """Assemble a legal 99 for ``commander`` at ``bracket``. See module docs.
 
@@ -478,6 +514,39 @@ def _assemble(
         collection=coll,  # FP-014.3 hook — accepted, not yet consumed.
     )
 
+    # ---- 4b. PERSONALIZATION (FP-014.3) ----------------------------------
+    # Three independent, individually-toggleable passes over the NONLAND
+    # spell list, applied in the order lift → steer → collection (rationale
+    # in deck_builder_personalize's module docstring). Each is a net-zero
+    # swap engine (remove one, add one) that never touches the manabase, so
+    # the exactly-99 budget computed above survives untouched; singleton and
+    # color-identity are re-checked on every incoming card via the closures
+    # below. The whole block is wrapped stage-by-stage so a personalization
+    # failure degrades to "no personalization", never a failed build.
+    (
+        nonlands,
+        lift_swap_notes,
+        lift_skipped,
+        steer_notes,
+        owned_swaps,
+        bracket_estimate,
+        buy_list,
+    ) = _personalize(
+        commander, bracket, nonlands, manabase, ci, lookup, cmdr_key,
+        coll=coll,
+        collection_path=collection_path,
+        enable_lift=enable_lift,
+        enable_steer=enable_steer,
+        owned_bias=owned_bias,
+        deck_dir=deck_dir,
+        lift_matrix=lift_matrix,
+        estimate_fn=estimate_fn,
+        is_game_changer=is_game_changer,
+        is_fast_mana=is_fast_mana,
+        power_pool=power_pool,
+        owned_names=owned_names,
+    )
+
     # ---- 5. OUTPUT + INVARIANT -------------------------------------------
     display_name = name or f"{commander} Build"
     # Stem the dashboard/improve loop and the win-attribution pipeline key
@@ -511,7 +580,249 @@ def _assemble(
         source=source,
         dropped_off_color=dropped_off_color,
         manabase=manabase.summary,
+        bracket_target=bracket,
+        bracket_estimate=bracket_estimate,
+        lift_swaps=lift_swap_notes,
+        lift_skipped=lift_skipped,
+        steer_notes=steer_notes,
+        owned_swaps=owned_swaps,
+        buy_list=buy_list,
     )
+
+
+def _revalidate_swaps(prev, new, reserved_keys, ci_ok):
+    """Re-check the three invariants after a personalization stage.
+
+    A stage is *supposed* to make net-zero, in-color, singleton swaps — but
+    "supposed to" is not "the emitted file may break it". This guard proves
+    the post-stage list still (a) has the same length (exactly-99 budget
+    intact), (b) is a genuine singleton (no key repeated, none colliding with
+    a committed land/basic/commander), and (c) is entirely in color identity.
+    If any check fails we DISCARD the stage's output and keep the pre-stage
+    list — a personalization bug degrades to "no personalization", it never
+    emits an illegal deck. Returns ``(list_to_use, ok)``.
+    """
+    if len(new) != len(prev):
+        return prev, False
+    seen: set[str] = set()
+    for nm in new:
+        k = name_key(nm)
+        if k in reserved_keys or k in seen:
+            return prev, False
+        seen.add(k)
+        if not ci_ok(nm):
+            return prev, False
+    return new, True
+
+
+def _personalize(
+    commander, bracket, nonlands, manabase, ci, lookup, cmdr_key,
+    *, coll, collection_path, enable_lift, enable_steer, owned_bias,
+    deck_dir, lift_matrix, estimate_fn, is_game_changer, is_fast_mana,
+    power_pool, owned_names,
+):
+    """Run the FP-014.3 stages over ``nonlands``; return the provenance.
+
+    Returns ``(nonlands, lift_notes, lift_skipped, steer_notes, owned_swaps,
+    bracket_estimate, buy_list)``. Every stage is wrapped so its failure is
+    contained, and every stage's output is re-validated by
+    ``_revalidate_swaps`` before it's accepted.
+    """
+    lift_notes: list[str] = []
+    lift_skipped: Optional[str] = None
+    steer_notes: list[str] = []
+    owned_swaps: list[str] = []
+    bracket_estimate: Optional[int] = None
+    buy_list: list[str] = []
+
+    # Keys a swap candidate must never collide with: the commander and every
+    # land/basic already committed (personalization only trades nonlands).
+    reserved: set[str] = {cmdr_key}
+    reserved |= {name_key(land) for land in manabase.lands}
+    reserved |= {name_key(b) for b in manabase.basics}
+
+    # --- shared closures (all route through the injected ``lookup``) -------
+    _role_cache: dict[str, str] = {}
+
+    def role_of(nm: str) -> str:
+        k = name_key(nm)
+        if k not in _role_cache:
+            try:
+                card = lookup(nm) or {}
+            except Exception:  # noqa: BLE001
+                card = {}
+            _role_cache[k] = classify_role_extended(
+                card.get("oracle_text", "") or "",
+                card.get("type_line", "") or "",
+            )
+        return _role_cache[k]
+
+    def ci_ok(nm: str) -> bool:
+        # ci is None → identity unresolved → enforce_color_identity passes
+        # everything through (same degrade as the base assembler).
+        if ci is None:
+            return True
+        kept, _dropped = enforce_color_identity([nm], ci)
+        return bool(kept)
+
+    def mv_of(nm: str) -> Optional[float]:
+        try:
+            card = lookup(nm)
+        except Exception:  # noqa: BLE001
+            return None
+        if not card:
+            return None
+        _pips, mv = _parse_cost(card.get("mana_cost") or "")
+        return mv
+
+    # Resolve the lift matrix once (both lift + steer read it). None when
+    # personalization is off / no corpus is available.
+    matrix = lift_matrix
+    if matrix is None and deck_dir is not None and (enable_lift or enable_steer):
+        try:
+            matrix = lift_analysis.load_or_build_matrix(Path(deck_dir))
+        except Exception:  # noqa: BLE001 — a corpus read blip disables lift.
+            matrix = None
+
+    # quality = lift deck-synergy over the ORIGINAL shell (built before any
+    # swaps so all stages score against the same baseline fabric).
+    base_deck_keys = {cmdr_key} | {name_key(n) for n in nonlands}
+    quality_of = personalize.synergy_scorer(matrix, bracket, base_deck_keys)
+
+    # --- STAGE 1: LIFT SWAPS ----------------------------------------------
+    if enable_lift:
+        try:
+            new, lift_notes, lift_skipped = personalize.lift_swaps(
+                nonlands, commander=commander, bracket=bracket, matrix=matrix,
+                reserved_keys=reserved, role_of=role_of, ci_ok=ci_ok,
+            )
+            nonlands, ok = _revalidate_swaps(nonlands, new, reserved, ci_ok)
+            if not ok:
+                lift_notes = []
+                lift_skipped = "lift swaps discarded (invariant re-check)"
+        except Exception:  # noqa: BLE001
+            lift_skipped = "lift stage error"
+
+    # --- STAGE 2: BRACKET STEERING ----------------------------------------
+    if enable_steer:
+        try:
+            _estimate = estimate_fn or (
+                lambda t: estimate_bracket(t, declared=bracket)
+            )
+            _is_gc = is_game_changer or _default_is_game_changer()
+            _is_fm = is_fast_mana or _default_is_fast_mana()
+            pool = power_pool
+            if pool is None:
+                # Corpus-sourced power candidates: the lift picks for this
+                # commander+shell that happen to be power cards belong to
+                # THIS deck (unlike a generic "all Game Changers" list).
+                pool = _default_power_pool(matrix, commander, nonlands, bracket)
+
+            def render_fn(nl):
+                return _render_dck(
+                    commander, nl, manabase.lands, manabase.basics,
+                )
+
+            new, steer_notes, bracket_estimate = personalize.steer_bracket(
+                nonlands, target=bracket, render_fn=render_fn,
+                estimate_fn=_estimate, is_game_changer=_is_gc,
+                is_fast_mana=_is_fm, candidate_pool=pool,
+                reserved_keys=reserved, ci_ok=ci_ok,
+                gc_cap=personalize.GC_CAP_BY_BRACKET.get(bracket, 10 ** 9),
+            )
+            nonlands, ok = _revalidate_swaps(nonlands, new, reserved, ci_ok)
+            if not ok:
+                steer_notes = ["bracket steer discarded (invariant re-check)"]
+        except Exception:  # noqa: BLE001
+            steer_notes = []
+
+    # --- STAGE 3: COLLECTION BIAS -----------------------------------------
+    if coll is not None and owned_bias:
+        try:
+            names = owned_names
+            if names is None and collection_path is not None:
+                try:
+                    names = parse_collection_lines(
+                        Path(collection_path).read_text(encoding="utf-8")
+                    )
+                except OSError:
+                    names = []
+            names = names or []
+            _is_gc = is_game_changer or _default_is_game_changer()
+            _is_fm = is_fast_mana or _default_is_fast_mana()
+            # Never trade away a power card the steer stage placed — that
+            # would silently re-open the bracket gap.
+            protect = lambda nm: _is_gc(nm) or _is_fm(nm)  # noqa: E731
+            new, owned_swaps = personalize.apply_collection_bias(
+                nonlands, collection=coll, owned_pool=names, ci_ok=ci_ok,
+                role_of=role_of, mv_of=mv_of, quality_of=quality_of,
+                reserved_keys=reserved, protect=protect,
+            )
+            nonlands, ok = _revalidate_swaps(nonlands, new, reserved, ci_ok)
+            if not ok:
+                owned_swaps = []
+        except Exception:  # noqa: BLE001
+            owned_swaps = []
+
+    # --- BUY-LIST: still-unowned cards in the FINAL 99 --------------------
+    # Only meaningful when a collection is registered AND owned-bias is on
+    # (the buy-list is the collection feature's report; --no-owned-bias
+    # turns the whole feature, buy-list included, off). Basics are always
+    # "owned" (owns() short-circuits them), so they never appear.
+    if coll is not None and owned_bias:
+        unowned = [n for n in nonlands if not owns(coll, n)]
+        unowned += [land for land in manabase.lands if not owns(coll, land)]
+        buy_list = sorted(dict.fromkeys(unowned))
+
+    return (
+        nonlands, lift_notes, lift_skipped, steer_notes, owned_swaps,
+        bracket_estimate, buy_list,
+    )
+
+
+def _default_is_game_changer() -> Callable[[str], bool]:
+    """Production Game-Changer predicate: name is on the official GC list
+    (offline fallback on any failure — a GC-list blip must not crash steer).
+    """
+    try:
+        from .game_changers import load_game_changers
+        gc = {g.lower() for g in load_game_changers()}
+    except Exception:  # noqa: BLE001
+        gc = set()
+    return lambda nm: name_key(nm) in gc
+
+
+def _default_is_fast_mana() -> Callable[[str], bool]:
+    """Production fast-mana predicate: reuse bracket_estimator's own
+    fast-mana list so 'power' means the same thing the estimator scores."""
+    try:
+        from .bracket_estimator import _FAST_MANA_CARDS
+        fm = set(_FAST_MANA_CARDS)
+    except Exception:  # noqa: BLE001
+        fm = set()
+    return lambda nm: name_key(nm) in fm
+
+
+def _default_power_pool(matrix, commander, nonlands, bracket) -> list[str]:
+    """Corpus-sourced candidate power cards for the steer stage.
+
+    The lift candidates for this commander+shell are, by construction, cards
+    the harvested community pairs with THIS deck — so when some of them are
+    Game Changers / fast mana they're commander-appropriate power to add
+    (far better than a blind 'every GC in-color' list). Empty when there's
+    no usable corpus: without a source we can only soften, never add — the
+    honest limit, reported in the steer notes.
+    """
+    if not matrix or matrix.get("too_small"):
+        return []
+    deck_keys = {name_key(commander)} | {name_key(n) for n in nonlands}
+    try:
+        cands = lift_analysis.lift_candidates(
+            matrix, deck_keys, bracket=bracket, limit=30,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    return [c["card"] for c in cands]
 
 
 def _render_dck(
@@ -548,12 +859,19 @@ def build_deck(
     resolve_ci: Optional[Callable[[str], Optional[str]]] = None,
     lookup: Optional[Callable[[str], Optional[dict]]] = None,
     name: Optional[str] = None,
+    enable_lift: bool = True,
+    enable_steer: bool = True,
+    owned_bias: bool = True,
+    deck_dir: Optional[Path] = None,
+    **personalize_kwargs,
 ) -> str:
     """Build a legal 99-card Commander deck for ``commander`` and return the
     Forge ``.dck`` TEXT (the caller decides where to write it).
 
     Thin wrapper over ``_assemble`` — see that function and the module
-    docstring for the full contract and the honest scope notes.
+    docstring for the full contract and the honest scope notes. The FP-014.3
+    toggles + injectable seams pass straight through (``**personalize_kwargs``
+    forwards the lift-matrix / estimator / power-pool test hooks).
     """
     return _assemble(
         commander,
@@ -564,6 +882,11 @@ def build_deck(
         resolve_ci=resolve_ci,
         lookup=lookup,
         name=name,
+        enable_lift=enable_lift,
+        enable_steer=enable_steer,
+        owned_bias=owned_bias,
+        deck_dir=deck_dir,
+        **personalize_kwargs,
     ).text
 
 
@@ -595,19 +918,37 @@ def main(argv=None) -> int:
                         help="Directory to write the .dck into "
                              "(default: the project's commander deck dir).")
     parser.add_argument("--collection", default=None,
-                        help="Path to a collection file for a minimal "
-                             "owned-card bias (FP-014.3 = full preference).")
+                        help="Path to a collection file. Enables owned-card "
+                             "bias (FP-014.3) unless --no-owned-bias is set.")
+    # FP-014.3 personalization toggles — each stage is ON by default (it is
+    # the point of a from-scratch build); these turn a stage off.
+    parser.add_argument("--no-lift", dest="enable_lift", action="store_false",
+                        help="Disable lift-driven synergy swaps (FP-014.3).")
+    parser.add_argument("--no-steer", dest="enable_steer", action="store_false",
+                        help="Disable bracket steering (FP-014.3).")
+    parser.add_argument("--no-owned-bias", dest="owned_bias",
+                        action="store_false",
+                        help="Disable owned-card bias even when a "
+                             "--collection is given (FP-014.3).")
+    parser.set_defaults(enable_lift=True, enable_steer=True, owned_bias=True)
     args = parser.parse_args(argv)
 
     if args.bracket not in (1, 2, 3, 4, 5):
         parser.error(f"--bracket must be 1-5, got {args.bracket}")
 
     collection_path = Path(args.collection) if args.collection else None
+    deck_dir = Path(args.deck_dir) if args.deck_dir else DECK_OUT_DIR
     try:
         result = _assemble(
             args.commander,
             args.bracket,
             collection_path,
+            # The corpus lift matrix is read from the deck dir the build
+            # writes into — the same pool the harvester/improve loop use.
+            deck_dir=deck_dir,
+            enable_lift=args.enable_lift,
+            enable_steer=args.enable_steer,
+            owned_bias=args.owned_bias,
         )
     except ValueError as exc:
         # Clean, user-facing message (e.g. "cannot build: no EDHREC data
@@ -615,7 +956,6 @@ def main(argv=None) -> int:
         print(str(exc))
         return 1
 
-    deck_dir = Path(args.deck_dir) if args.deck_dir else DECK_OUT_DIR
     deck_dir.mkdir(parents=True, exist_ok=True)
     out_path = deck_dir / f"{result.stem}.dck"
     out_path.write_text(result.text, encoding="utf-8")
@@ -633,6 +973,32 @@ def main(argv=None) -> int:
         print(line)
     if result.dropped_off_color:
         print(f"  dropped off-color: {', '.join(result.dropped_off_color)}")
+
+    # ---- FP-014.3 personalization summary --------------------------------
+    if result.lift_swaps:
+        print(f"  lift swaps ({len(result.lift_swaps)}):")
+        for note in result.lift_swaps:
+            print(f"    - {note}")
+    elif result.lift_skipped:
+        print(f"  lift swaps: skipped — {result.lift_skipped}")
+    if result.bracket_estimate is not None:
+        verdict = (
+            "meets target" if result.bracket_estimate == result.bracket_target
+            else ("below target" if result.bracket_estimate <
+                  result.bracket_target else "above target")
+        )
+        print(
+            f"  bracket: estimate B{result.bracket_estimate} vs "
+            f"target B{result.bracket_target} ({verdict})"
+        )
+        for note in result.steer_notes:
+            print(f"    - {note}")
+    if result.owned_swaps:
+        print(f"  owned-bias swaps ({len(result.owned_swaps)}):")
+        for note in result.owned_swaps:
+            print(f"    - {note}")
+    if collection_path is not None and args.owned_bias:
+        print(f"  buy-list (still unowned): {len(result.buy_list)} card(s)")
     return 0
 
 
