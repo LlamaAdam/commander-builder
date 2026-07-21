@@ -1963,11 +1963,7 @@ function renderDashboard(data, iterations) {
   // /api/dashboard with the chosen bracket, so the user sees how
   // the heuristic shifts power-related fields.
   tiles.appendChild(bracketTile(t));
-  tiles.appendChild(tile(
-    "Est. price",
-    t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",
-    t.n_priced_cards != null ? `${t.n_priced_cards} priced cards` : null,
-  ));
+  tiles.appendChild(priceTile(t, data.printing_savings));
   tiles.appendChild(tile(
     "Deck progress",
     `${data.deck_progress?.current ?? 0} / ${data.deck_progress?.target ?? 100}`,
@@ -2992,6 +2988,57 @@ function tile(label, value, sub) {
   t.appendChild(el("div", { class: "value" }, String(value)));
   if (sub) t.appendChild(el("div", { class: "sub" }, sub));
   return t;
+}
+
+// Est. price tile + cheaper-printing savings (ManaFoundry parity).
+// `savings` is the dashboard payload's `printing_savings` object:
+// {total, count, suggestions: [{card, qty, current_price, current_set,
+// cheapest_price, cheapest_set, cheapest_collector, savings}]}.
+// Renders the standard price tile, then — only when the backend found
+// actual savings — a collapsed <details> whose summary is the
+// "Save up to $X" teaser. <details> matches the existing lazy-expand
+// pattern (proposed-deck preview, iteration graph): zero JS state,
+// keyboard-accessible for free.
+function priceTile(t, savings) {
+  const tl = tile(
+    "Est. price",
+    t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",
+    t.n_priced_cards != null ? `${t.n_priced_cards} priced cards` : null,
+  );
+  if (!savings || !savings.count || !(savings.suggestions || []).length) {
+    return tl; // Offline / nothing worth swapping — plain tile.
+  }
+  const details = el("details", { style: "margin-top: 6px;" });
+  details.appendChild(el(
+    "summary",
+    { class: "muted", style: "cursor: pointer; font-size: 12px;" },
+    `Save up to $${Number(savings.total).toFixed(2)} `
+      + `with cheaper printings (${savings.count} `
+      + `card${savings.count === 1 ? "" : "s"})`,
+  ));
+  const ul = el("ul", {
+    style: "margin: 6px 0 0; padding-left: 16px; font-size: 12px; "
+         + "text-align: left; max-height: 180px; overflow: auto;",
+  });
+  for (const s of savings.suggestions) {
+    // "Card: $9.50 (2xm) → $2.10 (mm2 #43) — save $7.40". Set codes +
+    // collector number are exactly what the user types into a store
+    // search to find the cheap printing, so they earn their space.
+    const qty = s.qty > 1 ? ` ×${s.qty}` : "";
+    ul.appendChild(el(
+      "li", { style: "margin-bottom: 3px;" },
+      `${s.card}${qty}: `
+        + `$${Number(s.current_price).toFixed(2)}`
+        + `${s.current_set ? ` (${s.current_set})` : ""} → `
+        + `$${Number(s.cheapest_price).toFixed(2)}`
+        + ` (${s.cheapest_set || "?"}`
+        + `${s.cheapest_collector ? ` #${s.cheapest_collector}` : ""})`
+        + ` — save $${Number(s.savings).toFixed(2)}`,
+    ));
+  }
+  details.appendChild(ul);
+  tl.appendChild(details);
+  return tl;
 }
 
 function panel(title, content) {

@@ -88,6 +88,18 @@ def client(deck_dir, monkeypatch):
     monkeypatch.setattr(
         "commander_builder.deck_dashboard.lookup_card", fake_lookup,
     )
+    # The printing-savings probe on /api/dashboard resolves prices via
+    # scryfall_client directly (deck_pricing layer), so stub the source
+    # module too — and stub the prints lookup to "offline, nothing
+    # cached" so the suite never touches the network. Dedicated
+    # printing-savings tests inject their own multi-printing fakes.
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card_prints",
+        lambda name, **_: None,
+    )
 
     # Isolate the per-user config store: point it at a non-existent temp
     # path so the audit BYO-key resolver (header → config.json → env)
@@ -421,6 +433,70 @@ def test_dashboard_with_valid_bracket(client):
     }
 
 
+def test_dashboard_includes_printing_savings_key_offline(client):
+    """With the prints lookup stubbed to offline-nothing-cached, the
+    payload still carries a well-formed empty printing_savings block —
+    the UI relies on the key always being present."""
+    resp = client.get("/api/dashboard?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["printing_savings"] == {
+        "total": 0.0, "count": 0, "suggestions": [],
+    }
+
+
+def test_dashboard_printing_savings_with_cheaper_printings(client, monkeypatch):
+    """End-to-end through the route: multi-printing fakes produce
+    qty-aware suggestions in the dashboard payload."""
+    def fake_prints(name, **_):
+        if "Cultivate" in name:
+            # Current (fixture) price $1.50; threshold max($1, 30%) =
+            # $1 → the $0.25 printing qualifies ($1.25/copy).
+            return [
+                {"set": "c21", "set_type": "commander",
+                 "collector_number": "158", "border_color": "black",
+                 "oversized": False, "digital": False,
+                 "prices": {"usd": "0.25", "usd_foil": None,
+                            "usd_etched": None},
+                 "legalities": {"commander": "legal"}},
+                {"set": "m21", "set_type": "core",
+                 "collector_number": "177", "border_color": "black",
+                 "oversized": False, "digital": False,
+                 "prices": {"usd": "1.50", "usd_foil": None,
+                            "usd_etched": None},
+                 "legalities": {"commander": "legal"}},
+            ]
+        if "Cmdr" in name:
+            # Commander priced $10.00 in the fixture; $2 reprint saves $8.
+            return [
+                {"set": "cmm", "set_type": "masters",
+                 "collector_number": "7", "border_color": "black",
+                 "oversized": False, "digital": False,
+                 "prices": {"usd": "2.00", "usd_foil": None,
+                            "usd_etched": None},
+                 "legalities": {"commander": "legal"}},
+            ]
+        return None  # Forest et al: basic lands never get this far.
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card_prints", fake_prints,
+    )
+    resp = client.get("/api/dashboard?deck=Alpha")
+    assert resp.status_code == 200
+    ps = resp.get_json()["printing_savings"]
+    assert ps["count"] == 2
+    # Sorted by savings desc: commander ($8.00) before Cultivate.
+    assert [s["card"] for s in ps["suggestions"]] == ["Test Cmdr", "Cultivate"]
+    cmdr, cult = ps["suggestions"]
+    assert cmdr["savings"] == 8.0
+    assert cmdr["cheapest_set"] == "cmm"
+    assert cmdr["cheapest_collector"] == "7"
+    # Alpha lists "1 Cultivate" five times → qty folds to 5.
+    assert cult["qty"] == 5
+    assert cult["savings"] == pytest.approx(6.25)
+    assert ps["total"] == pytest.approx(14.25)
+
+
 def test_dashboard_traversal_blocked(client, tmp_path):
     outside = tmp_path / "evil.dck"
     outside.write_text("[Main]\n1 Forest\n", encoding="utf-8")
@@ -448,10 +524,17 @@ def seeded_client(deck_dir, tmp_path, monkeypatch):
     mod.seed_demo(db, deck_id="omnath")
 
     # Stub Scryfall (in case any dashboard call piggy-backs).
+    _fake = lambda name, **_: {  # noqa: E731 — tiny shared stub
+        "type_line": "Basic Land", "cmc": 0.0,
+        "color_identity": ["G"], "prices": {"usd": "0.05"},
+    }
+    monkeypatch.setattr("commander_builder.deck_dashboard.lookup_card", _fake)
+    # Same offline stubs as the `client` fixture: the dashboard's
+    # printing-savings probe reads scryfall_client directly.
+    monkeypatch.setattr("commander_builder.scryfall_client.lookup_card", _fake)
     monkeypatch.setattr(
-        "commander_builder.deck_dashboard.lookup_card",
-        lambda name: {"type_line": "Basic Land", "cmc": 0.0,
-                      "color_identity": ["G"], "prices": {"usd": "0.05"}},
+        "commander_builder.scryfall_client.lookup_card_prints",
+        lambda name, **_: None,
     )
 
     app = create_app(deck_dir=deck_dir, knowledge_db=db)

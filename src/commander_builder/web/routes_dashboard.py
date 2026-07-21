@@ -44,6 +44,7 @@ from ._helpers import (
     _iteration_to_dict,
     _resolve_deck_path,
 )
+from .deck_pricing import printing_savings_for_deck_text
 
 
 def make_dashboard_blueprint(
@@ -112,7 +113,23 @@ def make_dashboard_blueprint(
                 current_app.logger.warning("advise failed: %s", exc)
 
         data = build_dashboard(path, bracket=bracket, suggested=suggested)
-        return jsonify(data.to_dict())
+        payload = data.to_dict()
+        # Cheaper-printing savings (ManaFoundry parity). Computed in
+        # deck_pricing (module layering: pricing logic never lives in
+        # routes) and attached to the dashboard payload so the pricing
+        # tile can render "Save up to $X" without a second request.
+        # Failure never blocks the dashboard — same fail-quiet contract
+        # as the legality/salt probes in build_dashboard.
+        try:
+            payload["printing_savings"] = printing_savings_for_deck_text(
+                path.read_text(encoding="utf-8"),
+            )
+        except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
+            current_app.logger.warning("printing savings failed: %s", exc)
+            payload["printing_savings"] = {
+                "total": 0.0, "count": 0, "suggestions": [],
+            }
+        return jsonify(payload)
 
     @bp.route("/api/iterations")
     def iterations():
