@@ -8,6 +8,11 @@
 </head>
 <body>
   <header class="topbar">
+    <!-- Mobile-only drawer toggle (hidden >768px via .hamburger in app.css).
+         Toggles body.drawer-open; app.js wires the click + close handlers. -->
+    <button class="topbar-btn hamburger" id="btn-drawer-toggle" type="button"
+            aria-label="Open menu" aria-expanded="false" aria-controls="sidebar-panel"
+            title="Menu">&#9776;</button>
     <h1>Commander Builder</h1>
     <span class="muted" id="health-badge">checking…</span>
     <div class="topbar-spacer"></div>
@@ -158,6 +163,11 @@
       <p class="empty-state">Select a deck on the left to load its dashboard.</p>
     </section>
   </main>
+
+  <!-- Mobile drawer scrim: covers the dashboard behind the open drawer;
+       tapping it closes the drawer (wired in app.js). Hidden >768px and
+       when body.drawer-open is absent (see .drawer-scrim in app.css). -->
+  <div class="drawer-scrim" id="drawer-scrim"></div>
 
   <!-- New / import deck modal -->
   <div class="modal-backdrop" id="new-deck-modal" hidden>

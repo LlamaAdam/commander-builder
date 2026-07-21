@@ -135,6 +135,27 @@ function highlight(li) {
   if (li) li.classList.add("active");
 }
 
+// --- Mobile sidebar drawer -------------------------------------------
+// A single `drawer-open` class on <body> drives the CSS slide-in
+// (mirrors the .active class-toggle pattern used for the rail buttons).
+// All drawer styling lives behind the <=768px media query in app.css,
+// so on desktop these toggles are inert: the hamburger + scrim are
+// display:none and the sidebar/rail keep their grid positions.
+function openDrawer() {
+  document.body.classList.add("drawer-open");
+  const t = document.getElementById("btn-drawer-toggle");
+  if (t) t.setAttribute("aria-expanded", "true");
+}
+function closeDrawer() {
+  document.body.classList.remove("drawer-open");
+  const t = document.getElementById("btn-drawer-toggle");
+  if (t) t.setAttribute("aria-expanded", "false");
+}
+function toggleDrawer() {
+  if (document.body.classList.contains("drawer-open")) closeDrawer();
+  else openDrawer();
+}
+
 let _activeDeckId = null;
 // AbortController for the currently in-flight audit stream. Reset on
 // every loadAdvise() call so switching decks / re-running the audit
@@ -162,6 +183,9 @@ async function selectDeck(deckId, li, opts) {
   }
   _activeDeckId = deckId;
   highlight(li);
+  // Selecting a deck on mobile closes the slide-in drawer so the freshly
+  // loaded dashboard is visible. Inert on desktop (no drawer-open class).
+  closeDrawer();
   const dash = $("dashboard");
   if (!soft) {
     dash.innerHTML = '<p class="empty-state">Loading…</p>';
@@ -3343,12 +3367,20 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // ESC closes any open modal.
+  // Mobile drawer: hamburger toggles it; the scrim (and Escape, below)
+  // close it. Selecting a deck also closes it (see selectDeck).
+  const drawerToggle = $("btn-drawer-toggle");
+  if (drawerToggle) drawerToggle.addEventListener("click", toggleDrawer);
+  const drawerScrim = $("drawer-scrim");
+  if (drawerScrim) drawerScrim.addEventListener("click", closeDrawer);
+
+  // ESC closes any open modal (and the mobile drawer).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       ["propose-modal", "new-deck-modal", "alert-modal"].forEach((id) => {
         const m = $(id); if (m) m.hidden = true;
       });
+      closeDrawer();
     }
   });
 

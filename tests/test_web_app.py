@@ -287,6 +287,16 @@ def test_root_loads_static_assets(client):
     assert "app.css" in body
 
 
+def test_root_has_mobile_drawer_markup(client):
+    """Responsive layout: the mobile sidebar drawer needs a hamburger
+    toggle and a scrim in the rendered index. Both are hidden >768px via
+    CSS; app.js wires the toggle/close handlers to these ids."""
+    resp = client.get("/")
+    body = resp.data.decode("utf-8")
+    assert 'id="btn-drawer-toggle"' in body
+    assert 'id="drawer-scrim"' in body
+
+
 def test_static_css_serves(client):
     resp = client.get("/static/app.css")
     try:
