@@ -3015,7 +3015,12 @@ async function createPasteDeck() {
     });
     const body = await resp.json();
     if (!resp.ok) {
-      status.textContent = `Error: ${body.error || resp.status}`;
+      // `detail` carries the parser's line-level diagnosis for a
+      // malformed Arena/CSV paste — without it the user only sees the
+      // generic "could not parse" headline and has no idea which line
+      // to fix.
+      const detail = body.detail ? ` — ${body.detail}` : "";
+      status.textContent = `Error: ${body.error || resp.status}${detail}`;
       return;
     }
     status.textContent = `Created ${body.filename}.`;

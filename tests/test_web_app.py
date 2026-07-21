@@ -1330,6 +1330,76 @@ def test_import_deck_dck_format_paste_preserved(client, deck_dir):
     assert "1 Edgar Markov" in on_disk
 
 
+def test_import_deck_arena_paste_maps_sections(client, deck_dir):
+    """An MTGA/Arena export pasted into the same textarea auto-detects
+    and lands as a .dck with the Commander section mapped — the one
+    paste shape besides .dck that can carry an explicit commander."""
+    paste = (
+        "About\n"
+        "Name Ignored Here\n"
+        "\n"
+        "Commander\n"
+        "1 Feather, the Redeemed (WAR) 197\n"
+        "\n"
+        "Deck\n"
+        "1 Lightning Bolt (M21) 159\n"
+        "30 Mountain\n"
+    )
+    resp = client.post("/api/import_deck", json={
+        "name": "Arena Brew", "paste_text": paste, "bracket": 2,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    on_disk = (deck_dir / resp.get_json()["filename"]).read_text(encoding="utf-8")
+    assert "[Commander]" in on_disk
+    assert "1 Feather, the Redeemed" in on_disk
+    # (SET) NUM printing tails are Arena syntax, not Forge's.
+    assert "(WAR)" not in on_disk and "(M21)" not in on_disk
+    assert "30 Mountain" in on_disk
+
+
+def test_import_deck_csv_paste_creates_deck(client, deck_dir):
+    paste = (
+        "Count,Name,Set,Price\n"
+        "1,Sol Ring,C21,1.50\n"
+        '1,"Krenko, Mob Boss",DOM,0.50\n'
+        "30,Mountain,ANA,0.05\n"
+    )
+    resp = client.post("/api/import_deck", json={
+        "name": "CSV Brew", "paste_text": paste, "bracket": 3,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    on_disk = (deck_dir / resp.get_json()["filename"]).read_text(encoding="utf-8")
+    # CSV reuses the plain-paste path: everything in [Main], no
+    # commander section (no commander column exists in exports).
+    assert "[Main]" in on_disk
+    assert "[Commander]" not in on_disk
+    assert "1 Krenko, Mob Boss" in on_disk
+    assert "30 Mountain" in on_disk
+
+
+def test_import_deck_malformed_arena_400_names_line(client):
+    """A paste POSITIVELY detected as Arena (Deck header) with a bad
+    card line must come back as a 400 naming the line — never a 500."""
+    resp = client.post("/api/import_deck", json={
+        "name": "Broken Arena",
+        "paste_text": "Deck\n1 Shock (M21) 160\nLightning Bolt\n",
+    })
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "could not parse pasted deck list"
+    assert "line 3" in body["detail"]
+    assert "Lightning Bolt" in body["detail"]
+
+
+def test_import_deck_malformed_csv_400_names_line(client):
+    resp = client.post("/api/import_deck", json={
+        "name": "Broken CSV",
+        "paste_text": "Count,Name\nlots,Sol Ring\n",
+    })
+    assert resp.status_code == 400
+    assert "whole number" in resp.get_json()["detail"]
+
+
 def test_import_deck_409_on_duplicate(client, deck_dir):
     paste = "1 Sol Ring\n"
     client.post("/api/import_deck", json={

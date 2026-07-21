@@ -104,7 +104,8 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         or a paste of the deck text.
 
         Body: ``{"name": "<display>", "moxfield_url": "<url>"}``  OR
-              ``{"name": "<display>", "paste_text": "<.dck or moxfield-format>"}``
+              ``{"name": "<display>", "paste_text": "<.dck, MTGA
+              export, CSV, or plain card lines>"}``
 
         Filename is derived from ``name`` with a ``[USER]`` prefix and
         ``[B?]`` suffix so the deck shows up in the user-only sidebar.
@@ -165,9 +166,22 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                     "detail": f"{type(exc).__name__}: {exc}",
                 }), 502
         else:
-            # Paste path. Accept both .dck format (with [Main] sections)
-            # and the plain Moxfield bulk-paste line list.
-            deck_text_out = _normalize_pasted_deck(paste)
+            # Paste path. `_normalize_pasted_deck` auto-detects and
+            # accepts .dck format (with [Main] sections), MTGA/Arena
+            # exports, CSV card lists, and the plain Moxfield
+            # bulk-paste line list — all converge on the same .dck
+            # intermediate the writers below consume.
+            from ..import_formats import ImportFormatError
+            try:
+                deck_text_out = _normalize_pasted_deck(paste)
+            except ImportFormatError as exc:
+                # A paste positively detected as Arena/CSV had a bad
+                # line. The error message names the offending line —
+                # surface it as a client error, never a stacktrace.
+                return jsonify({
+                    "error": "could not parse pasted deck list",
+                    "detail": str(exc),
+                }), 400
             if not derived_name:
                 derived_name = "Pasted Deck"
 
