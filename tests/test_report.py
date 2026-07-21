@@ -116,6 +116,26 @@ def test_render_iteration_includes_all_sections(tmp_path):
     assert "OLD 6 – 10 NEW" in md
 
 
+def test_render_iteration_survives_explicit_null_rationale(tmp_path):
+    """A manifest with an explicit JSON null rationale must not crash.
+
+    ``.get("rationale", "")`` returns None (not the default) when the key
+    is PRESENT with a null value — the old code then called None.strip()
+    and one bad row killed the whole commander-history render.
+    """
+    db = tmp_path / "kl.sqlite"
+    rid = _seed_iteration(db, audit_manifest={"added": ["NewCard"],
+                                              "removed": [],
+                                              "rationale": None})
+    from commander_builder.knowledge_log import get_iteration
+    it = get_iteration(rid, db_path=db)
+
+    md = render_iteration(it, position=1, total=1)
+    assert "Iteration 1/1" in md
+    # No rationale line should appear — null means "no rationale".
+    assert "**Rationale**" not in md
+
+
 def test_render_iteration_skips_missing_optional_fields(tmp_path):
     """No rationale, no verdict_notes, no margin → still renders cleanly."""
     db = tmp_path / "kl.sqlite"

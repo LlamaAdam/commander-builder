@@ -296,7 +296,11 @@ rotation horror stories almost always come from explicit `KEY=value`
 shapes; that's the surface we hit hardest.
 
 Documentation placeholders (`sk-ant-...`, `YOUR_TOKEN_HERE`,
-`REPLACE_ME`, `<token>`, etc.) are silently ignored.
+`REPLACE_ME`, `<token>`, etc.) are silently ignored — but only when the
+placeholder marker appears **inside the matched token itself**. A real
+high-entropy key is flagged even if the surrounding line mentions
+`EXAMPLE` or ends a comment with `...`; nothing outside the token can
+suppress a finding.
 
 ### Handling deliberate test fixtures
 
@@ -318,11 +322,14 @@ Two escape hatches for cases where the scanner is wrong:
 
    ```
    Fingerprints (for .secrets-baseline):
-     tests/fixtures/fake.env:3:anthropic_api_key
+     tests/fixtures/fake.env:anthropic_api_key:3f2a9c81d0e4
    ```
 
    Append the fingerprint to `.secrets-baseline` to silence that exact
-   (file, line, pattern) tuple.
+   (file, pattern, token) tuple. The trailing field is a SHA-256 prefix
+   of the matched token — content-based, so the entry keeps working when
+   edits elsewhere in the file shift line numbers, and the baseline
+   never contains secret-shaped strings.
 
 **Never silence a real key.** Rotate first, fingerprint second.
 

@@ -43,7 +43,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from . import dck_utils
 from .compare_versions import COMPARE_OUT_DIR, ComparisonReport, compare
+from .dck_meta import rewrite_name
 from .edhrec_client import (
     fetch_average_deck,
     fetch_commander_page,
@@ -140,6 +142,11 @@ class MetaTestReport:
     comparisons: list[dict] = field(default_factory=list)    # ComparisonReport.to_dict()
     card_diff: CardDiffReport = field(default_factory=CardDiffReport)
     user_record: dict = field(default_factory=dict)          # aggregate W/L/D vs all refs
+    # Draw-policy label (2026-07-19): the underlying compare() pods count
+    # turn-cap draws as plain draws (never resolved to a life leader, unlike
+    # forge_runner's A/B harness). Label only — lets downstream analysis
+    # tell the two report populations apart; no behavior change.
+    draw_policy: str = "plain_draw"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -251,6 +258,16 @@ def _import_reference(deck_json: dict, source: str,
     name = deck_json.get("name", "Unknown Reference")
     text = to_dck(deck_json)
     out_path = _ref_destination(source, name, bracket, base=deck_dir)
+    # to_dck stamps the deck's Moxfield/EDHREC display name into Name=, but
+    # the file lands as "[REF] <source-tag> <safe-name> [Bn].dck" —
+    # log_parser._normalize never strips the "[REF] <tag>" prefix, so the
+    # normalized filename could never equal the normalized Name= and the
+    # reference scored 0 wins in every meta-test compare (silently
+    # flattering the user deck). Rewrite Name= to the filename stem so both
+    # sides normalize identically (invariant documented in dck_meta). The
+    # ReferenceDeck record below keeps the human-readable ``name`` for
+    # display; only the on-disk metadata changes.
+    text = rewrite_name(text, out_path.stem)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
     main_cards = _parse_main_card_names(out_path)
@@ -265,26 +282,12 @@ def _import_reference(deck_json: dict, source: str,
 
 
 def _parse_main_card_names(deck_path: Path) -> list[str]:
-    """Pull just the [Main] card names (without qty / set / cn)."""
+    """Pull just the [Main] card names (without qty / set / cn).
+
+    Thin wrapper over ``dck_utils.main_card_names``."""
     if not deck_path.exists():
         return []
-    out: list[str] = []
-    in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[main]":
-            in_main = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                out.append(m.group(1).strip())
-    return out
+    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
 
 
 def _fetch_edhrec_average_deck(
@@ -521,7 +524,22 @@ def run_meta_test(
     user_w = 0
     user_l = 0
     user_d = 0
-    for r in refs:
+    # True games-played total. user_w + user_l + user_d misses games a
+    # FILLER seat won (user lost those too, but they're not new_stats
+    # wins) — a "20-game" run used to report 'over 11 games'. Sum the
+    # attributed totals from each comparison instead and surface the
+    # filler-won remainder explicitly so the arithmetic is transparent.
+    games_total = 0
+    # Aggregate seat-balance tally (round 3). Each compare() below is a
+    # single pod (default filler_pairs=1), so compare()'s own odd-pod
+    # residual note would fire on EVERY reference — N copies of a warning
+    # about a "residual" that is deliberate here and cancels across the
+    # batch (that's what seat_parity=ref_idx % 2 is for). We suppress the
+    # per-call note and print ONE aggregate line after the loop instead,
+    # built from each report's h2h_seat_balance (old = the user deck).
+    user_seat1_pods = 0
+    counted_pods = 0
+    for ref_idx, r in enumerate(refs):
         print(f"\n--- Comparing user vs {r.source}: {r.name} ---", flush=True)
         cmp_report = compare(
             old_deck=user_deck,
@@ -529,12 +547,50 @@ def run_meta_test(
             bracket=bracket,
             games_per_pod=games_per_pod,
             filler_pairs=filler_pairs,
+            # Seat-order balance across the whole meta-test. compare()
+            # alternates the head-to-head pair's seat order by pod index
+            # (Forge keeps seat 1 on the play for every game of an
+            # invocation — see compare_versions' alternation block and
+            # forge_runner.run_ab_simulation's per-game precedent), but
+            # with the default filler_pairs=1 each comparison is a single
+            # pod, so the intra-call alternation has nothing to alternate
+            # and the user deck would sit in seat 1 for EVERY reference.
+            # Shifting the parity by the reference index alternates the
+            # user's seat across references instead, so the aggregate
+            # user_record carries at most a one-pod first-player residual
+            # (exact cancellation on an even reference count).
+            seat_parity=ref_idx % 2,
+            # Silence compare()'s per-call seat notes: with one pod per
+            # call the "odd pod count" residual is by design, and the
+            # aggregate line below reports the whole batch's balance once.
+            suppress_seat_note=True,
         )
         comparisons.append(cmp_report.to_dict())
+        user_seat1_pods += cmp_report.h2h_seat_balance["old_first"]
+        counted_pods += (
+            cmp_report.h2h_seat_balance["old_first"]
+            + cmp_report.h2h_seat_balance["new_first"]
+        )
         # In compare_versions: old=user, new=reference. So user wins are old_stats.wins.
         user_w += cmp_report.old_stats.wins
         user_l += cmp_report.new_stats.wins
         user_d += cmp_report.draws
+        # total_games counts every ATTRIBUTED game (failed pods already
+        # excluded by compare()), including games a filler seat won.
+        games_total += cmp_report.total_games
+
+    # The ONE aggregate seat-balance line (replaces N per-reference odd-pod
+    # notes). Forge keeps seat 1 on the play for every game of an
+    # invocation, so this is the honest "how often was the user deck on
+    # the play" number for the whole run. Skipped when no pod contributed
+    # (all comparisons failed/stubbed) — 0-of-0 would be noise.
+    if counted_pods:
+        print(
+            f"\nNOTE: seat balance — user deck took seat 1 (on the play) "
+            f"in {user_seat1_pods} of {counted_pods} head-to-head pod(s) "
+            f"across {len(refs)} reference(s).",
+            flush=True,
+        )
 
     # Diff the user deck against the references.
     user_main = _parse_main_card_names(user_path)
@@ -551,7 +607,13 @@ def run_meta_test(
             "user_wins": user_w,
             "user_losses": user_l,
             "draws": user_d,
-            "total_games": user_w + user_l + user_d,
+            # Games a filler seat won: real games the user played (and
+            # lost the race in) that aren't user W/L/D. max(0, ...) guards
+            # a malformed comparison stub whose totals undercount.
+            "filler_wins": max(0, games_total - (user_w + user_l + user_d)),
+            # Honest total (2026-07-19): ALL attributed games played, not
+            # just the W+L+D subset — a 20-game run reports 20, not 11.
+            "total_games": games_total,
             "win_rate": user_w / max(1, user_w + user_l) if (user_w + user_l) else 0.0,
         },
     )
@@ -582,10 +644,16 @@ def format_report_text(report: MetaTestReport) -> str:
         lines.append(f"  - [{r.source}] {r.name}  ({len(r.main_cards)} main cards){bracket_note}")
     lines.append("")
     rec = report.user_record
+    # ``filler_wins`` arrived with the honest-total fix (2026-07-19);
+    # .get() keeps this renderer working on reports persisted before it.
+    filler_wins = rec.get("filler_wins", 0)
+    filler_note = (
+        f" ({filler_wins} won by filler seats)" if filler_wins else ""
+    )
     lines.append(
         f"Aggregate record across all references: "
         f"{rec['user_wins']}W / {rec['user_losses']}L / {rec['draws']}D "
-        f"over {rec['total_games']} games "
+        f"over {rec['total_games']} games{filler_note} "
         f"(win rate: {rec['win_rate']:.0%} of decisive)"
     )
     lines.append("")

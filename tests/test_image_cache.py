@@ -32,15 +32,26 @@ from commander_builder.web._image_cache import (
 )
 
 
+def _sha8(name: str) -> str:
+    """First 8 hex chars of the exact name's SHA-1 — mirrors the
+    collision-breaking suffix ``cache_path`` appends to the lossy slug
+    (``Fire // Ice`` and ``Fire Ice`` share a slug otherwise)."""
+    import hashlib
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
 
 def test_cache_path_uses_size_subdir_and_slug(tmp_path):
-    """Layout: <root>/images/<size>/<slug>.<ext>. Slug matches the
-    scryfall_client convention (lowercase, non-alnum → underscore)."""
+    """Layout: <root>/images/<size>/<slug>_<sha1-8>.<ext>. Slug matches
+    the scryfall_client convention (lowercase, non-alnum → underscore);
+    the sha1-8 suffix disambiguates names the lossy slug would merge."""
     p = cache_path("Sol Ring", "small", root=tmp_path)
-    assert p == tmp_path / "images" / "small" / "sol_ring.jpg"
+    assert p == (
+        tmp_path / "images" / "small" / f"sol_ring_{_sha8('Sol Ring')}.jpg"
+    )
 
 
 def test_cache_path_png_size_uses_png_extension(tmp_path):
@@ -56,14 +67,37 @@ def test_cache_path_handles_double_faced_card_names(tmp_path):
     safe on Windows."""
     p = cache_path("Bala Ged Recovery // Bala Ged Sanctuary", "normal",
                    root=tmp_path)
-    assert p.name == "bala_ged_recovery_bala_ged_sanctuary.jpg"
+    name = "Bala Ged Recovery // Bala Ged Sanctuary"
+    assert p.name == (
+        f"bala_ged_recovery_bala_ged_sanctuary_{_sha8(name)}.jpg"
+    )
 
 
 def test_cache_path_empty_name_falls_back_to_unknown_slug(tmp_path):
     """Defensive: empty / whitespace-only names get a 'unknown' slug
-    rather than producing an empty filename."""
-    assert cache_path("", "small", root=tmp_path).name == "unknown.jpg"
-    assert cache_path("   ", "small", root=tmp_path).name == "unknown.jpg"
+    rather than producing an empty filename. The sha1-8 suffix still
+    applies (and differs between the two — hashed over the exact
+    pre-slug name)."""
+    assert cache_path("", "small", root=tmp_path).name == (
+        f"unknown_{_sha8('')}.jpg"
+    )
+    assert cache_path("   ", "small", root=tmp_path).name == (
+        f"unknown_{_sha8('   ')}.jpg"
+    )
+
+
+def test_cache_path_slug_collisions_disambiguated_by_hash(tmp_path):
+    """Adversarial-review item 5: 'Fire // Ice' and 'Fire Ice' collapse
+    to the same slug ('fire_ice'); without the hash suffix whichever
+    was fetched first would be served for BOTH names — wrong card art,
+    cached immutable for a week. Distinct names must map to distinct
+    cache paths."""
+    a = cache_path("Fire // Ice", "normal", root=tmp_path)
+    b = cache_path("Fire Ice", "normal", root=tmp_path)
+    assert a != b
+    # Both still carry the shared, greppable slug prefix.
+    assert a.name.startswith("fire_ice_")
+    assert b.name.startswith("fire_ice_")
 
 
 def test_content_type_for_png_returns_image_png():
@@ -91,7 +125,7 @@ def test_fetch_and_cache_writes_bytes_to_disk(tmp_path):
 
     data = fetch_and_cache("Sol Ring", "small", root=tmp_path, http_get=_fake)
     assert data == payload
-    written = (tmp_path / "images" / "small" / "sol_ring.jpg").read_bytes()
+    written = cache_path("Sol Ring", "small", root=tmp_path).read_bytes()
     assert written == payload
     assert len(seen_urls) == 1
     assert "format=image" in seen_urls[0]
@@ -127,7 +161,7 @@ def test_serve_image_cache_hit_does_not_fetch(tmp_path):
 def test_serve_image_cache_miss_fetches_then_serves(tmp_path):
     """On cache miss, serve_image populates the cache via http_get
     and returns the freshly-fetched bytes."""
-    payload = b"fresh-image-bytes"
+    payload = b"\xff\xd8\xfffresh-image-bytes"  # JPEG magic + body
     calls = []
 
     def _fake(url):
@@ -152,7 +186,7 @@ def test_fetch_and_cache_atomic_write_no_partial_files(tmp_path):
     """The write goes through ``<path>.tmp`` then atomic rename so a
     half-written file never appears under the final name. Verify the
     tmp file is gone after success."""
-    payload = b"complete-bytes"
+    payload = b"\xff\xd8\xffcomplete-bytes"  # JPEG magic + body
     fetch_and_cache(
         "Sol Ring", "small", root=tmp_path,
         http_get=lambda url: payload,
@@ -160,7 +194,31 @@ def test_fetch_and_cache_atomic_write_no_partial_files(tmp_path):
     images_dir = tmp_path / "images" / "small"
     tmps = list(images_dir.glob("*.tmp"))
     assert tmps == []
-    assert (images_dir / "sol_ring.jpg").read_bytes() == payload
+    assert cache_path("Sol Ring", "small", root=tmp_path).read_bytes() == payload
+
+
+def test_fetch_and_cache_rejects_non_image_body(tmp_path):
+    """A 200 with an HTML/JSON body (rate-limit / error page) must NOT be
+    cached as a .jpg — fetch_and_cache raises and writes nothing, so the next
+    request can retry instead of serving garbage immutable for the TTL."""
+    html = b"<!DOCTYPE html><html>rate limited</html>"
+    with pytest.raises(ValueError, match="non-image"):
+        fetch_and_cache("Sol Ring", "small", root=tmp_path,
+                        http_get=lambda url: html)
+    # Nothing (not even a .tmp) was left behind.
+    assert not cache_path("Sol Ring", "small", root=tmp_path).exists()
+    assert list((tmp_path / "images").rglob("*")) == [] \
+        or all(p.is_dir() for p in (tmp_path / "images").rglob("*"))
+
+
+def test_looks_like_image_accepts_image_magics_rejects_text():
+    from commander_builder.web._image_cache import _looks_like_image
+    assert _looks_like_image(b"\xff\xd8\xff...")        # JPEG
+    assert _looks_like_image(b"\x89PNG\r\n\x1a\n...")   # PNG
+    assert _looks_like_image(b"GIF89a...")              # GIF
+    assert not _looks_like_image(b"")                   # empty
+    assert not _looks_like_image(b"<html>...")          # HTML error page
+    assert not _looks_like_image(b'{"error": "429"}')   # JSON error body
 
 
 def test_allowed_sizes_matches_scryfall_published_set():
@@ -209,7 +267,7 @@ def test_card_image_route_serves_bytes_on_happy_path(
     assert resp.headers["Content-Type"] == "image/jpeg"
     assert "max-age=604800" in resp.headers["Cache-Control"]
     # Persisted to disk for the next request.
-    assert (root / "images" / "small" / "sol_ring.jpg").exists()
+    assert cache_path("Sol Ring", "small", root=root).exists()
 
 
 def test_card_image_route_uses_cache_on_second_call(
@@ -225,7 +283,7 @@ def test_card_image_route_uses_cache_on_second_call(
         calls[0] += 1
         if calls[0] > 1:
             pytest.fail("second request must serve from cache")
-        return b"cached-bytes"
+        return b"\xff\xd8\xffcached-bytes"  # JPEG magic + body
 
     monkeypatch.setattr(
         "commander_builder.web._image_cache._default_http_get", _fake,
@@ -234,7 +292,7 @@ def test_card_image_route_uses_cache_on_second_call(
     r2 = client.get("/api/card_image/small/Sol Ring")
     assert r1.status_code == 200
     assert r2.status_code == 200
-    assert r1.data == r2.data == b"cached-bytes"
+    assert r1.data == r2.data == b"\xff\xd8\xffcached-bytes"
     assert calls[0] == 1
 
 
@@ -457,12 +515,12 @@ def test_fetch_and_cache_runs_eviction_after_write(tmp_path):
         fetch_and_cache(
             "New Card", "small",
             root=tmp_path,
-            http_get=lambda url: b"y" * 500,  # pushes total to 1300
+            http_get=lambda url: b"\xff\xd8\xff" + b"y" * 500,  # JPEG; ~1303 total
         )
     # Old file was evicted (1300 > 1000, oldest first).
     assert not (images / "old.jpg").exists()
     # New file landed.
-    assert (images / "new_card.jpg").exists()
+    assert cache_path("New Card", "small", root=tmp_path).exists()
 
 
 def test_fetch_and_cache_enforce_quota_false_skips_eviction(tmp_path):
@@ -476,12 +534,12 @@ def test_fetch_and_cache_enforce_quota_false_skips_eviction(tmp_path):
         fetch_and_cache(
             "New Card", "small",
             root=tmp_path,
-            http_get=lambda url: b"y" * 500,
+            http_get=lambda url: b"\xff\xd8\xff" + b"y" * 500,
             enforce_quota=False,
         )
     # Both files still present despite tiny quota — eviction skipped.
     assert (images / "old.jpg").exists()
-    assert (images / "new_card.jpg").exists()
+    assert cache_path("New Card", "small", root=tmp_path).exists()
 
 
 def test_quota_bytes_env_override(monkeypatch):
@@ -546,10 +604,10 @@ def test_card_image_route_handles_double_faced_card_name(
     client, _ = client_with_image_cache
     monkeypatch.setattr(
         "commander_builder.web._image_cache._default_http_get",
-        lambda url, timeout=20.0: b"mdfc-bytes",
+        lambda url, timeout=20.0: b"\xff\xd8\xffmdfc-bytes",
     )
     resp = client.get(
         "/api/card_image/small/Bala Ged Recovery // Bala Ged Sanctuary",
     )
     assert resp.status_code == 200
-    assert resp.data == b"mdfc-bytes"
+    assert resp.data == b"\xff\xd8\xffmdfc-bytes"

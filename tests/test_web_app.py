@@ -89,6 +89,16 @@ def client(deck_dir, monkeypatch):
         "commander_builder.deck_dashboard.lookup_card", fake_lookup,
     )
 
+    # Isolate the per-user config store: point it at a non-existent temp
+    # path so the audit BYO-key resolver (header → config.json → env)
+    # never picks up a real key from the developer's machine. Without
+    # this, the no-key fallback tests would flake on a box that has a
+    # configured ~/.commander-builder/config.json. (FP-011 unification.)
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG",
+        str(deck_dir.parent / "no_such_config.json"),
+    )
+
     app = create_app(deck_dir=deck_dir)
     app.config["TESTING"] = True
     return app.test_client()
@@ -139,13 +149,23 @@ def test_list_decks_hides_proposed_working_copies(user_deck_dir):
     """Transient _proposed_<timestamp> files staged by propose_swap
     should never appear in the sidebar — neither in user_only mode
     nor in the unfiltered listing."""
-    # Plant a leftover proposed working copy.
+    # Plant a leftover proposed working copy in the PRE-uid name shape
+    # (staged by builds before the same-second-collision fix)...
     leftover = user_deck_dir / "[USER] Hakbal [B3]_proposed_20260428_134828.dck"
     leftover.write_text("[Main]\n1 Forest\n", encoding="utf-8")
+    # ...and one in the CURRENT shape (timestamp + 8-hex per-request
+    # uid). Both must stay hidden.
+    leftover_uid = (
+        user_deck_dir
+        / "[USER] Hakbal [B3]_proposed_20260428_134828_deadbeef.dck"
+    )
+    leftover_uid.write_text("[Main]\n1 Forest\n", encoding="utf-8")
     user_only = {d["id"] for d in _list_decks(user_deck_dir)}
     all_mode = {d["id"] for d in _list_decks(user_deck_dir, user_only=False)}
     assert "[USER] Hakbal [B3]_proposed_20260428_134828" not in user_only
     assert "[USER] Hakbal [B3]_proposed_20260428_134828" not in all_mode
+    assert "[USER] Hakbal [B3]_proposed_20260428_134828_deadbeef" not in user_only
+    assert "[USER] Hakbal [B3]_proposed_20260428_134828_deadbeef" not in all_mode
 
 
 def test_decks_endpoint_filters_to_user_default(user_deck_dir, monkeypatch):
@@ -206,6 +226,33 @@ def test_resolve_traversal_attempt_blocked(deck_dir):
     # ../.. attack
     sneaky = str(deck_dir / ".." / ".." / "etc" / "passwd")
     assert _resolve_deck_path(deck_dir, None, sneaky) is None
+
+
+def test_routes_audit_has_no_env_staging_machinery():
+    """2026-07-19 BYO-key rework: the env-staging context manager and
+    its lock are GONE — the key is threaded as an explicit advise()
+    parameter instead. Guard against the old pattern creeping back in
+    (any per-request os.environ write in the web layer is a thread race
+    on Flask's threaded dev server)."""
+    from commander_builder.web import routes_audit
+    assert not hasattr(routes_audit, "_claude_api_key_env")
+    assert not hasattr(routes_audit, "_CLAUDE_ENV_LOCK")
+    # No os.environ WRITES anywhere in the module source (reads are fine —
+    # the fallback-warning branch legitimately checks key presence).
+    import inspect
+    src = inspect.getsource(routes_audit)
+    assert "os.environ[" not in src
+    assert "environ.pop" not in src
+
+
+def test_resolve_explicit_path_non_dck_inside_dir_blocked(deck_dir):
+    """A non-.dck file inside deck_dir must NOT resolve — otherwise a
+    crafted ?path= could make DELETE/PUT clobber a pool JSON / soak summary
+    / staged file that merely lives alongside the decks."""
+    victim = deck_dir / "soak_summary.json"
+    victim.write_text("{}", encoding="utf-8")
+    assert _resolve_deck_path(deck_dir, None, str(victim)) is None
+    assert victim.exists()  # untouched
 
 
 # ---------------------------------------------------------------------------
@@ -641,13 +688,17 @@ def test_patch_verdict_rejects_unknown_value(seeded_client):
         json={"verdict": "approved"},
     )
     assert resp.status_code == 400
-    assert "kept/reverted/neutral/pending" in resp.get_json()["error"]
+    assert "kept/reverted/neutral/inconclusive/pending" in resp.get_json()["error"]
 
 
 def test_patch_verdict_rejects_missing_body(seeded_client):
-    """Empty body → 400, not a crash."""
+    """Empty body → 400, not a crash. Content type is sent (the
+    app-wide mutation gate would otherwise 415 before the route ran)."""
     iteration_id = _first_iteration_id(seeded_client)
-    resp = seeded_client.patch(f"/api/iterations/{iteration_id}/verdict")
+    resp = seeded_client.patch(
+        f"/api/iterations/{iteration_id}/verdict",
+        content_type="application/json",
+    )
     assert resp.status_code == 400
 
 
@@ -1005,14 +1056,14 @@ def test_propose_swap_runs_compare_and_returns_summary(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
     assert body["winner"] == "new"
     assert body["old_wins"] == 4
     assert body["new_wins"] == 11
-    assert body["games_per_pod"] == 5
+    assert body["games_per_pod"] == 10
     # Diff was non-empty (Lotus Cobra added, Cultivate removed).
     assert any("Lotus Cobra" in s for s in body["diff"]["added"])
 
@@ -1031,7 +1082,7 @@ def test_propose_swap_forwards_early_stop_metadata(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
@@ -1056,7 +1107,7 @@ def test_propose_swap_forwards_pod_summaries_with_intra_pod_abort(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 200
     body = resp.get_json()
@@ -1073,7 +1124,7 @@ def test_propose_swap_400_on_bad_games_value(client, monkeypatch):
     resp = client.post("/api/propose_swap", json={
         "deck": "Alpha",
         "new_text": "[Main]\n1 Forest\n",
-        "games": 7,  # not 5/10/20
+        "games": 7,  # not 10/40/100
     })
     assert resp.status_code == 400
 
@@ -1087,7 +1138,7 @@ def test_propose_swap_400_on_no_changes(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Cultivate\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": same_text, "games": 5,
+        "deck": "Alpha", "new_text": same_text, "games": 10,
     })
     assert resp.status_code == 400
     assert "no changes" in resp.get_json()["error"]
@@ -1098,7 +1149,7 @@ def test_propose_swap_404_on_missing_deck(client, monkeypatch):
     resp = client.post("/api/propose_swap", json={
         "deck": "Ghost",
         "new_text": "[Main]\n1 Forest\n",
-        "games": 5,
+        "games": 10,
     })
     assert resp.status_code == 404
 
@@ -1106,7 +1157,7 @@ def test_propose_swap_404_on_missing_deck(client, monkeypatch):
 def test_propose_swap_400_on_empty_new_text(client, monkeypatch):
     _stub_compare(monkeypatch)
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": "", "games": 5,
+        "deck": "Alpha", "new_text": "", "games": 10,
     })
     assert resp.status_code == 400
 
@@ -1137,14 +1188,21 @@ def test_deck_text_put_400_on_empty(client):
 
 def test_deck_text_delete_removes(client, deck_dir):
     assert (deck_dir / "Alpha.dck").exists()
-    resp = client.delete("/api/deck_text?deck=Alpha")
+    # Bodyless DELETE still needs the JSON content type: the app-wide
+    # mutation gate requires it on every mutating method (matches the
+    # header app.js now sends on its delete fetch).
+    resp = client.delete(
+        "/api/deck_text?deck=Alpha", content_type="application/json",
+    )
     assert resp.status_code == 200
     assert resp.get_json()["deleted"] is True
     assert not (deck_dir / "Alpha.dck").exists()
 
 
 def test_deck_text_delete_404(client):
-    resp = client.delete("/api/deck_text?deck=Ghost")
+    resp = client.delete(
+        "/api/deck_text?deck=Ghost", content_type="application/json",
+    )
     assert resp.status_code == 404
 
 
@@ -1289,6 +1347,43 @@ def test_import_deck_via_moxfield_url(client, deck_dir, monkeypatch):
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
     assert "Moxfield Test Deck" in body["filename"]
+
+
+def test_import_deck_route_stamps_name_from_filename_stem(
+    client, deck_dir, monkeypatch,
+):
+    """Regression: the web import route sanitizes ':' etc. out of the
+    filename but used to leave to_dck's raw Moxfield name in Name= —
+    breaking Forge's picker and every name-keyed pipeline for such decks.
+    The written file must carry Name=<stem>, with the pretty name kept in
+    DisplayName= (the display-decision pin for the web import path)."""
+    import re as _re
+    fake_json = {
+        "name": "Chatterfang: Squirrel Tribal \U0001f43f",
+        "publicId": "abc123",
+        "boards": {
+            "commanders": {"cards": {"k1": {
+                "quantity": 1, "card": {"name": "Chatterfang, Squirrel General"},
+            }}},
+            "mainboard": {"cards": {"k2": {
+                "quantity": 1, "card": {"name": "Sol Ring"},
+            }}},
+        },
+    }
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda public_id: fake_json,
+    )
+    resp = client.post("/api/import_deck", json={
+        "moxfield_url": "https://moxfield.com/decks/abc123", "bracket": 3,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    fn = resp.get_json()["filename"]
+    path = deck_dir / fn
+    text = path.read_text(encoding="utf-8")
+    name_val = _re.search(r"^Name=(.+)$", text, _re.MULTILINE).group(1)
+    assert name_val == path.stem
+    assert "DisplayName=Chatterfang: Squirrel Tribal \U0001f43f" in text
 
 
 def test_import_deck_502_when_moxfield_fails(client, monkeypatch):
@@ -1496,10 +1591,12 @@ def test_apply_swaps_cut_to_zero_removes_line():
     assert kept == 1
 
 
-def test_apply_swaps_three_cuts_two_in_line_drops_line():
-    """If the user asks for 3 cuts but only 2 exist, drop the 2 that
-    exist and leave the 3rd unmatched. ``removed`` reports only what
-    actually came out."""
+def test_apply_swaps_three_cuts_two_in_line_drops_third_pair():
+    """If the user asks for 3 cuts but only 2 copies exist, the first
+    two pairs apply and the THIRD PAIR (cut + its paired add) drops as
+    a unit. Pre-2026-07-19 the unmatched 3rd cut was silently skipped
+    while its paired add still landed, GROWING the mainboard by one —
+    the oversized-deck corruption bug."""
     from commander_builder.web.app import _apply_swaps_to_dck
     from types import SimpleNamespace
     original = "[Main]\n2 Mountain\n1 Sol Ring\n"
@@ -1514,16 +1611,23 @@ def test_apply_swaps_three_cuts_two_in_line_drops_line():
         SimpleNamespace(card="B", action="add", reason="", evidence={}),
         SimpleNamespace(card="C", action="add", reason="", evidence={}),
     ]
-    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
     # All 2 Mountains removed, line gone.
     assert "Mountain" not in new_text
-    # removed reports only 2 (matches what actually happened); 3rd cut
-    # was unmatched and silently dropped.
     assert removed == ["Mountain", "Mountain"]
-    # All 3 adds appended.
+    # Only the 2 funded adds land; C's paired cut had no copy left.
+    assert added == ["A", "B"]
     assert "1 A" in new_text
     assert "1 B" in new_text
-    assert "1 C" in new_text
+    assert "1 C" not in new_text
+    # Mainboard size preserved: 3 - 2 + 2 = 3.
+    from commander_builder.web._helpers import _count_main_cards
+    assert _count_main_cards(new_text) == 3
+    # The dropped pair is reported, not silent.
+    assert report["dropped_unmatched_cut"] == [{"cut": "Mountain", "add": "C"}]
 
 
 def test_apply_swaps_cuts_across_multiple_lines_for_same_name():
@@ -1573,17 +1677,19 @@ def test_apply_swaps_preserves_edition_codes_on_partial_cut():
 
 
 # ---------------------------------------------------------------------------
-# Quantity-aware adds (TIER-1.1 fix) -- previously, an add for a card
-# already in the deck appended a brand-new ``1 <Name>`` line instead of
-# incrementing the existing ``<qty> <Name>|EDITION`` line. Two adds of
-# the same card produced two separate ``1 <Name>`` lines instead of one
-# ``2 <Name>`` line. Forge tolerates duplicates but the resulting .dck
-# is harder to read and confuses downstream tooling that groups by line.
+# Quantity-aware adds (TIER-1.1 fix, tightened 2026-07-19) -- BASIC LAND
+# adds for a card already in the deck increment the existing line
+# (preserving the |SET|CN tail) instead of appending a stale duplicate,
+# and duplicate basic adds collapse to one merged line. NON-basic adds
+# for a card already in [Main] are REJECTED (with their paired cut) —
+# incrementing them wrote singleton violations like ``2 Rhystic Study``.
 # ---------------------------------------------------------------------------
 
-def test_apply_swaps_add_merges_into_existing_line(monkeypatch):
-    """Add for a card already in [Main] bumps that line's quantity
-    (preserving the edition tail) instead of appending a duplicate."""
+def test_apply_swaps_duplicate_nonbasic_add_pair_dropped(monkeypatch):
+    """An add for a NON-basic already in [Main] is a singleton
+    violation — pre-2026-07-19 this incremented the existing line to
+    ``2 Sol Ring``. Now the whole (cut, add) pair drops and is
+    reported, leaving the deck untouched and legal."""
     monkeypatch.setattr(
         "commander_builder.scryfall_client.lookup_card",
         lambda name, **kw: None,
@@ -1597,18 +1703,20 @@ def test_apply_swaps_add_merges_into_existing_line(monkeypatch):
         SimpleNamespace(card="Sol Ring", action="add",
                         reason="", evidence={}),
     ]
-    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
-    assert "2 Sol Ring|CLB|871" in new_text
-    sol_ring_lines = [
-        line for line in new_text.splitlines()
-        if "Sol Ring" in line
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    # No qty-2 line, no swap applied at all — the pair dropped as a unit.
+    assert "1 Sol Ring|CLB|871" in new_text
+    assert "2 Sol Ring" not in new_text
+    assert "1 Cultivate" in new_text
+    assert added == []
+    assert removed == []
+    assert kept == 2
+    assert report["dropped_duplicate_add"] == [
+        {"cut": "Cultivate", "add": "Sol Ring"},
     ]
-    assert len(sol_ring_lines) == 1
-    assert added == ["Sol Ring"]
-    assert removed == ["Cultivate"]
-    # ``kept`` counts surviving originals (post-cut, pre-add). Sol Ring
-    # was the lone survivor; the merge bump is tallied via len(added).
-    assert kept == 1
 
 
 def test_apply_swaps_duplicate_adds_collapse_to_one_line(monkeypatch):
@@ -1644,9 +1752,11 @@ def test_apply_swaps_duplicate_adds_collapse_to_one_line(monkeypatch):
 
 
 def test_apply_swaps_add_merges_after_partial_cut_same_card(monkeypatch):
-    """Cut decrements + add for the same name net out on the existing
-    line (keeping the edition tail) rather than producing a stale
-    decremented line plus a fresh ``1 <Name>`` line."""
+    """Basic-land cut decrements + add for the same name net out on
+    the existing line (keeping the edition tail) rather than producing
+    a stale decremented line plus a fresh ``1 <Name>`` line. The
+    NON-basic add (Sol Ring already in [Main]) drops with its paired
+    cut instead of bumping to an illegal ``2 Sol Ring``."""
     monkeypatch.setattr(
         "commander_builder.scryfall_client.lookup_card",
         lambda name, **kw: None,
@@ -1664,24 +1774,30 @@ def test_apply_swaps_add_merges_after_partial_cut_same_card(monkeypatch):
         SimpleNamespace(card="Mountain", action="add",
                         reason="", evidence={}),
     ]
-    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
-    # 5 - 2 + 1 = 4; edition tail kept verbatim.
-    assert "4 Mountain|EXP|123" in new_text
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    # Pair 1 (cut Mountain, add Sol Ring) dropped: Sol Ring is a
+    # non-basic already in the deck. Pair 2 (cut Mountain, add
+    # Mountain) applies and nets out: 5 - 1 + 1 = 5.
+    assert "5 Mountain|EXP|123" in new_text
     mountain_lines = [
         line for line in new_text.splitlines()
         if "Mountain" in line
     ]
     assert len(mountain_lines) == 1
-    # Sol Ring also bumped on its own line (1 + 1 = 2).
-    assert "2 Sol Ring" in new_text
-    sol_ring_lines = [
-        line for line in new_text.splitlines()
-        if "Sol Ring" in line
+    # Sol Ring stays a singleton.
+    assert "1 Sol Ring" in new_text
+    assert "2 Sol Ring" not in new_text
+    assert report["dropped_duplicate_add"] == [
+        {"cut": "Mountain", "add": "Sol Ring"},
     ]
-    assert len(sol_ring_lines) == 1
-    # Post-cut survivors: 3 Mountain + 1 Sol Ring = 4. The merge bumps
-    # (1 Mountain + 1 Sol Ring) are tallied via len(added) downstream.
-    assert kept == 4
+    assert added == ["Mountain"]
+    assert removed == ["Mountain"]
+    # Post-cut survivors: 4 Mountain + 1 Sol Ring = 5. The Mountain
+    # merge bump is tallied via len(added) downstream.
+    assert kept == 5
 
 
 def test_apply_swaps_add_hits_first_matching_line_when_multiple_printings(monkeypatch):
@@ -1708,6 +1824,172 @@ def test_apply_swaps_add_hits_first_matching_line_when_multiple_printings(monkey
     new_text, _added, _removed, _kept = _apply_swaps_to_dck(original, recs)
     assert "2 Mountain|CLB|871" in new_text
     assert "1 Mountain|EXP|123" in new_text
+
+
+# ---------------------------------------------------------------------------
+# Decklist validation of swap pairs (2026-07-19 fix) -- cuts must match
+# an actual [Main] card and adds must not violate the singleton rule or
+# duplicate the commander. An invalid half drops the WHOLE (cut, add)
+# pair so the mainboard size is preserved no matter what the LLM sent.
+# ---------------------------------------------------------------------------
+
+def test_apply_swaps_hallucinated_cut_drops_paired_add():
+    """A cut for a card not in the deck at all (LLM hallucination)
+    drops its paired add too — pre-fix the add landed anyway and the
+    deck grew past 99."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from commander_builder.web._helpers import _count_main_cards
+    from types import SimpleNamespace
+    original = "[Main]\n1 Sol Ring\n1 Cultivate\n1 Brainstorm\n"
+    recs = [
+        SimpleNamespace(card="Imaginary Card", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert added == []
+    assert removed == []
+    assert "Lotus Cobra" not in new_text
+    # Deck size unchanged — the whole pair dropped.
+    assert _count_main_cards(new_text) == 3
+    assert report["dropped_unmatched_cut"] == [
+        {"cut": "Imaginary Card", "add": "Lotus Cobra"},
+    ]
+
+
+def test_apply_swaps_dfc_full_name_cut_matches_front_face_line():
+    """Proposal says ``Malakir Rebirth // Malakir Mire`` (Scryfall's
+    full DFC name); the .dck line carries only the front face — the
+    cut must still match instead of dropping the pair."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Malakir Rebirth\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Malakir Rebirth // Malakir Mire",
+                        action="cut", reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert "Malakir Rebirth" not in new_text
+    assert "1 Lotus Cobra" in new_text
+    # ``removed`` reports the caller's requested spelling.
+    assert removed == ["Malakir Rebirth // Malakir Mire"]
+    assert report["dropped_unmatched_cut"] == []
+
+
+def test_apply_swaps_dfc_front_face_cut_matches_full_name_line():
+    """Mirror direction: proposal names the front face only, the .dck
+    line carries the full ``A // B`` form."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n1 Malakir Rebirth // Malakir Mire\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Malakir Rebirth", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert "Malakir" not in new_text
+    assert "1 Lotus Cobra" in new_text
+    assert removed == ["Malakir Rebirth"]
+    assert report["dropped_unmatched_cut"] == []
+
+
+def test_apply_swaps_add_matching_commander_dropped():
+    """An add that names the [Commander] card drops with its paired
+    cut — the commander already occupies the command zone and a [Main]
+    copy would be illegal."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = (
+        "[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n1 Sol Ring\n1 Cultivate\n"
+    )
+    recs = [
+        SimpleNamespace(card="Cultivate", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Krenko, Mob Boss", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert added == []
+    assert removed == []
+    assert "1 Cultivate" in new_text
+    # Commander section untouched, and no [Main] copy appeared.
+    assert new_text.count("Krenko, Mob Boss") == 1
+    assert report["dropped_commander_add"] == [
+        {"cut": "Cultivate", "add": "Krenko, Mob Boss"},
+    ]
+
+
+def test_apply_swaps_double_cut_of_singleton_drops_second_pair():
+    """Two cuts of a quantity-1 card: the first pair applies, the
+    second finds no copy left and drops with its paired add. Pre-fix
+    the second add landed unfunded and oversized the deck."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from commander_builder.web._helpers import _count_main_cards
+    from types import SimpleNamespace
+    original = "[Main]\n1 Sol Ring\n1 Cultivate\n1 Brainstorm\n"
+    recs = [
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Lotus Cobra", action="add",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Tireless Tracker", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, kept = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert removed == ["Sol Ring"]
+    assert added == ["Lotus Cobra"]
+    assert "Tireless Tracker" not in new_text
+    # 3 - 1 + 1 = 3: size preserved.
+    assert _count_main_cards(new_text) == 3
+    assert report["dropped_unmatched_cut"] == [
+        {"cut": "Sol Ring", "add": "Tireless Tracker"},
+    ]
+
+
+def test_apply_swaps_basic_land_add_still_increments_existing_line():
+    """Basic lands are exempt from the duplicate-add rejection — a
+    Mountain add on a deck already running Mountains is a legitimate
+    quantity bump, not a singleton violation."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n5 Mountain|EXP|123\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Sol Ring", action="cut",
+                        reason="", evidence={}),
+        SimpleNamespace(card="Mountain", action="add",
+                        reason="", evidence={}),
+    ]
+    report: dict = {}
+    new_text, added, removed, _ = _apply_swaps_to_dck(
+        original, recs, drop_report=report,
+    )
+    assert "6 Mountain|EXP|123" in new_text
+    assert added == ["Mountain"]
+    assert removed == ["Sol Ring"]
+    assert report["dropped_duplicate_add"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1811,7 +2093,9 @@ def test_cleanup_stale_staged_files_deletes_old_proposed_files(tmp_path):
     constructed = tmp_path / "userdata" / "decks" / "constructed"
     constructed.mkdir()
 
-    # Old proposed file (should be deleted).
+    # Old proposed file, PRE-uid name shape (should be deleted —
+    # leftovers staged by builds before the same-second-collision fix
+    # must still match the sweep pattern).
     old_proposed = deck_dir / "Foo_proposed_20260101_120000.dck"
     old_proposed.write_text("stale\n", encoding="utf-8")
     # Backdate it so the age check fires.
@@ -1823,14 +2107,28 @@ def test_cleanup_stale_staged_files_deletes_old_proposed_files(tmp_path):
     old_converted.write_text("stale\n", encoding="utf-8")
     os.utime(old_converted, (past, past))
 
+    # CURRENT name shape: routes_sim appends an 8-hex per-request uid
+    # after the timestamp. The sweep must match these too or every
+    # interrupted run would orphan its staging files forever.
+    old_proposed_uid = deck_dir / "Foo_proposed_20260101_120000_a1b2c3d4.dck"
+    old_proposed_uid.write_text("stale\n", encoding="utf-8")
+    os.utime(old_proposed_uid, (past, past))
+    old_converted_uid = (
+        constructed / "Bar_converted_20260101_120000_a1b2c3d4.dck"
+    )
+    old_converted_uid.write_text("stale\n", encoding="utf-8")
+    os.utime(old_converted_uid, (past, past))
+
     # User deck (should NOT be touched).
     user_deck = deck_dir / "[USER] Real Deck [B3].dck"
     user_deck.write_text("real\n", encoding="utf-8")
 
     deleted = _cleanup_stale_staged_files(deck_dir)
-    assert deleted == 2
+    assert deleted == 4
     assert not old_proposed.exists()
     assert not old_converted.exists()
+    assert not old_proposed_uid.exists()
+    assert not old_converted_uid.exists()
     assert user_deck.exists()
 
 
@@ -1948,6 +2246,19 @@ def test_pad_main_to_99_skips_quantities_in_other_sections():
     # sideboard must be ignored.
     assert "Mountain" not in breakdown
     assert breakdown == {"Forest": 34}
+
+
+def test_pad_main_to_99_reports_zero_when_no_main_header():
+    """No [Main] header → nowhere to splice pad lines → NOTHING is
+    inserted. The pre-2026-07-19 return reported the computed deficit
+    as padded anyway, so callers believed 89 basics landed when zero
+    did and their post-swap size math went wrong."""
+    from commander_builder.web.app import _pad_main_to_99
+    text = "[metadata]\nName=X\n[Commander]\n1 Cmdr\n"
+    out, padded, breakdown = _pad_main_to_99(text, current_main=10)
+    assert out == text
+    assert padded == 0
+    assert breakdown == {}
 
 
 def test_format_added_line_falls_back_when_set_missing(monkeypatch):
@@ -2296,7 +2607,7 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     # All 5 top-level keys present (UI tile renderer needs each).
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill",
+        "wincon_protection", "self_mill", "role_targets",
     }
     # Named-card signals picked up correctly.
     assert health["mdfc"]["count"] == 1
@@ -2305,14 +2616,25 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     assert "Silence" in health["wincon_protection"]["cards"]
     assert health["self_mill"]["count"] == 1
     assert "Stitcher's Supplier" in health["self_mill"]["cards"]
+    # Combo/bracket assessment present + well-shaped (this deck has no
+    # infinite combos, so it's clean + within bracket).
+    combo = body.get("combo_assessment")
+    assert combo is not None
+    assert set(combo.keys()) == {
+        "combos", "recommended_bracket", "violations", "within_bracket",
+    }
+    assert combo["combos"] == [] and combo["within_bracket"] is True
+    assert combo["recommended_bracket"] == 1
 
 
 def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     client, monkeypatch,
 ):
     """If Scryfall is unreachable, deck_health degrades gracefully:
-    the spell_density and mana_sinks signals report zeros (can't
-    classify types) but the named-card signals (MDFC, protection,
+    the spell_density and mana_sinks signals report None (the module
+    docstring's outage contract -- a misleading '0% spells' / '0
+    sinks' must not render on a deck that simply couldn't be
+    classified) while the named-card signals (MDFC, protection,
     self-mill) still work since they don't need Scryfall."""
     from types import SimpleNamespace
 
@@ -2336,11 +2658,12 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     # Still has all keys (UI needs them).
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill",
+        "wincon_protection", "self_mill", "role_targets",
     }
-    # Scryfall-dependent signals return zero/null gracefully.
-    assert health["mana_sinks"]["count"] == 0
-    assert health["spell_density"]["non_permanent_count"] == 0
+    # Scryfall-dependent signals honor the outage contract: None, not
+    # a fabricated zero. The UI renders these as "unavailable" tiles.
+    assert health["mana_sinks"] is None
+    assert health["spell_density"] is None
 
 
 def test_audit_endpoint_surfaces_protected_cards_from_metadata(
@@ -2572,6 +2895,59 @@ def test_audit_stream_emits_phase_events_in_order(client, monkeypatch):
     assert "proposed_text" in complete
     assert any(a["card"] == "Lotus Cobra" for a in complete["added"])
     assert any(r["card"] == "Cultivate" for r in complete["removed"])
+    # The complete payload carries the diagnosis under the SAME key the
+    # sync endpoint and the UI use (``diagnosis``). The stream used to
+    # mis-name this ``rationale`` so the streamed diagnosis never rendered.
+    assert complete["diagnosis"] == "aggressive dragons"
+    assert "rationale" not in complete
+
+
+def test_audit_stream_complete_warns_when_claude_falls_back_no_key(
+    client, monkeypatch,
+):
+    """Regression: the streaming ``complete`` event must carry the same
+    explicit 'no API key' guidance the sync endpoint returns when Claude
+    is requested but unavailable. The stream path previously only emitted
+    a warning when ``fallback_reason`` was set, so a no-key fallback (the
+    most common case) silently shipped ``warning=null`` to the client."""
+    from commander_builder._advisor_models import (
+        AdvicePhase, AdviceReport, DeckDiagnosis, SwapRecommendation,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def fake_steps(deck_path, bracket, **_kwargs):
+        rep = AdviceReport(
+            deck_filename=deck_path.name,
+            deck_id=None,
+            bracket=bracket,
+            commander_names=["The Ur-Dragon"],
+            diagnosis=DeckDiagnosis(pattern_summary="", weakness_signals=[]),
+            recommendations=[
+                SwapRecommendation(
+                    card="Lotus Cobra", action="add", reason="ramp",
+                    evidence={"source": "edhrec.top_cards"}, name_known=True,
+                ),
+                SwapRecommendation(
+                    card="Cultivate", action="cut", reason="slow",
+                    evidence={}, name_known=True,
+                ),
+            ],
+            # Claude was requested but advise() fell back to heuristic
+            # with no concrete fallback_reason — the exact gap.
+            source="heuristic",
+            fallback_reason=None,
+            timestamp="2026-05-13T12:00:00",
+        )
+        yield AdvicePhase("complete", {"report": rep})
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", fake_steps,
+    )
+    resp = client.get("/api/audit/stream?deck=Alpha&bracket=3&llm=claude")
+    assert resp.status_code == 200
+    complete = dict(_parse_sse(resp.data))["complete"]
+    assert complete["warning"] is not None
+    assert "api key" in complete["warning"].lower()
 
 
 def test_audit_stream_emits_error_on_missing_deck(client, monkeypatch):
@@ -2643,15 +3019,64 @@ def test_audit_stream_no_buffering_headers(client, monkeypatch):
     assert resp.headers.get("X-Accel-Buffering") == "no"
 
 
+def test_audit_stream_byo_key_threaded_not_staged_in_env(client, monkeypatch):
+    """Streaming BYO-key path of the 2026-07-19 rework: the key must
+    arrive at ``_advise_steps`` as the explicit ``api_key`` kwarg and
+    ``os.environ`` must be untouched for the WHOLE generator lifetime.
+    The old implementation held the env mutation (plus a global lock)
+    across the entire SSE stream — the widest cross-request race window
+    in the app."""
+    import os as _os
+    from commander_builder._advisor_models import (
+        AdvicePhase, AdviceReport, DeckDiagnosis,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    seen = {}
+
+    def fake_steps(deck_path, bracket, **kwargs):
+        seen["api_key_param"] = kwargs.get("api_key")
+        # Captured MID-STREAM, while the generator is live — exactly
+        # the window the old env staging held the mutation open for.
+        seen["api_key_in_env"] = _os.environ.get("ANTHROPIC_API_KEY")
+        yield AdvicePhase("complete", {
+            "report": AdviceReport(
+                deck_filename=deck_path.name,
+                deck_id=None, bracket=bracket,
+                commander_names=["X"],
+                diagnosis=DeckDiagnosis(),
+                recommendations=[],
+                source="claude", timestamp="2026-07-19",
+            ),
+        })
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor._advise_steps", fake_steps,
+    )
+    resp = client.get(
+        "/api/audit/stream?deck=Alpha&bracket=3&source=claude",
+        headers={"X-Anthropic-API-Key": "sk-ant-streambyo12345678"},
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.data)
+    assert [e[0] for e in events] == ["complete"]
+    assert seen["api_key_param"] == "sk-ant-streambyo12345678"
+    assert seen["api_key_in_env"] is None  # never staged in env
+    assert "ANTHROPIC_API_KEY" not in _os.environ  # nothing lingers
+
+
 def _stub_advise_capturing(monkeypatch, source="heuristic", fallback_reason=None):
-    """Stub advise() and capture how it was invoked + what the env
-    looked like at call time. Returns the seen-args dict."""
+    """Stub advise() and capture how it was invoked — including the
+    explicit api_key parameter AND what os.environ looked like at call
+    time (which must be UNTOUCHED by the route; the 2026-07-19 rework
+    threads the BYO key as a parameter instead of staging it in env).
+    Returns the seen-args dict."""
     from types import SimpleNamespace
     seen = {}
 
     def fake(deck_path, bracket, **kwargs):
         import os as _os
         seen["use_claude"] = kwargs.get("use_claude", False)
+        seen["api_key_param"] = kwargs.get("api_key")
         seen["api_key_in_env"] = _os.environ.get("ANTHROPIC_API_KEY")
         return SimpleNamespace(
             recommendations=[
@@ -2692,17 +3117,20 @@ def test_audit_llm_claude_passes_use_claude_and_byo_key(client, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     resp = client.get(
         "/api/audit?deck=Alpha&bracket=3&llm=claude",
-        headers={"X-Anthropic-API-Key": "sk-test-byo-12345"},
+        headers={"X-Anthropic-API-Key": "sk-ant-testbyo1234567890"},
     )
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
     assert seen["use_claude"] is True
-    # BYO key was injected into env for the call's lifetime.
-    assert seen["api_key_in_env"] == "sk-test-byo-12345"
+    # BYO key rides the explicit api_key parameter...
+    assert seen["api_key_param"] == "sk-ant-testbyo1234567890"
+    # ...and is NEVER staged in the process env, even mid-request —
+    # env staging raced across concurrent threaded requests.
+    assert seen["api_key_in_env"] is None
     assert body["source"] == "claude"
     assert body["requested_llm"] == "claude"
     assert body["warning"] is None
-    # Env restored after the request — key must not linger.
+    # Nothing lingers after the request either.
     import os as _os
     assert "ANTHROPIC_API_KEY" not in _os.environ
 
@@ -2832,15 +3260,69 @@ def test_audit_does_not_leak_byo_key_to_subsequent_call(client, monkeypatch):
 
     r1 = client.get(
         "/api/audit?deck=Alpha&bracket=3&llm=claude",
-        headers={"X-Anthropic-API-Key": "sk-first-call"},
+        headers={"X-Anthropic-API-Key": "sk-ant-firstcall12345678"},
     )
     assert r1.status_code == 200
-    assert seen["api_key_in_env"] == "sk-first-call"
+    assert seen["api_key_param"] == "sk-ant-firstcall12345678"
+    assert seen["api_key_in_env"] is None  # never staged in env
 
     seen.clear()
     r2 = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")
     assert r2.status_code == 200
+    assert seen.get("api_key_param") is None
     assert seen.get("api_key_in_env") is None
+
+
+def test_audit_rejects_malformed_byo_key_header(client, monkeypatch):
+    """A header value that doesn't match the Anthropic key shape is
+    ignored (never staged into os.environ) — same validation the
+    Settings PUT path enforces."""
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "definitely-not-an-anthropic-key"},
+    )
+    assert resp.status_code == 200
+    assert seen.get("api_key_in_env") is None
+
+
+def test_audit_uses_config_key_when_no_header(client, monkeypatch, tmp_path):
+    """FP-011 unification: with no X-Anthropic-API-Key header, the audit
+    resolves the BYO key from config.json (what the Settings panel
+    writes) and threads it as the explicit api_key parameter."""
+    from commander_builder import config_store
+    cfg = tmp_path / "config.json"
+    monkeypatch.setenv("COMMANDER_BUILDER_CONFIG", str(cfg))
+    config_store.save_config({"anthropic_api_key": "sk-ant-fromconfig1234567"})
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&llm=claude")  # no header
+    assert resp.status_code == 200, resp.get_json()
+    assert seen["use_claude"] is True
+    assert seen["api_key_param"] == "sk-ant-fromconfig1234567"
+    # Never staged in env — mid-request or after.
+    assert seen["api_key_in_env"] is None
+    import os as _os
+    assert "ANTHROPIC_API_KEY" not in _os.environ
+
+
+def test_audit_header_key_overrides_config(client, monkeypatch, tmp_path):
+    """Header is the per-request override; it wins over config.json."""
+    from commander_builder import config_store
+    cfg = tmp_path / "config.json"
+    monkeypatch.setenv("COMMANDER_BUILDER_CONFIG", str(cfg))
+    config_store.save_config({"anthropic_api_key": "sk-ant-fromconfig1234567"})
+    seen = _stub_advise_capturing(monkeypatch, source="claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resp = client.get(
+        "/api/audit?deck=Alpha&bracket=3&llm=claude",
+        headers={"X-Anthropic-API-Key": "sk-ant-fromheader9999999"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert seen["api_key_param"] == "sk-ant-fromheader9999999"
 
 
 # ---------------------------------------------------------------------------
@@ -2966,6 +3448,58 @@ def test_verify_against_source_diffs_local_vs_remote(client, monkeypatch):
     # remote-only.
     assert any("Cultivate" in line for line in body["in_local_only"])
     assert any("Mana Crypt" in line for line in body["in_remote_only"])
+    # Same commander on both sides ("Test Cmdr" — the remote's
+    # ``|C|1`` edition suffix must NOT read as a swap): no commander
+    # drift, but the additive fields are always present.
+    assert body["commander_changed"] is False
+    assert body["local_commanders"] == ["Test Cmdr"]
+    assert body["remote_commanders"] == ["Test Cmdr"]
+
+
+def test_verify_against_source_detects_commander_swap(client, monkeypatch):
+    """Regression (2026-07-20): diff_deck_text reads only [Main], so a
+    commander swap on Moxfield with an identical mainboard used to
+    report 'no drift' — precisely the change that invalidates every
+    downstream sim and recommendation. The route must compare the
+    [Commander] section too and report it distinctly."""
+    client.put(
+        "/api/deck_source?deck=Alpha",
+        json={"moxfield_url": "https://moxfield.com/decks/abc"},
+    )
+    # Remote mainboard mirrors the local fixture exactly (Forest +
+    # Cultivate; no set/cn keys so card_line renders bare '1 <Name>'
+    # lines identical to the local .dck) — ONLY the commander differs.
+    fake_remote_json = {
+        "name": "Alpha", "publicId": "abc",
+        "boards": {
+            "commanders": {
+                "cards": {
+                    "k1": {"quantity": 1, "card": {"name": "New Cmdr"}},
+                },
+            },
+            "mainboard": {
+                "cards": {
+                    "k2": {"quantity": 1, "card": {"name": "Forest"}},
+                    "k3": {"quantity": 1, "card": {"name": "Cultivate"}},
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "commander_builder.moxfield_import.fetch_deck",
+        lambda public_id: fake_remote_json,
+    )
+    resp = client.get("/api/verify_against_source?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # The [Main] diff sees nothing — that was the whole bug.
+    assert body["in_local_only"] == []
+    assert body["in_remote_only"] == []
+    # But the commander drift is reported, with both names so the UI
+    # can say WHICH commander changed.
+    assert body["commander_changed"] is True
+    assert body["local_commanders"] == ["Test Cmdr"]
+    assert body["remote_commanders"] == ["New Cmdr"]
 
 
 def test_verify_against_source_502_on_moxfield_failure(client, monkeypatch):
@@ -3004,7 +3538,7 @@ def test_propose_swap_503_when_forge_unavailable(client, monkeypatch):
         "[Main]\n1 Forest\n1 Lotus Cobra\n"
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
     })
     assert resp.status_code == 503
     body = resp.get_json()
@@ -3103,7 +3637,7 @@ def test_propose_swap_pod_mode_stages_in_commander_folder(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "pod",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "pod",
     })
     assert resp.status_code == 200
     # stage_dir for pod mode is the commander folder (the parent of
@@ -3132,7 +3666,7 @@ def test_propose_swap_1v1_mode_stages_in_constructed_subfolder(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     from pathlib import Path as _P
@@ -3161,7 +3695,7 @@ def test_propose_swap_1v1_converts_both_old_and_new_decks(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     # Both staged files must have the [Commander] section stripped
@@ -3192,7 +3726,7 @@ def test_propose_swap_1v1_uniquifies_metadata_name(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     import re as _re
@@ -3231,7 +3765,7 @@ def test_propose_swap_1v1_cleans_up_staged_files_after_compare(
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "1v1",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
     })
     assert resp.status_code == 200
     # The deck_dir fixture path is tmp_path / "decks"; the
@@ -3260,7 +3794,7 @@ def test_propose_swap_400_on_bad_mode_value(client, monkeypatch):
         "[Main]\n1 Forest\n1 Lotus Cobra\n"
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5,
+        "deck": "Alpha", "new_text": new_text, "games": 10,
         "mode": "skirmish",   # nonsense
     })
     assert resp.status_code == 400
@@ -3282,13 +3816,121 @@ def test_propose_swap_pod_mode_does_not_convert_format(client, monkeypatch):
         "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
     )
     resp = client.post("/api/propose_swap", json={
-        "deck": "Alpha", "new_text": new_text, "games": 5, "mode": "pod",
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "pod",
     })
     assert resp.status_code == 200
     # Pod mode preserves [Commander] in the staged file.
     assert "[Commander]" in captured["new_text"]
     # And does NOT inject Deck Type=constructed.
     assert "Deck Type=constructed" not in captured["new_text"]
+
+
+def test_propose_swap_same_second_requests_stage_distinct_paths(
+    client, monkeypatch,
+):
+    """Two propose_swap requests staged within the SAME second must
+    produce DIFFERENT staged file paths.
+
+    The staged names carry a strftime("%Y%m%d_%H%M%S") timestamp —
+    1-second granularity. Before the per-request uid suffix, two A/B
+    sims on the same deck started in the same second built IDENTICAL
+    paths: request B's write_text clobbered the file request A's Forge
+    JVM was mid-reading, and A's cleanup unlink deleted the file B
+    still needed (FileNotFound / '0 games played').
+
+    Freeze datetime.now() so both requests see the exact same
+    timestamp — the worst case — and pin that the paths still differ.
+    routes_sim does `from datetime import datetime as _dt` inside the
+    handler, so patching the datetime module's `datetime` attribute is
+    picked up per-request (module-level `from` imports elsewhere keep
+    their original binding and are unaffected).
+    """
+    import datetime as _dtmod
+
+    class _FrozenDT(_dtmod.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 19, 12, 0, 0)
+
+    monkeypatch.setattr(_dtmod, "datetime", _FrozenDT)
+
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    # 1v1 mode stages BOTH a _proposed_ and a _converted_ file — cover
+    # the whole collision class in one run.
+    body = {
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
+    }
+    resp_a = client.post("/api/propose_swap", json=body)
+    assert resp_a.status_code == 200
+    first_new = captured["new_deck"]
+    first_old = captured["old_deck"]
+    resp_b = client.post("/api/propose_swap", json=body)
+    assert resp_b.status_code == 200
+    second_new = captured["new_deck"]
+    second_old = captured["old_deck"]
+
+    frozen_ts = "20260719_120000"
+    # Sanity: the frozen clock actually took — both runs share the
+    # exact same timestamp component, so ONLY the uid can differ.
+    for name in (first_new, second_new):
+        assert f"_proposed_{frozen_ts}_" in name, name
+    for name in (first_old, second_old):
+        assert f"_converted_{frozen_ts}_" in name, name
+    # The actual collision pin: identical second, distinct paths.
+    assert first_new != second_new, (
+        "same-second propose_swap requests staged the SAME proposed "
+        f"path ({first_new!r}) — concurrent A/B sims would clobber "
+        "each other's staged decks"
+    )
+    assert first_old != second_old, (
+        "same-second propose_swap requests staged the SAME converted "
+        f"path ({first_old!r})"
+    )
+
+
+def test_propose_swap_staged_name_metadata_equals_filename_stem(
+    client, monkeypatch,
+):
+    """Win attribution requires `_normalize(<filename stem>) ==
+    _normalize(<Name= field>)` (see dck_meta's module docstring):
+    Forge reports the Name= field, compare_versions queries by
+    filename. Assert the RELATIONSHIP (Name == stem) rather than a
+    literal so the pin survives changes to the uniquifier shape —
+    the uid suffix lives on both sides, which is exactly what keeps
+    attribution consistent.
+    """
+    import re as _re
+    from commander_builder.log_parser import _normalize
+
+    captured = _capture_compare(monkeypatch)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 10, "mode": "1v1",
+    })
+    assert resp.status_code == 200
+    for deck_key, text_key in (
+        ("new_deck", "new_text"),
+        ("old_deck", "old_text"),
+    ):
+        stem = Path(captured[deck_key]).stem
+        m = _re.search(r"^Name=(.+)$", captured[text_key], _re.MULTILINE)
+        assert m, f"{text_key} has no Name= metadata"
+        assert m.group(1) == stem, (
+            f"{deck_key}: staged Name= ({m.group(1)!r}) != filename "
+            f"stem ({stem!r}) — log_parser can't attribute wins"
+        )
+        # And the normalized forms agree — the exact key match win
+        # attribution runs on.
+        assert _normalize(captured[deck_key]) == _normalize(m.group(1))
 
 
 def test_compare_iterations_handles_added_cards(seeded_client):
@@ -3334,10 +3976,15 @@ def test_save_iteration_persists_row(save_client):
             "added": [{"card": "Lotus Cobra", "rationale": "ramp"}],
             "removed": [{"card": "Cultivate", "rationale": "slow"}],
         },
+        # Shape matches a real /api/propose_swap payload: total_games is
+        # the attributed-game total for the whole comparison (old_games /
+        # new_games mirror it — both versions sit in every pod). The
+        # 2026-07-20 convention gives decisive = old_wins + new_wins = 10
+        # (no filler wins in this fake, so it coincides with total - draws).
         "sim_report": {
             "winner": "new", "old_wins": 4, "new_wins": 6,
             "old_games": 10, "new_games": 10, "draws": 0,
-            "margin": 2, "total_games": 20, "mode": "pod", "bracket": 3,
+            "margin": 2, "total_games": 10, "mode": "pod", "bracket": 3,
         },
         "verdict": "kept",
         "verdict_notes": "Cobra was the right call.",
@@ -3393,6 +4040,31 @@ def test_save_iteration_400_on_invalid_verdict(save_client):
     })
     assert resp.status_code == 400
     assert "verdict" in resp.get_json()["error"]
+
+
+def test_save_iteration_accepts_inconclusive(save_client):
+    """'inconclusive' is the web UI's DEFAULT save verdict whenever the
+    sim had < 20 decisive games (app.js renderSaveIterationBlock), and
+    both the PATCH endpoint and knowledge_log already accept it — so
+    save_iteration rejecting it 400'd the UI's own default path."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        # A 3-2 smoke sim: exactly the low-N shape that defaults the UI
+        # radio to 'inconclusive'.
+        "sim_report": {
+            "winner": "new", "old_wins": 2, "new_wins": 3,
+            "old_games": 5, "new_games": 5, "draws": 0,
+            "margin": 1, "total_games": 5, "mode": "pod", "bracket": 3,
+        },
+        "verdict": "inconclusive",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["verdict"] == "inconclusive"
+    # Round-trips through the detail endpoint unchanged.
+    detail = client.get(f"/api/iteration/{body['id']}").get_json()
+    assert detail["verdict"] == "inconclusive"
 
 
 def test_save_iteration_400_on_invalid_bracket(save_client):
@@ -3510,6 +4182,217 @@ def test_save_iteration_handles_missing_sim_report(save_client):
     assert detail["win_rate_old"] is None
     assert detail["win_rate_new"] is None
     assert detail["margin"] is None
+
+
+# --- knowledge_log win-rate convention (2026-07-20) -------------------------
+# The three writers of win_rate_old/new — _proposer_sim._ab_to_iteration_
+# fields, iteration_loop.run_one_iteration, and /api/save_iteration — must
+# produce IDENTICAL values for the same underlying sim outcome, and NULL
+# (never 0.0) when no game was decisive. This suite exercises all three in
+# one place because cross-run analyses (FP-002-style row gates) read the
+# columns as one population.
+#
+# The fake sim outcome deliberately includes FILLER-won games. The first
+# unification pass (611feff) passed a filler-free version of this test
+# because 8 + 10 + 2 == 20 made total_games - draws (the compare-shaped
+# denominator, filler wins included) numerically equal to wins_old +
+# wins_new (the AB-shaped denominator) — masking that the two formulas
+# diverge by ~2x on any real 4-player pod, where fillers take roughly half
+# the games. With filler wins in the fake, only the one true convention
+# (head-to-head decisive = wins_old + wins_new) makes all writers agree.
+
+def _stage_iteration_loop_decks(tmp_path, monkeypatch):
+    """Minimal staged_decks harness (mirrors test_iteration_loop's) so
+    run_one_iteration can execute here with a canned compare()."""
+    il_dir = tmp_path / "il_decks" / "commander"
+    il_dir.mkdir(parents=True)
+    names = []
+    for version in ("v1", "v2"):
+        p = il_dir / f"[USER] Conv Deck {version} [B3].dck"
+        p.write_text(
+            "[metadata]\nName=Conv Deck\nMoxfield=conv-public-id\n"
+            "[Commander]\n1 Test Commander\n[Main]\n1 Sol Ring\n",
+            encoding="utf-8",
+        )
+        names.append(p.name)
+    monkeypatch.setattr("commander_builder.iteration_loop.DECK_DIR", il_dir)
+    return names
+
+
+def _canned_comparison(old_wins, new_wins, draws, total):
+    from commander_builder.compare_versions import ComparisonReport, VersionStats
+    return ComparisonReport(
+        old_deck="old.dck", new_deck="new.dck", bracket=3,
+        timestamp="2026-07-19T00:00:00Z", mode="pod", games_per_pod=10,
+        total_games=total, draws=draws,
+        old_stats=VersionStats(deck_filename="old.dck", wins=old_wins),
+        new_stats=VersionStats(deck_filename="new.dck", wins=new_wins),
+    )
+
+
+def test_win_rate_convention_identical_across_all_three_writers(
+    save_client, tmp_path, monkeypatch,
+):
+    """Same FILLER-HEAVY outcome — 40 attributed games: old won 8, new won
+    10, 2 drew, and fillers took the other 20 — must yield the same
+    win_rate_old/new (8/18 and 10/18) from every writer. Under 611feff's
+    mixed convention the compare-shaped writers would have recorded
+    8/38 and 10/38 here (~2x low) — this is the regression test that
+    would have caught that gap."""
+    from commander_builder._proposer_sim import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    from commander_builder.iteration_loop import run_one_iteration
+    from commander_builder.knowledge_log import get_iteration
+
+    expected_old = round(8 / 18, 4)
+    expected_new = round(10 / 18, 4)
+
+    # Writer 1 — auto-curate A/B path. In the ABResult shape the 2 draws
+    # and 20 filler wins sit inside `games` but attribute to neither
+    # version; head-to-head decisive is wins_a + wins_b = 18.
+    fields = _ab_to_iteration_fields(ABResult(
+        deck_a="a.dck", deck_b="b.dck",
+        wins_a=8, wins_b=10, games=40, status="done",
+    ))
+    assert fields["win_rate_old"] == expected_old
+    assert fields["win_rate_new"] == expected_new
+
+    # Writer 2 — iteration_loop over a canned ComparisonReport. Filler
+    # wins live inside total_games (attributed games), so total - draws
+    # is 38, NOT the head-to-head decisive count. The writer must use
+    # old_stats.wins + new_stats.wins = 18.
+    v1_name, v2_name = _stage_iteration_loop_decks(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _canned_comparison(8, 10, 2, 40),
+    )
+    il_db = tmp_path / "conv_klog.sqlite"
+    result = run_one_iteration(
+        deck_filename=v1_name, new_deck_filename=v2_name, bracket=3,
+        audit_manifest={"added": [], "removed": []}, db_path=il_db,
+    )
+    row = get_iteration(result.iteration_id, db_path=il_db)
+    assert row.win_rate_old == expected_old
+    assert row.win_rate_new == expected_new
+
+    # Writer 3 — /api/save_iteration with the propose_swap payload shape
+    # (total_games present, filler wins inside it).
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {"old_wins": 8, "new_wins": 10, "draws": 2,
+                       "total_games": 40},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["win_rate_old"] == expected_old
+    assert detail["win_rate_new"] == expected_new
+
+
+def test_save_iteration_both_payload_shapes_same_denominator(save_client):
+    """The two /api/save_iteration payload shapes — the propose_swap
+    response body (has total_games) and hand-built / legacy AB-shaped
+    payloads (no total_games) — must land IDENTICAL win rates for the
+    same wins. 611feff flipped denominators per shape (total - draws vs
+    old + new), so the same 8-10 outcome stored two different rate pairs
+    depending on which shape delivered it."""
+    client, _ = save_client
+    shapes = [
+        # Compare shape: total_games includes 20 filler wins + 2 draws.
+        {"old_wins": 8, "new_wins": 10, "draws": 2, "total_games": 40},
+        # AB / legacy shape: no total_games at all.
+        {"old_wins": 8, "new_wins": 10},
+    ]
+    rates = []
+    for sim_report in shapes:
+        resp = client.post("/api/save_iteration", json={
+            "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+            "verdict": "kept", "sim_report": sim_report,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        d = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+        rates.append((d["win_rate_old"], d["win_rate_new"]))
+    assert rates[0] == rates[1] == (round(8 / 18, 4), round(10 / 18, 4))
+
+
+def test_win_rate_convention_null_when_no_decisive_games(
+    save_client, tmp_path, monkeypatch,
+):
+    """decisive == 0 (every attributed game drew) must land NULL win
+    rates from all three writers — a fabricated 0.0 would read as an
+    observed 'never wins'."""
+    from commander_builder._proposer_sim import _ab_to_iteration_fields
+    from commander_builder.forge_runner import ABResult
+    from commander_builder.iteration_loop import run_one_iteration
+    from commander_builder.knowledge_log import get_iteration
+
+    # Writer 1 — the sim RAN (games > 0) but nothing was decisive: the
+    # win_rate keys are omitted so update_iteration_sim leaves the
+    # columns NULL; margin (a real observed 0) is still recorded.
+    fields = _ab_to_iteration_fields(ABResult(
+        deck_a="a.dck", deck_b="b.dck",
+        wins_a=0, wins_b=0, games=5, status="done",
+    ))
+    assert "win_rate_old" not in fields
+    assert "win_rate_new" not in fields
+    assert fields["margin"] == 0
+
+    # Writer 2 — all 20 attributed games drew.
+    v1_name, v2_name = _stage_iteration_loop_decks(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _canned_comparison(0, 0, 20, 20),
+    )
+    il_db = tmp_path / "conv_null_klog.sqlite"
+    result = run_one_iteration(
+        deck_filename=v1_name, new_deck_filename=v2_name, bracket=3,
+        audit_manifest={"added": [], "removed": []}, db_path=il_db,
+    )
+    row = get_iteration(result.iteration_id, db_path=il_db)
+    assert row.win_rate_old is None
+    assert row.win_rate_new is None
+
+    # Writer 2, filler sweep — FILLERS won all 20 attributed games (no
+    # draws at all). Head-to-head decisive is 0, so the columns must be
+    # NULL. Under 611feff's total - draws denominator this recorded a
+    # fabricated 0/20 = 0.0 "never wins" for both versions.
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _canned_comparison(0, 0, 0, 20),
+    )
+    result = run_one_iteration(
+        deck_filename=v1_name, new_deck_filename=v2_name, bracket=3,
+        audit_manifest={"added": [], "removed": []}, db_path=il_db,
+    )
+    row = get_iteration(result.iteration_id, db_path=il_db)
+    assert row.win_rate_old is None
+    assert row.win_rate_new is None
+
+    # Writer 3 — same all-draw payload through the endpoint.
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "inconclusive",
+        "sim_report": {"old_wins": 0, "new_wins": 0, "draws": 4,
+                       "total_games": 4},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["win_rate_old"] is None
+    assert detail["win_rate_new"] is None
+
+    # Writer 3, filler sweep — fillers took every attributed game.
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "inconclusive",
+        "sim_report": {"old_wins": 0, "new_wins": 0, "draws": 0,
+                       "total_games": 4},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["win_rate_old"] is None
+    assert detail["win_rate_new"] is None
 
 
 # --- /api/save_iteration — pricing snapshot for cost-evolution chart ------
@@ -4366,3 +5249,307 @@ def test_audit_payload_name_known_defaults_true_when_unset(client, monkeypatch):
     for entry in body["added"] + body["removed"]:
         assert entry.get("name_known", True) is True
     assert body["unknown_card_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #013 — two-version audit diff (card delta + /api/audit_diff route)
+# ---------------------------------------------------------------------------
+
+def test_audit_card_diff_pure_added_removed_unchanged():
+    """Pure card-delta logic: net add/remove/unchanged across two snapshots."""
+    from commander_builder.knowledge_log import audit_card_diff
+
+    a = (
+        "[Commander]\n1 Omnath\n\n"
+        "[Main]\n1 Forest\n1 Cultivate\n1 Lotus Cobra\n2 Island\n"
+    )
+    b = (
+        "[Commander]\n1 Omnath\n\n"
+        "[Main]\n1 Forest\n1 Tireless Tracker\n1 Lotus Cobra\n1 Island\n"
+    )
+    diff = audit_card_diff(a, b)
+
+    added = {c["name"]: c["qty"] for c in diff["added"]}
+    removed = {c["name"]: c["qty"] for c in diff["removed"]}
+    assert added == {"Tireless Tracker": 1}
+    assert removed == {"Cultivate": 1, "Island": 1}  # Island 2->1 is net -1
+    assert diff["unchanged"] == 2                      # Forest, Lotus Cobra
+    assert diff["from_total"] == 5 and diff["to_total"] == 4
+
+
+def test_audit_card_diff_ignores_non_main_sections_and_empty():
+    from commander_builder.knowledge_log import audit_card_diff
+
+    assert audit_card_diff(None, None) == {
+        "added": [], "removed": [], "unchanged": 0,
+        "from_total": 0, "to_total": 0,
+    }
+    # Commander-section differences must not leak into the Main delta.
+    a = "[Commander]\n1 Alpha\n\n[Main]\n1 Forest\n"
+    b = "[Commander]\n1 Beta\n\n[Main]\n1 Forest\n"
+    diff = audit_card_diff(a, b)
+    assert diff["added"] == [] and diff["removed"] == []
+    assert diff["unchanged"] == 1
+
+
+@pytest.fixture
+def diff_client(deck_dir, tmp_path, monkeypatch):
+    """Client backed by two iterations with *different* [Main] sections so
+    the diff endpoint has a real delta to render."""
+    from commander_builder.knowledge_log import Iteration, init_db, record_iteration
+
+    db = tmp_path / "diff_klog.sqlite"
+    init_db(db)
+
+    def _snap(name, *main_lines):
+        return (
+            "[metadata]\n" f"Name={name}\n\n"
+            "[Commander]\n1 Omnath, Locus of Creation\n\n"
+            "[Main]\n" + "".join(f"{ln}\n" for ln in main_lines)
+        )
+
+    v1 = Iteration(
+        deck_id="omnath", deck_name="Omnath v1", bracket=3,
+        audit_version="v1", verdict="pending", milestone=None,
+        deck_snapshot=_snap("Omnath v1", "1 Forest", "1 Cultivate", "2 Island"),
+    )
+    from_id = record_iteration(v1, db_path=db)
+
+    v2 = Iteration(
+        deck_id="omnath", deck_name="Omnath v2", bracket=3,
+        audit_version="v2", verdict="kept", milestone="champion",
+        parent_id=from_id,
+        deck_snapshot=_snap("Omnath v2", "1 Forest", "1 Lotus Cobra", "1 Island"),
+    )
+    to_id = record_iteration(v2, db_path=db)
+
+    app = create_app(deck_dir=deck_dir, knowledge_db=db)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    client._diff_ids = (from_id, to_id)  # type: ignore[attr-defined]
+    return client
+
+
+def test_audit_diff_route_returns_card_delta(diff_client):
+    from_id, to_id = diff_client._diff_ids
+    resp = diff_client.get(f"/api/audit_diff?from_id={from_id}&to_id={to_id}")
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    assert body["from"]["id"] == from_id
+    assert body["to"]["id"] == to_id
+    assert body["from"]["audit_version"] == "v1"
+    assert body["to"]["verdict"] == "kept"
+    assert body["to"]["milestone"] == "champion"
+
+    diff = body["diff"]
+    added = {c["name"]: c["qty"] for c in diff["added"]}
+    removed = {c["name"]: c["qty"] for c in diff["removed"]}
+    assert added == {"Lotus Cobra": 1}
+    assert removed == {"Cultivate": 1, "Island": 1}
+    assert diff["unchanged"] == 1  # Forest
+
+
+def test_audit_diff_route_400_on_missing_ids(diff_client):
+    assert diff_client.get("/api/audit_diff").status_code == 400
+    assert diff_client.get("/api/audit_diff?from_id=1").status_code == 400
+    assert diff_client.get("/api/audit_diff?from_id=x&to_id=y").status_code == 400
+
+
+def test_audit_diff_route_404_on_unknown_iteration(diff_client):
+    from_id, _to_id = diff_client._diff_ids
+    resp = diff_client.get(f"/api/audit_diff?from_id={from_id}&to_id=999999")
+    assert resp.status_code == 404
+    assert "999999" in resp.get_json()["error"]
+
+
+
+# ---------------------------------------------------------------------------
+# Cross-origin mutation gate (2026-07-19 adversarial review, item 1)
+# ---------------------------------------------------------------------------
+# Mutating endpoints used get_json(force=True), which parses text/plain
+# bodies — making every POST a CORS "simple request" that any web page
+# could fire at localhost without a preflight. The app-level
+# before_request hook now 415s any mutating request that doesn't carry
+# Content-Type: application/json.
+
+def test_mutation_gate_415_on_text_plain_post(client):
+    resp = client.post(
+        "/api/log_error",
+        data='{"message": "smuggled as text/plain"}',
+        content_type="text/plain",
+    )
+    assert resp.status_code == 415
+    body = resp.get_json()
+    assert "application/json" in body["error"]
+
+
+def test_mutation_gate_415_on_form_encoded_post(client):
+    # HTML-form content types are also "simple" cross-origin requests;
+    # the gate rejects them the same way.
+    resp = client.post("/api/import_deck", data="x=1",
+                       content_type="application/x-www-form-urlencoded")
+    assert resp.status_code == 415
+
+
+def test_mutation_gate_allows_json_post(client):
+    """A proper JSON POST passes the gate and reaches the route."""
+    resp = client.post("/api/log_error", json={"message": "real error"})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+
+
+def test_mutation_gate_allows_charset_suffix(client):
+    """``application/json; charset=utf-8`` must pass — request.mimetype
+    strips parameters, so the charset suffix doesn't trip the gate."""
+    resp = client.post(
+        "/api/log_error",
+        data=json.dumps({"message": "charset ok"}),
+        content_type="application/json; charset=utf-8",
+    )
+    assert resp.status_code == 200
+
+
+def test_mutation_gate_leaves_get_untouched(client):
+    """GETs (CORS-readable but side-effect free) are not gated."""
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
+
+
+def test_mutation_gate_covers_put(client):
+    resp = client.put(
+        "/api/deck_text?deck=Alpha",
+        data="text=evil", content_type="application/x-www-form-urlencoded",
+    )
+    assert resp.status_code == 415
+
+
+# ---------------------------------------------------------------------------
+# import_deck bracket validation (item 2)
+# ---------------------------------------------------------------------------
+# bracket is baked into the filename as "[B<n>]"; downstream
+# _bracket_from_filename only understands 1..5 so a "[B9]" file would
+# silently break bracket resolution forever.
+
+def test_import_deck_400_on_bracket_out_of_range_high(client, deck_dir):
+    resp = client.post("/api/import_deck", json={
+        "name": "Bad Bracket", "paste_text": "1 Sol Ring\n", "bracket": 9,
+    })
+    assert resp.status_code == 400
+    assert "1..5" in resp.get_json()["error"]
+    # Nothing was written.
+    assert not list(deck_dir.glob("*Bad Bracket*"))
+
+
+def test_import_deck_400_on_bracket_negative(client, deck_dir):
+    resp = client.post("/api/import_deck", json={
+        "name": "Neg Bracket", "paste_text": "1 Sol Ring\n", "bracket": -1,
+    })
+    assert resp.status_code == 400
+    assert not list(deck_dir.glob("*Neg Bracket*"))
+
+
+def test_import_deck_400_on_non_integer_bracket(client):
+    resp = client.post("/api/import_deck", json={
+        "name": "Str Bracket", "paste_text": "1 Sol Ring\n", "bracket": "abc",
+    })
+    assert resp.status_code == 400
+
+
+def test_import_deck_valid_bracket_still_works(client, deck_dir):
+    resp = client.post("/api/import_deck", json={
+        "name": "Good Bracket", "paste_text": "1 Sol Ring\n", "bracket": 3,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert "[B3]" in resp.get_json()["filename"]
+
+
+def test_import_deck_missing_bracket_defaults_to_3(client, deck_dir):
+    """Absent bracket means "not specified" and keeps the historical
+    default of 3 — only explicitly-provided bad values 400."""
+    resp = client.post("/api/import_deck", json={
+        "name": "Default Bracket", "paste_text": "1 Sol Ring\n",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert "[B3]" in resp.get_json()["filename"]
+
+
+def test_deck_audit_400_on_out_of_range_bracket(client):
+    """GET routes accepting ?bracket= now validate the range too."""
+    resp = client.get("/api/deck_audit?deck=Alpha&bracket=9")
+    assert resp.status_code == 400
+    resp = client.get("/api/dashboard?deck=Alpha&bracket=-1")
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Game-changer count case consistency (item 3)
+# ---------------------------------------------------------------------------
+
+def test_deck_audit_and_dashboard_gc_counts_agree_on_mixed_case(
+    client, deck_dir, monkeypatch,
+):
+    """deck_audit used exact-case GC membership while the dashboard's
+    bracket tile lower-cased both sides — the two counts disagreed for
+    any deck line whose casing differed from the GC list's canonical
+    form. Both are case-folded now; displayed names keep the deck
+    line's original casing."""
+    (deck_dir / "MixedCase.dck").write_text(
+        "[metadata]\nName=MixedCase\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n1 RHYSTIC STUDY\n1 Forest\n1 Cultivate\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "commander_builder.game_changers.load_game_changers",
+        lambda **kw: {"Rhystic Study"},
+    )
+    audit = client.get("/api/deck_audit?deck=MixedCase").get_json()
+    dash = client.get("/api/dashboard?deck=MixedCase").get_json()
+
+    # The audit surfaces the card despite the deck line's odd casing,
+    # and the displayed name preserves that original casing.
+    assert audit["in_deck_game_changers"] == ["RHYSTIC STUDY"]
+    # Banner list, banner count, and bracket tile all agree.
+    assert dash["legality"]["in_deck_game_changers"] == ["RHYSTIC STUDY"]
+    assert dash["legality"]["n_game_changers"] == 1
+    assert dash["stat_tiles"]["n_game_changers"] == 1
+    assert len(audit["in_deck_game_changers"]) == \
+        dash["legality"]["n_game_changers"]
+
+
+# ---------------------------------------------------------------------------
+# log_error size cap (item 4)
+# ---------------------------------------------------------------------------
+
+def test_log_error_stops_writing_past_cap(client, deck_dir, monkeypatch):
+    """Past the size cap the endpoint returns 200 with logged:false and
+    the file stops growing — best-effort sink, never errors the client
+    (a browser error handler must not see its own sink fail)."""
+    log_path = deck_dir.parent.parent / "_js_errors.log"
+    # The log lives in a directory shared across tests in this session;
+    # start clean so the tiny monkeypatched cap is meaningful.
+    if log_path.exists():
+        log_path.unlink()
+    monkeypatch.setattr(
+        "commander_builder.web.routes_meta._JS_ERROR_LOG_MAX_BYTES", 64,
+    )
+    # First write lands (file empty → under cap) and pushes size past 64.
+    resp = client.post("/api/log_error", json={
+        "message": "x" * 100,
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    size_after_first = log_path.stat().st_size
+    assert size_after_first >= 64
+
+    # Second write is refused: still 200, logged:false, file unchanged.
+    resp = client.post("/api/log_error", json={
+        "message": "y" * 100,
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["logged"] is False
+    assert body["reason"] == "log full"
+    assert log_path.stat().st_size == size_after_first

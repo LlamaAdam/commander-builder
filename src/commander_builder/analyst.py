@@ -34,6 +34,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
+from ._llm_json import extract_json_object
+
 
 # --- Inputs and outputs ----------------------------------------------------
 
@@ -93,16 +95,44 @@ def analyze(input_: AnalystInput, config: Optional[AnalystConfig] = None) -> Ver
         return heuristic
 
     # Heuristic is uncertain; try the configured LLM backends in order.
+    #
+    # Two distinct failure modes, handled differently ON PURPOSE:
+    #
+    #   NotImplementedError  — backend not wired (no key / SDK / daemon).
+    #                          Expected in many configs; quiet fall-through.
+    #   any other Exception  — backend IS wired but the call failed:
+    #                          unparseable/truncated model output
+    #                          (LLMJsonError), API/network errors, SDK
+    #                          surprises. Previously these escaped and
+    #                          crashed the whole iteration loop mid-run.
+    #                          Now: log LOUDLY (an operator must see that
+    #                          a paid backend is misbehaving) and degrade
+    #                          to the heuristic verdict so the pipeline
+    #                          keeps moving on empirical data.
     if config.use_ollama:
         try:
             return ollama_verdict(input_, config)
         except NotImplementedError:
             pass  # Fall through to Claude or back to heuristic.
+        except Exception as exc:  # noqa: BLE001 — see contract above
+            print(
+                f"WARNING: ollama_verdict failed "
+                f"({type(exc).__name__}: {exc}); "
+                f"falling back to claude/heuristic verdict.",
+                flush=True,
+            )
     if config.use_claude:
         try:
             return claude_verdict(input_, config)
         except NotImplementedError:
             pass
+        except Exception as exc:  # noqa: BLE001 — see contract above
+            print(
+                f"WARNING: claude_verdict failed "
+                f"({type(exc).__name__}: {exc}); "
+                f"falling back to heuristic verdict.",
+                flush=True,
+            )
 
     # No LLM available — return the (low-confidence) heuristic anyway. Caller
     # decides whether to flag for manual review.
@@ -224,6 +254,32 @@ restatements of the numbers.
 """
 
 
+def _parse_verdict_payload(text: str, backend: str) -> dict:
+    """Recover a verdict JSON object from possibly-fenced or
+    prose-prefixed model output via the shared ``_llm_json`` extractor.
+
+    Raises ``LLMJsonError`` (NOT NotImplementedError) on garbage or
+    truncated output. The distinction matters: NotImplementedError means
+    "backend not wired" and ``analyze()`` falls through SILENTLY; a
+    parse failure means the backend IS wired but returned junk — that
+    must surface as a LOUD warning in ``analyze()`` (which catches it
+    and degrades to the heuristic) rather than being indistinguishable
+    from a missing API key. The old in-house fence-strip + greedy-regex
+    fallback lived here; it's now the shared extractor so all LLM parse
+    sites behave identically."""
+    return extract_json_object(text, context=backend)
+
+
+def _safe_confidence(value: object) -> float:
+    """Coerce a model-supplied confidence to float, defaulting to 0.5 on a
+    non-numeric value (e.g. the model writes \"high\" instead of 0.9) so the
+    verdict doesn't crash with ValueError."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     """Render a verdict via the Claude API.
 
@@ -289,15 +345,15 @@ def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
         if hasattr(block, "text"):
             text += block.text
     if not text.strip():
-        raise RuntimeError("claude_verdict: empty response from API")
+        raise NotImplementedError("claude_verdict: empty response from API")
 
-    parsed = json.loads(text)
+    parsed = _parse_verdict_payload(text, "claude_verdict")
     label = parsed.get("label", "neutral")
     if label not in {"kept", "reverted", "neutral"}:
         label = "neutral"
     return Verdict(
         label=label,
-        confidence=float(parsed.get("confidence", 0.5)),
+        confidence=_safe_confidence(parsed.get("confidence", 0.5)),
         reasoning=str(parsed.get("reasoning", "")),
         lessons=list(parsed.get("lessons", []) or []),
         source="claude",
@@ -358,14 +414,14 @@ def ollama_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
 
     text = payload.get("response", "")
     if not text:
-        raise RuntimeError("ollama_verdict: empty response from daemon")
-    parsed = json.loads(text)
+        raise NotImplementedError("ollama_verdict: empty response from daemon")
+    parsed = _parse_verdict_payload(text, "ollama_verdict")
     label = parsed.get("label", "neutral")
     if label not in {"kept", "reverted", "neutral"}:
         label = "neutral"
     return Verdict(
         label=label,
-        confidence=float(parsed.get("confidence", 0.5)),
+        confidence=_safe_confidence(parsed.get("confidence", 0.5)),
         reasoning=str(parsed.get("reasoning", "")),
         lessons=list(parsed.get("lessons", []) or []),
         source="ollama",

@@ -79,3 +79,23 @@ jobs:
       - name: Run pytest (full lane, includes --run-slow)
         run: |
           python -m pytest --run-slow --no-header -q --tb=short
+
+  secret-scan:
+    # Full-tree secret sweep. The pre-commit hook only protects
+    # contributors who installed it locally (and is bypassable via
+    # --no-verify); this job covers everyone else by scanning every
+    # git-tracked file on each PR / push. Runs OUTSIDE the Python
+    # matrix — the scanner is pure stdlib and its result doesn't vary
+    # by interpreter version, so one run is signal and three are spend.
+    # No pip install either: checkout + the runner's python3 keeps the
+    # job to a few seconds and removes the only realistic flake source
+    # (dependency resolution).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan all tracked files for secrets
+        # --all enumerates via `git ls-files -z`, so only committed
+        # content is scanned (no build artifacts) and filenames with
+        # spaces/brackets are handled safely.
+        run: python3 scripts/pre_commit_secret_scan.py --all

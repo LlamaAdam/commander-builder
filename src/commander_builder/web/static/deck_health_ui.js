@@ -54,10 +54,18 @@ function renderDeckHealthTiles(health) {
     flavor: mdfc.count >= 6 ? "good" : (mdfc.count >= 3 ? "neutral" : "muted"),
   }));
 
-  // Spell density tile.
+  // Spell density tile. A null signal means deck_health's Scryfall
+  // outage contract fired (a majority of card lookups failed) — the
+  // `|| {ratio: null}` fallback deliberately routes that into the same
+  // "—" / unavailable rendering as the empty-deck case, since neither
+  // has a trustworthy ratio to show.
   const sd = health.spell_density || {
     non_permanent_count: 0, total_main_count: 0, ratio: null,
   };
+  // Partial-outage annotation: below the outage threshold the ratio is
+  // computed from the cards Scryfall COULD classify; say so when any
+  // lookups missed so a slightly-off ratio is explainable.
+  const sdMisses = sd.lookup_failures || 0;
   const sdLabel = sd.ratio == null
     ? "—"
     : `${Math.round(sd.ratio * 100)}%`;
@@ -72,25 +80,48 @@ function renderDeckHealthTiles(health) {
         + ` mainboard cards (${Math.round(sd.ratio * 100)}%).\n\n`
         + `Spellslinger archetypes (Storm, Magecraft, Prowess) need 20-30%+ `
         + `non-permanents to keep their payoffs live.`
+        + (sdMisses
+          ? `\n\n${sdMisses} card lookup${sdMisses === 1 ? "" : "s"} failed — `
+            + `ratio computed from the cards Scryfall could classify.`
+          : "")
       : "Spell-density signal unavailable (Scryfall lookup failed).",
     flavor: (sd.ratio != null && sd.ratio >= 0.20) ? "good"
           : (sd.ratio != null && sd.ratio >= 0.10) ? "neutral"
           : "muted",
   }));
 
-  // Mana sinks tile.
-  const ms = health.mana_sinks || { count: 0, cards: [] };
-  row.appendChild(renderHealthTile({
-    label: "Mana sinks",
-    value: ms.count,
-    tooltip: ms.cards.length
-      ? `X-cost spells (mana sinks):\n${ms.cards.join("\n")}\n\n`
-        + `Mana sinks scale to whatever excess mana you have — they prevent `
-        + `flooding out in long games. B4 decks typically run 3-5 of these.`
-      : "No X-cost spells detected. A deck with no mana sinks can flood out "
-        + "in long games when you draw lands you don't need.",
-    flavor: ms.count >= 3 ? "good" : (ms.count >= 1 ? "neutral" : "warn"),
-  }));
+  // Mana sinks tile. Unlike spell density there is no null-equivalent
+  // field inside the shape ("count: 0" is a REAL, warn-worthy state),
+  // so a null signal — deck_health's Scryfall outage contract — gets
+  // its own explicit "unavailable" tile. Before this branch, null fell
+  // into the `|| { count: 0 }` fallback and rendered a warn-flavored
+  // "0 mana sinks" on decks that simply couldn't be classified.
+  const ms = health.mana_sinks;
+  if (ms == null) {
+    row.appendChild(renderHealthTile({
+      label: "Mana sinks",
+      value: "—",
+      tooltip: "Mana-sink signal unavailable (Scryfall lookup failed).",
+      flavor: "muted",
+    }));
+  } else {
+    const msMisses = ms.lookup_failures || 0;
+    row.appendChild(renderHealthTile({
+      label: "Mana sinks",
+      value: ms.count,
+      tooltip: (ms.cards.length
+        ? `X-cost spells (mana sinks):\n${ms.cards.join("\n")}\n\n`
+          + `Mana sinks scale to whatever excess mana you have — they prevent `
+          + `flooding out in long games. B4 decks typically run 3-5 of these.`
+        : "No X-cost spells detected. A deck with no mana sinks can flood out "
+          + "in long games when you draw lands you don't need.")
+        + (msMisses
+          ? `\n\n${msMisses} card lookup${msMisses === 1 ? "" : "s"} failed — `
+            + `count computed from the cards Scryfall could classify.`
+          : ""),
+      flavor: ms.count >= 3 ? "good" : (ms.count >= 1 ? "neutral" : "warn"),
+    }));
+  }
 
   // Wincon-specific protection tile.
   const wp = health.wincon_protection || { count: 0, cards: [] };
@@ -123,6 +154,32 @@ function renderDeckHealthTiles(health) {
     // Self-mill is only relevant for graveyard decks, so "0" isn't
     // automatically bad. Default to "muted" not "warn".
     flavor: sm.count >= 4 ? "good" : (sm.count >= 1 ? "neutral" : "muted"),
+  }));
+
+  // Role-target tile (F2). Flags roles BELOW the deck-template minimums
+  // (ramp/draw/removal/wipe/protection) — the complement of the advisor's
+  // saturation guard (which flags EXCESS). Value is the count of
+  // under-built roles; tooltip itemizes count/target/deficit per role.
+  const rt = health.role_targets || { roles: {}, under_built: [] };
+  const under = rt.under_built || [];
+  const roleLines = Object.entries(rt.roles || {})
+    .map(([role, v]) => {
+      const flag = (v.deficit || 0) > 0 ? "  ⚠ -" + v.deficit : "  ✓";
+      return `${role}: ${v.count}/${v.target}${flag}`;
+    });
+  row.appendChild(renderHealthTile({
+    label: "Role targets",
+    value: under.length === 0 ? "OK" : `${under.length} low`,
+    sub: under.length ? under.join(", ") : "",
+    tooltip: roleLines.length
+      ? `Core roles vs deck-template minimums:\n${roleLines.join("\n")}\n\n`
+        + `Roles below target are under-built — the advisor's saturation `
+        + `guard flags the opposite (excess). Targets: ramp 10, draw 10, `
+        + `removal 8, wipe 3, protection 4.`
+      : "Role-target signal unavailable (Scryfall lookup failed).",
+    flavor: roleLines.length === 0 ? "muted"
+          : (under.length === 0 ? "good"
+          : (under.length <= 2 ? "neutral" : "warn")),
   }));
 
   return row;
@@ -223,6 +280,76 @@ function renderSaltWarningBanner(warning) {
   }
   wrap.appendChild(list);
   return wrap;
+}
+
+// Render the infinite/win-combo assessment from /api/audit's
+// `combo_assessment` block. Two visual states:
+//   * VIOLATION (red, border-left): one or more detected combos push the
+//     deck above its declared bracket (WotC restricts two-card infinite
+//     combos below B4). Lists the offending combos + recommended bracket.
+//   * INFO (blue <details>): combos present but legal at this bracket —
+//     collapsed so it doesn't shout, but visible for awareness.
+// Renders nothing when no combos are detected (keeps clean decks clean).
+function renderComboAssessment(assessment) {
+  const combos = (assessment && assessment.combos) || [];
+  if (!combos.length) return document.createDocumentFragment();
+  const violations = assessment.violations || [];
+  const rec = assessment.recommended_bracket || 1;
+
+  const comboLine = (c) => {
+    const li = el("li", {});
+    li.appendChild(el("span", { style: "font-weight: 500;" },
+      (c.cards || []).join(" + ")));
+    li.appendChild(document.createTextNode(
+      `  →  ${c.produces || "combo"} `));
+    li.appendChild(el("span", {
+      class: "pill",
+      style: "padding: 1px 6px; border-radius: 4px; font-size: 11px; "
+           + "font-weight: 600; background: var(--border); color: var(--text);",
+      title: "Lowest WotC bracket that permits this combo.",
+    }, `B${c.bracket_floor}+`));
+    return li;
+  };
+
+  if (violations.length) {
+    const wrap = el("div", {
+      class: "combo-violation-banner",
+      style: "margin: 10px 0; padding: 10px 14px; "
+           + "background: rgba(239, 68, 68, 0.12); "
+           + "border-left: 4px solid #ef4444; border-radius: 6px; "
+           + "color: var(--text);",
+    });
+    wrap.appendChild(el("div",
+      { style: "font-weight: 600; margin-bottom: 4px;" },
+      `Bracket pressure: ${violations.length} `
+      + (violations.length === 1 ? "combo" : "combos")
+      + ` exceed this bracket — this deck plays as Bracket ${rec}.`));
+    const ul = el("ul", {
+      style: "list-style: none; padding: 0; margin: 4px 0 0 0; "
+           + "font-size: 13px;",
+    });
+    for (const c of violations) ul.appendChild(comboLine(c));
+    wrap.appendChild(ul);
+    return wrap;
+  }
+
+  // Legal-at-bracket: collapsed details, informational.
+  const det = el("details", {
+    style: "margin: 10px 0; padding: 8px 12px; "
+         + "background: rgba(96, 165, 250, 0.08); "
+         + "border: 1px solid rgba(96, 165, 250, 0.4); "
+         + "border-radius: 6px; font-size: 13px;",
+  });
+  det.appendChild(el("summary",
+    { style: "cursor: pointer; font-weight: 500;" },
+    `${combos.length} infinite/win combo`
+    + (combos.length === 1 ? "" : "s") + " detected (legal at this bracket)"));
+  const ul = el("ul", {
+    style: "list-style: none; padding: 0; margin: 6px 0 0 0;",
+  });
+  for (const c of combos) ul.appendChild(comboLine(c));
+  det.appendChild(ul);
+  return det;
 }
 
 // Render the EDHREC average-deck preview as a collapsible <details>

@@ -64,6 +64,21 @@ class MatchupReport:
     unsupported_cards: list[str] = field(default_factory=list)
     per_opponent_record: dict[str, dict] = field(default_factory=dict)
     pods: list[dict] = field(default_factory=list)
+    # Pod-failure telemetry ("no silent failures"). Failed pods — JVM
+    # crash, or timeout with nothing attributable — are EXCLUDED from
+    # games_played, so their unattributed games can never be counted as
+    # phantom user LOSSES (user_losses = decisive - wins would otherwise
+    # book every unattributed game as a loss). Mirrors the fields on
+    # compare_versions.ComparisonReport.
+    failed_pods: int = 0
+    timed_out_pods: int = 0
+    excluded_games: int = 0
+    pod_failures: list[dict] = field(default_factory=list)
+    # Draw-policy label (2026-07-19): turn-cap draws are counted in
+    # ``draws`` as plain draws — never resolved to a surviving life leader
+    # the way forge_runner's A/B harness does ('resolve_survivor_leader').
+    # Label only, for downstream analysis; no behavior change.
+    draw_policy: str = "plain_draw"
 
     @property
     def win_rate(self) -> float:
@@ -166,8 +181,43 @@ def run_matchup(
     for i, pod in enumerate(pods):
         print(f"\n--- Pod {i + 1}/{len(pods)}: {pod} ---", flush=True)
         result = runner.run(pod, num_games=games_per_pod)
-        parsed = parse(result.stdout)
-        ma = analyze(result.stdout)
+        stdout = result.stdout
+        if result.timed_out and "Match Result:" not in stdout:
+            # The watchdog killed Forge before the trailing "Match Result:"
+            # summary. parse() would still count the per-game "Game Result"
+            # lines into games_completed but attribute NO winners — and the
+            # user_losses = decisive - wins arithmetic below would book
+            # every one of those games as a user LOSS. Salvage the games
+            # that actually finished by re-scanning stdout for per-game
+            # winner lines (same policy as compare_versions' timeout path).
+            # Lazy import: compare_versions imports _load_pool /
+            # _fallback_opponents from THIS module at import time, so a
+            # top-level import here would be circular.
+            from .compare_versions import (
+                _salvage_wins_from_stdout,
+                _synthesize_match_result,
+            )
+            salvaged = _salvage_wins_from_stdout(stdout)
+            if salvaged["wins_by_seat_name"]:
+                stdout = stdout + _synthesize_match_result(salvaged)
+        parsed = parse(stdout)
+        ma = analyze(stdout)
+
+        # Failure classification — same rules as compare_versions'
+        # _run_one_pod (see the why-comment there): crashes are never
+        # salvaged (matching forge_runner's A/B policy), timeouts count
+        # only if at least one game was attributable.
+        pod_failed = False
+        failure_reason: Optional[str] = None
+        if result.error and not result.timed_out:
+            pod_failed = True
+            failure_reason = result.error
+        elif result.returncode not in (0, None) and not result.timed_out:
+            pod_failed = True
+            failure_reason = f"Forge exited with code {result.returncode}"
+        elif result.timed_out and not parsed.deck_results:
+            pod_failed = True
+            failure_reason = result.error or "timed out with no attributable game results"
 
         report.pods.append({
             "pod_index": i + 1,
@@ -175,8 +225,43 @@ def run_matchup(
             "duration_sec": round(result.duration_sec, 1),
             "returncode": result.returncode,
             "timed_out": result.timed_out,
+            "error": result.error,
+            "pod_failed": pod_failed,
+            "failure_reason": failure_reason,
             "match": ma.to_dict(),
         })
+
+        if pod_failed:
+            # Excluded, not counted: adding this pod's unattributed games
+            # to games_played would inflate user_losses with games nobody
+            # verifiably won. Surface it loudly instead.
+            report.failed_pods += 1
+            report.excluded_games += parsed.games_completed
+            report.pod_failures.append({
+                "pod_index": i + 1,
+                "pod": pod,
+                "reason": failure_reason,
+                "returncode": result.returncode,
+                "timed_out": result.timed_out,
+                "unattributed_games": parsed.games_completed,
+            })
+            print(
+                f"WARNING: pod {i + 1}/{len(pods)} FAILED and is EXCLUDED "
+                f"from the matchup: {failure_reason} "
+                f"({parsed.games_completed} unattributed game(s) discarded).",
+                flush=True,
+            )
+            continue
+        if result.timed_out:
+            # Truncated but attributable — count the finished games, flag
+            # the truncation so the record isn't read as a full-length run.
+            report.timed_out_pods += 1
+            print(
+                f"WARNING: pod {i + 1}/{len(pods)} TIMED OUT mid-run; "
+                f"salvaged {parsed.games_completed} finished game(s) of "
+                f"{games_per_pod} requested.",
+                flush=True,
+            )
 
         # Aggregate user wins from log_parser (the authoritative match line).
         for d in parsed.deck_results:
@@ -201,7 +286,16 @@ def run_matchup(
             damages.append(user_stats.damage_taken)
             if game.winner_normalized == user_norm and game.end_turn is not None:
                 won_turns.append(game.end_turn)
-            elif game.winner_normalized != user_norm and game.end_turn is not None:
+            # `is not None` guard: a drawn game has winner_normalized None,
+            # which satisfies `!= user_norm` — without the guard the draw's
+            # end_turn (typically the turn cap, i.e. huge) was booked as a
+            # LOSS turn and inflated avg_turns_when_lost. Draws are neither
+            # wins nor losses here (mirrors compare_versions._aggregate_pod).
+            elif (
+                game.winner_normalized is not None
+                and game.winner_normalized != user_norm
+                and game.end_turn is not None
+            ):
                 lost_turns.append(game.end_turn)
                 if user_stats.eliminated and user_stats.eliminated_turn is not None:
                     cur = report.fastest_loss_turn
@@ -222,8 +316,19 @@ def run_matchup(
             row["wins_vs_user"] += d.wins
 
     # User wins are a subset of games_played; losses = decisive - wins.
+    # games_played only counts ATTRIBUTED games — failed pods were excluded
+    # in the loop above, so a crashed/timed-out pod can no longer inject
+    # phantom losses here.
     decisive = report.games_played - report.draws
     report.user_losses = max(0, decisive - report.user_wins)
+    if report.failed_pods:
+        print(
+            f"\nWARNING: {report.failed_pods}/{len(pods)} pod(s) failed and "
+            f"were excluded ({report.excluded_games} unattributed game(s) "
+            f"discarded). The record reflects {report.games_played} "
+            f"attributed game(s) only.",
+            flush=True,
+        )
     report.avg_user_ending_life = round(
         sum(ending_lives) / len(ending_lives), 1
     ) if ending_lives else 0.0
@@ -252,6 +357,16 @@ def _format_summary(report: MatchupReport) -> str:
     lines.append(f"=== Matchup: {report.user_deck} (B{report.bracket}) ===")
     lines.append(f"Record: {report.user_wins}W / {report.user_losses}L / {report.draws}D — "
                  f"win rate {report.win_rate:.1%}")
+    # Failure telemetry right under the record line — a record built on
+    # fewer pods than requested reads very differently.
+    if report.failed_pods or report.timed_out_pods:
+        lines.append(
+            f"!! {report.failed_pods} failed pod(s) EXCLUDED "
+            f"({report.excluded_games} unattributed game(s) discarded), "
+            f"{report.timed_out_pods} timed-out pod(s) truncated."
+        )
+        for f in report.pod_failures:
+            lines.append(f"!!   pod {f['pod_index']}: {f['reason']}")
     lines.append(f"Avg ending life: {report.avg_user_ending_life}  (damage taken/game: {report.avg_user_damage_taken})")
     if report.avg_turns_when_won:
         lines.append(f"Avg turns when winning: {report.avg_turns_when_won}")

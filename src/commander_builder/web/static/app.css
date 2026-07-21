@@ -190,9 +190,48 @@ body {
 .alert-body .pill.warn { background: var(--warn); color: #4a3308; }
 .alert-body .pill.good { background: var(--good); color: #08361d; }
 
+/* --- FP-007 unified nav shell --- */
+
+/* Left-rail icon strip: three section buttons stacked vertically. */
+.left-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 6px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  align-items: center;
+  width: 56px;
+}
+.rail-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  width: 44px;
+  text-align: center;
+  line-height: 1.2;
+}
+.rail-btn:hover { color: var(--text); background: var(--panel-2); }
+.rail-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.rail-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
 .layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 56px 280px 1fr;
   height: calc(100vh - 53px);
   overflow: hidden;
 }
@@ -531,6 +570,16 @@ body {
 .verdict.kept     { background: var(--good); color: #08361d; }
 .verdict.reverted { background: var(--bad);  color: #380808; }
 .verdict.neutral  { background: var(--warn); color: #4a3308; }
+/* 'inconclusive' = sim finished but < 20 decisive games. Muted gray-blue
+   (indigo, matching iteration_graph.js's node tint) so it reads as
+   "recorded but uncallable" — distinct from pending's flat panel gray.
+   Without this rule the pill rendered as bare unstyled text. */
+.verdict.inconclusive { background: rgba(129, 140, 248, 0.25); color: #a5b4fc; }
 .verdict.pending  { background: var(--panel-2); color: var(--muted); }
 .iteration .name { font-size: 14px; }
 .iteration .delta { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+
+/* #013 two-version card diff */
+.version-compare .diff-added h4   { color: var(--good); }
+.version-compare .diff-removed h4 { color: var(--bad); }
+.version-compare .diff-card-list { list-style: square; color: var(--text, #ddd); }

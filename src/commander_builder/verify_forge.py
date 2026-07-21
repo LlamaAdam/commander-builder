@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -87,11 +88,25 @@ def find_java() -> tuple[Optional[str], Optional[str]]:
         return None, None
     try:
         # `java -version` prints to stderr.
+        # env scrub: no JVM we spawn should inherit the Anthropic
+        # credential _secrets.load_credentials() may have exported —
+        # see forge_runner.scrubbed_child_env() for the rationale.
+        from .forge_runner import scrubbed_child_env
         result = subprocess.run(
             [java, "-version"],
             capture_output=True,
             text=True,
             timeout=10,
+            # Explicit encoding: text=True alone decodes with the LOCALE
+            # codec (cp1252 on Windows) in STRICT mode, so any non-cp1252
+            # byte raises UnicodeDecodeError inside subprocess.run itself.
+            # `java -version` is ASCII in practice, but pin UTF-8+replace
+            # anyway for consistency with every other launch site (see
+            # forge_runner._run_blocking) — a localized/odd JVM banner must
+            # never crash the probe.
+            encoding="utf-8",
+            errors="replace",
+            env=scrubbed_child_env(),
         )
         version = (result.stderr or result.stdout).strip().splitlines()[0]
         return java, version
@@ -268,18 +283,34 @@ def run_sim(
     stderr_path = output_dir / f"{label}_stderr.txt"
     info_path = output_dir / f"{label}_meta.json"
 
-    started = datetime.now()
+    started = time.monotonic()
     error: Optional[str] = None
     returncode: Optional[int] = None
     timed_out = False
 
     try:
+        # env scrub: the Forge JVM must never inherit the Anthropic
+        # credential — see forge_runner.scrubbed_child_env().
+        from .forge_runner import coerce_output_text, scrubbed_child_env
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=MATCH_TIMEOUT_SEC,
             cwd=str(jar.parent),
+            # Explicit encoding is load-bearing: text=True alone decodes
+            # with the LOCALE codec — cp1252 on Windows — in STRICT mode,
+            # while Forge emits UTF-8 (deck names with emoji/non-Latin
+            # characters occur in practice; run_match.py documents the same
+            # trap). A single non-cp1252-decodable byte would raise
+            # UnicodeDecodeError *inside* subprocess.run, and the catch-all
+            # below would report a failed verification with no stdout
+            # captured at all. Match forge_runner._run_blocking: UTF-8 with
+            # replacement, so a stray bad byte degrades to U+FFFD instead
+            # of torching the whole sim capture.
+            encoding="utf-8",
+            errors="replace",
+            env=scrubbed_child_env(),
         )
         stdout_path.write_text(proc.stdout, encoding="utf-8")
         stderr_path.write_text(proc.stderr, encoding="utf-8")
@@ -287,12 +318,15 @@ def run_sim(
     except subprocess.TimeoutExpired as exc:
         error = f"Timed out after {MATCH_TIMEOUT_SEC}s"
         timed_out = True
-        stdout_path.write_text(exc.stdout or "", encoding="utf-8")
-        stderr_path.write_text(exc.stderr or "", encoding="utf-8")
+        # exc.stdout/.stderr may be bytes (POSIX re-raises the raw pipe
+        # contents even with encoding= set) or None — write_text() accepts
+        # neither, so normalize via coerce_output_text (imported above).
+        stdout_path.write_text(coerce_output_text(exc.stdout), encoding="utf-8")
+        stderr_path.write_text(coerce_output_text(exc.stderr), encoding="utf-8")
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
 
-    duration = (datetime.now() - started).total_seconds()
+    duration = time.monotonic() - started
 
     # Try to grab Forge's own log file if it exists. Path is platform/install
     # dependent; we copy from any plausible location.

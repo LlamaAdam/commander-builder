@@ -9,6 +9,7 @@ import pytest
 
 from commander_builder.archetype import (
     MIN_CONTENT_MATCHES,
+    MIN_TRIBAL_MATCHES,
     _content_scan,
     _filename_hint,
     _read_main_card_names,
@@ -97,6 +98,44 @@ def test_content_scan_handles_empty_input():
     assert _content_scan([]) == (None, 0)
 
 
+def test_content_scan_goodstuff_with_few_tribal_nouns_is_not_aggro():
+    """2026-07 rebalance regression: tribal nouns ('dragon', 'angel',
+    'elemental'...) appear in a handful of names in almost ANY deck, and
+    at the old threshold (3) they made 'aggro' the de-facto default. A
+    goodstuff pile with a few incidental noun names must NOT claim aggro
+    — it falls through to the honest midrange default."""
+    cards = [
+        "Shivan Dragon", "Serra Angel", "Omnath, Locus of Creation",
+        "Solemn Simulacrum", "Sol Ring", "Arcane Signet", "Cultivate",
+        "Swords to Plowshares", "Beast Within", "Farseek",
+    ]
+    winner, _score = _content_scan(cards)
+    assert winner != "aggro"
+    assert winner is None  # nothing else claims it either → midrange
+
+
+def test_content_scan_true_tribal_deck_still_claims_aggro():
+    """The tribal-noun gate must not lock out REAL tribal decks: a deck
+    stuffed with same-tribe names clears MIN_TRIBAL_MATCHES and scores
+    aggro decisively."""
+    cards = [f"Goblin Test Card {i}" for i in range(MIN_TRIBAL_MATCHES)]
+    winner, score = _content_scan(cards)
+    assert winner == "aggro"
+    assert score >= MIN_TRIBAL_MATCHES
+
+
+def test_content_scan_control_via_named_staples():
+    """Post-rebalance the control set holds only NAME-matchable tokens
+    (commanders + named staples) — oracle-text phrases like 'counter
+    target' were removed because a card-name scan can never see them."""
+    cards = [
+        "Cyclonic Rift", "Propaganda", "Ghostly Prison",
+        "Teferi, Hero of Dominaria", "Sol Ring",
+    ]
+    winner, _score = _content_scan(cards)
+    assert winner == "control"
+
+
 # --- classify (the public entry) -------------------------------------------
 
 def test_classify_filename_hint_wins_over_content(tmp_path):
@@ -119,6 +158,16 @@ def test_classify_uses_content_when_no_filename_hint(tmp_path):
 def test_classify_falls_back_to_midrange(tmp_path):
     p = _write_dck(tmp_path, "[USER] Something [B3].dck", [
         "Sol Ring", "Forest", "Plains", "Island",
+    ])
+    assert classify(p) == "midrange"
+
+
+def test_classify_goodstuff_with_tribal_nouns_is_midrange(tmp_path):
+    """End-to-end: a neutral filename + a goodstuff list with incidental
+    tribal-noun names lands on the midrange default, not 'aggro'."""
+    p = _write_dck(tmp_path, "[USER] Goodstuff [B3].dck", [
+        "Shivan Dragon", "Serra Angel", "Solemn Simulacrum",
+        "Sol Ring", "Cultivate", "Beast Within", "Forest", "Plains",
     ])
     assert classify(p) == "midrange"
 

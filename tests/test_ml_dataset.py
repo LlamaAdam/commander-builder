@@ -57,6 +57,105 @@ def test_extract_features_computes_derived_metrics():
     assert row.features["margin"] == 2.0
 
 
+def test_extract_features_fallback_win_rates_exclude_filler_wins():
+    """When the authoritative win_rate columns are NULL, the fallback
+    derivation must follow the 2026-07-20 knowledge_log convention:
+    wins / head-to-head decisive (old + new wins), NOT total - draws.
+    Filler-heavy compare report: 20 attributed games, old 3 / new 5 /
+    2 draws, fillers took the other 10 — rates are 3/8 and 5/8, not
+    3/18 and 5/18. The decisive_games FEATURE keeps its attributed
+    non-draw meaning (18) — only the win-rate denominator is
+    head-to-head."""
+    row = extract_features(_it(1, "abc", sim_report={
+        "total_games": 20, "draws": 2,
+        "old_stats": {"wins": 3}, "new_stats": {"wins": 5},
+    }))
+    assert row.features["win_rate_old"] == 3 / 8
+    assert row.features["win_rate_new"] == 5 / 8
+    assert row.features["decisive_games"] == 18.0
+
+
+def test_extract_features_reads_real_ab_sim_schema():
+    """Regression guard: forge_runner.ABResult.to_dict() emits wins_a/wins_b/
+    games -- NOT old_stats/new_stats/total_games. extract_features must read
+    the real schema, else every win/margin feature is silently zeroed (the
+    bug fixed 2026-05-20)."""
+    row = extract_features(_it(1, "abc", verdict="reverted", sim_report={
+        "wins_a": 2, "wins_b": 0, "games": 2,
+        "deck_a": "x", "deck_b": "y", "status": "done",
+    }))
+    assert row.features["old_wins"] == 2.0
+    assert row.features["new_wins"] == 0.0
+    assert row.features["total_games"] == 2.0
+    assert row.features["margin"] == -2.0
+    assert row.features["win_rate_old"] == 1.0
+    assert row.features["win_rate_new"] == 0.0
+
+
+def test_extract_features_prefers_authoritative_win_rate_columns():
+    """When the iteration row carries computed win_rate_old/new columns, use
+    them (the analyst persisted them next to the verdict)."""
+    it = _it(1, "abc", verdict="kept", sim_report={"wins_a": 1, "wins_b": 3, "games": 4})
+    it.win_rate_old, it.win_rate_new = 0.25, 0.75
+    row = extract_features(it)
+    assert row.features["win_rate_old"] == 0.25
+    assert row.features["win_rate_new"] == 0.75
+
+
+def test_extract_features_includes_deck_composition_features():
+    """Pre-sim deck-health features come from deck_snapshot. dh_basic_lands is
+    a pure-regex count (robust offline); the rest are present (default 0 if the
+    card DB is unavailable)."""
+    deck = ("[metadata]\nName=T\n[Commander]\n1 Cmdr\n[Main]\n"
+            "5 Forest|J25|1\n5 Island|J25|2\n1 Sol Ring|C20|1\n")
+    it = _it(1, "abc")
+    it.deck_snapshot = deck
+    row = extract_features(it)
+    for f in ("dh_spell_density", "dh_mana_sinks", "dh_wincon_protection",
+              "dh_self_mill", "dh_mdfc", "dh_basic_lands"):
+        assert f in row.features
+    assert row.features["dh_basic_lands"] == 10.0  # 5 Forest + 5 Island
+
+
+def test_extract_features_tolerates_explicit_null_stats():
+    """ComparisonReport legitimately persists None for undefined stats (e.g.
+    avg_turns_when_won when a version never won a game). The key EXISTS with
+    value null, so ``.get(key, 0)`` returns None — and ``float(None)`` used to
+    raise TypeError and kill build_dataset for the whole iteration list.
+    Nulls must degrade to the default (0.0), not crash."""
+    it = _it(1, "abc", sim_report={
+        "total_games": 4, "draws": 0,
+        # old won all 4 games → its turns_when_lost is null; new never won
+        # → its turns_when_won / ending_life are null.
+        "old_stats": {"wins": 4, "avg_ending_life": 21.0,
+                      "avg_turns_when_lost": None},
+        "new_stats": {"wins": 0, "avg_ending_life": None,
+                      "avg_turns_when_won": None},
+    })
+    row = extract_features(it)
+    assert row is not None
+    assert row.features["old_avg_turns_when_lost"] == 0.0
+    assert row.features["new_avg_turns_when_won"] == 0.0
+    assert row.features["new_avg_ending_life"] == 0.0
+    # Non-null values still pass through untouched.
+    assert row.features["old_avg_ending_life"] == 21.0
+
+
+def test_build_dataset_survives_a_null_stat_row():
+    """One iteration with null stats must not discard the whole dataset —
+    the exact blast radius of the pre-fix TypeError."""
+    its = [
+        _it(1, "abc", sim_report={
+            "total_games": 2, "draws": 0,
+            "old_stats": {"wins": 2, "avg_turns_when_won": None},
+            "new_stats": {"wins": 0, "avg_turns_when_won": None},
+        }),
+        _it(2, "def"),
+    ]
+    rows = build_dataset(its)
+    assert len(rows) == 2
+
+
 def test_extract_features_skips_pending_verdict():
     assert extract_features(_it(1, "abc", verdict="pending")) is None
 

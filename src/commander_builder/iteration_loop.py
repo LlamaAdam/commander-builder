@@ -35,9 +35,12 @@ import re
 from .analyst import AnalystConfig, AnalystInput, Verdict, analyze
 from .compare_versions import ComparisonReport, compare
 from .forge_runner import VENDOR_FORGE
+# ``db_path=None`` defaults below defer to knowledge_log's call-time
+# resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
+# production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
-    DEFAULT_DB_PATH,
     Iteration,
+    decisive_win_rate,
     record_iteration,
 )
 from .proposer import ProposerConfig, ProposerInput, propose
@@ -93,7 +96,7 @@ def propose_then_iterate(
     parent_iteration_id: Optional[int] = None,
     games_per_pod: int = 10,
     filler_pairs: int = 2,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     analyst_config: Optional[AnalystConfig] = None,
     proposer_config: Optional[ProposerConfig] = None,
 ) -> "IterationResult":
@@ -131,7 +134,7 @@ def run_one_iteration(
     parent_iteration_id: Optional[int] = None,
     games_per_pod: int = 10,
     filler_pairs: int = 2,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Optional[Path] = None,
     analyst_config: Optional[AnalystConfig] = None,
 ) -> IterationResult:
     """Run one full propose→simulate→analyze cycle for a deck.
@@ -158,23 +161,68 @@ def run_one_iteration(
     )
 
     # Step 6: verdict.
-    verdict = analyze(
-        AnalystInput(
-            deck_name=deck_filename,
-            bracket=bracket,
-            audit_manifest=audit_manifest,
-            sim_report=cmp_report.to_dict(),
-        ),
-        config=analyst_config,
-    )
+    #
+    # Guard ("no silent failures"): if every pod failed — JVM crash,
+    # timeout with nothing salvageable — compare() returns total_games=0.
+    # The old code divided by max(1, total - draws) and recorded
+    # win_rate_old=0.0 / win_rate_new=0.0, a FABRICATED "empirical
+    # neutral" that poisoned the knowledge log as if 0-0 had actually
+    # been observed at the table. Refuse to render an empirical verdict
+    # on zero attributed games: record the row as 'pending' (the same
+    # label _proposer_sim._verdict_from_ab uses for skipped/failed sims)
+    # with NULL win rates, so the iteration can be re-run later and no
+    # analyst/LLM wastes a call on an empty sim.
+    # Head-to-head decisive count (2026-07-20 convention, see
+    # knowledge_log's schema docstring): games one of the TWO COMPARED
+    # VERSIONS actually won. The previous denominator, total_games -
+    # draws (611feff), also counted FILLER-won pod games — games the
+    # old/new pair can never win, but which fillers take roughly half
+    # the time in a 4-player pod — so this writer's rates sat ~2x lower
+    # than the AB-shaped writers' (wins_a + wins_b) for the same
+    # outcome. wins_old + wins_new is the quantity every verdict gate
+    # counts and every writer can compute, so it is THE convention.
+    decisive = cmp_report.old_stats.wins + cmp_report.new_stats.wins
+    if cmp_report.total_games == 0:
+        reason = (
+            f"sim produced no attributed games "
+            f"({cmp_report.failed_pods}/{cmp_report.pods_planned or len(cmp_report.pods)} "
+            f"pod(s) failed, {cmp_report.excluded_games} unattributed game(s) "
+            f"discarded) — no empirical verdict recorded"
+        )
+        print(f"WARNING: {reason}", flush=True)
+        verdict = Verdict(
+            label="pending",
+            confidence=0.0,
+            reasoning=reason,
+            lessons=[],
+            source="harness",
+        )
+        win_rate_old = None
+        win_rate_new = None
+        margin = None
+    else:
+        verdict = analyze(
+            AnalystInput(
+                deck_name=deck_filename,
+                bracket=bracket,
+                audit_manifest=audit_manifest,
+                sim_report=cmp_report.to_dict(),
+            ),
+            config=analyst_config,
+        )
+        # Draws AND filler wins are excluded from the denominator. If
+        # every attributed game drew or went to a filler there is no
+        # head-to-head sample — record NULL win rates rather than a fake
+        # 0.0/0.0 (the old max(1, ...) clamp did exactly that; NULL-when-
+        # zero follows 1ae44f9). decisive_win_rate is the shared
+        # convention helper ALL knowledge_log win-rate writers route
+        # through — same denominator rule, same rounding — so the columns
+        # stay comparable across writers.
+        win_rate_old = decisive_win_rate(cmp_report.old_stats.wins, decisive)
+        win_rate_new = decisive_win_rate(cmp_report.new_stats.wins, decisive)
+        margin = cmp_report.new_stats.wins - cmp_report.old_stats.wins
 
     # Step 7: persist.
-    win_rate_old = (
-        cmp_report.old_stats.wins / max(1, cmp_report.total_games - cmp_report.draws)
-    )
-    win_rate_new = (
-        cmp_report.new_stats.wins / max(1, cmp_report.total_games - cmp_report.draws)
-    )
     snapshot_text = new_path.read_text(encoding="utf-8") if new_path.exists() else None
     # Use the Moxfield publicId from the .dck metadata as the durable deck_id.
     # Falls back to the filename if the deck pre-dates the Moxfield= metadata
@@ -192,9 +240,9 @@ def run_one_iteration(
             sim_report=cmp_report.to_dict(),
             verdict=verdict.label,
             verdict_notes=verdict.reasoning,
-            win_rate_old=round(win_rate_old, 3),
-            win_rate_new=round(win_rate_new, 3),
-            margin=cmp_report.new_stats.wins - cmp_report.old_stats.wins,
+            win_rate_old=win_rate_old,
+            win_rate_new=win_rate_new,
+            margin=margin,
             deck_snapshot=snapshot_text,
         ),
         db_path=db_path,
@@ -204,6 +252,10 @@ def run_one_iteration(
         "kept": "continue",
         "reverted": "revert",
         "neutral": "stop",  # User decides; loop pauses by default.
+        # Sim failed outright (zero attributed games) — nothing empirical
+        # happened, so the only sane move is to stop and let the user
+        # investigate/re-run. Continuing would iterate on unverified data.
+        "pending": "stop",
     }[verdict.label]
 
     return IterationResult(

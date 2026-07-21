@@ -2,7 +2,7 @@
 <AutomatedInstallation langpack="eng">
   <com.izforge.izpack.panels.htmlinfo.HTMLInfoPanel id="welcome"/>
   <com.izforge.izpack.panels.target.TargetPanel id="install_dir">
-    <installpath>C:\dev\commander_builder\vendor\forge</installpath>
+    <installpath>C:\dev\commander-builder\vendor\forge</installpath>
   </com.izforge.izpack.panels.target.TargetPanel>
   <com.izforge.izpack.panels.packs.PacksPanel id="sdk_pack_select">
     <pack index="0" name="Forge pack" selected="true"/>

@@ -55,3 +55,7 @@ test2_rerun_v2.json
 *.swp
 .DS_Store
 Thumbs.db
+
+# Runtime artifacts (pytest harness state, orchestrator data dirs)
+.pytest_harness/
+data/

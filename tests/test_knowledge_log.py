@@ -521,8 +521,21 @@ def test_verdict_breakdown_includes_all_verdicts_zeroed(db):
     assert bucket["kept"] == 1
     assert bucket["reverted"] == 0
     assert bucket["neutral"] == 0
+    assert bucket["inconclusive"] == 0
     assert bucket["pending"] == 0
     assert bucket["total"] == 1
+
+
+def test_update_verdict_accepts_inconclusive(db):
+    """'inconclusive' (low-N gate from _verdict_from_ab) is a valid verdict."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="pending"),
+        db_path=db,
+    )
+    it_id = recent_iterations(db_path=db)[0].id
+    update_verdict(it_id, "inconclusive", db_path=db)  # must not raise
+    assert recent_iterations(db_path=db)[0].verdict == "inconclusive"
 
 
 # ---------------------------------------------------------------------------
@@ -657,3 +670,82 @@ def test_init_db_migration_is_idempotent(tmp_path):
     set_milestone(it_id, "still-works", db_path=p)
     row = get_iteration(it_id, db_path=p)
     assert row.milestone == "still-works"
+
+
+# --- decisive_win_rate — the one win-rate convention (2026-07-19) -----------
+
+
+def test_decisive_win_rate_is_wins_over_decisive_rounded_4():
+    """Canonical convention every win_rate_old/new writer routes through:
+    wins / decisive, 4-decimal rounding."""
+    from commander_builder.knowledge_log import decisive_win_rate
+    assert decisive_win_rate(8, 18) == round(8 / 18, 4)
+    assert decisive_win_rate(0, 18) == 0.0     # a real observed 0-for-18
+    assert decisive_win_rate(18, 18) == 1.0
+
+
+def test_decisive_win_rate_returns_none_on_zero_decisive():
+    """decisive <= 0 means nothing was measured — NULL, never a fabricated
+    0.0 that would read as an observed 'never wins'."""
+    from commander_builder.knowledge_log import decisive_win_rate
+    assert decisive_win_rate(0, 0) is None
+    assert decisive_win_rate(5, 0) is None     # defensive: bad caller math
+    assert decisive_win_rate(0, -1) is None
+
+# ---------------------------------------------------------------------------
+# fp013_gate_progress -- "N / 1,000 high-confidence curator iterations"
+# ---------------------------------------------------------------------------
+#
+# FP-013 (project-tuned LLM) is parked until the live knowledge_log holds
+# ~1,000 high-confidence curator iterations: rows carrying the full
+# (audit manifest, curator decision, >=40-game sim verdict) triple. This
+# counter is the gate tracker the fp013-scope memo asked for.
+
+def _gate_progress(**kwargs):
+    # Imported lazily so a missing symbol fails these tests, not collection.
+    from commander_builder.knowledge_log import fp013_gate_progress
+    return fp013_gate_progress(**kwargs)
+
+
+def _gate_row(db, *, manifest={"added": ["A"], "removed": ["B"]},
+              verdict="kept", sim_report=None):
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        audit_manifest=manifest, verdict=verdict, sim_report=sim_report,
+    )
+    return record_iteration(it, db_path=db)
+
+
+def test_fp013_gate_progress_empty_db(db):
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    assert progress["target"] == 1000
+    assert progress["min_games"] == 40
+    assert progress["pct"] == 0.0
+
+
+def test_fp013_gate_progress_counts_only_high_confidence(db):
+    # Qualifying: manifest + decided verdict + >=40-game sim.
+    _gate_row(db, verdict="kept",
+              sim_report={"wins_a": 10, "wins_b": 30, "games": 40})
+    # Qualifying: ComparisonReport shape stores the count as total_games.
+    _gate_row(db, verdict="neutral", sim_report={"total_games": 48})
+    # NOT qualifying: verdict still pending.
+    _gate_row(db, verdict="pending", sim_report={"games": 40})
+    # NOT qualifying: low-game sim (the pre-2026-05-24 2-6 game era).
+    _gate_row(db, verdict="kept", sim_report={"games": 5})
+    # NOT qualifying: no audit manifest (label without the question).
+    _gate_row(db, manifest=None, verdict="kept", sim_report={"games": 40})
+    # NOT qualifying: no sim at all.
+    _gate_row(db, verdict="kept", sim_report=None)
+
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 2
+    assert progress["pct"] == 0.2
+
+
+def test_fp013_gate_progress_min_games_override(db):
+    _gate_row(db, verdict="kept", sim_report={"games": 5})
+    progress = _gate_progress(db_path=db, min_games=5)
+    assert progress["count"] == 1
+    assert progress["min_games"] == 5

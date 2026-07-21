@@ -2,7 +2,7 @@
 
 > Single technical reference for the project: module map, data flow,
 > persistence, coding conventions, and the decisions that shaped them.
-> [STATUS.md](../STATUS.md) tracks operational state; [CHANGELOG.md](../CHANGELOG.md)
+> [STATUS.md](STATUS.md) tracks operational state; [CHANGELOG.md](CHANGELOG.md)
 > records what landed.
 
 ---
@@ -104,6 +104,7 @@ layers never import higher.
 | `run_match` | User deck vs curated pool (or fallback opponents), `MatchupReport` | Improvement decisions. That's the analyst loop. |
 | `compare_versions` | Old-vs-new head-to-head A/B sim; parallel pod dispatch; adaptive early-stop; intra-pod abort; card-level diff | Whether the new version is "better". That's `analyst`. |
 | `snapshot_deck` | File-copy `.dck` to versioned filename; refuse-clobber semantics | What to do with the snapshot. Workflow / iteration_loop owns. |
+| `dck_meta` | The filename↔`Name=` win-attribution invariant: `rewrite_name_to_stem` rewrites `[metadata] Name=` to the filename stem (original kept as `DisplayName=`) in every deck writer that copies/splices an existing `.dck` | Deciding filenames. Callers (snapshot / proposer / meta-test / import) pick the name. |
 | `meta_test` | Pull top-likes Moxfield + EDHREC Average Deck for a commander; compare-versus-references; must-add / consider / off-meta | Acting on the recommendations. The user does. |
 | `improvement_advisor` (orchestrator) | Dispatch to multi-source recommenders; `advise()` entry point; `_advise_steps()` streaming generator; name validation + pricing snapshot | Running the sim. That's `compare_versions`. |
 | `_advisor_models` | `DeckDiagnosis`, `SwapRecommendation`, `AdviceReport`, `AdvicePhase` dataclasses | Serialization schema. JSON mapping is implicit. |
@@ -114,6 +115,7 @@ layers never import higher.
 | `_advisor_manabase` | Curated manabase essentials (`_missing_manabase_recommendations`) | Role-based adds. That's other advisor paths. |
 | `_advisor_role_helpers` | Thin role-classifier wrapper for advisor use | Core classification. That's `staples.classify_role_extended`. |
 | `analyst` | Verdict (`kept` / `reverted` / `neutral`) with confidence + reasoning + lessons | Running the comparison itself. |
+| `_llm_json` | Shared robust JSON extraction for LLM responses: `try_extract_json_object` (fence strip / brace-scan recovery) + `extract_json_object` raising a loud `LLMJsonError` with context + response snippets | Prompting or calling the LLM. Analyst / proposer / curator / advisor call it on the raw reply. |
 | `proposer` (orchestrator) | Router for manual / Claude / Ollama proposers; the `Proposal` dataclass; `auto_propose()` curator pipeline; `apply_proposal_to_deck`; `_extract_curator_json` | Validating proposals. `compare_versions` + `analyst` do. |
 | `_proposer_filters` | Post-response curator filters: `enforce_bracket_caps` (game-changers stripped at B1/B2), `enforce_color_identity` (off-color adds rejected via Scryfall CI), `_load_game_changers` | Recommendation logic. The advisor / curator generate; filters reject. |
 | `_proposer_sim` | Forge A/B sim glue: `_verdict_from_ab` (margin → kept/reverted/neutral), `_ab_to_iteration_fields`, bracket-aware `_pick_filler_decks`, `_run_sim_and_record`, `_log_auto_curate_iteration` | Running the sim itself. `forge_runner` + `compare_versions` do. |
@@ -591,7 +593,7 @@ All MTG-stack repos are public on GitHub. Before every commit:
 ## Key decisions (rationale captured at the time)
 
 For *recent* decisions (last few days) see
-[STATUS.md](../STATUS.md#decisions-recently-made-recent-context). Older
+[STATUS.md](STATUS.md#decisions-recently-made-recent-context). Older
 load-bearing decisions:
 
 - **Python over Node.js.** Better stdlib subprocess management for

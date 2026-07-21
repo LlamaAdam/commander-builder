@@ -472,10 +472,17 @@ def build_dashboard(
         from .staples import UNIVERSAL_STAPLES_LC
         gc_set = load_game_changers()
         # Match the bracket-tile filter so the banner pill and the
-        # bracket sub-line agree on the count.
+        # bracket sub-line agree on the count. Membership is
+        # case-folded to match _count_game_changers above — that
+        # helper lower-cases both sides, so an exact-case check here
+        # made the legality banner and the bracket tile disagree on
+        # the same page whenever a deck line's casing differed from
+        # the GC list's canonical casing. Displayed names keep the
+        # deck line's original casing.
+        gc_lc = {g.lower() for g in gc_set}
         in_deck_gcs = sorted({
             n for n in deck_card_names
-            if n in gc_set and n.lower() not in UNIVERSAL_STAPLES_LC
+            if n.lower() in gc_lc and n.lower() not in UNIVERSAL_STAPLES_LC
         })
     except Exception as exc:  # noqa: BLE001 — dashboard must not fail on legality probes
         # WotC game-changers CDN is occasionally flaky; logging

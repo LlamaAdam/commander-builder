@@ -13,12 +13,76 @@ module split. External code keeps importing from
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Optional
 
 from ._advisor_models import DeckDiagnosis, SwapRecommendation
 from ._advisor_role_helpers import _role_for_card
 from .edhrec_client import AverageDeck, CardEntry, CommanderPage
 from .staples import is_land, is_universal_staple
+
+
+# ---------------------------------------------------------------------------
+# Tribal-bypass helpers: avoid recommending cuts of cards that share the
+# commander's tribal subtype (Angel, Dragon, Goblin, ...) just because
+# EDHREC's commander-specific lists are thin. CACHE-ONLY -- never touches the
+# network -- so cold/uncached cards quietly fall through to the existing cut
+# behavior instead of stalling the audit on a Scryfall fetch.
+# ---------------------------------------------------------------------------
+
+def _cached_scryfall(card_name: str) -> Optional[dict]:
+    """Return the on-disk Scryfall snapshot for ``card_name`` or ``None``.
+    No network. Mirrors ``scryfall_client.lookup_card``'s cache-read step."""
+    from .scryfall_client import _cache_path
+    try:
+        p = _cache_path(card_name)
+    except Exception:  # noqa: BLE001
+        return None
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _commander_tribal_subtype(commander_name: str) -> Optional[str]:
+    """If the commander has a creature subtype that its own oracle text
+    references (e.g. ``Legendary Creature -- Angel`` + oracle text mentioning
+    "Angels"), return that subtype as the deck's tribal theme. Returns
+    ``None`` for non-tribal commanders or on a Scryfall-cache miss."""
+    data = _cached_scryfall(commander_name)
+    if not data:
+        return None
+    type_line = data.get("type_line") or ""
+    oracle = (data.get("oracle_text") or "").lower()
+    if "—" not in type_line and "--" not in type_line:
+        # Multi-face / split cards may concatenate; pick the first face.
+        return None
+    # First face only -- DFC / split cards join faces with " // ".
+    first_face = type_line.split(" // ", 1)[0]
+    # Subtypes live after the em-dash (or ASCII "--" on some snapshots).
+    sep = "—" if "—" in first_face else "--"
+    parts = first_face.split(sep, 1)
+    if len(parts) < 2:
+        return None
+    subtype_tokens = [t for t in parts[1].split() if t.isalpha()]
+    for st in subtype_tokens:
+        st_lc = st.lower()
+        # Match singular OR plural occurrence: "Angel" / "Angels".
+        if re.search(rf"\b{re.escape(st_lc)}s?\b", oracle):
+            return st
+    return None
+
+
+def _card_has_subtype(card_name: str, subtype: str) -> bool:
+    """True iff ``card_name``'s cached type line contains ``subtype``."""
+    data = _cached_scryfall(card_name)
+    if not data:
+        return False
+    type_line = (data.get("type_line") or "").lower()
+    return subtype.lower() in type_line
 
 
 # How many candidate adds + cuts to recommend. Bumped from 8 → 12
@@ -119,6 +183,14 @@ def _heuristic_swap_recommendations(
     # Backward compat for callers that still pass ``tag_page=`` —
     # promoted to a list internally. Drop in a future version.
     tag_page: Optional[CommanderPage] = None,
+    # Recency signal: lowercased names of cards currently trending on
+    # EDHREC's time-windowed ``/top`` view (``edhrec_client.fetch_top_cards``).
+    # A candidate add that is ALSO trending gets floated up in the ranking
+    # and annotated — a card spiking this month is a stronger add than a
+    # stale all-time staple. Only *re-ranks existing commander-relevant
+    # candidates*; it never introduces off-archetype/off-color cards, so a
+    # bad/empty fetch can only fail to boost, never add noise.
+    trending: Optional[set[str]] = None,
 ) -> list[SwapRecommendation]:
     """Pure-data swap proposals from EDHREC inclusion-% deltas.
 
@@ -301,6 +373,9 @@ def _heuristic_swap_recommendations(
                 f"EDHREC {bucket}: in {inclusion_phrase}"
                 + (f", synergy {c.synergy_pct:.0f}%" if c.synergy_pct else "")
             )
+        is_trending = bool(trending) and c.name.lower() in trending
+        if is_trending:
+            reason_text += " — trending now on EDHREC /top"
         add_recs.append(SwapRecommendation(
             card=c.name,
             action="add",
@@ -310,18 +385,26 @@ def _heuristic_swap_recommendations(
                 "synergy_pct": c.synergy_pct,
                 "source": f"edhrec.{bucket}",
                 "role": role,
+                "trending": is_trending,
             },
         ))
 
-    # Re-rank by diagnosis priority roles, when present. Adds in the
-    # priority-role list float to the top in their listed order;
-    # everything else keeps its original (synergy-then-top) ordering.
-    # Stable sort preserves intra-bucket order.
-    if diagnosis and diagnosis.priority_roles:
-        priority_index = {r: i for i, r in enumerate(diagnosis.priority_roles)}
-        def _rank(r: SwapRecommendation) -> int:
+    # Re-rank by diagnosis priority roles (primary) then trending status
+    # (secondary). Adds whose role is in the priority list float to the top
+    # in listed order; within the same role-rank, cards currently trending
+    # on EDHREC /top come first. When there's no diagnosis, role-rank is
+    # constant so trending becomes the primary key (a recency boost over the
+    # default synergy-then-top order). Stable sort preserves intra-key order.
+    if (diagnosis and diagnosis.priority_roles) or trending:
+        priority_index = (
+            {r: i for i, r in enumerate(diagnosis.priority_roles)}
+            if diagnosis else {}
+        )
+        def _rank(r: SwapRecommendation) -> tuple[int, int]:
             role = r.evidence.get("role", "unknown")
-            return priority_index.get(role, len(priority_index) + 1)
+            role_rank = priority_index.get(role, len(priority_index) + 1)
+            trending_rank = 0 if r.evidence.get("trending") else 1
+            return (role_rank, trending_rank)
         add_recs.sort(key=_rank)
 
     # Split adds into two pools:
@@ -388,7 +471,23 @@ def _heuristic_swap_recommendations(
     if len(edhrec_known) < MIN_EDHREC_SIGNAL_FOR_CUTS:
         return recs
 
-    for card in deck_cards:
+    # Tribal-theme bypass. When the commander has a creature subtype its
+    # oracle text references (Giada -> Angel, Krenko -> Goblin, Edgar ->
+    # Vampire, ...), don't recommend cutting cards that share that subtype
+    # just because they aren't on EDHREC's commander-specific top/high-
+    # synergy lists -- EDHREC's lists skew toward the most-played builds
+    # and miss in-tribe but less-popular options (Glorious Protector in a
+    # Giada deck, for instance). Cache-only detection -- no network.
+    commander_tribal = _commander_tribal_subtype(edhrec_page.commander_name)
+
+    # ``deck_cards`` is a set, and with more absence-candidates than
+    # ``cut_limit`` the truncation below would otherwise keep whichever
+    # cards happened to iterate first — set order varies per process
+    # (PYTHONHASHSEED), so two identical advisor runs could recommend
+    # DIFFERENT cuts. Cut candidacy is pure absence (no per-card score
+    # exists at this point), so plain name order is the deterministic
+    # tiebreak: same deck + same EDHREC page → same cut list, always.
+    for card in sorted(deck_cards):
         # Don't recommend cutting any land (basic, dual, fetch,
         # shock, MDFC, utility) or universal staples. The manabase
         # is a deliberate construction; a missing reference doesn't
@@ -396,10 +495,20 @@ def _heuristic_swap_recommendations(
         if is_land(card) or is_universal_staple(card):
             continue
         if card.lower() not in edhrec_known:
+            if commander_tribal and _card_has_subtype(card, commander_tribal):
+                # In-tribe card -- preserve it even though EDHREC's
+                # commander page didn't list it.
+                continue
             recs.append(SwapRecommendation(
                 card=card,
                 action="cut",
-                reason="not in EDHREC's top-cards or high-synergy lists for this commander",
+                # Rephrased: was "not in EDHREC's top-cards or high-synergy
+                # lists for this commander", which read like a card-quality
+                # claim. It is really an off-theme signal (the card doesn't
+                # appear on this commander's signature lists), so the
+                # wording now reflects that.
+                reason=("off-theme for this commander "
+                        "(not in its EDHREC top/high-synergy lists)"),
                 evidence={"source": "edhrec.absence"},
             ))
             if sum(1 for r in recs if r.action == "cut") >= cut_limit:

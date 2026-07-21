@@ -30,6 +30,7 @@ weekly.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import time
@@ -43,6 +44,9 @@ from typing import Optional
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = REPO_ROOT / ".cache" / "edhrec"
 EDHREC_BASE = "https://edhrec.com"
+# Direct JSON API (no HTML scrape). Used by fetch_top_cards for the
+# time-windowed / by-type "top cards" pages.
+EDHREC_JSON_BASE = "https://json.edhrec.com/pages"
 USER_AGENT = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
 REQUEST_SLEEP_SEC = 0.5  # EDHREC isn't rate-limited like Scryfall but be polite.
 CACHE_TTL_HOURS = 24
@@ -205,10 +209,21 @@ def _http_get_text_with_retry(
 ) -> str:
     """GET ``url`` with exponential backoff on transient failures.
 
-    Retries on 5xx HTTPError, 429 (rate-limited), and URLError (network /
-    DNS / timeout). 404 is deterministic — caller decides whether the
-    miss is fatal — and propagates without retrying. Other 4xx (400,
-    401, 403) are caller-bug class errors and also don't retry.
+    Retries on 5xx HTTPError, 429 (rate-limited), URLError (network /
+    DNS / timeout), and ``http.client.HTTPException`` (mid-body
+    connection failures — see below). 404 is deterministic — caller
+    decides whether the miss is fatal — and propagates without
+    retrying. Other 4xx (400, 401, 403) are caller-bug class errors
+    and also don't retry.
+
+    Why HTTPException: ``urllib.request.urlopen`` wraps most transport
+    failures in URLError/HTTPError, but once the response object is
+    handed back, ``resp.read()`` (inside ``_http_get_text``) talks to
+    the raw ``http.client`` layer directly. A server/CDN that drops
+    the connection mid-body raises ``http.client.IncompleteRead`` (or
+    another ``HTTPException`` subclass) — which is NOT an OSError and
+    NOT wrapped by urllib. These are exactly as transient as a 503,
+    so they get the same retry treatment.
 
     Backoff: when the server sends a ``Retry-After`` header (RFC 7231),
     honor it (clamped to ``MAX_RETRY_AFTER_SEC`` so a 300+s instruction
@@ -233,6 +248,14 @@ def _http_get_text_with_retry(
         except urllib.error.URLError as exc:
             last_exc = exc
         except TimeoutError as exc:
+            last_exc = exc
+        except http.client.HTTPException as exc:
+            # IncompleteRead / RemoteDisconnected / other connection-state
+            # errors raised by resp.read() after urlopen() succeeded.
+            # (RemoteDisconnected also subclasses ConnectionResetError so
+            # some of these are OSErrors too — but IncompleteRead is not,
+            # and would otherwise escape the loop entirely.) Transient by
+            # nature: the body cut off mid-transfer, so retry.
             last_exc = exc
         if attempt >= max_retries:
             break
@@ -430,14 +453,169 @@ def _parse_commander_page(commander_name: str, slug: str, html: str) -> Commande
     return page
 
 
+def _page_has_card_signal(page: CommanderPage) -> bool:
+    """True when the parse extracted at least one card from ANY section.
+
+    Why this exists: an HTTP 200 is NOT proof we got real EDHREC data.
+    CDN bot-challenge pages, redirect interstitials, and site schema
+    changes all come back 200 with HTML that has no usable
+    ``__NEXT_DATA__`` card lists. ``_parse_commander_page`` deliberately
+    degrades to an empty page in that case (its schema-tolerance
+    contract), so the CALLER must decide whether the result is worth
+    caching. Writing an empty parse to the 24h disk cache poisons every
+    advisor/audit run for that commander (or tag) within the TTL —
+    zero EDHREC signal, no error, no retry, recommendations quietly
+    degrade. Mirrors the ``if salt_map:`` guard in ``fetch_salt_list``.
+
+    ``deck_count`` / ``average_deck_url`` alone do NOT count as signal:
+    the recommendation pipeline consumes cards, so a page with metadata
+    but zero cards would still starve every run that hits the cache.
+    """
+    return bool(
+        page.top_cards
+        or page.high_synergy_cards
+        or page.new_cards
+        or page.category_lists
+    )
+
+
+def _warn_empty_parse(kind: str, ident: str) -> None:
+    """One LOUD, grep-able line when a 200-OK fetch parsed to nothing.
+
+    Kept as a helper so the commander-page and tag-page paths emit an
+    identical message shape — operators grep server logs for
+    ``[edhrec] WARNING`` to distinguish "EDHREC was down" from "EDHREC
+    answered but served us a challenge page".
+    """
+    print(
+        f"[edhrec] WARNING: {kind} {ident!r} fetched OK but contained no "
+        "card data — EDHREC returned a page with no usable __NEXT_DATA__ "
+        "(possibly a bot-challenge page, redirect interstitial, or schema "
+        "change). Result NOT cached; will retry next run.",
+        flush=True,
+    )
+
+
+# Recognized "top" page slugs: time windows + card types. EDHREC serves
+# each at json.edhrec.com/pages/top/<slug>.json.
+TOP_WINDOWS = ("year", "month", "week")  # year == "Past 2 Years"
+TOP_TYPES = ("creatures", "instants", "sorceries", "artifacts",
+             "enchantments", "planeswalkers", "lands", "battles")
+
+
+def fetch_top_cards(
+    slug: str = "year",
+    cache: bool = True,
+    ttl_hours: int = CACHE_TTL_HOURS,
+) -> list[CardEntry]:
+    """Fetch EDHREC's "top cards" page for a time window or card type.
+
+    ``slug`` is a window (``year`` = past 2 years, ``month``, ``week``) or
+    a card type (``creatures``, ``instants``, ``lands``, …). Returns a
+    ``CardEntry`` list ranked by popularity (``num_decks`` desc). Recency-
+    aware: ``month``/``week`` surface cards trending NOW vs all-time
+    staples — a stronger signal for "what to add" than a stale staple.
+
+    Returns ``[]`` on any failure (network/404/parse) so callers degrade
+    gracefully. Cached to ``.cache/edhrec/top-<slug>.json``.
+    """
+    cache_path = _cache_path(f"top-{slug}")
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return [CardEntry(**e) for e in data.get("cards", [])]
+        except (OSError, ValueError, TypeError):
+            pass
+
+    url = f"{EDHREC_JSON_BASE}/top/{urllib.parse.quote(slug)}.json"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        raw = _http_get_text_with_retry(url)
+        payload = json.loads(raw)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        # OSError covers HTTPError/URLError/TimeoutError (all real
+        # network failures); http.client.HTTPException covers
+        # IncompleteRead-class mid-body disconnects that resp.read()
+        # raises WITHOUT an OSError wrapper (they'd otherwise crash the
+        # caller after retries are exhausted); ValueError covers
+        # JSONDecodeError (CDN served non-JSON, e.g. a challenge page).
+        # Anything else is a programming error and should propagate,
+        # not be silently converted into "no top cards".
+        print(
+            f"[edhrec] WARNING: top-cards fetch failed for {slug!r} "
+            f"({exc!r}) — continuing without trending signal",
+            flush=True,
+        )
+        return []
+
+    buckets: dict[str, list[CardEntry]] = {}
+    _walk_for_cardlists(payload, buckets)
+    seen: set[str] = set()
+    cards: list[CardEntry] = []
+    for lst in buckets.values():
+        for c in lst:
+            key = c.name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cards.append(c)
+    # /top "inclusion" is a raw deck count, not a %, so rank by num_decks.
+    cards.sort(key=lambda c: c.num_decks, reverse=True)
+
+    # Valid JSON but zero recognizable cards = schema change (or a bad
+    # slug). The ``if cache and cards`` guard below already refuses to
+    # cache the empty parse; warn so the degradation isn't silent.
+    # (Bespoke message rather than _warn_empty_parse — this is the JSON
+    # API, so "no __NEXT_DATA__" would be the wrong diagnosis.)
+    if not cards:
+        print(
+            f"[edhrec] WARNING: top-cards page {slug!r} fetched OK but "
+            "contained no recognizable cardlists — bad slug or JSON "
+            "schema change. Result NOT cached; will retry next run.",
+            flush=True,
+        )
+
+    if cache and cards:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"slug": slug,
+                        "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        "cards": [asdict(c) for c in cards]}),
+            encoding="utf-8")
+    return cards
+
+
+def top_main(argv=None) -> int:
+    """``commander-top`` — list EDHREC's most-played cards for a window/type."""
+    import argparse
+    p = argparse.ArgumentParser(
+        prog="commander-top",
+        description="EDHREC top cards by time window (year/month/week) or "
+                    "card type (creatures/instants/lands/…).")
+    p.add_argument("slug", nargs="?", default="year",
+                   help="year (past 2yr) | month | week | a card type. Default year.")
+    p.add_argument("--limit", type=int, default=25)
+    args = p.parse_args(argv)
+    cards = fetch_top_cards(args.slug)
+    if not cards:
+        print(f"(no top cards for {args.slug!r} — bad slug or network)")
+        return 1
+    print(f"EDHREC top cards [{args.slug}] (by deck count):")
+    for i, c in enumerate(cards[:args.limit], 1):
+        print(f"  {i:>3}. {c.name}  ({c.num_decks:,} decks)")
+    return 0
+
+
 def fetch_commander_page(
     commander_or_slug: str,
     cache: bool = True,
     ttl_hours: int = CACHE_TTL_HOURS,
-) -> CommanderPage:
+) -> Optional[CommanderPage]:
     """Fetch + parse one commander's EDHREC page. Caches the parsed
     CommanderPage to disk; subsequent calls within `ttl_hours` skip the
-    network."""
+    network. Returns ``None`` when EDHREC has no page (404 — unknown/mis-slugged
+    commander), the retries are exhausted, or parsing fails; callers must
+    handle None (the heuristic recommender already does)."""
     slug = commander_or_slug if "-" in commander_or_slug and commander_or_slug.islower() \
         else commander_slug(commander_or_slug)
     cache_path = _cache_path(slug)
@@ -461,9 +639,35 @@ def fetch_commander_page(
         if exc.code == 404:
             return None
         return None
-    except Exception:
+    except (OSError, http.client.HTTPException) as exc:
+        # URLError and TimeoutError are both OSError subclasses, so
+        # OSError covers every network-level failure urllib itself can
+        # raise (DNS, connection refused, TLS, socket timeout) WITHOUT
+        # also swallowing genuine bugs — the old blanket
+        # ``except Exception`` silently converted e.g. a parser-adjacent
+        # TypeError into "EDHREC unavailable". http.client.HTTPException
+        # closes the one gap in that theory: resp.read() can raise
+        # IncompleteRead (mid-body disconnect) and friends, which are
+        # NOT OSError subclasses and are just as much "the network
+        # failed" as a socket timeout. Programming errors still
+        # propagate; network errors degrade gracefully, but loudly
+        # enough (exception repr) to be diagnosable from the server log.
+        print(
+            f"[edhrec] WARNING: commander-page fetch failed for {slug!r} "
+            f"({exc!r}) — continuing without EDHREC signal",
+            flush=True,
+        )
         return None
     page = _parse_commander_page(commander_or_slug, slug, html)
+    # Cache-poisoning guard: only cache a parse that actually carries
+    # card signal. A 200-OK challenge page / interstitial / schema-shift
+    # parses to an EMPTY CommanderPage; caching that would silently
+    # starve every run for this commander for the next 24h. Return the
+    # empty page uncached instead (callers already handle empty pages),
+    # so the next run retries the fetch.
+    if not _page_has_card_signal(page):
+        _warn_empty_parse("commander page", slug)
+        return page
     if cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(page.to_json(), encoding="utf-8")
@@ -547,12 +751,28 @@ def fetch_salt_list(
     time.sleep(REQUEST_SLEEP_SEC)
     try:
         html = _http_get_text_with_retry(url)
-    except Exception:  # noqa: BLE001
+    except (OSError, http.client.HTTPException) as exc:
+        # OSError covers HTTPError/URLError/TimeoutError;
+        # http.client.HTTPException covers IncompleteRead-class mid-body
+        # disconnects that escape urllib's OSError hierarchy. Together
+        # that's every real network failure — without swallowing
+        # programming errors like the old blanket ``except Exception``
+        # did.
+        print(
+            f"[edhrec] WARNING: salt-list fetch failed ({exc!r}) — "
+            "continuing without salt scores",
+            flush=True,
+        )
         return {}
 
     try:
         next_data = _extract_next_data(html)
     except ValueError:
+        # 200-OK but no __NEXT_DATA__ → challenge page / interstitial /
+        # schema change. Nothing is cached on this path (the write below
+        # is guarded by ``if salt_map``), so the next run retries — but
+        # say so loudly instead of silently returning no salt signal.
+        _warn_empty_parse("salt list", "top/salt")
         return {}
 
     # Walk the blob looking for a section with cards carrying a
@@ -584,6 +804,13 @@ def fetch_salt_list(
             for v in node:
                 _walk(v)
     _walk(next_data)
+
+    # A present-but-saltless blob means the page schema shifted (the
+    # ``label: "Salt Score: X"`` annotation moved/renamed). Warn so the
+    # operator notices; the guard below already skips the cache write,
+    # so the next run retries.
+    if not salt_map:
+        _warn_empty_parse("salt list", "top/salt")
 
     if cache and salt_map:
         try:
@@ -644,7 +871,17 @@ def fetch_tag_page(
         if exc.code == 404:
             return None
         return None
-    except Exception:
+    except (OSError, http.client.HTTPException) as exc:
+        # Same rationale as fetch_commander_page: OSError covers
+        # URLError/TimeoutError (network-level failures), HTTPException
+        # covers resp.read()'s mid-body disconnects (IncompleteRead is
+        # not an OSError) — while letting programming errors propagate
+        # instead of masquerading as "EDHREC unavailable".
+        print(
+            f"[edhrec] WARNING: tag-page fetch failed for {safe_slug!r} "
+            f"({exc!r}) — continuing without tag signal",
+            flush=True,
+        )
         return None
     # Reuse the commander-page parser — tag pages have the same
     # __NEXT_DATA__ shape. The ``commander_name`` field on the
@@ -656,6 +893,13 @@ def fetch_tag_page(
         slug=safe_slug,
         html=html,
     )
+    # Same cache-poisoning guard as fetch_commander_page: a 200-OK
+    # challenge page parses to an empty CommanderPage; caching it would
+    # zero out this tag's signal for the next 24h. Return it uncached so
+    # the next run retries.
+    if not _page_has_card_signal(page):
+        _warn_empty_parse("tag page", safe_slug)
+        return page
     if cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(page.to_json(), encoding="utf-8")
@@ -701,13 +945,54 @@ class AverageDeck:
         """Build a Moxfield-shape deck JSON so existing import code can
         consume this without a separate path. Commander cards are routed to
         the [Commander] section by name match (the commander itself in the
-        cards list); everything else lands in [Main]."""
+        cards list); everything else lands in [Main].
+
+        Basic-land handling (design choice 2026-05-30):
+        EDHREC exposes ``num_decks`` ("appears in N decks") for each card but
+        does NOT publish a per-basic count. The prior code used
+        ``max(1, min(40, num_decks))`` which produced decks with up to 40
+        copies of a single popular basic. Instead, we now treat the basics
+        that EDHREC lists as the deck's *basic-land slot mix* and distribute
+        ``max(0, 99 - non_basic_count)`` copies evenly across them (remainder
+        goes to the first-listed basics). When EDHREC lists no basics we
+        leave the deck short of 99 main rather than guessing a color
+        identity — the caller can decide to top up.
+        """
+        BASIC_TYPES = {
+            "forest", "island", "plains", "mountain", "swamp", "wastes",
+        }
         cmdr_name_lc = self.commander_name.lower()
         commanders: dict[str, dict] = {}
         mainboard: dict[str, dict] = {}
+
+        # Pre-pass: count non-basic mainboard entries + collect basics in
+        # the order EDHREC listed them.
+        non_basic_count = 0
+        listed_basics: list[int] = []  # indices into self.cards
+        for i, card in enumerate(self.cards):
+            lc = card.name.lower()
+            if lc == cmdr_name_lc:
+                continue
+            if lc in BASIC_TYPES:
+                listed_basics.append(i)
+            else:
+                non_basic_count += 1
+
+        # Even split of the remaining slots across the listed basics. Every
+        # listed basic gets an explicit quantity (possibly 0 when the
+        # non-basic load already meets/exceeds 99) so the prior 40-cap
+        # behavior never re-emerges via the default.
+        basic_target = max(0, 99 - non_basic_count)
+        basic_qty_by_idx: dict[int, int] = {idx: 0 for idx in listed_basics}
+        if listed_basics and basic_target > 0:
+            n = len(listed_basics)
+            base, remainder = divmod(basic_target, n)
+            for rank, idx in enumerate(listed_basics):
+                basic_qty_by_idx[idx] = base + (1 if rank < remainder else 0)
+
         for i, card in enumerate(self.cards):
             entry = {
-                "quantity": int(card.num_decks) if card.num_decks else 1,
+                "quantity": 1,
                 "card": {
                     "name": card.name,
                     "set": "",
@@ -715,20 +1000,12 @@ class AverageDeck:
                 },
             }
             if card.name.lower() == cmdr_name_lc:
-                # Commander goes to its own bucket; quantity is always 1.
                 entry["quantity"] = 1
                 commanders[f"cmdr-{i}"] = entry
             else:
-                # `num_decks` from EDHREC is "appears in N decks", not "use N
-                # copies". For mainboard, use 1 unless name suggests basic
-                # land where multiples are typical.
-                qty = 1
-                # Basics get a generous default; EDHREC average decks
-                # represent basic counts in the deck-count number.
-                lc = card.name.lower()
-                if lc in {"forest", "island", "plains", "mountain", "swamp", "wastes"}:
-                    qty = max(1, min(40, int(card.num_decks) or 1))
-                entry["quantity"] = qty
+                if i in basic_qty_by_idx:
+                    entry["quantity"] = basic_qty_by_idx[i]
+                # Non-basics keep qty=1 (singleton format).
                 mainboard[f"main-{i}"] = entry
         return {
             "name": f"EDHREC Average — {self.commander_name}"
@@ -851,12 +1128,25 @@ def fetch_average_deck(
         if exc.code == 404:
             return None
         return None
-    except Exception:
+    except (OSError, http.client.HTTPException) as exc:
+        # Same narrowing as the other fetchers: OSError covers
+        # URLError/TimeoutError, HTTPException covers mid-body
+        # disconnects from resp.read(); programming errors propagate.
+        print(
+            f"[edhrec] WARNING: average-deck fetch failed for {url!r} "
+            f"({exc!r}) — continuing without average-deck signal",
+            flush=True,
+        )
         return None
 
+    # Nothing below caches an empty result (both early returns skip the
+    # cache write), so a challenge page here can't poison the cache —
+    # but warn anyway so "no average deck" is distinguishable from
+    # "EDHREC served us an interstitial" in the logs.
     try:
         next_data = _extract_next_data(html)
     except ValueError:
+        _warn_empty_parse("average-deck page", cache_key)
         return None
 
     cards = _walk_for_average_deck_cards(next_data)
@@ -892,6 +1182,10 @@ if __name__ == "__main__":
         print("Usage: edhrec_client.py <commander-name-or-slug>")
         sys.exit(2)
     page = fetch_commander_page(" ".join(sys.argv[1:]))
+    if page is None:
+        print(json.dumps({"error": "no EDHREC page found (unknown commander, "
+                          "bad slug, or fetch failed)"}))
+        sys.exit(1)
     print(json.dumps({
         "commander": page.commander_name,
         "slug": page.slug,

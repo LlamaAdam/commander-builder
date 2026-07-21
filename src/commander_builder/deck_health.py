@@ -47,6 +47,8 @@ from __future__ import annotations
 import re
 from typing import Iterable, Optional
 
+from . import dck_utils
+
 
 # ---------------------------------------------------------------------------
 # Named-card detection lists
@@ -122,8 +124,11 @@ _MDFC_LANDS = frozenset(c.lower() for c in [
 # (Keeping the comment + entry shape so a future maintainer can see
 # the curation reasoning rather than wondering why X is missing.)
 _MDFC_LANDS = frozenset(name for name in _MDFC_LANDS if name not in {
+    # NOTE: "skyclave cleric" must NOT be filtered here — it IS a ZNR
+    # MDFC (back face: Skyclave Basilica, per the entry comment above);
+    # it was wrongly listed among the not-MDFC placeholders.
     "felidar retreat", "cleansing wildfire", "murasa rootgrazer",
-    "skyclave cleric", "mishra's foundry", "plaza of heroes",
+    "mishra's foundry", "plaza of heroes",
     "urza's sylex", "mishra, lost to phyrexia", "minas tirith",
     "glasspool mimic",  # mimic IS MDFC, but back face is land --
                          # leave it since real Commander play uses it
@@ -227,7 +232,8 @@ _SELF_MILL_ENABLERS = _SELF_MILL_ENABLERS - {
 # Deck-text parsing
 # ---------------------------------------------------------------------------
 
-_MAIN_LINE = re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+# Kept for backwards compatibility; canonical copy lives in dck_utils.
+_MAIN_LINE = dck_utils.CARD_LINE_RE
 
 
 def _iter_main_cards(deck_text: str) -> Iterable[tuple[int, str]]:
@@ -238,28 +244,10 @@ def _iter_main_cards(deck_text: str) -> Iterable[tuple[int, str]]:
     preserved from the file. Skips section headers, metadata, and
     blank lines. Same parsing convention as the rest of the project
     (see web/_helpers.py's ``_apply_swaps_to_dck``).
+
+    Thin wrapper over ``dck_utils.iter_main_cards``.
     """
-    in_main = False
-    for raw in deck_text.splitlines():
-        s = raw.strip()
-        if not s:
-            continue
-        if s.startswith("[") and s.endswith("]"):
-            in_main = s.lower() == "[main]"
-            continue
-        if not in_main:
-            continue
-        m = _MAIN_LINE.match(s)
-        if not m:
-            continue
-        try:
-            qty = int(m.group(1))
-        except (TypeError, ValueError):
-            qty = 1
-        name = m.group(2).strip()
-        if not name:
-            continue
-        yield qty, name
+    return dck_utils.iter_main_cards(deck_text)
 
 
 # ---------------------------------------------------------------------------
@@ -348,15 +336,29 @@ def _lookup_card_safe(name: str):
         return None
 
 
-def compute_spell_density(deck_text: str) -> dict:
+def compute_spell_density(deck_text: str) -> Optional[dict]:
     """Ratio of non-permanent (instant + sorcery) to total main cards.
 
     Returns ``{
         "non_permanent_count": int,
         "total_main_count": int,
         "ratio": float | None,
-    }``. ``ratio`` is None when total_main_count is zero (empty
-    deck -- defensive).
+        "lookup_failures": int,
+    }`` — or ``None`` when Scryfall lookups failed for MORE than half
+    the deck's card lines. That's the module docstring's outage
+    contract: "Scryfall unreachable → the signal returns None instead
+    of a misleading zero." Before this guard an all-lookups-fail
+    outage produced ``ratio == 0.0`` ("0% spells") on a perfectly
+    healthy deck — indistinguishable from a genuinely spell-free deck
+    and rendered with warn styling in the UI.
+
+    Below the outage threshold, ``ratio`` is computed from the cards
+    Scryfall COULD classify (failed lookups drop out of both numerator
+    and denominator — an unknown card must not count as "permanent"),
+    and ``lookup_failures`` carries the number of card lines that
+    missed so the UI can annotate the tile. ``total_main_count`` stays
+    the full printed deck size. ``ratio`` is None when nothing could
+    be classified or the deck is empty (defensive).
 
     Spellslinger archetypes typically run 20-30%+ non-permanents.
     The advisor's theme detector flags spellslinger from add-pool
@@ -364,22 +366,35 @@ def compute_spell_density(deck_text: str) -> dict:
     actually has the spell density to back it up.
     """
     non_perm = 0
-    total = 0
+    total = 0            # full printed quantity across [Main]
+    classified_qty = 0   # quantity backed by a successful lookup
+    lines = 0            # lookup attempts (one per deck line)
+    failed_lines = 0     # lookups that returned None (miss or outage)
     for qty, name in _iter_main_cards(deck_text):
         total += qty
+        lines += 1
         card = _lookup_card_safe(name)
         if card is None:
+            failed_lines += 1
             continue
+        classified_qty += qty
         type_line = (card.get("type_line") or "").lower()
         # "Instant" and "Sorcery" are non-permanent. Lands, creatures,
         # artifacts, enchantments, planeswalkers, battles, tribals
         # all become permanents on resolution.
         if "instant" in type_line or "sorcery" in type_line:
             non_perm += qty
+    # Outage detection: a majority of lookups failing means Scryfall is
+    # effectively unreachable (a single typo'd/custom card can't trip
+    # this). Half-or-fewer misses are tolerable noise; MORE than half
+    # means any computed ratio would be dominated by guesswork.
+    if lines and failed_lines * 2 > lines:
+        return None
     return {
         "non_permanent_count": non_perm,
         "total_main_count": total,
-        "ratio": (non_perm / total) if total > 0 else None,
+        "ratio": (non_perm / classified_qty) if classified_qty > 0 else None,
+        "lookup_failures": failed_lines,
     }
 
 
@@ -426,7 +441,7 @@ def _has_self_untap_loop(card_name: str, oracle_text: str) -> bool:
     return False
 
 
-def count_mana_sinks(deck_text: str) -> dict:
+def count_mana_sinks(deck_text: str) -> Optional[dict]:
     """Count cards that can repeatedly consume mana for value.
 
     Three heuristics, OR'd per card:
@@ -445,14 +460,25 @@ def count_mana_sinks(deck_text: str) -> dict:
        Domination's loop (every ability is ``{N}, {T}:`` but the
        self-untap recycles the tap).
 
-    Returns ``{"count": int, "cards": [str, ...]}``.
+    Returns ``{"count": int, "cards": [str, ...], "lookup_failures":
+    int}`` — or ``None`` when Scryfall lookups failed for MORE than
+    half the deck's card lines. Same outage contract (and same
+    majority threshold) as ``compute_spell_density``: an outage used
+    to yield ``{"count": 0}``, which the UI rendered as a warn-flavored
+    "no mana sinks" on decks that simply couldn't be classified.
+    Below the threshold the count comes from the cards that DID
+    resolve, with ``lookup_failures`` noting how many lines missed.
     """
     count = 0
     names: list[str] = []
     seen_lower: set[str] = set()
+    lines = 0            # lookup attempts (one per deck line)
+    failed_lines = 0     # lookups that returned None (miss or outage)
     for qty, name in _iter_main_cards(deck_text):
+        lines += 1
         card = _lookup_card_safe(name)
         if card is None:
+            failed_lines += 1
             continue
         # mana_cost is the printed cost. card_faces[0].mana_cost for
         # MDFCs; we check both to catch the front face of MDFC X-spells.
@@ -482,7 +508,13 @@ def count_mana_sinks(deck_text: str) -> dict:
             if key not in seen_lower:
                 seen_lower.add(key)
                 names.append(name)
-    return {"count": count, "cards": names}
+    # Outage detection — mirrors compute_spell_density: majority of
+    # lookups failing means "can't classify this deck", not "this deck
+    # has zero mana sinks". Returning None lets the UI say
+    # "unavailable" instead of scolding a healthy deck.
+    if lines and failed_lines * 2 > lines:
+        return None
+    return {"count": count, "cards": names, "lookup_failures": failed_lines}
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +534,12 @@ def compute_deck_health(deck_text: str) -> dict:
     deck takes a few seconds for the lookups to populate.
 
     Any individual signal that fails (e.g. Scryfall outage) returns
-    its empty/null shape so the rest of the panel still renders.
+    its empty/null shape so the rest of the panel still renders. For
+    the Scryfall-typed signals (``spell_density``, ``mana_sinks``)
+    that null shape is literally ``None`` — a majority-of-lookups-fail
+    outage must NOT masquerade as "0% spells" / "0 sinks" (the module
+    docstring's contract). The UI renders None as an explicit
+    "unavailable" tile.
     """
     return {
         "mdfc": count_mdfc_lands(deck_text),
@@ -510,4 +547,19 @@ def compute_deck_health(deck_text: str) -> dict:
         "mana_sinks": count_mana_sinks(deck_text),
         "wincon_protection": count_wincon_protection(deck_text),
         "self_mill": count_self_mill_enablers(deck_text),
+        # Role target ratios (F2): flag roles below the gold-standard
+        # template minimums (ramp/draw/removal/wipe/protection). The
+        # complement of the saturation guard, which flags excess.
+        "role_targets": _role_targets_signal(deck_text),
     }
+
+
+def _role_targets_signal(deck_text: str) -> dict:
+    """Deck-health signal: role counts vs ROLE_TARGETS minimums. Degrades
+    to an empty shape on any failure so the rest of the panel renders."""
+    try:
+        from .staples import role_target_report
+        names = [name for _qty, name in _iter_main_cards(deck_text)]
+        return role_target_report(names)
+    except Exception:  # noqa: BLE001
+        return {"roles": {}, "under_built": []}

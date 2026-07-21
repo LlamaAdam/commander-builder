@@ -38,7 +38,11 @@ from pathlib import Path
 from typing import Optional
 
 from .forge_runner import VENDOR_FORGE, VENDOR_JRE
-from .knowledge_log import DEFAULT_DB_PATH, init_db, stats_summary
+# Module import (not ``from .knowledge_log import DEFAULT_DB_PATH``) so the
+# path is read at call time — a from-import would freeze the value at import
+# time and bypass the test suite's DEFAULT_DB_PATH isolation patch.
+from . import knowledge_log
+from .knowledge_log import init_db, stats_summary
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRYFALL_CACHE = REPO_ROOT / ".cache" / "scryfall"
@@ -188,9 +192,10 @@ def _check_decks_dir() -> CheckResult:
 
 
 def _check_knowledge_log() -> CheckResult:
+    db_path = knowledge_log.DEFAULT_DB_PATH
     try:
-        init_db(DEFAULT_DB_PATH)
-        stats = stats_summary(db_path=DEFAULT_DB_PATH)
+        init_db(db_path)
+        stats = stats_summary(db_path=db_path)
     except Exception as exc:  # noqa: BLE001
         return CheckResult(
             "knowledge_log", RED,
@@ -200,7 +205,7 @@ def _check_knowledge_log() -> CheckResult:
     return CheckResult(
         "knowledge_log", GREEN,
         f"{stats['total']} iterations across {stats['unique_decks']} decks",
-        f"path: {DEFAULT_DB_PATH}",
+        f"path: {db_path}",
     )
 
 

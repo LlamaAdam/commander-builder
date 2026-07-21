@@ -43,6 +43,7 @@ from commander_builder.knowledge_log import (
     Iteration,
     iteration_graph_for_deck,
     record_iteration,
+    set_milestone,
 )
 
 
@@ -171,6 +172,19 @@ def test_node_price_usd_is_null_when_no_pricing(tmp_path):
     _record_chain(db, "deck-unpriced", 2)
     result = iteration_graph_for_deck("deck-unpriced", db_path=db)
     assert all(n["price_usd"] is None for n in result["nodes"])
+
+
+def test_node_carries_milestone_when_set(tmp_path):
+    """#012: a milestone-tagged iteration surfaces ``milestone`` on its
+    graph node so the JS can render the ⚑ flag glyph; untagged nodes
+    carry None."""
+    db = tmp_path / "knowledge_log.sqlite"
+    ids = _record_chain(db, "deck-ms", 2)
+    set_milestone(ids[1], "first cEDH-ready build", db_path=db)
+    result = iteration_graph_for_deck("deck-ms", db_path=db)
+    by_id = {n["id"]: n for n in result["nodes"]}
+    assert by_id[ids[0]]["milestone"] is None
+    assert by_id[ids[1]]["milestone"] == "first cEDH-ready build"
 
 
 # ---------------------------------------------------------------------------

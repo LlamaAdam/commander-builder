@@ -15,8 +15,8 @@ ground-truth simulation and an LLM (Claude or local Ollama) acts as the
 analyst that reads sim deltas and decides what to try next.
 
 **Source-of-truth docs:**
-- [STATUS.md](STATUS.md) — current state, open backlog, parked plans
-- [CHANGELOG.md](CHANGELOG.md) — what landed, in reverse chronological order
+- [STATUS.md](docs/STATUS.md) — current state, open backlog, parked plans
+- [CHANGELOG.md](docs/CHANGELOG.md) — what landed, in reverse chronological order
 - [docs/architecture.md](docs/architecture.md) — module map, data flow,
   conventions, working principles
 
@@ -104,7 +104,8 @@ commander-push "[USER] My Deck v2 [B3].dck"
 # Compare your deck to consensus meta-references at a bracket
 commander-meta-test "[USER] My Deck [B3].dck" --bracket 3
 
-# Inspect or revert any historical iteration
+# Inspect or revert any historical iteration (revert backs up the live
+# deck first and prints the backup path)
 commander-history --deck-id <publicId>
 commander-revert --to-deck <publicId> --version 3
 
@@ -132,7 +133,8 @@ commander-snapshot "[USER] My Deck [B3].dck" --version v1
 #    (b) Open a Claude session, paste prompts/moxfield_audit_v3.md.
 #        The audit modifies your Moxfield deck and emits audit_manifest.json.
 
-# 4. Re-pull the post-audit deck (overwrites the local file)
+# 4. Re-pull the post-audit deck (same Moxfield id → overwrites the local
+#    file in place; local Protect= lines are preserved)
 commander-import --user https://moxfield.com/decks/<id>
 
 # 5. Snapshot v2 and run head-to-head A/B (see commands above)
@@ -155,7 +157,7 @@ src/commander_builder/   ~30 production modules; key subsystems split:
     routes_decks.py      deck text/source/import + game_changers + deck_audit
     routes_dashboard.py  /api/dashboard + pricing + verdict breakdown
     routes_meta.py       root + health + forge_version + log_error
-tests/                   820 unit tests, all offline (~37s)
+tests/                   1,700+ unit tests, all offline (~90s)
 scripts/                 integration tests + batch runners (hit Forge)
 prompts/                 versioned LLM workflow prompts
 docs/                    architecture, current handoff, sprint specs
@@ -174,7 +176,7 @@ bulk + per-card snapshots + Magic Comp Rules). Both projects read via
 
 ## Where to start when picking this up cold
 
-1. `STATUS.md` — current state, open backlog, parked plans
+1. `docs/STATUS.md` — current state, open backlog, parked plans
 2. `docs/architecture.md` — how the pieces fit
 3. `python -m pytest tests/` — confirm the suite is green
 4. `git log --oneline -10` — what landed most recently
@@ -203,5 +205,5 @@ short version:
 
 ## License
 
-`pyproject.toml` reads `license = "TBD"`. Personal-use repo today;
+`pyproject.toml` reads `license = { text = "TBD" }`. Personal-use repo today;
 adopt MIT (or similar) if the project ever goes public.

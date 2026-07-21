@@ -236,6 +236,29 @@ def test_collect_deck_status_unknown_bracket(tmp_path):
     assert report.deck_name == "Untagged Deck"
 
 
+def test_collect_deck_status_prefers_display_name_over_stamped_name(tmp_path):
+    """Display-decision pin: importers now stamp Name= with the filename
+    stem (so Forge win attribution works for non-ASCII/':' deck names) and
+    park the pretty Moxfield name in DisplayName=. The status CLI must show
+    the pretty name, not the bracketed stem."""
+    body = (
+        "[metadata]\n"
+        "Name=[USER] Chatterfang_ Squirrel Tribal [B3]\n"
+        "DisplayName=Chatterfang: Squirrel Tribal \U0001f43f\n"
+        "Moxfield=ABC123\n"
+        "[Commander]\n"
+        "1 Chatterfang, Squirrel General|MH2|151\n"
+        "[Main]\n"
+        "1 Sol Ring|CMR|1\n"
+    )
+    deck = _touch(tmp_path / "[USER] Chatterfang_ Squirrel Tribal [B3].dck", body)
+    report = collect_deck_status(deck, db_path=tmp_path / "kl.sqlite")
+    assert report.deck_name == "Chatterfang: Squirrel Tribal \U0001f43f"
+    # Decks written before the stamping change (Name= only, no DisplayName=)
+    # keep their old display verbatim — covered by
+    # test_collect_deck_status_parses_filename_and_dck above.
+
+
 def test_collect_deck_status_aggregates_iteration_history(tmp_path):
     """Iteration count + recent iterations come from knowledge_log
     rows keyed on the deck's Moxfield publicId."""

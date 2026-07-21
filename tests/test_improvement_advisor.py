@@ -99,6 +99,37 @@ def test_heuristic_recommends_high_synergy_first():
     assert "high_synergy" in adds[0].reason
 
 
+def test_heuristic_floats_trending_card_up_and_annotates():
+    """A candidate that's also trending on EDHREC /top should rank above an
+    equally-ranked non-trending candidate, and say so in its reason."""
+    deck = {"Sol Ring"}
+    page = _fake_edhrec_page(
+        top=[("Stale Staple", 80.0), ("Hot New Pick", 70.0)],
+        synergy=[],
+    )
+    # Default order would be Stale Staple first (higher inclusion / earlier).
+    recs = _heuristic_swap_recommendations(
+        deck, page, trending={"hot new pick"})
+    adds = [r for r in recs if r.action == "add"]
+    assert adds[0].card == "Hot New Pick"          # trending floats up
+    assert adds[0].evidence.get("trending") is True
+    assert "trending" in adds[0].reason.lower()
+    # The non-trending card is still present, just lower + unannotated.
+    stale = next(r for r in adds if r.card == "Stale Staple")
+    assert stale.evidence.get("trending") is False
+
+
+def test_heuristic_trending_is_optional_and_inert_when_absent():
+    """Without a trending set, behavior + evidence shape are unchanged
+    (trending defaults False, ordering follows synergy-then-top)."""
+    deck = {"Sol Ring"}
+    page = _fake_edhrec_page(top=[("A Card", 80.0)], synergy=[])
+    recs = _heuristic_swap_recommendations(deck, page)
+    add = next(r for r in recs if r.action == "add")
+    assert add.evidence.get("trending") is False
+    assert "trending" not in add.reason.lower()
+
+
 def test_heuristic_skips_cards_already_in_deck():
     deck = {"Sol Ring", "Synergy Card"}
     page = _fake_edhrec_page(
@@ -699,6 +730,30 @@ def test_heuristic_respects_add_and_cut_limits():
     assert len(cuts) == 4
 
 
+def test_heuristic_cut_selection_is_deterministic_beyond_limit():
+    """With more cut candidates than ``cut_limit``, WHICH cards get
+    recommended must not depend on set iteration order (which varies per
+    process under hash randomization — unreproducible advisor runs). Cuts
+    are unscored (pure EDHREC absence), so the pinned order is plain name
+    sort: lexicographically-first candidates claim the limited slots.
+
+    Cross-process nondeterminism can't be exercised inside one pytest
+    process, so this pins the deterministic contract instead: a fixed
+    candidate pool larger than the limit yields an exact, name-ordered
+    cut list, identical across repeated calls."""
+    deck = {f"Off-{i}" for i in range(20)}   # 20 candidates, limit 4
+    page = _fake_edhrec_page(
+        top=[(f"Top-{i}", 80.0) for i in range(55)],  # clears cut floor
+        synergy=[],
+    )
+    first = _heuristic_swap_recommendations(deck, page, add_limit=3, cut_limit=4)
+    second = _heuristic_swap_recommendations(deck, page, add_limit=3, cut_limit=4)
+    cuts = [r.card for r in first if r.action == "cut"]
+    # Name-sorted head of the candidate pool ("Off-1" < "Off-10" < "Off-2").
+    assert cuts == ["Off-0", "Off-1", "Off-10", "Off-11"]
+    assert cuts == [r.card for r in second if r.action == "cut"]
+
+
 def test_heuristic_add_limit_does_not_trim_supplemental_buckets():
     """The 2026-05-15 split-pool refactor: ``add_limit`` only caps
     core EDHREC-page buckets (high_synergy / top_cards /
@@ -990,6 +1045,54 @@ def test_advise_full_flow_heuristic(tmp_path, monkeypatch):
     assert "Forest" not in cuts
 
 
+def test_advise_degrades_gracefully_when_edhrec_raises_urlerror(
+    tmp_path, monkeypatch,
+):
+    """Documented contract: mid-pipeline network blips fall back to the
+    heuristic — a URLError (DNS down, connection refused) inside the lazy
+    EDHREC fetch must NOT propagate out of the advise generator and kill
+    the single-deck CLI with a traceback.
+
+    Deliberately does NOT stub ``improvement_advisor.fetch_commander_page``
+    (the usual fixture pattern): the point is to drive the REAL
+    fetch_commander_page end-to-end with its HTTP layer raising URLError,
+    pinning that the 5c7b3d6 except-OSError narrowing still catches it
+    (URLError IS an OSError subclass) and degrades to a None page →
+    empty-recommendation report instead of an exception."""
+    import urllib.error
+    import commander_builder.edhrec_client as ec
+
+    deck_dir = tmp_path / "decks"
+    match_dir = tmp_path / "matches"
+    deck_dir.mkdir()
+    match_dir.mkdir()
+    deck = _write_dck(
+        deck_dir, "[USER] Hakbal of the Surging Soul [B3].dck",
+        commanders=["Hakbal of the Surging Soul"],
+        main=["Sol Ring", "Forest", "Old Card"],
+    )
+
+    # Point the EDHREC cache at an empty dir so a fresh on-disk page from a
+    # previous run can't satisfy the fetch before the network layer runs.
+    monkeypatch.setattr(ec, "CACHE_DIR", tmp_path / "edhrec-cache")
+    monkeypatch.setattr(ec, "REQUEST_SLEEP_SEC", 0)
+    # URLError is retryable, so the retry loop's backoff sleeps would fire
+    # 3 times — neutralize them to keep the test instant.
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    def _dns_down(url):
+        raise urllib.error.URLError("getaddrinfo failed")
+    monkeypatch.setattr(ec, "_http_get_text", _dns_down)
+
+    # Must not raise. The heuristic gets a None EDHREC page and produces a
+    # valid (possibly recommendation-free) report.
+    report = advise(deck, bracket=3, deck_dir=deck_dir, match_dir=match_dir)
+    assert report.source == "heuristic"
+    # No EDHREC signal → no EDHREC-sourced adds/cuts snuck through.
+    assert not [r for r in report.recommendations
+                if str(r.evidence.get("source", "")).startswith("edhrec.")]
+
+
 def test_advise_strips_off_color_adds_via_color_identity_filter(tmp_path, monkeypatch):
     """The advisor's CI post-filter must drop off-color add recommendations
     so the suggestions panel / /api/advise / /api/audit can't surface
@@ -1258,6 +1361,146 @@ def test_advise_uses_claude_when_wired(tmp_path, monkeypatch):
     assert "Old" in cards
     # Rationale propagates to the diagnosis pattern_summary.
     assert "test rationale" in report.diagnosis.pattern_summary
+
+
+def test_advise_claude_tolerates_prose_then_fenced_json(tmp_path, monkeypatch):
+    """Regression: the advisor's old startswith-``` strip choked on a
+    response with prose BEFORE the fence, so a perfectly recoverable
+    reply silently degraded to the heuristic. Now the shared _llm_json
+    extractor recovers it and the report stays source='claude'."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(deck_dir, "[USER] X [B3].dck",
+                     commanders=["Hakbal"], main=["Sol Ring", "Old"])
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+
+    fenced_with_prose = (
+        "Here is my analysis of the deck:\n```json\n"
+        + json.dumps({
+            "rationale": "fenced rationale",
+            "added": ["Fenced Pick"],
+            "removed": ["Old"],
+        })
+        + "\n```"
+    )
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _Msg(fenced_with_prose)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+    report = advise(deck, bracket=3, use_claude=True,
+                    deck_dir=deck_dir, match_dir=deck_dir)
+    assert report.source == "claude"  # did NOT fall back to heuristic
+    assert "Fenced Pick" in {r.card for r in report.recommendations}
+
+
+def test_advise_concurrent_explicit_keys_never_cross(tmp_path, monkeypatch):
+    """BYO-key thread-safety (2026-07-19 rework): two INTERLEAVED advise()
+    calls carrying different explicit ``api_key`` values must each
+    construct their Anthropic client with their OWN key. The old design
+    staged the key in the process-global os.environ, so two concurrent
+    threaded web requests could read each other's keys (cross-billing)
+    or have a finally-restore wipe the key mid-API-call. A Barrier
+    inside the fake ``messages.create`` guarantees both calls are
+    in-flight simultaneously — the exact overlap the env staging raced
+    on. No env fallback is available (key deleted), so any key observed
+    can only have arrived via the explicit parameter."""
+    import threading
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = _write_dck(deck_dir, "[USER] X [B3].dck",
+                     commanders=["Hakbal"], main=["Sol Ring", "Old"])
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.fetch_commander_page",
+        lambda name, **kw: _fake_edhrec_page(top=[], synergy=[]),
+    )
+
+    # Both calls must be inside the "API call" at the same time before
+    # either returns — proves true interleaving, not serialization.
+    barrier = threading.Barrier(2, timeout=30)
+
+    class _Block:
+        def __init__(self, t): self.text = t
+    class _Msg:
+        def __init__(self, t): self.content = [_Block(t)]
+    class FakeClient:
+        def __init__(self, api_key=None, **kw):
+            self._api_key = api_key
+        @property
+        def messages(self):
+            outer = self
+            class M:
+                def create(self, **kw):
+                    barrier.wait()  # rendezvous with the other request
+                    # Echo the constructor's key back in the response so
+                    # each thread can verify its own key was used for
+                    # ITS client — a swapped key would surface here.
+                    return _Msg(json.dumps({
+                        "rationale": f"key={outer._api_key}",
+                        "added": [f"Pick {outer._api_key}"],
+                        "removed": ["Old"],
+                    }))
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+    results: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def call(key: str):
+        try:
+            results[key] = advise(
+                deck, bracket=3, source="claude",
+                deck_dir=deck_dir, match_dir=deck_dir,
+                api_key=key,
+            )
+        except BaseException as exc:  # noqa: BLE001 — surfaced below
+            errors.append(exc)
+
+    t1 = threading.Thread(target=call, args=("sk-alice",))
+    t2 = threading.Thread(target=call, args=("sk-bob",))
+    t1.start(); t2.start()
+    t1.join(timeout=60); t2.join(timeout=60)
+    assert not errors, errors
+
+    for key in ("sk-alice", "sk-bob"):
+        report = results[key]
+        assert report.source == "claude"
+        cards = {r.card for r in report.recommendations}
+        # Each caller's client was constructed with that caller's key.
+        assert f"Pick {key}" in cards, (
+            f"advise(api_key={key!r}) got recommendations from a client "
+            f"built with the WRONG key: {cards}"
+        )
+        # And no cross-contamination from the other caller.
+        other = "sk-bob" if key == "sk-alice" else "sk-alice"
+        assert f"Pick {other}" not in cards
+    # The explicit keys never leaked into the process env.
+    import os as _os
+    assert "ANTHROPIC_API_KEY" not in _os.environ
 
 
 # --- _validate_card_names — hallucination defense for Claude analyst -------

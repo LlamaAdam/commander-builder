@@ -14,7 +14,7 @@ every subsequent request.
 
 Layout::
 
-    <mtg_cards>/images/<size>/<slug>.jpg
+    <mtg_cards>/images/<size>/<slug>_<sha1-8>.jpg
 
 ``<size>`` is one of Scryfall's published image-version strings
 (``small`` / ``normal`` / ``large`` / ``png`` / ``art_crop`` /
@@ -22,8 +22,10 @@ Layout::
 ``.jpg`` otherwise (Scryfall's published encoding per size).
 
 ``<slug>`` is the same ``re.sub('[^a-z0-9]+', '_', name.lower())``
-slug used by ``scryfall_client._cache_path`` so the same card lands
-under a predictable filename across both caches.
+slug used by ``scryfall_client._cache_path``; ``<sha1-8>`` is the
+first 8 hex chars of the exact card name's SHA-1, appended because
+the lossy slug alone collides for distinct names like ``Fire // Ice``
+vs. ``Fire Ice`` (see ``cache_path``).
 
 Public surface (all pure-helper, side-effect-localized to disk +
 optional injected HTTP fetcher):
@@ -100,10 +102,46 @@ def _ext_for(size: str) -> str:
     return ".png" if size == "png" else ".jpg"
 
 
+def _looks_like_image(data: bytes) -> bool:
+    """True if ``data`` starts with a known image magic number.
+
+    Guards the cache against a 200-with-non-image-body: Scryfall (or an
+    interposing proxy / rate-limiter) can return HTTP 200 with an HTML or
+    JSON error page. Without this check that body gets written as a ``.jpg``
+    and served back ``immutable`` for the cache lifetime. We accept JPEG /
+    PNG / GIF magics (covers every Scryfall image version) and reject
+    everything else (HTML starts with ``<``, JSON with ``{``)."""
+    if not data:
+        return False
+    return (
+        data[:3] == b"\xff\xd8\xff"   # JPEG
+        or data[:4] == b"\x89PNG"     # PNG (4-byte signature prefix)
+        or data[:4] == b"GIF8"        # GIF
+    )
+
+
 def cache_path(name: str, size: str, root: Optional[Path] = None) -> Path:
-    """Disk path for the cached ``<name>`` / ``<size>`` image. No IO."""
+    """Disk path for the cached ``<name>`` / ``<size>`` image. No IO.
+
+    The filename is ``<slug>_<sha1-8>.<ext>``. The slug alone is NOT
+    collision-free: it collapses every non-alnum run to one underscore,
+    so distinct cards like ``Fire // Ice`` and a hypothetical
+    ``Fire Ice`` both slug to ``fire_ice`` — and whichever was fetched
+    first would be served (``immutable``, week-long Cache-Control) for
+    the other. Appending the first 8 hex chars of the exact name's
+    SHA-1 disambiguates while keeping filenames human-greppable.
+
+    Migration note: pre-hash cache entries (bare ``<slug>.<ext>``) are
+    simply never matched again — they miss and the image is refetched
+    under the new name; the stale files age out via the LRU quota
+    eviction in ``_enforce_quota``. No migration pass needed.
+    """
+    import hashlib
+    digest = hashlib.sha1((name or "").encode("utf-8")).hexdigest()[:8]
     base = root if root is not None else _cards_root()
-    return base / "images" / size / f"{_slug(name)}{_ext_for(size)}"
+    return base / "images" / size / (
+        f"{_slug(name)}_{digest}{_ext_for(size)}"
+    )
 
 
 def _scryfall_image_url(name: str, size: str) -> str:
@@ -260,6 +298,13 @@ def fetch_and_cache(
         raise ValueError(f"unsupported size {size!r}; expected one of {sorted(ALLOWED_SIZES)}")
     fetch = http_get or _default_http_get
     data = fetch(_scryfall_image_url(name, size))
+    # Never cache a non-image body (HTML/JSON error page returned as 200) —
+    # it would be served back as a broken `.jpg` `immutable` until evicted.
+    if not _looks_like_image(data):
+        raise ValueError(
+            f"upstream returned a non-image body for {name!r}/{size} "
+            f"({len(data)} bytes); refusing to cache"
+        )
     path = cache_path(name, size, root=root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -288,6 +333,12 @@ def serve_image(
         raise ValueError(f"unsupported size {size!r}; expected one of {sorted(ALLOWED_SIZES)}")
     path = cache_path(name, size, root=root)
     if path.is_file():
-        return path.read_bytes(), content_type_for(size)
+        try:
+            return path.read_bytes(), content_type_for(size)
+        except OSError:
+            # TOCTOU: a concurrent fetch's quota eviction can unlink the
+            # file between is_file() and read_bytes(). Fall through and
+            # refetch rather than surfacing a spurious 502.
+            pass
     data = fetch_and_cache(name, size, root=root, http_get=http_get)
     return data, content_type_for(size)

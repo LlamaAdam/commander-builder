@@ -207,6 +207,47 @@ def test_propose_handles_claude_runtime_error_with_warn(tmp_path, monkeypatch, c
     assert "claude_propose failed" in captured.out
 
 
+def test_propose_garbage_claude_response_is_loud_not_manual(
+        tmp_path, monkeypatch):
+    """Regression for the misleading-fallback bug: when Claude RESPONDS but
+    with garbage, propose() must re-raise the parse error — NOT fall
+    through to manual_propose, whose 'No manifest at ...'
+    FileNotFoundError masked the real failure. manual_propose must not
+    even be invoked."""
+    from commander_builder._llm_json import LLMJsonError
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(monkeypatch, "Here are my thoughts on the deck...")
+
+    manual_calls: list = []
+    def spy_manual(input_, config):
+        manual_calls.append(input_)
+        raise AssertionError("manual_propose must not be reached")
+    monkeypatch.setattr("commander_builder.proposer.manual_propose", spy_manual)
+
+    # Deliberately NO manifest file on disk: the old behavior surfaced
+    # FileNotFoundError here instead of the parse failure.
+    input_ = _make_input(tmp_path)
+    with pytest.raises(LLMJsonError, match="claude_propose"):
+        propose(input_, ProposerConfig(use_claude=True))
+    assert manual_calls == []
+
+
+def test_propose_garbage_ollama_response_is_loud_not_manual(
+        tmp_path, monkeypatch):
+    """Same loud-error rule for the Ollama backend: a daemon that answers
+    with non-JSON must surface LLMJsonError, not degrade to manual."""
+    from commander_builder._llm_json import LLMJsonError
+    payload = json.dumps({"response": "not json at all"}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeUrlOpenResponse(payload)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    input_ = _make_input(tmp_path)
+    with pytest.raises(LLMJsonError, match="ollama_propose"):
+        propose(input_, ProposerConfig(use_ollama=True))
+
+
 # --- claude_propose success path (mocked Anthropic SDK) --------------------
 
 def _fake_anthropic_response(text: str):
@@ -248,6 +289,23 @@ def test_claude_propose_parses_valid_manifest(tmp_path, monkeypatch):
     # monkeypatch.setitem auto-cleans up.
 
 
+def _mock_claude_sdk(monkeypatch, text: str):
+    """Install a fake `anthropic` module whose client returns `text`."""
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response(text)
+            return M()
+
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+
 def test_claude_propose_strips_markdown_code_fences(tmp_path, monkeypatch):
     """Claude sometimes wraps JSON in ```json ... ``` despite being told not
     to. We strip the fences before parsing."""
@@ -257,25 +315,58 @@ def test_claude_propose_strips_markdown_code_fences(tmp_path, monkeypatch):
         + json.dumps({"added": ["A"], "removed": ["B"], "rationale": "x"})
         + "\n```"
     )
-
-    class FakeClient:
-        def __init__(self, **kw): pass
-        @property
-        def messages(self):
-            class M:
-                def create(self, **kw):
-                    return _fake_anthropic_response(fenced)
-            return M()
-
-    import sys, types
-    fake_module = types.ModuleType("anthropic")
-    fake_module.Anthropic = FakeClient
-    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    _mock_claude_sdk(monkeypatch, fenced)
 
     out = claude_propose(_make_input(tmp_path), ProposerConfig())
     assert out.added == ["A"]
     assert out.removed == ["B"]
     # monkeypatch.setitem auto-cleans up.
+
+
+def test_claude_propose_parses_prose_then_fenced_json(tmp_path, monkeypatch):
+    """Regression: a response with prose BEFORE the ```json fence used to
+    throw JSONDecodeError (the old strip only fired when the response
+    STARTED with ```), which propose() then buried under manual_propose's
+    misleading FileNotFoundError."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(
+        monkeypatch,
+        "Looking at this deck, the removal package is thin.\n```json\n"
+        + json.dumps({"added": ["A"], "removed": ["B"], "rationale": "x"})
+        + "\n```\nHappy to elaborate.",
+    )
+
+    out = claude_propose(_make_input(tmp_path), ProposerConfig())
+    assert out.added == ["A"]
+    assert out.removed == ["B"]
+
+
+def test_claude_propose_garbage_raises_llm_json_error(tmp_path, monkeypatch):
+    """Unparseable prose => LLMJsonError naming the call site + model and
+    quoting the response — NOT a JSONDecodeError, and definitely not a
+    fall-through to manual."""
+    from commander_builder._llm_json import LLMJsonError
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(monkeypatch, "I would swap a few cards around.")
+
+    with pytest.raises(LLMJsonError) as exc_info:
+        claude_propose(_make_input(tmp_path), ProposerConfig())
+    msg = str(exc_info.value)
+    assert "claude_propose" in msg
+    assert "claude-sonnet-4-5" in msg           # model context
+    assert "swap a few cards" in msg            # response snippet
+
+
+def test_claude_propose_truncated_json_raises_llm_json_error(
+        tmp_path, monkeypatch):
+    """max_tokens cutoff (object never closes) => specific LLMJsonError."""
+    from commander_builder._llm_json import LLMJsonError
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(
+        monkeypatch, '{"added": ["A", "B"], "removed": ["C", "D"], "ratio'
+    )
+    with pytest.raises(LLMJsonError, match="claude_propose"):
+        claude_propose(_make_input(tmp_path), ProposerConfig())
 
 
 def test_claude_propose_input_deck_id_overrides_manifest(tmp_path, monkeypatch):
@@ -361,3 +452,42 @@ def test_ollama_propose_falls_back_when_daemon_unreachable(tmp_path, monkeypatch
 
     with pytest.raises(NotImplementedError, match="Ollama daemon not reachable"):
         ollama_propose(_make_input(tmp_path), ProposerConfig())
+
+
+# ---------------------------------------------------------------------------
+# `python -m commander_builder.proposer` entry-point regression test
+#
+# Background: running proposer.py directly used to fail with a circular-
+# import (`cannot import name 'auto_curate_main' from partially
+# initialized module 'commander_builder._proposer_cli'`). Caught during
+# the 2026-05-20 web/curator end-to-end smoke test. Fixed by aliasing
+# the `__main__` module under `commander_builder.proposer` before any
+# sibling import fires. This pins the contract.
+# ---------------------------------------------------------------------------
+
+
+def test_python_m_commander_builder_proposer_help_runs():
+    """`python -m commander_builder.proposer --help` must exit 0.
+
+    This is the regression test for the 2026-05-20 circular-import bug
+    where -m invocation crashed because `_proposer_cli` re-loaded
+    proposer.py before its module-scope export of `auto_curate_main`
+    completed.
+    """
+    import subprocess
+    import sys as _sys
+
+    result = subprocess.run(
+        [_sys.executable, "-m", "commander_builder.proposer", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"python -m commander_builder.proposer --help failed:\n"
+        f"stdout: {result.stdout[:500]}\nstderr: {result.stderr[:1500]}"
+    )
+    # Sanity: help text mentions the actual CLI surface so we know we
+    # reached the real entry point (not a stub or early-exit).
+    assert "commander-auto-curate" in result.stdout
+    assert "--mode" in result.stdout

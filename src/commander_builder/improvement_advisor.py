@@ -47,12 +47,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
+from . import dck_utils
 from .edhrec_client import (
     AverageDeck,
     CardEntry,
@@ -120,7 +122,6 @@ def _aggregate_match_history(deck_filename: str, match_dir: Path = MATCH_DIR) ->
 
     # Filter by stem-prefix match — the run_match output filename starts with
     # a sanitized version of the deck filename.
-    import re
     stem = re.sub(r"[^\w-]+", "_", Path(deck_filename).stem).strip("_")
     reports = sorted(
         match_dir.glob(f"{stem}_*.json"),
@@ -207,27 +208,12 @@ def _aggregate_match_history(deck_filename: str, match_dir: Path = MATCH_DIR) ->
 # --- Card-level signals from EDHREC ---------------------------------------
 
 def _read_main_cards(deck_path: Path) -> list[str]:
-    """Pull the [Main] section card names (without qty / set / cn)."""
+    """Pull the [Main] section card names (without qty / set / cn).
+
+    Thin wrapper over ``dck_utils.main_card_names``."""
     if not deck_path.exists():
         return []
-    import re
-    out: list[str] = []
-    in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[main]":
-            in_main = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_main = False
-            continue
-        if in_main:
-            m = re.match(r"^\d+\s+(.+?)(?:\|.*)?$", line)
-            if m:
-                out.append(m.group(1).strip())
-    return out
+    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
 
 
 # Signal-to-roles map + _signals_to_priority_roles + heuristic
@@ -395,6 +381,8 @@ def advise(
     match_dir: Path = MATCH_DIR,
     claude_model: str = DEFAULT_CLAUDE_MODEL,
     budget: bool = False,
+    intent_themes: Optional[list[str]] = None,
+    api_key: Optional[str] = None,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck.
 
@@ -420,6 +408,14 @@ def advise(
     ``use_claude=True`` is preserved as a legacy alias for
     ``source="claude"`` so existing callers don't break.
 
+    ``api_key`` (optional) is an explicit per-call Anthropic key used
+    ONLY by the Claude backend. ``None`` (default) means "use the
+    process credential" (``ANTHROPIC_API_KEY`` in the env, typically
+    loaded from the credentials file) — identical to prior behavior.
+    The web layer passes its BYO key here so a threaded server never
+    has to stage per-request secrets in the process-global
+    ``os.environ`` (which raced across concurrent requests).
+
     Implementation note: this synchronous entry point collects all
     phases from ``_advise_steps()`` and assembles the final report.
     Callers that want to render partial progress (e.g. the streaming
@@ -432,6 +428,8 @@ def advise(
         use_claude=use_claude, source=source,
         deck_dir=deck_dir, match_dir=match_dir,
         claude_model=claude_model, budget=budget,
+        intent_themes=intent_themes,
+        api_key=api_key,
     ):
         if phase.phase == "complete":
             final_report = phase.data.get("report")
@@ -464,7 +462,9 @@ def _advise_steps(
     match_dir: Path = MATCH_DIR,
     claude_model: str = DEFAULT_CLAUDE_MODEL,
     budget: bool = False,
-):
+    intent_themes: Optional[list[str]] = None,
+    api_key: Optional[str] = None,
+) -> Iterator[AdvicePhase]:
     """Generator version of :func:`advise` — yields ``AdvicePhase``
     events as each stage of the pipeline completes.
 
@@ -565,10 +565,17 @@ def _advise_steps(
             manabase_recs = list(_missing_manabase_recommendations(
                 main_cards, ci_set, tribe=tribe, budget=budget,
             ))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         # Commander lookup failure shouldn't break the audit — emit
-        # an empty manabase event so the UI doesn't hang waiting.
-        pass
+        # an empty manabase event so the UI doesn't hang waiting. But
+        # say so: this phase flags missing shock/fetch lands, and a
+        # silent empty result reads as "manabase is fine".
+        print(
+            f"WARN: manabase phase skipped for {primary_commander!r} "
+            f"({type(exc).__name__}: {exc}); no manabase "
+            "recommendations this audit.",
+            flush=True,
+        )
     yield AdvicePhase("manabase", {
         "recommendations": [asdict(r) for r in manabase_recs],
         "tribe": tribe,
@@ -582,6 +589,7 @@ def _advise_steps(
     edhrec_page: Optional[CommanderPage] = None
     average_deck: Optional[AverageDeck] = None
     tag_pages: Optional[list[CommanderPage]] = None
+    trending_names: Optional[set[str]] = None
     bracket_peer_ref_count: int = 0
     recs: list[SwapRecommendation]
     effective_source = source  # mutate on fallback
@@ -593,15 +601,19 @@ def _advise_steps(
         return edhrec_page
 
     def _fetch_tag_pages_lazy() -> list[CommanderPage]:
-        """Pull EDHREC ``/tags/<slug>`` pages for both the detected
-        tribe AND any themes detected from the deck's oracle text.
+        """Pull EDHREC ``/tags/<slug>`` pages for the deck's themes.
 
-        Tribal slug comes from ``tribe_tag_slug(tribe)``; theme
-        slugs come from ``detect_themes(deck_oracles)`` which scans
-        for Tokens / Spellslinger / Aristocrats / +1+1 counters /
-        Landfall / Lifegain / Reanimator / Equipment / Artifacts /
-        Enchantress signals (each gated by a per-theme min-count
-        threshold so goodstuff decks don't trip every theme).
+        Priority order:
+          1. Intent themes (``intent_themes`` from ``--intent-themes``):
+             explicit slugs learned from the deck's intent analysis.
+             Highest-confidence signal — the user asked us to bias toward
+             these archetypes.
+          2. Tribe (``tribe_tag_slug(tribe)``): tribal decks have the
+             tightest archetype identity, so this ranks above oracle-text
+             scanning.
+          3. Oracle-text scan (``detect_themes``): Tokens / Spellslinger /
+             Aristocrats / +1+1 counters / Landfall / Lifegain /
+             Reanimator / Equipment / Artifacts / Enchantress signals.
 
         Returns the list of successfully-fetched tag pages (may be
         empty for non-tribal, non-themed decks). Capped at 4 pages
@@ -615,14 +627,23 @@ def _advise_steps(
             return tag_pages
         slugs: list[str] = []
         seen_slugs: set[str] = set()
-        # Tribe first (highest signal — tribal decks have the
-        # tightest archetype identity).
+        # Intent-themes first (soft-bias from FP-012 Slice A): these are
+        # the slugs the improvement loop explicitly wants to bias toward.
+        # Prepending ensures they claim slots in the 4-page cap before
+        # the auto-detected slugs, giving the intent the loudest voice.
+        for s in (intent_themes or []):
+            s = s.strip()
+            if s and s not in seen_slugs:
+                slugs.append(s)
+                seen_slugs.add(s)
+        # Tribe second (highest auto-detected signal — tribal decks have
+        # the tightest archetype identity).
         if tribe:
             s = tribe_tag_slug(tribe)
             if s and s not in seen_slugs:
                 slugs.append(s)
                 seen_slugs.add(s)
-        # Detected themes second. Scan the deck's oracle texts via
+        # Detected themes third. Scan the deck's oracle texts via
         # the cached scryfall lookups (no extra network — just
         # ``lookup_card`` per card, all already warm from the
         # role-classifier pass earlier in this audit).
@@ -685,6 +706,28 @@ def _advise_steps(
                 average_deck = None
         return average_deck
 
+    def _fetch_trending_lazy() -> set[str]:
+        """Pull the cards currently trending on EDHREC's time-windowed
+        ``/top`` view (past month) as a lowercased name set.
+
+        Recency signal for the heuristic: a candidate add that's spiking
+        this month is a stronger pick than a stale all-time staple. Used
+        only to *re-rank* commander-relevant candidates, never to introduce
+        cards, so a failed/empty fetch is harmless (no boost, no noise).
+        Best-effort + memoized for the call.
+        """
+        nonlocal trending_names
+        if trending_names is None:
+            try:
+                from .edhrec_client import fetch_top_cards
+                trending_names = {
+                    c.name.lower() for c in fetch_top_cards("month")
+                    if getattr(c, "name", None)
+                }
+            except Exception:  # noqa: BLE001
+                trending_names = set()
+        return trending_names
+
     if source == "bracket_peers":
         peer_recs, ref_count = _bracket_peers_recommendations(
             commander_name=primary_commander,
@@ -706,6 +749,7 @@ def _advise_steps(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
+                trending=_fetch_trending_lazy(),
             )
             effective_source = "heuristic"
     elif source == "claude":
@@ -718,10 +762,14 @@ def _advise_steps(
         except Exception:  # noqa: BLE001
             peer_summary = None
         try:
+            # api_key threads the (optional) per-request BYO key straight
+            # to the Anthropic client constructor — see advise()'s
+            # docstring. None → the advisor reads the process env as before.
             recs, rationale_override = _claude_swap_recommendations(
                 deck_path.name, bracket, main_cards, diagnosis, page,
                 model=claude_model,
                 bracket_peers_summary=peer_summary,
+                api_key=api_key,
             )
             if peer_summary:
                 bracket_peer_ref_count = int(
@@ -735,6 +783,7 @@ def _advise_steps(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
+                trending=_fetch_trending_lazy(),
             )
             effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
@@ -747,14 +796,17 @@ def _advise_steps(
                 main_cards, page, diagnosis=diagnosis,
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
+                trending=_fetch_trending_lazy(),
             )
             effective_source = "heuristic"
     else:
         page = _fetch_edhrec_lazy()
         recs = _heuristic_swap_recommendations(
             main_cards, page,
+            diagnosis=diagnosis,
             average_deck=_fetch_avg_deck_lazy(),
             tag_pages=_fetch_tag_pages_lazy(),
+            trending=_fetch_trending_lazy(),
         )
 
     yield AdvicePhase("primary", {
@@ -772,7 +824,6 @@ def _advise_steps(
     deck_id: Optional[str] = None
     try:
         text = deck_path.read_text(encoding="utf-8")
-        import re
         m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
         if m:
             deck_id = m.group(1).strip()

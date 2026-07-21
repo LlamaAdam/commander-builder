@@ -237,8 +237,19 @@ def test_fetch_commander_page_writes_to_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
     )
+    # The page must carry at least one card: empty parses are
+    # deliberately NOT cached (cache-poisoning guard — see
+    # _page_has_card_signal), so this fixture includes a cardlist to
+    # exercise the "valid page → cached" happy path.
     next_data = {
-        "props": {"pageProps": {"data": {"deck_count": 42, "cardlists": []}}}
+        "props": {"pageProps": {"data": {
+            "deck_count": 42,
+            "cardlists": [
+                {"header": "Top Cards", "cardviews": [
+                    {"name": "Sol Ring", "inclusion": 61.0, "synergy": 0.05},
+                ]},
+            ],
+        }}}
     }
     html = (
         '<script id="__NEXT_DATA__" type="application/json">'
@@ -251,8 +262,11 @@ def test_fetch_commander_page_writes_to_cache(tmp_path, monkeypatch):
 
     page = fetch_commander_page("New Commander")
     assert page.deck_count == 42
-    # File written.
-    assert (tmp_path / "new-commander.json").exists()
+    assert page.top_cards[0].name == "Sol Ring"
+    # File written, with the card signal intact.
+    cache_file = tmp_path / "new-commander.json"
+    assert cache_file.exists()
+    assert "Sol Ring" in cache_file.read_text(encoding="utf-8")
 
 
 # --- round-trip ------------------------------------------------------------
@@ -390,11 +404,21 @@ def test_fetch_salt_list_returns_empty_dict_on_fetch_failure(
         "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
     )
 
+    # Simulate the failure with a REAL network exception type: since the
+    # except-narrowing (fetch failures are caught as OSError, matching
+    # what urllib actually raises), a RuntimeError would propagate — by
+    # design, so programming errors can't masquerade as "EDHREC down".
+    import urllib.error
+
     def boom(url):
-        raise RuntimeError("network down")
+        raise urllib.error.URLError("network down")
     monkeypatch.setattr(
         "commander_builder.edhrec_client._http_get_text", boom,
     )
+    # URLError is retryable, so the retry loop's backoff sleeps fire —
+    # neutralize them to keep the test instant.
+    import commander_builder.edhrec_client as ec
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
     assert fetch_salt_list() == {}
 
 
@@ -589,6 +613,50 @@ def test_retry_retries_on_429_rate_limit(monkeypatch):
     assert calls["n"] == 3
 
 
+def test_retry_on_incomplete_read_then_succeeds(monkeypatch):
+    """http.client.IncompleteRead (mid-body disconnect from resp.read())
+    is NOT an OSError — urllib doesn't wrap exceptions raised after
+    urlopen() hands the response back. It's as transient as a 503, so
+    the retry loop must catch and retry it rather than letting it
+    escape and crash the caller."""
+    import http.client
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def cut_off_mid_body(url):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise http.client.IncompleteRead(b"<html>par", expected=4096)
+        return "<html>ok</html>"
+
+    monkeypatch.setattr(ec, "_http_get_text", cut_off_mid_body)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    body = _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+    assert body == "<html>ok</html>"
+    assert calls["n"] == 3  # two IncompleteReads retried, third succeeded
+
+
+def test_retry_exhaustion_reraises_incomplete_read(monkeypatch):
+    """Every attempt dies mid-body → the wrapper re-raises the final
+    HTTPException after using ALL attempts (it must not bail on the
+    first one). Fetch-site handlers translate this into None."""
+    import http.client
+    import commander_builder.edhrec_client as ec
+    calls = {"n": 0}
+
+    def always_cut_off(url):
+        calls["n"] += 1
+        raise http.client.IncompleteRead(b"", expected=4096)
+
+    monkeypatch.setattr(ec, "_http_get_text", always_cut_off)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+
+    with pytest.raises(http.client.IncompleteRead):
+        _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
+    assert calls["n"] == 4  # 1 initial + 3 retries, all consumed
+
+
 # --- fetch_commander_page — integration with retry -------------------------
 
 def test_fetch_commander_page_recovers_from_transient_503(tmp_path, monkeypatch):
@@ -602,8 +670,17 @@ def test_fetch_commander_page_recovers_from_transient_503(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "commander_builder.edhrec_client.time.sleep", lambda s: None,
     )
+    # Card signal included so the page qualifies for the cache write
+    # (empty parses are deliberately not cached).
     next_data = {
-        "props": {"pageProps": {"data": {"deck_count": 7, "cardlists": []}}}
+        "props": {"pageProps": {"data": {
+            "deck_count": 7,
+            "cardlists": [
+                {"header": "Top Cards", "cardviews": [
+                    {"name": "Lightning Greaves", "inclusion": 40.0},
+                ]},
+            ],
+        }}}
     }
     html = (
         '<script id="__NEXT_DATA__" type="application/json">'
@@ -624,6 +701,7 @@ def test_fetch_commander_page_recovers_from_transient_503(tmp_path, monkeypatch)
     assert page is not None
     assert page.deck_count == 7
     assert calls["n"] == 2
+    assert (tmp_path / "sephiroth.json").exists()
 
 
 def test_fetch_commander_page_returns_none_after_exhausted_retries(
@@ -649,6 +727,68 @@ def test_fetch_commander_page_returns_none_after_exhausted_retries(
 
     page = fetch_commander_page("Sephiroth")
     assert page is None
+
+
+def test_fetch_commander_page_degrades_on_persistent_incomplete_read(
+    tmp_path, monkeypatch, capsys,
+):
+    """Retries exhausted on IncompleteRead → the fetch site catches the
+    HTTPException (NOT an OSError — the pre-fix ``except OSError``
+    missed it and crashed CLI callers with a traceback) and degrades to
+    None, emitting the loud grep-able warning from 5c7b3d6."""
+    import http.client
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.time.sleep", lambda s: None,
+    )
+
+    def always_cut_off(url):
+        raise http.client.IncompleteRead(b"<html>par", expected=4096)
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", always_cut_off,
+    )
+
+    page = fetch_commander_page("Sephiroth")  # must not raise
+    assert page is None
+    out = capsys.readouterr().out
+    # The degradation is loud: warning line carries the exception repr.
+    assert "[edhrec] WARNING" in out
+    assert "IncompleteRead" in out
+
+
+def test_fetch_top_cards_degrades_on_persistent_incomplete_read(
+    tmp_path, monkeypatch, capsys,
+):
+    """Same HTTPException gap on the JSON-endpoint path: fetch_top_cards
+    must degrade to [] (with the warning) instead of crashing."""
+    import http.client
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.time.sleep", lambda s: None,
+    )
+
+    def always_cut_off(url):
+        raise http.client.IncompleteRead(b"{", expected=4096)
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", always_cut_off,
+    )
+
+    from commander_builder.edhrec_client import fetch_top_cards
+    cards = fetch_top_cards("year")  # must not raise
+    assert cards == []
+    out = capsys.readouterr().out
+    assert "[edhrec] WARNING" in out
+    assert "IncompleteRead" in out
 
 
 # --- Retry-After header handling + retry logging ---------------------------
@@ -802,3 +942,293 @@ def test_no_log_when_first_attempt_succeeds(monkeypatch, capsys):
 
     _http_get_text_with_retry("https://edhrec.com/x")
     assert "[edhrec] retry" not in capsys.readouterr().out
+
+
+# --- empty-parse cache-poisoning guard --------------------------------------
+# An HTTP-200 response with no __NEXT_DATA__ (CDN bot-challenge page,
+# redirect interstitial, schema change) parses to an EMPTY CommanderPage.
+# Caching that would silently zero out EDHREC signal for the whole 24h
+# TTL — so empty parses must be returned WITHOUT being cached, loudly.
+
+_CHALLENGE_HTML = (
+    "<html><head><title>Just a moment...</title></head>"
+    "<body>Checking your browser before accessing edhrec.com</body></html>"
+)
+
+
+def _valid_page_html(card_name: str = "Sol Ring") -> str:
+    """Minimal commander/tag page HTML that parses to a NON-empty page."""
+    next_data = {
+        "props": {"pageProps": {"data": {
+            "deck_count": 5,
+            "cardlists": [
+                {"header": "Top Cards", "cardviews": [
+                    {"name": card_name, "inclusion": 50.0},
+                ]},
+            ],
+        }}}
+    }
+    return (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(next_data) + '</script>'
+    )
+
+
+def test_fetch_commander_page_does_not_cache_challenge_page(
+    tmp_path, monkeypatch, capsys,
+):
+    """200-OK challenge page → empty page returned (contract unchanged),
+    NOTHING written to the cache, and a loud warning printed."""
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text",
+        lambda url: _CHALLENGE_HTML,
+    )
+
+    page = fetch_commander_page("Vexing Commander")
+    # Return contract unchanged: callers still get an (empty) page.
+    assert page is not None
+    assert page.top_cards == []
+    assert page.category_lists == {}
+    # The poison never reaches disk.
+    assert not (tmp_path / "vexing-commander.json").exists()
+    assert list(tmp_path.glob("*.json")) == []
+    out = capsys.readouterr().out
+    assert "[edhrec] WARNING" in out
+    assert "vexing-commander" in out
+    assert "NOT cached" in out
+
+
+def test_fetch_commander_page_caches_after_empty_parse_recovery(
+    tmp_path, monkeypatch, capsys,
+):
+    """The whole point of not caching the empty parse: the NEXT call
+    re-fetches, and a now-valid page is parsed + cached normally."""
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    responses = [_CHALLENGE_HTML, _valid_page_html("Arcane Signet")]
+    calls = {"n": 0}
+
+    def sequenced(url):
+        body = responses[calls["n"]]
+        calls["n"] += 1
+        return body
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", sequenced,
+    )
+
+    first = fetch_commander_page("Vexing Commander")
+    assert first.top_cards == []
+    assert not (tmp_path / "vexing-commander.json").exists()
+
+    # Second call must hit the network again (nothing poisoned the
+    # cache) and this time succeed + cache.
+    second = fetch_commander_page("Vexing Commander")
+    assert calls["n"] == 2
+    assert second.top_cards[0].name == "Arcane Signet"
+    assert (tmp_path / "vexing-commander.json").exists()
+
+    # Third call is served from the fresh, VALID cache — no network.
+    third = fetch_commander_page("Vexing Commander")
+    assert calls["n"] == 2
+    assert third.top_cards[0].name == "Arcane Signet"
+
+
+def test_fetch_tag_page_does_not_cache_challenge_page(
+    tmp_path, monkeypatch, capsys,
+):
+    """Same guard on the tag-page path (separate cache directory)."""
+    from commander_builder.edhrec_client import fetch_tag_page
+    # Tag cache lives at CACHE_DIR.parent / "edhrec_tag".
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "edhrec",
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text",
+        lambda url: _CHALLENGE_HTML,
+    )
+
+    page = fetch_tag_page("dragons")
+    assert page is not None
+    assert page.top_cards == []
+    assert not (tmp_path / "edhrec_tag" / "dragons.json").exists()
+    out = capsys.readouterr().out
+    assert "[edhrec] WARNING" in out
+    assert "dragons" in out
+    assert "NOT cached" in out
+
+
+def test_fetch_tag_page_caches_valid_page_after_empty_parse(
+    tmp_path, monkeypatch,
+):
+    """Tag path: empty parse not cached → next call re-fetches and a
+    valid page caches normally."""
+    from commander_builder.edhrec_client import fetch_tag_page
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "edhrec",
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    responses = [_CHALLENGE_HTML, _valid_page_html("Terror of the Peaks")]
+    calls = {"n": 0}
+
+    def sequenced(url):
+        body = responses[calls["n"]]
+        calls["n"] += 1
+        return body
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", sequenced,
+    )
+
+    first = fetch_tag_page("dragons")
+    assert first.top_cards == []
+    assert not (tmp_path / "edhrec_tag" / "dragons.json").exists()
+
+    second = fetch_tag_page("dragons")
+    assert calls["n"] == 2
+    assert second.top_cards[0].name == "Terror of the Peaks"
+    assert (tmp_path / "edhrec_tag" / "dragons.json").exists()
+
+
+def test_fetch_salt_list_challenge_page_warns_and_does_not_cache(
+    tmp_path, monkeypatch, capsys,
+):
+    """Salt path already refused to cache empty maps (the precedent for
+    the guard); it must now also WARN instead of degrading silently."""
+    from commander_builder.edhrec_client import fetch_salt_list
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "edhrec",
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text",
+        lambda url: _CHALLENGE_HTML,
+    )
+
+    assert fetch_salt_list() == {}
+    assert not (tmp_path / "edhrec_salt" / "top-salt.json").exists()
+    out = capsys.readouterr().out
+    assert "[edhrec] WARNING" in out
+    assert "NOT cached" in out
+
+
+# --- narrowed exception handling in fetch_* ---------------------------------
+
+def test_fetch_commander_page_warns_on_network_failure(
+    tmp_path, monkeypatch, capsys,
+):
+    """Network failures (URLError et al.) still degrade to None, but now
+    leave a diagnosable warning with the exception repr."""
+    import urllib.error
+    import commander_builder.edhrec_client as ec
+    monkeypatch.setattr(ec, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ec, "REQUEST_SLEEP_SEC", 0)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)  # retry backoff
+
+    def dns_down(url):
+        raise urllib.error.URLError("getaddrinfo failed")
+    monkeypatch.setattr(ec, "_http_get_text", dns_down)
+
+    assert fetch_commander_page("Sephiroth") is None
+    out = capsys.readouterr().out
+    assert "[edhrec] WARNING" in out
+    assert "URLError" in out  # exception repr present
+
+
+def test_fetch_commander_page_no_longer_swallows_programming_errors(
+    tmp_path, monkeypatch,
+):
+    """The old blanket ``except Exception`` converted ANY bug into a
+    silent None ("EDHREC unavailable"). After narrowing to OSError, a
+    programming error (e.g. TypeError) propagates to the caller."""
+    import commander_builder.edhrec_client as ec
+    monkeypatch.setattr(ec, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ec, "REQUEST_SLEEP_SEC", 0)
+
+    def buggy(url):
+        raise TypeError("someone broke the fetch layer")
+    monkeypatch.setattr(ec, "_http_get_text", buggy)
+
+    with pytest.raises(TypeError):
+        fetch_commander_page("Sephiroth")
+
+# ---------------------------------------------------------------------------
+# AverageDeck.to_moxfield_shape — basic-land distribution
+# ---------------------------------------------------------------------------
+
+def _build_avg_deck(commander, non_basic_count, basics_listed):
+    """Helper: build an AverageDeck with N non-basics + the named basics."""
+    from commander_builder.edhrec_client import AverageDeck, CardEntry
+    cards: list[CardEntry] = [CardEntry(name=commander, num_decks=1)]
+    for i in range(non_basic_count):
+        cards.append(CardEntry(name=f"NonBasic{i:03d}", num_decks=100))
+    for b in basics_listed:
+        # 5000 is the kind of "appears in N decks" count that used to be
+        # capped at 40 by the old code — the bug we're fixing.
+        cards.append(CardEntry(name=b, num_decks=5000))
+    return AverageDeck(
+        commander_name=commander,
+        slug="test", url="x", bracket_slug=None, budget_slug=None,
+        cards=cards,
+    )
+
+
+def test_to_moxfield_shape_distributes_basics_to_fill_99():
+    """Basics are split evenly across the listed basic types so the total
+    mainboard = 99 cards (not 40-of-each)."""
+    deck = _build_avg_deck("Atraxa, Praetors' Voice",
+                           non_basic_count=65, basics_listed=["Forest", "Island"])
+    shape = deck.to_moxfield_shape(bracket_int=4)
+    main = shape["boards"]["mainboard"]["cards"]
+    total = sum(e["quantity"] for e in main.values())
+    assert total == 99, f"expected 99 mainboard cards, got {total}"
+    # 99 - 65 = 34 basics, split 17/17 (even). Neither basic should be 5000.
+    basic_qtys = {e["card"]["name"]: e["quantity"] for e in main.values()
+                  if e["card"]["name"].lower() in {"forest", "island"}}
+    assert basic_qtys == {"Forest": 17, "Island": 17}
+
+
+def test_to_moxfield_shape_uneven_split_remainder_to_first_listed():
+    """When (99 - non_basic) doesn't divide evenly, the remainder lands on
+    the first-listed basic(s) (deterministic, by EDHREC ordering)."""
+    deck = _build_avg_deck("Niv-Mizzet, Parun",
+                           non_basic_count=64, basics_listed=["Island", "Mountain"])
+    main = deck.to_moxfield_shape()["boards"]["mainboard"]["cards"]
+    basic_qtys = {e["card"]["name"]: e["quantity"] for e in main.values()
+                  if e["card"]["name"].lower() in {"island", "mountain"}}
+    # 99 - 64 = 35 -> 18 + 17, remainder to first-listed (Island).
+    assert basic_qtys == {"Island": 18, "Mountain": 17}
+
+
+def test_to_moxfield_shape_no_basic_overshoot_when_already_99_nonbasic():
+    """If non-basics already fill >=99, the basics get qty 0 (not negative,
+    not the old 40-cap value)."""
+    deck = _build_avg_deck("Krenko, Mob Boss",
+                           non_basic_count=99, basics_listed=["Mountain"])
+    main = deck.to_moxfield_shape()["boards"]["mainboard"]["cards"]
+    mtn_qty = next(e["quantity"] for e in main.values()
+                   if e["card"]["name"] == "Mountain")
+    assert mtn_qty == 0
+
+
+def test_to_moxfield_shape_non_basics_are_singletons():
+    """Commander format -> every non-basic is qty 1 regardless of num_decks."""
+    deck = _build_avg_deck("Sol", non_basic_count=10, basics_listed=[])
+    main = deck.to_moxfield_shape()["boards"]["mainboard"]["cards"]
+    for e in main.values():
+        assert e["quantity"] == 1, e

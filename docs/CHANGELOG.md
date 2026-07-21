@@ -6,6 +6,466 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-20 — adversarial-review round 3 (5 commits, UNMERGED)
+
+Third pass: an audit of round 2's own commits plus a completeness check
+that no finding from either round was dropped (none was). Fast lane
+after this round: 1838 passed / 147 skipped. One bullet per commit,
+oldest first.
+
+#### Fixed
+
+- **`fix(import)`** (`10ece14`): same-id matching respects the
+  `[USER]`/pool role boundary — a deck harvested into the opponent pool
+  no longer blocks importing a `[USER]` copy; bracket drift renames the
+  file (with `Name=` restamp) so `_bracket_from_filename` stays truthful.
+- **`fix(verdict)`** (`69ab9a5`): sim warnings speak decisive-vs-total
+  units (fillers win ~half of 4-player pod games); `commander-improve`
+  default sim-games 25 → 45 so the 20-decisive verdict gate is actually
+  reachable; post-sim note reports actual decisive shortfalls.
+- **`fix(stats)`** (`bd63da8`): win-rate columns are head-to-head
+  decisive in all four writers, for real this time; schema docstring
+  carries a dated three-era convention history; cross-writer identity
+  test now includes filler wins (fails against the old code).
+- **`fix(misc)`** (`11001dc`): absorbed-pod seat-balance telemetry +
+  note; meta-test aggregate seat line instead of per-reference spam;
+  FP2 v2-rename fallback restamps `Name=`; `[CONTROL]` calibration
+  leftovers excluded from pool-curation candidates; real-log evidence
+  recorded that Forge cap-stops never mark survivors "has lost".
+- **`docs`** (`23b7ea8`): round-2 catalog (listed here for completeness).
+
+### 2026-07-20 — adversarial-review round 2 (14 commits, UNMERGED)
+
+Second review pass over the same branch: an audit of round 1's own
+16 commits plus deeper sweeps of previously light areas. Same branch/
+worktree as below. Fast lane after this round: 1814 passed / 146
+skipped (~95s). One bullet per commit, oldest first.
+
+#### Fixed
+
+- **`fix(revert)`** (`e0708cf`): restamp `Name=` when revert restores a
+  historical snapshot — closes a regression round 1's own `f74913a` made
+  deterministic; dck_meta empty-`Name=` and `DisplayName=` re-import
+  hardening.
+- **`fix(verdict)`** (`1cec8d4`): `save_iteration` accepts
+  `inconclusive` (the web UI's default below 20 decisive games no longer
+  400s); `commander-improve` default sim-games 5 → 25 so it can actually
+  advance; loud sub-threshold warnings; JS margin/verdict rendering.
+- **`fix(sim)`** (`e2e5b87`): compare pods alternate head-to-head seat
+  order by pod index (meta-test alternates per reference) — removes the
+  systematic seat-1 first-player bias toward the old deck.
+- **`fix(curator)`** (`bf700ba`): preflight blame isolation (rotated
+  fillers + one-retry exoneration — one bad deck can no longer zero the
+  candidate pool); per-deck confirm-action accounting; typed
+  `InsufficientSurvivorsError` instead of an uncaught traceback.
+- **`fix(analyzer)`** (`d356132`): parse Forge's `Game Outcome: ... has
+  lost <reason>` lines — commander-damage/poison/mill eliminations at
+  positive life are now excluded from turn-cap draw resolution; run_match
+  draws no longer inflate `avg_turns_when_lost`.
+- **`fix(stats)`** (`611feff`): one win-rate convention (wins/decisive)
+  across all four knowledge_log writers; meta-test totals include
+  filler wins; `run_ab_parallel` turn averages weighted by real sample
+  counts; every report shape carries a `draw_policy` label.
+- **`fix(import)`** (`fc54986`): same-id re-import matching scans
+  uniquified siblings — re-pulls of collision-renamed decks overwrite in
+  place instead of minting duplicates.
+- **`fix(web)`** (`c5e7af6`): JSON content-type gate on all mutating
+  endpoints (closes the no-preflight cross-origin/DNS-rebinding vector);
+  bracket validation everywhere; game-changer case-fold consistency;
+  5 MB error-log cap; image-cache slug hashing.
+- **`fix(ui)`** (`13f16de`): stale-response guards in `selectDeck` and
+  the bracket-override handler; deck-size pill copy for >100-card decks;
+  iteration-graph forked chains stack instead of overlapping.
+- **`fix(soak)`** (`6d1c3cb`): `merge_soak --to-knowledge-log` is
+  idempotent (content-identity dedupe) and skips gauntlet-schema rows
+  instead of folding them as bogus 0-0 iterations.
+- **`fix(degrade)`** (`6f89c6c`): `http.client.HTTPException` joins the
+  EDHREC retry/degrade path; deck-health signals return None (rendered
+  "unavailable") on Scryfall outage instead of misleading zeros.
+- **`fix(parallel)`** (`bac47c1`): early-stop keeps draining in-flight
+  pods so paid-for games are absorbed; `forge_log_tail` replaced with an
+  honest marker under shared-profile parallel dispatch.
+- **`fix(misc)`** (`6689566`): nine low-severity fixes — null-rationale
+  render crash, draw saturation-vs-target invariant, Skyclave Cleric
+  MDFC, evidence-score clamping, filler-pair duplication warning,
+  `_is_decisive` docstring, soak_throughput div-zero/`--force`, batch
+  SystemExit(0) status, honest name-based archetype classification.
+- **`fix(guards)`** (`5a3266f`): dry-run honors the 99-card guard;
+  Moxfield drift check detects commander swaps.
+
+### 2026-07-19 — adversarial-review fix branch (16 commits, UNMERGED)
+
+Lives on `fix/adversarial-review-2026-07-19` (worktree
+`C:\dev\cb-review-fixes`), pending merge to `feature`. One bullet per
+commit, oldest first. Fast lane: 1719 passed / 146 skipped (~90s).
+
+#### Fixed
+
+- **`fix(sim)`** (`f74913a`): rewrite `Name=` to the filename stem in the
+  snapshot / proposer-apply / meta-test deck writers — new `dck_meta.py`
+  holds the filename↔`Name=` win-attribution invariant; original name
+  preserved as `DisplayName=`.
+- **`fix(sim)`** (`1ae44f9`): surface pod failures in
+  compare/run_match/iteration_loop instead of silently diluting stats.
+- **`fix(tests)`** (`4dc4f2e`): knowledge_log DB path resolves at call
+  time so the test isolation fixture actually isolates.
+- **`fix(proposer)`** (`8d5f5e0`): validate cuts/adds against the real
+  decklist (singleton + exactly-99 mainboard invariant); never write an
+  illegal deck.
+- **`fix(llm)`** (`543bc2f`): shared robust JSON extractor
+  (`_llm_json.py`); garbage/truncated LLM replies raise loud
+  `LLMJsonError`s instead of misleading fallbacks.
+- **`fix(secrets)`** (`3fcde0a`): thread the BYO key explicitly; scrub
+  `ANTHROPIC_API_KEY` from subprocess env.
+- **`fix(security)`** (`b617678`): token-level placeholder check in the
+  secret scanner; space-safe pre-commit hook; scanner runs in CI.
+- **`fix(cli)`** (`304e4c8`): flag-aware batch argv rewriting (safe with
+  `.dck` flag values); `SystemExit` no longer aborts the batch.
+- **`fix(edhrec)`** (`5c7b3d6`): never cache empty parses; warn loudly on
+  challenge pages.
+- **`fix(import)`** (`6ccf3f0`): same-id re-import overwrites in place;
+  name collisions uniquify inside the bracket tag.
+- **`fix(revert)`** (`a3660fb`): back up the live deck (and print the
+  backup path) before overwriting it.
+- **`fix(export)`** (`99e8b53`): content-identity dedupe on
+  knowledge-log import; no silent export truncation (10k cap removed).
+- **`fix(web)`** (`7693136`): uid-suffix staged sim filenames to prevent
+  same-second clobber races.
+- **`fix(subprocess)`** (`a465d4e`): UTF-8 decoding everywhere
+  Forge/CLI output is read.
+- **`fix(misc)`** (`45d1d36`): None-safe ML features; deterministic
+  cuts; URLError degradation; case-folded game-changer lookup.
+- **`fix(import)`** (`4c79068`): stamp `Name=` from the final filename
+  stem; drop the dead A/B name matcher.
+
+### 2026-05-27 — FP-002/007/008-009/010 slices landed (4 review branches merged)
+
+Built in parallel isolated worktrees, reviewed (green fast lane + scope audit +
+a line-by-line correctness pass), and merged to `feature` (`--no-ff` each):
+- **FP-002**: `scripts/build_fp002_deckset.py` — acquire top-liked Moxfield base
+  + Claude-curated v2 for ~30 commanders toward the 80-deck margin-regression
+  goal (resumable; smoke-tested live).
+- **FP-007**: unified nav shell (Decks/Cards/Rules left-rail), `/api/library`
+  cross-deck card search (backed by `decks_containing_card`), and
+  `/api/rules/combo` + `/api/rules/game_changers`.
+- **FP-008/009**: `image_url` added to the `/api/oracle` projection (rest of the
+  oracle/card surface was already shipped).
+- **FP-010**: first-run downloader + JRE extraction (`extract_jre`/`ensure_jre`)
+  + deck-dir picker + window chrome (icon/single-instance/graceful shutdown) + a
+  Windows CI build job. Review caught + fixed a latent crash — the app icon is a
+  `webview.start()` kwarg, not a `create_window()` param (tests had masked it).
+Fast lane: 1548 passed / 141 skipped on merged `feature`. (Installer slice for
+FP-010 deferred — needs Inno Setup/NSIS tooling.)
+
+### 2026-05-27 — orchestrator worklist landed (4 items, reviewed + folded)
+
+The autonomous commander-orchestrator cleared the `orch/worklist` queue;
+each fix was reviewed against its pinned contract and the worklist tests
+were folded into permanent per-module homes (coverage now rides with the
+code on `feature`, not the disposable branch). Full `--run-slow` suite green
+(1618 passed).
+
+#### Added
+
+- **`feat(fp-002)`: `margin_analysis.single_feature_ols(samples, feature)`** —
+  pure-stdlib single-feature OLS (slope/intercept/r²) plus a leave-one-out
+  cross-validated RMSE (the honest out-of-sample error for the
+  analysis→predictor step); constant-feature safe (slope 0.0, no ZeroDiv).
+- **`feat(fp-010)`: `bootstrap._pick_jre_asset(release, system, machine)`** —
+  picks the Temurin/Adoptium JRE archive for the caller's OS+arch from a
+  GitHub release payload (mirrors `_pick_forge_jar_asset`); `None` when no
+  asset matches. Enables first-run JRE auto-fetch.
+- **`feat(fp-007)`: `web/_helpers.decks_containing_card(deck_dir, card_name)`** —
+  cross-deck library search ("which of my decks run this card?"): sorted deck
+  IDs whose `[Commander]`/`[Main]` runs the card, case-insensitive, leading
+  quantity and `|SET|CN` edition tail stripped.
+
+#### Fixed
+
+- **`fix(game_changers)`: don't cache a failed/empty scrape.**
+  `fetch_game_changers` now persists `.cache/game_changers.json` only when the
+  WotC scrape actually produced names; a failed/empty scrape degrades to the
+  bundled fallback *without* writing the cache, so it no longer masquerades as
+  "fresh" for the full TTL and blocks a retry.
+
+### 2026-05-26 — FP-002 reopened + cross-validated, FP-007/FP-010 started, deep audit + fixes
+
+#### Added
+
+- **`feat(fp-002)`: margin-regression analysis on the 40-game soak rows.**
+  `scripts/margin_analysis.py` (pure stdlib — sklearn/numpy/scipy absent)
+  regresses curator win-rate margin on pre-sim deck-health features in two
+  designs: `--mode ab` (v1-vs-v2 in-pod) and `--mode gauntlet` (each deck vs a
+  fixed gauntlet, unconfounded). **Finding (robust across both): curation is
+  empirically ~neutral** (mean margin +0.0009 A/B, −0.0108 gauntlet); the one
+  A/B "significant" feature (`wincon_protection`) did NOT replicate in the
+  cleaner design → confound artifact. Only `deficit_total`/`under_built_roles`
+  agree across designs (curation adds least to structurally-deficient decks).
+  18 tests; `docs/future-plans.md` + deck-gen plan
+  (`docs/future-plans.md`).
+- **`feat(combo)`: infinite-combo → bracket enforcement.**
+  `combo_detection.assess_deck_brackets()` maps each detected combo to its WotC
+  bracket floor (two-card infinite/win → B4, 3+-card → B3), flags combos
+  exceeding the declared bracket, recommends the bracket the deck actually
+  plays at. Surfaced in `/api/audit` (+ stream) as `combo_assessment` and
+  rendered as a bracket-pressure banner / collapsed panel.
+- **`feat(advisor)`: EDHREC `/top` trending as a recency boost.** The heuristic
+  recommender takes a `trending` set from `fetch_top_cards("month")`; trending
+  candidates float up (secondary to diagnosis priority) and are annotated.
+  Re-rank only — never introduces off-archetype/off-color cards.
+- **`feat(web)`: role-targets deck-health tile** (under-built-role deficits) +
+  `combo_assessment` in the audit payload.
+- **`feat(fp-007)`: card-reference panel (slice 1).** `GET /api/card/<name>`
+  (identity / commander-legality / price / printing over the cached
+  `scryfall_client`) + a topbar "Cards" search + reference overlay. FP-007
+  flipped PARKED → STARTED (`docs/future-plans.md`); the FP-006 gate is met.
+- **`feat(fp-010)`: desktop EXE (started).** `commander_builder/desktop.py`
+  (Flask on a daemon thread + native pywebview window), `packaging/`
+  PyInstaller spec + `scripts/build_desktop.py` (verified: builds
+  `dist/CommanderBuilder/CommanderBuilder.exe` with Flask assets bundled),
+  `[desktop]` extra. `bootstrap.py` first-run dependency detection +
+  Forge-jar downloader (`commander-builder-bootstrap`). `docs/future-plans.md`.
+- **`feat(forge)`: `run_ab_parallel`** — split one A/B matchup's games into even
+  chunks across cwd-isolated Forge profiles, run concurrently (capped at
+  physical cores via `psutil`), and aggregate per-seat wins into one ABResult.
+
+#### Changed
+
+- **`feat(sim)`: A/B sim game-count options `5/10/20` → `10/40/100`** (default
+  40, the soak high-confidence standard) with a live per-bracket time-hint next
+  to the selector. 5-game sims are below the noise floor.
+- **`feat(sim)`: low-N verdict gating.** Below 20 decisive games an A/B result
+  records as a new `inconclusive` verdict (distinct from a genuine `neutral`
+  tie) rather than a confident kept/reverted that a single-game flip could
+  invert. Wired through `_proposer_sim`, `knowledge_log`, the dashboard
+  PATCH allow-list, and the web save-verdict radios.
+
+#### Fixed
+
+- **`fix(web)`: security batch** — `_resolve_deck_path` `?path=` now `.dck`-locked
+  (no clobbering non-deck files); image cache validates image magic before
+  caching (no HTML-error-body served as `.jpg`) + TOCTOU-guarded read; BYO
+  Anthropic key staged into `os.environ` under a serializing lock that always
+  restores (sync + SSE paths); 3 unguarded route reads → clean 500s.
+- **`fix`: 7 correctness bugs from a deep subsystem audit** — advisor default
+  path dropped `diagnosis=`; `classify_role_extended` misclassified lands;
+  subscription-CLI env scrub widened to all `ANTHROPIC_*` + bedrock/vertex
+  toggles; `fetch_commander_page` Optional + guarded `__main__`;
+  `_resolve_life_leader` no longer crowns an eliminated seat; `forge_runner`
+  timeout-salvage preserves `avg_turns`; `analyst` tolerates fenced/prose LLM
+  output + non-numeric confidence (degrades to heuristic).
+- **`fix`: ResourceWarning leaks** — file/socket handles closed in
+  `margin_analysis`, `combo_detection.refresh_combos`, `game_analyzer`.
+
+### 2026-05-22 — FP promotions: A2 commander-improve (FP-012 slice 1), A1 web config (FP-011), A3 FP-001 spike memo
+
+#### Added — bandit swap-selection strategy (FP-012 slice 2)
+
+- **`feat(improve)`: `commander-improve --strategy bandit`.** The next
+  slice past A2's fixed-N greedy loop: instead of accepting whatever the
+  curator proposes, treat individual candidate swaps as multi-armed-bandit
+  arms and learn — across A/B sims — which ones actually move the win
+  rate. New `bandit.py` is the pure core: an `Arm` model, two policies
+  (`EpsilonGreedy` + `UCB1`), and a `run_bandit` loop driven by an
+  injected evaluator (no Forge/Anthropic/disk — fully unit-tested). The
+  CLI builds arms from the advisor's candidate `(add, cut)` swaps; each
+  pull applies one swap to the current best deck, A/B-sims it
+  (seat-attributed), and rewards the win margin, advancing the base deck
+  on improvement. New flags `--strategy {greedy,bandit}` (default greedy,
+  so A2 behavior is unchanged), `--bandit-policy {epsilon_greedy,ucb1}`,
+  `--epsilon`, `--ucb-c`. The full FP-012 agent (intent-learning,
+  Bayesian opt, multi-deck orchestration) stays parked. 21 new tests
+  (15 core + 6 integration).
+
+#### Changed — unified the two Anthropic-key entry points (FP-011)
+
+- **`feat(web)`: config.json is now the single source of truth for the
+  BYO Anthropic key.** Previously there were two disconnected stores: the
+  audit panel's "Set API key" wrote the key to browser `localStorage`
+  (sent as the `X-Anthropic-API-Key` header), while the new Settings
+  panel wrote it server-side to `config.json` — but nothing read the
+  latter for audits. Now:
+  - **Server:** `routes_audit._resolve_byo_key()` resolves the audit key
+    in precedence `header → config.json → env`, so the key saved in
+    Settings actually drives Claude audits. The "no key" fallback warning
+    now points to Settings.
+  - **Client:** the audit panel's key button is relabeled "Set API key…"
+    and **opens the Settings dialog** instead of a `window.prompt`; once a
+    key is configured it reads "API key ✓ (Settings)". The browser no
+    longer stores the raw key — `loadAdvise` dropped the prompt/localStorage
+    path, and any legacy `cb.audit.anthropic_key` is cleared on load.
+  4 new/updated tests (config-key fallback + header-override-config +
+  shared web `client` fixture isolates `COMMANDER_BUILDER_CONFIG`).
+  Verified end-to-end in Chrome.
+
+#### Docs — FP-008 confirmed already shipped (stale backlog entry)
+
+- **`docs`: mark FP-008 (card-image lazy fetcher) done in STATUS.** No
+  code change — the feature was already fully implemented: `app.js`
+  `renderAddRow` renders lazy/async thumbnails through `cardImageUrl()` →
+  the local `/api/card_image/<size>/<name>` route, with a click-to-expand
+  overlay (`openCardImageOverlay`); the route disk-caches Scryfall bytes
+  (`web/_image_cache.py`, with quota eviction + transient retry) and
+  serves immutable `Cache-Control`. Covered by `test_image_cache.py`. The
+  STATUS Tier-2 entry had simply never been struck through.
+
+#### Added — iteration-graph milestone glyph (#012 UI remainder)
+
+- **`feat(web)`: ⚑ milestone flag on iteration-graph nodes.** Finishes
+  the one deferred piece of #012 (milestone backend shipped earlier in
+  `c5ab6bd`). `iteration_graph_for_deck` now includes `milestone` on each
+  node; `iteration_graph.js` renders a ⚑ glyph at the node's top-center
+  when set and adds the label to the hover tooltip. 1 new test
+  (`test_node_carries_milestone_when_set`); JS `node --check` clean.
+
+#### Added — oracle-text card-reference store (FP-009, backlog #014)
+
+- **`feat(oracle_store)`: `commander-oracle-refresh` + errata-drift
+  detection.** New `oracle_store.py` is a thin surface over the existing
+  `scryfall_client` snapshot cache (`mtg_cards/oracle_snapshots/`) — no
+  second datastore (the #014 architectural call). Adds the three pieces
+  FP-009 was missing: `card_reference()` (stable presentation alias for
+  `format_card_for_display`), `check_errata(name)` (compares the cached
+  snapshot's oracle text against a fresh, non-caching Scryfall fetch to
+  detect WotC re-wordings), and `bulk_refresh()` driving the
+  `commander-oracle-refresh` CLI (`--deck` / `--name` / `--all`,
+  `--stale-days`, `--write`, `--json`). Read-only by default; only
+  `--write` rewrites drifted snapshots. New console entry point. 17 tests
+  (network stubbed via `CACHE_DIR` redirect + monkeypatched client).
+
+#### Added — Pearson r for the forge_py correlation harness
+
+- **`feat(correlation)`: `pearson_r()` + `correlation_summary` reports
+  `pearson_r`/`pearson_n`.** New pure (numpy-free) Pearson helper; the
+  summary now correlates the two engines' per-row win margins
+  (`new_wins - old_wins`) and reports r against the 2026-04-28 "flip
+  default only when r ≥ 0.90 across ≥30 paired rows" rule (the CLI prints
+  a ✓/below-gate marker). `None` when undefined (<2 rows / flat series).
+  The A3 spike's one noted scaffolding gap. 9 new tests.
+
+#### Docs — FP-001 LLM-pilot feasibility spike (go/no-go memo)
+
+- **`docs(fp001)`: LLM-piloted Forge AI spike → NO-GO (as scoped) /
+  redirected + gated.** New `docs/fp001-llm-pilot-spike.md` records the
+  A3 spike result: you cannot pilot Forge 2.0.12's AI with an LLM — it's
+  a vendored compiled JAR run as a fire-and-forget `java -jar … sim`
+  subprocess with no decision-injection seam (only `on_line` /
+  `abort_check` = read-stdout / kill-process) and no Forge source to
+  patch. The real seam is `forge_py`'s Python decision points, but that
+  engine is absent here and not yet mature. The ≥30-paired-game,
+  Pearson-r ≥ 0.90 experiment is fully designed and the scaffolding
+  (`analyst.py` LLM client, `run_ab_simulation`/`run_ab_batch`,
+  `forge_py_correlation` log) is ready, but there's no pilotable player
+  to run it against today. FP-001 stays parked with a precise unblock
+  condition. A valuable negative result that avoids a 2–4 wk dead-end.
+  (No code change; one optional follow-up noted: a Pearson-r helper
+  beside `correlation_summary`.)
+
+#### Added — web config GET/PUT + Settings panel (FP-011 finished)
+
+- **`feat(web)`: `GET`/`PUT /api/config` + per-user config store.** New
+  `config_store.py` reads/writes a per-user `config.json`
+  (`%LOCALAPPDATA%\commander-builder\config.json` on Windows,
+  `~/.commander-builder/config.json` elsewhere; `COMMANDER_BUILDER_CONFIG`
+  overrides). New `web/routes_config.py` blueprint:
+  - `GET /api/config` returns the config with secrets **redacted** — an
+    `anthropic_api_key_set` boolean + last-4 `anthropic_api_key_hint`; the
+    raw token is never serialized, so a GET→render→PUT round trip can't
+    leak or re-submit it.
+  - `PUT /api/config` validates a sparse update (token shape mirrors the
+    `scripts/scan_secrets.py` anthropic pattern; unknown keys, malformed
+    tokens, out-of-range brackets → 400 with **nothing persisted**),
+    merges into the stored config, and writes the file owner-only
+    (0o600). The app binds 127.0.0.1, so the PUT surface is local-only.
+  - Minimal Settings panel: a native `<dialog>` + `static/settings.js`
+    wired to a topbar **Settings** button. The token field starts blank
+    and shows a "(set · …last4)" hint; leaving it blank keeps the
+    existing key.
+  This was the last open piece of FP-011 (the pre-commit secret scanner
+  shipped earlier in `803debe`). 32 tests (`test_config_store.py` +
+  `test_routes_config.py`, endpoints via Flask test client).
+
+#### Added — `commander-improve` greedy single-deck improve loop
+
+- **`feat(improve)`: `commander-improve --deck <id> --rounds N`** — the
+  bounded first slice of FP-012 (the autonomous deck-improvement agent).
+  New `commander_builder/improve.py` runs the existing
+  `commander-auto-curate --run-sim` pipeline for N rounds on ONE deck and
+  advances **greedily**: a round's proposed deck becomes the next round's
+  base only when the seat-attributed A/B verdict is `kept`;
+  `reverted`/`neutral`/`pending` rounds keep the current base. Stops early
+  on a no-op round (curator proposed no changes → converged) or an errored
+  round. Bracket is inferred from the `[B<n>]` filename suffix when
+  `--bracket` is omitted; `--deck <id>` resolves against the Commander
+  deck dir (or pass a `.dck` path positionally). Pass-through curation/sim
+  flags mirror auto-curate (`--mode`, `--sim-games`, `--sim-margin`,
+  `--sim-fillers`, `--model`, `--source`, `--protect*`, `--db-path`).
+  Composes the auto-curate machinery rather than reimplementing it, so
+  every round inherits seat attribution, color-identity filtering,
+  protected-card handling, and knowledge_log rows. The full multi-arm
+  bandit / Bayesian agent stays parked. New `commander-improve` console
+  entry point. 15 tests (loop logic driven by an injected `round_fn` —
+  no Forge/Anthropic in the suite).
+
+### 2026-05-21/22 — FP-003 shipped, A/B win-attribution fix, FP-002 concluded, FP-002 data-gen substrate
+
+Commits `33536d7`…`7cef5a7` on `feature/2026-04-28-session`. Two future
+plans moved off "parked": **FP-003 shipped**, **FP-002 concluded NOT
+VIABLE** via this pipeline. A correctness fix to A/B win attribution
+invalidated the prior FP-002 training labels.
+
+#### Fixed — A/B sim win attribution (the bug that mattered)
+
+- **`fix(forge)`: attribute A/B sim wins by SEAT, not deck name.**
+  `run_ab_simulation` credited wins by deck *name*, but deck A and deck B
+  routinely share the same internal `Name=` (a curated deck keeps its
+  parent's; a detuned deck keeps the original's) → Forge emitted identical
+  seat tokens → wins funnelled to one side. Now attributed by seat.
+  **Consequence:** the prior `knowledge_log` FP-002 labels (78 kept / 153
+  reverted) are **measurement artifacts** — train only on post-fix rows
+  with `--min-id 314`. Pre-fix rows are kept in the DB as archive, never
+  deleted. (`e8777b6`)
+
+#### Added — concurrent Forge sims (FP-003 SHIPPED)
+
+- **`feat(forge)`: concurrent A/B sims via cwd-isolated profile pool.**
+  New `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims across
+  cwd-isolated Forge profiles in parallel (≈2× throughput). Second profile
+  lives at `vendor/forge2`, recreatable via
+  `scripts/setup_forge_profile.py`. Resolves the FP-003 feasibility spike:
+  separate `cwd`-isolated profiles do avoid file-locking races. (`0f8f945`)
+- **`feat(curator)`: hint `--parallelism` when batch + `--run-sim` default
+  to 1.** (`33536d7`)
+
+#### Concluded — FP-002 Phase-3 ML predictor: NOT VIABLE via this pipeline
+
+- With correct (post-`e8777b6`) attribution, the curator's swaps almost
+  never make a deck *worse* than its input — verified across detune depths
+  0–10 → **11 kept / 3 neutral / 0 reverted**. The kept-vs-reverted
+  classifier therefore has no negative class to learn. A future FP-002
+  would need a different framing (e.g. regress on improvement margin), not
+  more sim hours.
+- Supporting data-gen substrate that led to the conclusion:
+  - **`feat`: `scripts/detune_deck.py`** positive-example generator +
+    `9a22240` unit tests. (the orchestrator holds the generators +
+    `train_fp002.py`.)
+  - **`ml_dataset`: pre-sim deck-composition features + regression tests**
+    (`114122e`); **fix `extract_features` reading stale sim schema; add
+    detuner** (`6822352`).
+
+#### Added — subscription-CLI curator routing + secret scanner (FP-011 piece)
+
+- **`feat`: route curator through the subscription `claude` CLI when no
+  API key is present** (`12d7f2c`); `1682ada` unit-tests the adapter;
+  `d38bb4c` documents why `claude_propose` stays SDK-only. Never inherit
+  `ANTHROPIC_API_KEY` when invoking `claude`.
+- **`feat(security)`: pre-commit secret scanner** — scans staged diffs for
+  key prefixes (FP-011 piece; web config GET/PUT still TODO). (`803debe`)
+- **`docs`: action plans for actionable future plans** (FP-003/011/001/010)
+  at `docs/future-plans-action.md` (`af83510`); **`HANDOFF.md`** added as
+  orientation + FP snapshot, split from the orchestrator (`8ed4cc1`,
+  `7cef5a7`); `0bb2aa3` unbreaks `python -m commander_builder.proposer`.
+
 ### 2026-05-19 — post-PR-#3 work: CI fix, image cache, Forge slug fix, app.js splits, knowledge_log milestones, secret-scan hook
 
 14 commits landed on `feature/2026-04-28-session` after PR #3 merged.

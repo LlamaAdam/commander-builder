@@ -2,6 +2,7 @@
 import json
 import socket
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -162,3 +163,49 @@ def test_doctor_to_dict_round_trips():
     assert "worst_status" in d
     assert "exit_code" in d
     assert len(d["checks"]) == len(report.checks)
+
+
+def test_run_doctor_does_not_touch_production_knowledge_log(tmp_path):
+    """Guard for the conftest isolation fixture actually isolating.
+
+    ``run_doctor()`` (and ``collect_status()``) take no db_path and used
+    to reach the REAL repo-root ``knowledge_log.sqlite`` even under the
+    autouse ``_isolate_knowledge_log_default_path`` fixture, because the
+    consumers froze ``DEFAULT_DB_PATH`` at import time and knowledge_log
+    baked it into def-time parameter defaults. Regression check: run the
+    two no-arg import-time consumers and assert every DB side effect
+    lands in the fixture's temp file, not the production path.
+    """
+    from commander_builder import knowledge_log
+
+    # The autouse fixture must have redirected the default already.
+    patched = knowledge_log.DEFAULT_DB_PATH
+    production = Path(knowledge_log.__file__).resolve().parents[2] / "knowledge_log.sqlite"
+    assert patched != production
+    # Tolerate a production DB legitimately existing on a dev machine —
+    # the invariant is that the test run doesn't CREATE (or touch) it.
+    production_existed = production.exists()
+    production_mtime = production.stat().st_mtime_ns if production_existed else None
+
+    report = run_doctor(skip_ollama=True)
+    kl_check = next(c for c in report.checks if c.name == "knowledge_log")
+    assert kl_check.status == GREEN
+    # The doctor's reported path should be the patched one.
+    assert str(patched) in (kl_check.detail or "")
+
+    # Second import-time consumer: status. collect_status() hits
+    # stats_summary/recent_iterations with no db_path.
+    from commander_builder.status import collect_status
+    collect_status(
+        deck_dir=tmp_path / "decks",
+        pool_dir=tmp_path / "pools",
+        match_dir=tmp_path / "matches",
+        compare_dir=tmp_path / "compare",
+    )
+
+    # All init_db side effects landed in the isolated temp DB...
+    assert patched.exists()
+    # ...and the production file was neither created nor modified.
+    assert production.exists() == production_existed
+    if production_existed:
+        assert production.stat().st_mtime_ns == production_mtime

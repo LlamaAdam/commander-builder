@@ -55,7 +55,10 @@ function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "class") node.className = v;
-    else if (k === "html") node.innerHTML = v;
+    // NOTE: deliberately no innerHTML escape hatch here — server/API
+    // data must flow through createTextNode/textContent. If a call
+    // site truly needs raw HTML, assign innerHTML explicitly there
+    // with a comment explaining why it is safe.
     else node.setAttribute(k, v);
   }
   for (const c of children) {
@@ -186,6 +189,13 @@ async function selectDeck(deckId, li, opts) {
       fetchJSON(`/api/dashboard?deck=${encodeURIComponent(deckId)}`),
       fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
     ]);
+    // Stale-response guard: if the user clicked another deck while
+    // these fetches were in flight, drop this (slower) result instead
+    // of overwriting the newer deck's dashboard. Without this, every
+    // later action (audit / propose / save-iteration keys off
+    // _activeDeckId) would operate on deck B while the user LOOKS at
+    // deck A's data. Same check the audit auto-kick below already does.
+    if (_activeDeckId !== deckId) return;
     renderDashboard(data, iters.iterations || []);
     // Auto-kick a fast heuristic audit so the user sees recs
     // immediately instead of hunting for the "Run audit" button.
@@ -207,6 +217,9 @@ async function selectDeck(deckId, li, opts) {
       loadAdvise("heuristic");
     }
   } catch (e) {
+    // Same stale guard on the error path — a late failure for a deck
+    // the user already left must not blank the deck they're viewing.
+    if (_activeDeckId !== deckId) return;
     dash.innerHTML = `<p class="empty-state">Error loading: ${e.message}</p>`;
   } finally {
     const badge = document.getElementById("_soft-refresh-badge");
@@ -215,6 +228,44 @@ async function selectDeck(deckId, li, opts) {
 }
 
 let _proposeMode = "ab";   // "ab" (Run A/B sim) or "save" (Edit deck)
+
+// Per-game wall-time (seconds) by bracket — conservative (slow side of the
+// observed distribution) so ETAs don't breed "is it stuck?" questions. Pod =
+// 4-player commander; duel = 1v1 (~3-5x faster). With parallel-pod dispatch,
+// wall-time tracks the SLOWEST concurrent pod, not the sum.
+const _POD_SEC_PER_GAME = { 1: 15, 2: 22, 3: 30, 4: 55, 5: 75 };
+const _DUEL_SEC_PER_GAME = { 1: 4, 2: 6, 3: 8, 4: 14, 5: 22 };
+
+function _bracketOfActiveDeck() {
+  const m = (_activeDeckId || "").match(/\[B(\d)\]/);
+  return m ? parseInt(m[1], 10) : 3;
+}
+
+// Estimated A/B-sim wall-clock. Returns { sec, str } where str is "~N min"
+// (>=90s) or "~Ns". Shared by the live Games hint and the run-status line so
+// the two never diverge.
+function simEta(games, mode, bracket) {
+  const table = (mode === "pod") ? _POD_SEC_PER_GAME : _DUEL_SEC_PER_GAME;
+  const perGame = table[bracket] ?? table[3];
+  const sec = games * perGame;
+  const str = sec >= 90 ? `~${Math.round(sec / 60)} min` : `~${sec}s`;
+  return { sec, str };
+}
+
+// Update the live time hint next to the Games radios. Reads the currently
+// checked games + mode and the active deck's bracket. No-op in save mode
+// (the hint span is hidden with the rest of the sim controls).
+function updateGamesEta() {
+  const span = $("games-eta");
+  if (!span) return;
+  const gEl = document.querySelector('input[name="games"]:checked');
+  const mEl = document.querySelector('input[name="mode"]:checked');
+  if (_proposeMode === "save" || !gEl) { span.textContent = ""; return; }
+  const games = parseInt(gEl.value, 10);
+  const mode = mEl ? mEl.value : "pod";
+  const bracket = _bracketOfActiveDeck();
+  span.textContent = `${simEta(games, mode, bracket).str} on B${bracket}`;
+}
 
 async function openProposeModal(opts) {
   if (!_activeDeckId) return;
@@ -237,6 +288,7 @@ async function openProposeModal(opts) {
   }
   status.textContent = "";
   result.innerHTML = "";
+  updateGamesEta();  // show the time hint for the current selection on open
   ta.value = "Loading…";
   modal.hidden = false;
   try {
@@ -310,26 +362,10 @@ async function runProposeSwap() {
   // estimate misled users about how long to wait. Real datapoint that
   // forced this fix: a B4 10g pod sim took ~700s vs. the old flat
   // 150s estimate.
-  const bracketMatch = (_activeDeckId || "").match(/\[B(\d)\]/);
-  const bracket = bracketMatch ? parseInt(bracketMatch[1], 10) : 3;
-  // Per-game wall-time in seconds, keyed by bracket. Conservative
-  // (slow side of observed distribution) so users don't get
-  // over-optimistic ETAs that breed "is it stuck?" questions.
-  // Pod = 4-player commander; duel = 1v1 constructed (~3-5x faster).
-  // With parallel-pod dispatch (Sprint 1A) + intra-pod abort (1C),
-  // wall-time tracks the SLOWEST pod, not the sum — these figures
-  // already account for that. 1B early-stop is effectively a no-op
-  // when filler_pairs == cpu_count (all pods run concurrently,
-  // nothing queued to cancel), so we don't discount for it.
-  const podSecPerGame = { 1: 15, 2: 22, 3: 30, 4: 55, 5: 75 };
-  const duelSecPerGame = { 1: 4, 2: 6, 3: 8, 4: 14, 5: 22 };
-  const perGame = (mode === "pod")
-    ? (podSecPerGame[bracket] ?? podSecPerGame[3])
-    : (duelSecPerGame[bracket] ?? duelSecPerGame[3]);
-  const etaSec = games * perGame;
-  const etaStr = etaSec >= 90
-    ? `~${Math.round(etaSec / 60)} min`
-    : `~${etaSec}s`;
+  const bracket = _bracketOfActiveDeck();
+  // ETA via the shared estimator (see simEta) so the run-status line and the
+  // live Games hint never disagree.
+  const etaStr = simEta(games, mode, bracket).str;
   status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} `
     + `games on B${bracket} via Forge — ${etaStr}…`;
   btn.disabled = true;
@@ -453,14 +489,20 @@ function renderSaveIterationBlock(body) {
   // Verdict radios.
   const fs = el("fieldset", { class: "games-radio" });
   fs.appendChild(el("legend", {}, "Verdict:"));
+  // Below ~20 decisive games the result is below the noise floor, so the
+  // default verdict is "inconclusive" regardless of who edged ahead — a 3-2
+  // isn't a kept. At a trustworthy sample size, default to the winner.
+  const _decisive = (body.old_wins || 0) + (body.new_wins || 0);
   const defaultVerdict =
-    body.winner === "new" ? "kept"
+    _decisive < 20 ? "inconclusive"
+    : body.winner === "new" ? "kept"
     : body.winner === "old" ? "reverted"
     : "neutral";
   for (const [val, label] of [
     ["kept", "Kept (apply changes)"],
     ["reverted", "Reverted (discard)"],
-    ["neutral", "Neutral (inconclusive)"],
+    ["neutral", "Neutral (true tie)"],
+    ["inconclusive", "Inconclusive (too few games)"],
     ["pending", "Pending (decide later)"],
   ]) {
     const lbl = el("label");
@@ -605,16 +647,19 @@ let _lastSimReport = null;
 // a deck the user moved away from.
 let _lastDashboardPriceUsd = null;
 
-// Audit-backend preference + BYO API key. Stored in localStorage
-// (browser-local; never sent anywhere except the active /api/audit
-// request as the X-Anthropic-API-Key header). Per FP-011.
+// Audit-backend preference. Stored in localStorage (browser-local).
+// FP-011 unification: the BYO Anthropic key is NO LONGER kept in
+// localStorage — it lives server-side in config.json (set via the
+// Settings panel), and the audit endpoint resolves it (header →
+// config.json → env). Any legacy browser-stored key is cleared on
+// load (see clearLegacyAnthropicKey).
 // The localStorage key keeps its legacy name "cb.audit.llm" so users
 // who already toggled Claude don't lose their preference, but the
 // accepted values expanded from "heuristic"/"claude" to also include
 // "bracket_peers" (top-N highest-liked Moxfield decks at the same
 // commander + bracket — see improvement_advisor._bracket_peers_recommendations).
 const _LLM_PREF_KEY = "cb.audit.llm";
-const _ANTHROPIC_KEY = "cb.audit.anthropic_key";
+const _ANTHROPIC_KEY = "cb.audit.anthropic_key";  // legacy; cleared on load
 const _CLAUDE_MODEL_KEY = "cb.audit.claude_model";
 const _BUDGET_KEY = "cb.audit.budget";
 
@@ -694,6 +739,85 @@ function openCardImageOverlay(cardName) {
   scrim.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
   document.body.appendChild(scrim);
+}
+
+// FP-007 card-reference panel: fetch /api/card/<name> and show a richer
+// overlay than openCardImageOverlay — image + oracle text, identity,
+// commander legality, USD price, and printing. Backs the topbar "Cards"
+// search box.
+async function openCardReference(name) {
+  name = (name || "").trim();
+  if (!name) return;
+  const prior = document.getElementById("_card-ref-overlay");
+  if (prior) prior.remove();
+  const scrim = el("div", {
+    id: "_card-ref-overlay",
+    style: "position: fixed; inset: 0; background: rgba(0,0,0,0.7); "
+         + "z-index: 1000; display: flex; align-items: center; "
+         + "justify-content: center;",
+  });
+  const panel = el("div", {
+    style: "background: var(--bg); border: 1px solid var(--border); "
+         + "border-radius: 8px; padding: 16px; max-width: 760px; "
+         + "max-height: 88vh; overflow: auto; display: flex; gap: 16px; "
+         + "box-shadow: 0 4px 32px rgba(0,0,0,0.5);",
+  });
+  panel.addEventListener("click", (e) => e.stopPropagation());  // clicks inside keep it open
+  panel.appendChild(el("div", { class: "muted" }, `Looking up "${name}"…`));
+  scrim.appendChild(panel);
+  function close() { scrim.remove(); document.removeEventListener("keydown", onKey); }
+  function onKey(e) { if (e.key === "Escape") close(); }
+  scrim.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(scrim);
+
+  try {
+    const resp = await fetch(`/api/card/${encodeURIComponent(name)}`);
+    panel.innerHTML = "";
+    if (resp.status === 404) {
+      panel.appendChild(el("p", {}, `No card found for "${name}".`));
+      return;
+    }
+    if (!resp.ok) {
+      panel.appendChild(el("p", {}, `Lookup failed (HTTP ${resp.status}).`));
+      return;
+    }
+    const c = await resp.json();
+    // Left: image. Right: details.
+    panel.appendChild(el("img", {
+      src: cardImageUrl(c.name, "normal"), alt: c.name,
+      style: "width: 240px; height: auto; border-radius: 8px; flex: 0 0 auto;",
+    }));
+    const info = el("div", { style: "flex: 1 1 auto; min-width: 260px;" });
+    info.appendChild(el("h2", { style: "margin: 0 0 2px;" }, c.name || name));
+    const sub = [c.mana_cost, c.type_line].filter(Boolean).join("  •  ");
+    if (sub) info.appendChild(el("div", { class: "muted", style: "margin-bottom: 8px;" }, sub));
+    if (c.oracle_text) {
+      info.appendChild(el("div", {
+        style: "white-space: pre-wrap; font-size: 13px; line-height: 1.4; "
+             + "margin-bottom: 10px;",
+      }, c.oracle_text));
+    }
+    const ci = (c.color_identity && c.color_identity.length)
+      ? c.color_identity.join("") : "Colorless";
+    const facts = [
+      `Color identity: ${ci}`,
+      `Commander: ${c.commander_legal ? "legal" : "not legal"}`,
+      c.price_usd != null ? `Price: $${c.price_usd.toFixed(2)}` : "Price: n/a",
+      (c.set || c.collector_number)
+        ? `Printing: ${(c.set || "").toUpperCase()} #${c.collector_number || "?"}`
+          + (c.rarity ? ` (${c.rarity})` : "")
+        : null,
+    ].filter(Boolean);
+    const ul = el("ul", { style: "list-style: none; padding: 0; margin: 0; "
+                                + "font-size: 13px;" });
+    for (const f of facts) ul.appendChild(el("li", {}, f));
+    info.appendChild(ul);
+    panel.appendChild(info);
+  } catch (e) {
+    panel.innerHTML = "";
+    panel.appendChild(el("p", {}, `Lookup error: ${e.message}`));
+  }
 }
 
 // Build a card-image URL that goes through the local server-side
@@ -818,16 +942,14 @@ function setAutoAuditPref(enabled) {
 function setAuditLLMPref(v) {
   try { localStorage.setItem(_LLM_PREF_KEY, v); } catch (_e) { /* ignore */ }
 }
-function getAnthropicKey() {
-  try { return localStorage.getItem(_ANTHROPIC_KEY) || ""; }
-  catch (_e) { return ""; }
+// FP-011: the BYO key moved server-side (config.json via Settings).
+// Clear any legacy plaintext key a prior version stored in this browser
+// so it doesn't linger. Invoked once at module load below.
+function clearLegacyAnthropicKey() {
+  try { localStorage.removeItem(_ANTHROPIC_KEY); }
+  catch (_e) { /* ignore */ }
 }
-function setAnthropicKey(k) {
-  try {
-    if (k) localStorage.setItem(_ANTHROPIC_KEY, k);
-    else localStorage.removeItem(_ANTHROPIC_KEY);
-  } catch (_e) { /* ignore */ }
-}
+clearLegacyAnthropicKey();
 
 // Whitelist of valid audit source values. Must mirror the server-side
 // validation in routes_audit.py and _AUDIT_SOURCE_OPTIONS above.
@@ -861,27 +983,15 @@ async function loadAdvise(sourceOverride) {
   if (!_activeDeckId) return;
   const sug = $("sug-panel");
   if (!sug) return;
-  const sourcePref = sourceOverride || getAuditLLMPref();
-  // Only the Claude path needs a BYO key. Bracket-peers + heuristic
-  // are key-free, so don't prompt the user for one.
-  const byoKey = sourcePref === "claude" ? getAnthropicKey() : "";
-  if (sourcePref === "claude" && !byoKey) {
-    const k = window.prompt(
-      "Paste your Anthropic API key (stored only in this browser; "
-      + "sent only on audit requests). Cancel to skip and use heuristic.",
-      "",
-    );
-    if (k && k.trim().startsWith("sk-")) {
-      setAnthropicKey(k.trim());
-    } else if (!sourceOverride) {
-      // Only mutate the user's stored preference when this isn't an
-      // explicit override — the auto-kick / upgrade button mustn't
-      // silently change the persisted setting.
-      setAuditLLMPref("heuristic");
-    }
-  }
   const sourceFinal = sourceOverride || getAuditLLMPref();
-  const keyFinal = sourceFinal === "claude" ? getAnthropicKey() : "";
+  // BYO key now lives server-side in config.json (set via the Settings
+  // panel). We no longer prompt for or store it in the browser — the
+  // audit endpoint resolves the key (header → config.json → env) itself
+  // and, when Claude is requested with no key anywhere, falls back to
+  // the heuristic and surfaces a "set your key in Settings" warning.
+  // ``keyFinal`` stays as an optional ephemeral header override that
+  // nothing sets by default.
+  const keyFinal = "";
 
   // Restore the panel header (renderSuggestions strips children
   // beyond the <h3>; we want the header back when re-rendering).
@@ -1104,29 +1214,30 @@ function renderAuditBackendRow(body) {
   budgetLabel.appendChild(document.createTextNode(" Budget mode"));
   row.appendChild(budgetLabel);
 
-  // Manage-key button — clears stored key or prompts for a new one.
+  // Manage-key button — opens the unified Settings panel. FP-011: the
+  // Anthropic key is stored server-side (config.json) and set in ONE
+  // place (Settings), instead of a separate plaintext copy per browser.
+  // The audit endpoint resolves the key header → config.json → env, so
+  // whatever you save in Settings drives Claude audits.
   const keyBtn = el("button",
-    { class: "advise-btn", style: "padding: 4px 10px; font-size: 12px;" },
-    getAnthropicKey() ? "Replace API key" : "Set API key",
+    { class: "advise-btn", style: "padding: 4px 10px; font-size: 12px;",
+      title: "Set or replace your Anthropic API key in Settings." },
+    "Set API key…",
   );
   keyBtn.addEventListener("click", () => {
-    const k = window.prompt(
-      "Anthropic API key (leave empty to forget). "
-      + "Stored in this browser only; sent only as the "
-      + "X-Anthropic-API-Key header on audit requests.",
-      "",
-    );
-    if (k === null) return;       // cancel
-    if (k.trim() === "") {
-      setAnthropicKey("");
-      keyBtn.textContent = "Set API key";
-    } else if (k.trim().startsWith("sk-")) {
-      setAnthropicKey(k.trim());
-      keyBtn.textContent = "Replace API key";
-    } else {
-      window.alert("API key should start with 'sk-'.");
-    }
+    const settingsBtn = document.getElementById("btn-settings");
+    if (settingsBtn) settingsBtn.click();
   });
+  // Reflect whether a key is already configured server-side, so the
+  // button reads "✓ (Settings)" once one is set.
+  fetch("/api/config")
+    .then((r) => r.json())
+    .then((cfg) => {
+      if (cfg && cfg.anthropic_api_key_set) {
+        keyBtn.textContent = "API key ✓ (Settings)";
+      }
+    })
+    .catch(() => { /* leave default label */ });
   row.appendChild(keyBtn);
   return row;
 }
@@ -1167,6 +1278,13 @@ function renderAuditResult(container, body) {
   // deck_health payload (legacy clients without the field stay clean).
   if (body.deck_health) {
     container.appendChild(renderDeckHealthTiles(body.deck_health));
+  }
+
+  // Infinite/win-combo + bracket-pressure assessment. Renders a red
+  // banner when detected combos exceed the declared bracket, a collapsed
+  // info panel when combos are present but legal, nothing when clean.
+  if (body.combo_assessment) {
+    container.appendChild(renderComboAssessment(body.combo_assessment));
   }
 
   if (body.diagnosis) {
@@ -1667,6 +1785,112 @@ function renderAuditResult(container, body) {
 }
 
 
+// Two-version card-diff compare UI (#013). Two pickers over the deck's
+// iteration history; "Compare" fetches /api/audit_diff and renders the
+// added / removed / unchanged card delta between the chosen versions.
+function renderVersionCompare(iterations) {
+  const wrap = el("div", {
+    class: "version-compare",
+    style: "margin-top: 12px; border-top: 1px solid var(--border, #2a2a2a); padding-top: 10px;",
+  });
+  wrap.appendChild(el("p", {
+    class: "muted",
+    style: "margin: 0 0 6px; font-size: 12px;",
+  }, "Compare two versions — card delta"));
+
+  const label = (it) => {
+    const ver = it.audit_version || `#${it.id}`;
+    const verdict = it.verdict ? ` · ${it.verdict}` : "";
+    const flag = it.milestone ? " ★" : "";
+    return `${ver}${flag} — ${it.deck_name || ("#" + it.id)}${verdict}`;
+  };
+  const mkSelect = (selectedIdx) => {
+    const sel = el("select", {
+      class: "version-compare-pick",
+      style: "max-width: 46%; font-size: 12px; padding: 3px 4px;",
+    });
+    iterations.forEach((it, i) => {
+      const opt = el("option", { value: String(it.id) }, label(it));
+      if (i === selectedIdx) opt.setAttribute("selected", "selected");
+      sel.appendChild(opt);
+    });
+    return sel;
+  };
+
+  // Default: oldest -> newest. iterations may arrive newest- or
+  // oldest-first; either way the two extremes are the useful default.
+  const fromSel = mkSelect(0);
+  const toSel = mkSelect(iterations.length - 1);
+
+  const controls = el("div", {
+    style: "display: flex; gap: 6px; align-items: center; flex-wrap: wrap;",
+  });
+  controls.appendChild(fromSel);
+  controls.appendChild(el("span", { class: "muted", style: "font-size: 12px;" }, "→"));
+  controls.appendChild(toSel);
+  const compareBtn = el("button", {
+    class: "advise-btn",
+    style: "font-size: 12px; padding: 4px 10px;",
+  }, "Compare");
+  controls.appendChild(compareBtn);
+  wrap.appendChild(controls);
+
+  const result = el("div", { style: "margin-top: 10px;" });
+  wrap.appendChild(result);
+
+  const cardList = (title, cards, cls) => {
+    const box = el("div", { class: `diff-col diff-${cls}`, style: "flex: 1; min-width: 0;" });
+    box.appendChild(el("h4", {
+      style: "margin: 0 0 4px; font-size: 12px;",
+    }, `${title} (${cards.length})`));
+    if (!cards.length) {
+      box.appendChild(el("p", { class: "muted", style: "font-size: 12px; margin: 0;" }, "—"));
+      return box;
+    }
+    const ul = el("ul", { class: "diff-card-list", style: "margin: 0; padding-left: 16px; font-size: 12px;" });
+    for (const c of cards) {
+      const qty = c.qty && c.qty > 1 ? `${c.qty}× ` : "";
+      ul.appendChild(el("li", {}, `${qty}${c.name}`));
+    }
+    box.appendChild(ul);
+    return box;
+  };
+
+  compareBtn.addEventListener("click", async () => {
+    const fromId = fromSel.value;
+    const toId = toSel.value;
+    result.innerHTML = "";
+    if (fromId === toId) {
+      result.appendChild(el("p", { class: "muted", style: "font-size: 12px;" },
+        "Pick two different versions to compare."));
+      return;
+    }
+    compareBtn.disabled = true;
+    compareBtn.textContent = "Comparing…";
+    try {
+      const data = await fetchJSON(
+        `/api/audit_diff?from_id=${encodeURIComponent(fromId)}&to_id=${encodeURIComponent(toId)}`,
+      );
+      const d = data.diff;
+      result.appendChild(el("p", {
+        class: "muted", style: "font-size: 12px; margin: 0 0 6px;",
+      }, `${d.from_total} cards → ${d.to_total} cards · ${d.unchanged} unchanged`));
+      const cols = el("div", { style: "display: flex; gap: 16px;" });
+      cols.appendChild(cardList("Added", d.added, "added"));
+      cols.appendChild(cardList("Removed", d.removed, "removed"));
+      result.appendChild(cols);
+    } catch (e) {
+      result.appendChild(el("p", { class: "muted", style: "font-size: 12px;" },
+        `Compare failed: ${e.message}`));
+    }
+    compareBtn.disabled = false;
+    compareBtn.textContent = "Compare";
+  });
+
+  return wrap;
+}
+
+
 function renderDashboard(data, iterations) {
   const dash = $("dashboard");
   dash.innerHTML = "";
@@ -1813,9 +2037,12 @@ function renderDashboard(data, iterations) {
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: `verdict ${it.verdict}` }, it.verdict));
       row.appendChild(el("span", { class: "name" }, it.deck_name));
+      // `margin` is a raw game-count delta (wins_new - wins_old, see
+      // _proposer_sim._ab_to_iteration_fields) — NOT percentage points,
+      // so label it in games. "+2pp" here overstated a +2-game edge.
       const deltaText =
         it.margin != null
-          ? `${it.margin > 0 ? "+" : ""}${it.margin}pp`
+          ? `${it.margin > 0 ? "+" : ""}${it.margin} games`
           : it.win_rate_new != null
           ? `${Math.round(it.win_rate_new * 100)}%`
           : "";
@@ -1867,6 +2094,10 @@ function renderDashboard(data, iterations) {
       graphWrap.appendChild(toggleBtn);
       graphWrap.appendChild(graphContainer);
       histPanel.appendChild(graphWrap);
+
+      // Two-version card diff (#013). Pick any two iterations and render
+      // the added/removed/unchanged card delta side-by-side.
+      histPanel.appendChild(renderVersionCompare(iterations));
     }
     dash.appendChild(histPanel);
   }
@@ -1997,6 +2228,7 @@ async function loadVerdictBreakdown(deckId, dashContainer) {
       const kept = b.kept || 0;
       const reverted = b.reverted || 0;
       const neutral = b.neutral || 0;
+      const inconclusive = b.inconclusive || 0;
       const row = el("li", { class: "iteration" });
       row.appendChild(el("span", { class: "name" }, v));
       // Color the verdict count pills like the iteration list.
@@ -2009,6 +2241,12 @@ async function loadVerdictBreakdown(deckId, dashContainer) {
       ));
       if (neutral) pills.appendChild(el(
         "span", { class: "verdict neutral" }, `${neutral} neutral`,
+      ));
+      // Without this pill, low-N sims (verdict='inconclusive', counted
+      // in `total` by knowledge_log.stats) silently deflate the
+      // "kept/total" ratio below with no visible explanation.
+      if (inconclusive) pills.appendChild(el(
+        "span", { class: "verdict inconclusive" }, `${inconclusive} inconclusive`,
       ));
       row.appendChild(pills);
       const keptPct = total ? Math.round((kept / total) * 100) : 0;
@@ -2070,10 +2308,19 @@ function legalityBanner(legality, data) {
   if (legality.deck_size_ok === false) {
     const total = legality.deck_total ?? "?";
     const target = legality.deck_target ?? 100;
-    wrap.appendChild(el(
-      "span", { class: "pill bad" },
-      `Deck is ${total}/${target} — needs ${target - total} more`,
-    ));
+    // Branch the copy on the sign of the shortfall: an oversized deck
+    // must not read "needs -2 more". NaN (unknown total) falls through
+    // to the bare count.
+    const diff = typeof total === "number" ? target - total : NaN;
+    let sizeMsg;
+    if (diff > 0) {
+      sizeMsg = `Deck is ${total}/${target} — needs ${diff} more`;
+    } else if (diff < 0) {
+      sizeMsg = `Deck is ${total}/${target} — over by ${-diff}`;
+    } else {
+      sizeMsg = `Deck is ${total}/${target}`;
+    }
+    wrap.appendChild(el("span", { class: "pill bad" }, sizeMsg));
   }
   // Game Changers pill.
   const gcCount = legality.n_game_changers || 0;
@@ -2164,7 +2411,14 @@ async function verifyAgainstSource() {
         style: "color: var(--accent);",
       }, resp.source_url),
     ));
-    if (resp.in_local_only.length === 0 && resp.in_remote_only.length === 0) {
+    // commander_changed is an additive server field (older responses
+    // simply lack it, which coerces to false — same as before the fix).
+    // It must gate the "In sync" pill: the [Main] diff can be empty
+    // while the deck was re-helmed on Moxfield, and a commander swap
+    // is the one drift that invalidates everything downstream.
+    const cmdrChanged = !!resp.commander_changed;
+    if (resp.in_local_only.length === 0 && resp.in_remote_only.length === 0
+        && !cmdrChanged) {
       body.appendChild(el(
         "p", {}, el("span", { class: "pill good" },
           `In sync — ${resp.matched} cards match`),
@@ -2176,8 +2430,22 @@ async function verifyAgainstSource() {
       el("span", { class: "pill warn" },
         `Drift detected — ${resp.matched} matched, ` +
         `${resp.in_local_only.length} only-local, ` +
-        `${resp.in_remote_only.length} only-remote`),
+        `${resp.in_remote_only.length} only-remote` +
+        (cmdrChanged ? ", commander changed" : "")),
     ));
+    if (cmdrChanged) {
+      body.appendChild(el("h4", {}, "Commander changed"));
+      const ul = el("ul");
+      ul.appendChild(el(
+        "li", {},
+        `Local: ${(resp.local_commanders || []).join(" / ") || "(none)"}`,
+      ));
+      ul.appendChild(el(
+        "li", {},
+        `Moxfield: ${(resp.remote_commanders || []).join(" / ") || "(none)"}`,
+      ));
+      body.appendChild(ul);
+    }
     if (resp.in_local_only.length) {
       body.appendChild(el("h4", {}, "In your local copy but not on Moxfield"));
       const ul = el("ul");
@@ -2240,17 +2508,24 @@ function bracketTile(t) {
   sel.addEventListener("change", async (ev) => {
     const newBracket = ev.target.value;
     if (!_activeDeckId) return;
+    // Pin the deck this reload was kicked off for so a deck switch
+    // mid-fetch doesn't let the stale response (or its error toast)
+    // overwrite the newly selected deck's dashboard — same guard as
+    // selectDeck.
+    const deckId = _activeDeckId;
     const dash = $("dashboard");
     dash.innerHTML = '<p class="empty-state">Reloading with bracket ' + newBracket + '…</p>';
     try {
       const [data, iters] = await Promise.all([
         fetchJSON(
-          `/api/dashboard?deck=${encodeURIComponent(_activeDeckId)}&bracket=${newBracket}`,
+          `/api/dashboard?deck=${encodeURIComponent(deckId)}&bracket=${newBracket}`,
         ),
-        fetchJSON(`/api/iterations?deck=${encodeURIComponent(_activeDeckId)}`),
+        fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
       ]);
+      if (_activeDeckId !== deckId) return;
       renderDashboard(data, iters.iterations || []);
     } catch (e) {
+      if (_activeDeckId !== deckId) return;
       dash.innerHTML = `<p class="empty-state">Error: ${e.message}</p>`;
     }
   });
@@ -2359,7 +2634,14 @@ async function deleteDeck() {
   try {
     const resp = await fetch(
       `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
-      { method: "DELETE" },
+      {
+        // No body, but the server's cross-origin mutation gate requires
+        // Content-Type: application/json on EVERY mutating method (it
+        // forces a CORS preflight so foreign pages can't drive this
+        // localhost API); a bare DELETE would now 415.
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+      },
     );
     if (!resp.ok) {
       flashStatus(`Delete failed: ${resp.status}`);
@@ -2756,6 +3038,21 @@ document.addEventListener("DOMContentLoaded", () => {
   if (closeBtn) closeBtn.addEventListener("click", closeProposeModal);
   const runBtn = $("propose-run");
   if (runBtn) runBtn.addEventListener("click", runProposeSwap);
+
+  // Live time hint: recompute the ETA whenever the game count or mode
+  // changes (radios are static markup, so bind once here).
+  document.querySelectorAll('input[name="games"], input[name="mode"]')
+    .forEach((r) => r.addEventListener("change", updateGamesEta));
+
+  // FP-007 topbar card lookup: submit -> card-reference overlay.
+  const cardForm = $("card-search-form");
+  if (cardForm) {
+    cardForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const input = $("card-search-input");
+      if (input && input.value.trim()) openCardReference(input.value);
+    });
+  }
 
   // Generic modal-close buttons (Add-deck modal + Alert modal).
   document.querySelectorAll("[data-close]").forEach((btn) => {

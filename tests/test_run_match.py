@@ -86,6 +86,9 @@ def test_to_dict_includes_win_rate():
     )
     d = r.to_dict()
     assert d["win_rate"] == 0.75
+    # Draw-policy label (2026-07-19): run_match counts turn-cap draws as
+    # plain draws (vs the A/B harness's 'resolve_survivor_leader').
+    assert d["draw_policy"] == "plain_draw"
 
 
 def test_format_summary_includes_record_line():
@@ -99,3 +102,218 @@ def test_format_summary_includes_record_line():
     assert "U.dck" in s
     assert "4W" in s and "2L" in s
     assert "win rate 66.7%" in s
+
+
+# ---------------------------------------------------------------------------
+# Pod-failure surfacing — failed pods must be reported, NOT counted as losses
+# ---------------------------------------------------------------------------
+
+def _setup_match_world(tmp_path, monkeypatch):
+    """Stage a user deck + 3 opponents in a fake DECK_DIR and route
+    run_matchup's pool lookup at them. Mirrors compare_versions'
+    _setup_compare_world pattern — mock at the runner boundary only."""
+    from commander_builder import run_match as rm
+
+    deck_dir = tmp_path / "decks" / "commander"
+    deck_dir.mkdir(parents=True)
+    for name in [
+        "[USER] Hero [B3].dck",
+        "OppA [B3].dck",
+        "OppB [B3].dck",
+        "OppC [B3].dck",
+    ]:
+        (deck_dir / name).write_text(
+            "[metadata]\nName=" + Path(name).stem + "\n[Main]\n1 Forest\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(rm, "DECK_DIR", deck_dir)
+    monkeypatch.setattr(
+        rm, "_load_pool",
+        lambda bracket: ["OppA [B3].dck", "OppB [B3].dck", "OppC [B3].dck"],
+    )
+    return rm
+
+
+def test_run_matchup_excludes_crashed_pod_from_losses(
+    tmp_path, monkeypatch, capsys,
+):
+    """The bug: games from crashed pods (partial per-game lines, no Match
+    Result, nonzero rc) entered games_played unattributed and user_losses
+    = decisive - wins booked every one of them as a user LOSS. They must
+    be excluded and surfaced instead."""
+    from commander_builder.forge_runner import SimResult
+
+    rm = _setup_match_world(tmp_path, monkeypatch)
+
+    # Pod 1: healthy — user ("Hero") wins 1 of 3 attributed games.
+    good_stdout = (
+        "Match Result: Ai(1)-Hero: 1 Ai(2)-OppA [B3]: 2 "
+        "Ai(3)-OppB [B3]: 0 Ai(4)-OppC [B3]: 0\n"
+        "Game Result: Game 1 ended in 60000 ms. Ai(1)-Hero has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(2)-OppA [B3] has won!\n"
+        "Game Result: Game 3 ended in 60000 ms. Ai(2)-OppA [B3] has won!\n"
+    )
+    # Pod 2: JVM crashed mid-run after 2 games — per-game lines but no
+    # trailing Match Result, nonzero exit code.
+    crashed_stdout = (
+        "Game Result: Game 1 ended in 60000 ms. Ai(2)-OppA [B3] has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(3)-OppB [B3] has won!\n"
+    )
+    results = iter([
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0,
+                  stdout=good_stdout, stderr="", timed_out=False, error=None),
+        SimResult(cmd=["x"], returncode=1, duration_sec=0.5,
+                  stdout=crashed_stdout, stderr="NPE", timed_out=False,
+                  error=None),
+    ])
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return next(results)
+
+    report = rm.run_matchup(
+        user_deck="[USER] Hero [B3].dck",
+        bracket=3, games_per_pod=3, num_pods=2,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_matches",
+    )
+
+    # Only pod 1's attributed games count: 1W / 2L, NOT 1W / 4L.
+    assert report.games_played == 3
+    assert report.user_wins == 1
+    assert report.user_losses == 2
+    # The failure is flagged, not silently dropped.
+    assert report.failed_pods == 1
+    assert report.excluded_games == 2
+    assert report.pod_failures[0]["reason"] == "Forge exited with code 1"
+    assert report.pod_failures[0]["unattributed_games"] == 2
+    # Both pods stay in the report (post-mortem data) with flags.
+    assert len(report.pods) == 2
+    assert report.pods[1]["pod_failed"] is True
+    # to_dict carries the failure fields for status.py / report.py readers.
+    d = report.to_dict()
+    assert d["failed_pods"] == 1
+    # Loud console warning + summary line.
+    out = capsys.readouterr().out
+    assert "FAILED" in out and "EXCLUDED" in out
+    s = _format_summary(report)
+    assert "1 failed pod(s) EXCLUDED" in s
+
+
+def test_run_matchup_salvages_timed_out_pod_not_counted_as_losses(
+    tmp_path, monkeypatch, capsys,
+):
+    """A timed-out pod with partial per-game lines but no Match Result gets
+    a synthesized summary: finished games are attributed (user's win is
+    kept as a WIN, not lost to dilution) and the truncation is flagged."""
+    from commander_builder.forge_runner import SimResult
+
+    rm = _setup_match_world(tmp_path, monkeypatch)
+
+    partial = (
+        "Game Result: Game 1 ended in 60000 ms. Ai(1)-Hero has won!\n"
+        "Game Result: Game 2 ended in 60000 ms. Ai(2)-OppA [B3] has won!\n"
+    )
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=None, duration_sec=600.0,
+                stdout=partial, stderr="", timed_out=True,
+                error="Timed out after 600s",
+            )
+
+    report = rm.run_matchup(
+        user_deck="[USER] Hero [B3].dck",
+        bracket=3, games_per_pod=5, num_pods=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_matches",
+    )
+    # Pre-fix: games_played=2 with 0 attributed wins → 2 phantom losses.
+    assert report.failed_pods == 0
+    assert report.timed_out_pods == 1
+    assert report.games_played == 2
+    assert report.user_wins == 1
+    assert report.user_losses == 1
+    out = capsys.readouterr().out
+    assert "TIMED OUT" in out
+
+
+def test_run_matchup_draw_end_turn_not_counted_in_loss_turn_stats(
+    tmp_path, monkeypatch,
+):
+    """The bug: a drawn game has winner_normalized None, which satisfied the
+    old `winner_normalized != user_norm` loss branch, so the draw's end_turn
+    (the turn cap — huge) was averaged into avg_turns_when_lost. Here the
+    user wins game 1 (turn 10) and game 2 is a turn-cap draw (turn 50): with
+    no actual losses, avg_turns_when_lost must be 0.0, not 50.0."""
+    from commander_builder.forge_runner import SimResult
+
+    rm = _setup_match_world(tmp_path, monkeypatch)
+
+    stdout = (
+        # Game 1 — Hero wins decisively at turn 10.
+        "Turn: Turn 1 (Ai(1)-Hero)\n"
+        "Life: Life: Ai(2)-OppA [B3] 40 > 0\n"
+        "Game Outcome: Turn 10\n"
+        "Game Result: Game 1 ended in 60000 ms. Ai(1)-Hero has won!\n"
+        # Game 2 — turn-cap draw at turn 50, no winner attributed.
+        "Turn: Turn 1 (Ai(1)-Hero)\n"
+        "Life: Life: Ai(1)-Hero 40 > 20\n"
+        "Stopping slow match as draw\n"
+        "Game Outcome: Turn 50\n"
+        "Game Result: Game 2 ended in 240000 ms\n"
+        "Match Result: Ai(1)-Hero: 1 Ai(2)-OppA [B3]: 0 "
+        "Ai(3)-OppB [B3]: 0 Ai(4)-OppC [B3]: 0\n"
+    )
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=0, duration_sec=1.0,
+                stdout=stdout, stderr="", timed_out=False, error=None,
+            )
+
+    report = rm.run_matchup(
+        user_deck="[USER] Hero [B3].dck",
+        bracket=3, games_per_pod=2, num_pods=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_matches",
+    )
+    assert report.games_played == 2
+    assert report.user_wins == 1
+    assert report.draws == 1
+    assert report.user_losses == 0          # decisive(1) - wins(1)
+    assert report.avg_turns_when_won == 10.0
+    # Pre-fix this was 50.0 — the draw's turn-cap end_turn booked as a loss.
+    assert report.avg_turns_when_lost == 0.0
+
+
+def test_run_matchup_timeout_with_nothing_salvageable_is_excluded(
+    tmp_path, monkeypatch,
+):
+    """A pod that hung before any game finished contributes nothing —
+    and, critically, no losses."""
+    from commander_builder.forge_runner import SimResult
+
+    rm = _setup_match_world(tmp_path, monkeypatch)
+
+    class FakeRunner:
+        def run(self, *args, **kwargs):
+            return SimResult(
+                cmd=["x"], returncode=None, duration_sec=600.0,
+                stdout="Turn: Turn 9 (Ai(1)-Hero)\n", stderr="",
+                timed_out=True, error="Timed out after 600s",
+            )
+
+    report = rm.run_matchup(
+        user_deck="[USER] Hero [B3].dck",
+        bracket=3, games_per_pod=3, num_pods=1,
+        runner=FakeRunner(),
+        out_dir=tmp_path / "_matches",
+    )
+    assert report.games_played == 0
+    assert report.user_wins == 0
+    assert report.user_losses == 0
+    assert report.failed_pods == 1
+    assert report.pod_failures[0]["timed_out"] is True

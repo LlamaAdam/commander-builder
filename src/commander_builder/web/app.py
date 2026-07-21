@@ -30,7 +30,10 @@ from typing import Optional
 # (build_dashboard, knowledge_log functions, etc.) so they don't
 # need re-importing here.
 from ..forge_runner import detect_forge_version
-from ..knowledge_log import DEFAULT_DB_PATH as _DEFAULT_KLOG_DB
+# Module import (not ``from ..knowledge_log import DEFAULT_DB_PATH``) so the
+# default DB path is read at app-creation time — a from-import would freeze
+# the value at import time and bypass the test suite's isolation patch.
+from .. import knowledge_log as _knowledge_log
 
 # Pure helpers extracted to ``_helpers.py`` as part of the
 # 2026-05-13 blueprint refactor (tier-3 issue #3.1). Re-exported
@@ -66,7 +69,14 @@ def _cleanup_stale_staged_files(
     import time as _time
     if not deck_dir.exists():
         return 0
-    pattern = _re.compile(r"_(proposed|converted)_\d{8}_\d{6}\.dck$")
+    # Staged names are `<stem>_proposed_<ts>_<uid8>.dck` — the trailing
+    # 8-hex uid is routes_sim's per-request uniquifier (prevents
+    # same-second clobber races between concurrent A/B sims). The uid
+    # group is OPTIONAL so leftovers staged by pre-uid builds (bare
+    # `_proposed_<ts>.dck`) still get swept instead of orphaned.
+    pattern = _re.compile(
+        r"_(proposed|converted)_\d{8}_\d{6}(_[0-9a-f]{8})?\.dck$"
+    )
     now = _time.time()
     deleted = 0
     # Sweep the commander folder + the parallel constructed folder
@@ -111,7 +121,12 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
         if user_only and not p.stem.startswith("[USER]"):
             continue
         # Skip transient propose-swap working copies regardless of mode.
-        if _re.search(r"_(proposed|converted)_\d{8}_\d{6}$", p.stem):
+        # The optional trailing 8-hex uid matches routes_sim's per-request
+        # uniquifier (same-second collision fix); the bare-timestamp form
+        # is kept so leftovers from pre-uid builds stay hidden too.
+        if _re.search(
+            r"_(proposed|converted)_\d{8}_\d{6}(_[0-9a-f]{8})?$", p.stem,
+        ):
             continue
         display = _re.sub(r"^\[USER\]\s*", "", p.stem)
         out.append({
@@ -152,7 +167,7 @@ def create_app(
 
     if knowledge_db is None:
         env_db = os.environ.get("COMMANDER_BUILDER_KNOWLEDGE_DB")
-        knowledge_db = Path(env_db) if env_db else _DEFAULT_KLOG_DB
+        knowledge_db = Path(env_db) if env_db else _knowledge_log.DEFAULT_DB_PATH
     knowledge_db = Path(knowledge_db)
 
     # Sweep transient propose-swap staging files left over from
@@ -205,6 +220,38 @@ def create_app(
     app.config["DECK_DIR"] = deck_dir
     app.config["KNOWLEDGE_DB"] = knowledge_db
 
+    # --- Cross-origin mutation gate (2026-07-19 adversarial review) ---
+    # Every mutating endpoint used ``request.get_json(force=True)``,
+    # which happily parses a ``text/plain`` body as JSON. A text/plain
+    # POST is a CORS "simple request" — the browser sends it cross-
+    # origin WITHOUT a preflight, so any web page the user visits could
+    # drive this localhost server (start hours-long Forge sims, write
+    # decks, spam logs) via plain ``fetch()`` or DNS rebinding. The
+    # browser can't read the response, but the side effects land anyway.
+    #
+    # Requiring ``Content-Type: application/json`` on every mutating
+    # method makes such requests "non-simple": the browser sends an
+    # OPTIONS preflight first, we never answer it with CORS-allow
+    # headers, and the browser refuses to send the actual request.
+    # DELETE/PUT/PATCH are already non-simple methods, but they're
+    # gated too for defense-in-depth and a uniform contract.
+    #
+    # ``request.mimetype`` is the media type with any parameters
+    # (e.g. ``; charset=utf-8``) already stripped and lowercased, so
+    # charset-suffixed headers pass the check.
+    from flask import jsonify as _jsonify, request as _request
+
+    @app.before_request
+    def _require_json_for_mutations():
+        if _request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return None
+        if _request.mimetype != "application/json":
+            return _jsonify({
+                "error": "Content-Type must be application/json",
+                "received": _request.mimetype or None,
+            }), 415
+        return None
+
     # Cache-buster: a fresh token per process boot so static assets
     # are never served from a stale browser cache after a restart.
     # Without this, app.js / app.css edits ship to GitHub but the
@@ -213,27 +260,61 @@ def create_app(
     import secrets as _secrets
     _ASSET_VERSION = _secrets.token_hex(4)
 
+    # Per-process SECRET_KEY: nothing uses sessions/signed cookies today,
+    # but Flask's default is None — any future flash()/CSRF addition
+    # would be silently forgeable without this. Env override keeps it
+    # stable across restarts when an operator needs that.
+    app.config["SECRET_KEY"] = (
+        os.environ.get("COMMANDER_BUILDER_SECRET_KEY")
+        or _secrets.token_hex(32)
+    )
+
+    @app.after_request
+    def _security_headers(response):
+        # Defense-in-depth for the localhost UI (and anyone who opts
+        # into --host 0.0.0.0): no framing, no MIME sniffing, no
+        # referrer leakage.
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
     # Register modular route blueprints. As of the 2026-05-13 tier-3
     # blueprint refactor (issue #3.1), route groups live in
     # ``routes_<group>.py`` modules and are wired in here. The
     # remaining inline routes are being migrated incrementally.
     from .routes_audit import make_audit_blueprint
+    from .routes_cards import make_cards_blueprint
+    from .routes_config import make_config_blueprint
     from .routes_dashboard import make_dashboard_blueprint
     from .routes_decks import make_decks_blueprint
+    from .routes_library import make_library_blueprint
     from .routes_meta import make_meta_blueprint
     from .routes_oracle import make_oracle_blueprint
+    from .routes_rules import make_rules_blueprint
     from .routes_sim import make_sim_blueprint
     app.register_blueprint(make_audit_blueprint(deck_dir))
     app.register_blueprint(make_dashboard_blueprint(
         deck_dir, knowledge_db, _list_decks,
     ))
     app.register_blueprint(make_decks_blueprint(deck_dir))
+    # FP-007 slice 2: cross-deck library search (which decks run a card?).
+    app.register_blueprint(make_library_blueprint(deck_dir))
     app.register_blueprint(
         make_meta_blueprint(deck_dir, _list_decks, _ASSET_VERSION),
     )
     # FP-009: oracle-text presentation endpoint backing the audit
     # panel's hover tooltip + click-to-expand side panel.
     app.register_blueprint(make_oracle_blueprint())
+    # FP-007 (unified app, slice 1): card-reference panel — richer
+    # projection (identity / legality / price / printing) behind the
+    # topbar "Cards" search box.
+    app.register_blueprint(make_cards_blueprint())
+    # FP-007 slice 3: combo + bracket rules lookup.
+    app.register_blueprint(make_rules_blueprint())
+    # FP-011: per-user config (redacted GET / restricted PUT) backing
+    # the Settings panel — BYO Anthropic token + app preferences.
+    app.register_blueprint(make_config_blueprint())
     app.register_blueprint(make_sim_blueprint(deck_dir, knowledge_db))
 
 
@@ -266,6 +347,14 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=5000)
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
+
+    # The Werkzeug debugger is arbitrary code execution from the browser.
+    # Refuse the footgun combination outright rather than warn-and-hope.
+    if args.debug and args.host not in ("127.0.0.1", "localhost", "::1"):
+        ap.error(
+            "--debug exposes the Werkzeug debugger (remote code "
+            "execution); it is only allowed with a loopback --host."
+        )
 
     app = create_app(deck_dir=args.deck_dir)
     app.run(host=args.host, port=args.port, debug=args.debug)

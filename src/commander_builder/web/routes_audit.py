@@ -31,6 +31,15 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
+# BYO-key handling (2026-07-19 rework): the per-request Anthropic key is
+# threaded EXPLICITLY through ``advise(..., api_key=...)`` down to the
+# Anthropic client constructor. The old approach staged the key in the
+# process-global ``os.environ`` (with a lock + restore-in-finally), which
+# (a) serialized all Claude requests behind one env window, and (b) was
+# one missed code path away from concurrent requests reading each other's
+# keys or wiping one mid-API-call. The web layer must NEVER write
+# per-request secrets into ``os.environ``.
+
 from ..edhrec_client import fetch_salt_list
 from ._helpers import (
     _apply_swaps_to_dck,
@@ -56,6 +65,41 @@ _SOURCE_LABEL = {
 }
 
 
+def _resolve_byo_key(header_value: str) -> str:
+    """Resolve the effective BYO Anthropic key for an audit request.
+
+    Single source of truth, in precedence order (FP-011 unification):
+      1. ``X-Anthropic-API-Key`` request header — an ephemeral per-request
+         override (rarely used now the Settings panel exists).
+      2. ``config.json``'s ``anthropic_api_key`` — what the Settings panel
+         writes; the durable per-user key.
+    Returns ``""`` when neither is set, in which case the caller passes
+    ``api_key=None`` to the advisor so a deployment-level
+    ``ANTHROPIC_API_KEY`` (credentials file / container secret) still
+    applies. The resolved key is only ever threaded as an explicit
+    parameter — never written into ``os.environ`` (see module docstring
+    note on the 2026-07-19 BYO-key rework).
+    """
+    header_value = (header_value or "").strip()
+    if header_value:
+        # Validate the header against the same key-shape regex the
+        # Settings PUT path enforces. A garbage value would otherwise be
+        # staged into os.environ and surface (possibly echoed back in an
+        # SDK error message) instead of failing cleanly to the fallback.
+        try:
+            from .. import config_store
+            if config_store._ANTHROPIC_KEY_RE.match(header_value):
+                return header_value
+        except Exception:  # noqa: BLE001 — config must never break an audit
+            pass
+        return ""
+    try:
+        from .. import config_store
+        return (config_store.load_config().get("anthropic_api_key") or "").strip()
+    except Exception:  # noqa: BLE001 — config must never break an audit
+        return ""
+
+
 # Empty shape for deck_health when computation fails entirely. The UI
 # renders tiles based on key presence; missing keys would crash the
 # renderer, so we always ship the full structure even on failure.
@@ -69,6 +113,7 @@ _EMPTY_DECK_HEALTH = {
     "mana_sinks": {"count": 0, "cards": []},
     "wincon_protection": {"count": 0, "cards": []},
     "self_mill": {"count": 0, "cards": []},
+    "role_targets": {"roles": {}, "under_built": []},
 }
 
 
@@ -83,27 +128,11 @@ def _count_main_lines(deck_text: str) -> int:
     main_count (e.g. 143 on a deck whose proposed_text was 99
     cards). This helper walks proposed_text once and sums the
     qty prefixes the way Forge actually parses them.
+
+    Thin wrapper over ``dck_utils.count_main_cards``.
     """
-    import re as _re
-    line_pat = _re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
-    total = 0
-    in_main = False
-    for raw in deck_text.splitlines():
-        s = raw.strip()
-        if not s:
-            continue
-        if s.startswith("[") and s.endswith("]"):
-            in_main = s.lower() == "[main]"
-            continue
-        if not in_main:
-            continue
-        m = line_pat.match(s)
-        if m:
-            try:
-                total += int(m.group(1))
-            except (TypeError, ValueError):
-                total += 1
-    return total
+    from ..dck_utils import count_main_cards
+    return count_main_cards(deck_text)
 
 
 def _compute_deck_health_safe(deck_text: str) -> dict:
@@ -115,6 +144,193 @@ def _compute_deck_health_safe(deck_text: str) -> dict:
         return compute_deck_health(deck_text)
     except Exception:  # noqa: BLE001 -- defensive at the route layer
         return dict(_EMPTY_DECK_HEALTH)
+
+
+_EMPTY_COMBO_ASSESSMENT = {
+    "combos": [], "recommended_bracket": 1, "violations": [],
+    "within_bracket": True,
+}
+
+
+def _assess_combos_safe(deck_text: str, bracket: int) -> dict:
+    """Wrap ``combo_detection.assess_deck_brackets`` so a combo-DB read or
+    parse failure can't take down the audit. Surfaces detected infinite/win
+    combos and whether they push the deck above its declared bracket."""
+    try:
+        from ..combo_detection import assess_deck_brackets
+        return assess_deck_brackets(deck_text, bracket)
+    except Exception:  # noqa: BLE001 -- defensive at the route layer
+        return dict(_EMPTY_COMBO_ASSESSMENT)
+
+
+def _fallback_warning(
+    requested: str,
+    actual_source: str,
+    fallback_reason,
+    byo_key: str,
+) -> "str | None":
+    """The fall-back warning shared by both audit endpoints.
+
+    advise() silently degrades to the EDHREC heuristic when the
+    requested backend can't run (no Claude key, no bracket peers, a
+    network blip). Three branches, in priority order, tell the user
+    exactly why so they can fix it or accept the degraded source:
+      1. a concrete fallback_reason from advise()
+      2. the specific "no API key" guidance (claude requested, no key
+         anywhere) — this branch was MISSING on the SSE path before
+         the two endpoints were unified here
+      3. a generic "requested but unavailable" message
+    Returns None when the effective source matches what was requested.
+    """
+    if actual_source == requested:
+        return None
+    requested_label = _SOURCE_LABEL.get(requested, requested)
+    if fallback_reason:
+        return (
+            f"{requested_label} fell back to EDHREC heuristic. "
+            f"Reason: {fallback_reason}"
+        )
+    if (requested == "claude"
+            and not byo_key
+            and not os.environ.get("ANTHROPIC_API_KEY")):
+        return (
+            "Claude analyst was requested but no API key was provided. "
+            "Open Settings and set your Anthropic API key (sk-ant-…), "
+            "then try again."
+        )
+    return (
+        f"{requested_label} was requested but unavailable — "
+        "falling back to EDHREC heuristic."
+    )
+
+
+def _build_audit_payload(
+    report,
+    *,
+    original: str,
+    deck_id,
+    bracket: int,
+    requested: str,
+    byo_key: str,
+) -> dict:
+    """Assemble the full audit response shared by the sync ``/api/audit``
+    endpoint and the SSE ``/api/audit/stream`` ``complete`` event.
+
+    Single source of truth for proposed-text assembly, pricing, salt
+    annotations, and the fall-back warning. The two endpoints used to
+    carry near-identical copies of this (~160 lines each) that had
+    drifted: the stream path omitted the "no API key" warning branch and
+    mis-named the diagnosis field ``rationale`` (the UI reads
+    ``diagnosis`` on both paths, so the streamed diagnosis never
+    rendered). Both bugs are fixed by routing both endpoints through here.
+    """
+    proposed_text, added, removed, kept = _apply_swaps_to_dck(
+        original, report.recommendations,
+    )
+    # Pad sub-100 source decks with basics mirroring the deck's color
+    # distribution so Forge will load the proposed deck; ``kept`` stays
+    # truthful and ``padded_count`` is surfaced separately.
+    post_swap_main = kept + len(added)
+    proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
+        proposed_text, post_swap_main,
+    )
+    original_total, original_priced = _total_price_for_deck_text(original)
+    proposed_total, proposed_priced = _total_price_for_deck_text(proposed_text)
+    if original_total is not None and proposed_total is not None:
+        price_delta = round(proposed_total - original_total, 2)
+    else:
+        price_delta = None
+    # EDHREC salt list once per audit (cached 7 days). Best-effort:
+    # empty dict on fetch failure → no salt annotations, no warning.
+    try:
+        salt_map = fetch_salt_list()
+    except Exception:  # noqa: BLE001
+        salt_map = {}
+    # Surface ALL recommendations, not just those that landed in
+    # proposed_text after adds==cuts balancing; ``applied`` flags which
+    # are in the Forge-ready text vs loose suggestions. (Live-audit
+    # 2026-05-14: the cut-gate emits zero cuts on sparse EDHREC data,
+    # which previously dropped every add silently.)
+    applied_add_set = {n.lower() for n in added}
+    applied_cut_set = {n.lower() for n in removed}
+    added_payload = [
+        {
+            "card": rec.card,
+            "rationale": rec.reason or "",
+            "match_pct": _match_pct_from_evidence(rec.evidence),
+            "price_usd": (rec.evidence or {}).get("price_usd"),
+            "name_known": getattr(rec, "name_known", True),
+            "source": (rec.evidence or {}).get("source"),
+            "applied": rec.card.lower() in applied_add_set,
+            "salt": salt_map.get(rec.card.lower()),
+        }
+        for rec in report.recommendations
+        if rec.action == "add"
+    ]
+    removed_payload = [
+        {
+            "card": rec.card,
+            "rationale": rec.reason or "",
+            "name_known": getattr(rec, "name_known", True),
+            "applied": rec.card.lower() in applied_cut_set,
+            "salt": salt_map.get(rec.card.lower()),
+        }
+        for rec in report.recommendations
+        if rec.action == "cut"
+    ]
+    unknown_card_count = sum(
+        1 for entry in added_payload + removed_payload
+        if entry["name_known"] is False
+    )
+    actual_source = getattr(report, "source", "heuristic")
+    fallback_reason = getattr(report, "fallback_reason", None)
+    warning = _fallback_warning(
+        requested, actual_source, fallback_reason, byo_key,
+    )
+    return {
+        "deck": deck_id,
+        "bracket": bracket,
+        "proposed_text": proposed_text,
+        "added": added_payload,
+        "removed": removed_payload,
+        "kept_count": kept,
+        # Count quantity-prefixed [Main] lines directly so the headline
+        # matches what Forge will load (not derived from rec-list sizes).
+        "main_count": _count_main_lines(proposed_text),
+        "diagnosis": getattr(report.diagnosis, "pattern_summary", "") or "",
+        "weakness_signals": list(
+            getattr(report.diagnosis, "weakness_signals", []) or []
+        ),
+        "source": actual_source,
+        # Older clients read ``requested_llm``; newer read
+        # ``requested_source``. Both populated for transition.
+        "requested_llm": requested,
+        "requested_source": requested,
+        "warning": warning,
+        "basics_padded": padded_count,
+        "basics_padded_breakdown": padded_breakdown,
+        "unknown_card_count": unknown_card_count,
+        "skipped_for_saturation": list(
+            getattr(report, "skipped_for_saturation", []) or []
+        ),
+        "bracket_peer_ref_count": int(
+            getattr(report, "bracket_peer_ref_count", 0) or 0,
+        ),
+        "original_price_usd": original_total,
+        "proposed_price_usd": proposed_total,
+        "price_delta_usd": price_delta,
+        "n_priced_cards_original": original_priced,
+        "n_priced_cards_proposed": proposed_priced,
+        "average_deck_preview": project_average_deck_preview(
+            getattr(report, "average_deck", None),
+            getattr(report, "edhrec_categories", {}) or {},
+            original,
+        ),
+        "salt_warning": project_salt_warning(original, salt_map, bracket),
+        "protected_cards": read_protected_cards(original),
+        "deck_health": _compute_deck_health_safe(original),
+        "combo_assessment": _assess_combos_safe(original, bracket),
+    }
 
 
 def make_audit_blueprint(deck_dir: Path) -> Blueprint:
@@ -157,6 +373,11 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be int"}), 400
+        # Range check for parity with the other bracket-accepting
+        # routes — an out-of-range bracket (9, -1) would steer the
+        # advisor's bracket-targeted suggestions into nonsense.
+        if bracket is not None and bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be 1..5"}), 400
         # Filename bracket is the default when not overridden.
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3
@@ -187,7 +408,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 }), 400
             requested = llm
         use_claude = requested == "claude"
-        byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
+        byo_key = _resolve_byo_key(request.headers.get("X-Anthropic-API-Key", ""))
         # Budget mode skips ABU duals + fetches from the manabase
         # essentials safety net. Truthy query values: 1, true, yes.
         budget_raw = (request.args.get("budget") or "").strip().lower()
@@ -200,25 +421,18 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
 
         try:
             from ..improvement_advisor import advise as _advise, DEFAULT_CLAUDE_MODEL
-            saved_key = os.environ.get("ANTHROPIC_API_KEY")
-            if use_claude and byo_key:
-                os.environ["ANTHROPIC_API_KEY"] = byo_key
-            try:
-                report = _advise(
-                    path, bracket=bracket,
-                    source=requested,
-                    use_claude=use_claude,
-                    claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
-                    budget=budget,
-                )
-            finally:
-                # Always restore env, even on raise — the BYO key must
-                # not linger in the process for unrelated requests.
-                if use_claude and byo_key:
-                    if saved_key is None:
-                        os.environ.pop("ANTHROPIC_API_KEY", None)
-                    else:
-                        os.environ["ANTHROPIC_API_KEY"] = saved_key
+            # BYO key rides the explicit api_key parameter (None → the
+            # advisor uses the deployment-level env/credentials key).
+            # Concurrent requests each carry their own key on their own
+            # stack — no process-global state, no cross-request races.
+            report = _advise(
+                path, bracket=bracket,
+                source=requested,
+                use_claude=use_claude,
+                claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
+                budget=budget,
+                api_key=(byo_key or None) if use_claude else None,
+            )
         except FileNotFoundError as exc:
             return jsonify({"error": str(exc)}), 404
         except Exception as exc:
@@ -228,227 +442,14 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             }), 503
 
         original = path.read_text(encoding="utf-8")
-        proposed_text, added, removed, kept = _apply_swaps_to_dck(
-            original, report.recommendations,
-        )
-        # Backlog item: pad sub-100 source decks. The advisor balances
-        # adds==cuts so any source-deck deficit (e.g. the Goblin deck's
-        # 71 mainboard) is preserved into the proposed deck and Forge
-        # refuses to load it. Top up with basics mirroring the deck's
-        # existing color distribution. `kept` stays truthful (cards
-        # from the source that survived cuts); `padded_count` is
-        # surfaced separately so the UI can show what we synthesized.
-        post_swap_main = kept + len(added)
-        proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
-            proposed_text, post_swap_main,
-        )
-        # Compute the original + proposed deck total prices so the UI
-        # can show "$420 → $537 (+$117)" alongside the diff. Tier-2
-        # backlog item — feeds the cost-evolution chart's per-swap
-        # delta and lets budget-mode users see the cost impact of
-        # their audit at a glance. Best-effort: ``_total_price_for_
-        # deck_text`` returns ``(None, 0)`` when no priced cards are
-        # available (Scryfall down, all-digital-only deck), which
-        # the UI translates to "—" instead of "$0.00."
-        original_total, original_priced = _total_price_for_deck_text(original)
-        proposed_total, proposed_priced = _total_price_for_deck_text(proposed_text)
-        if original_total is not None and proposed_total is not None:
-            price_delta = round(proposed_total - original_total, 2)
-        else:
-            price_delta = None
-        # Surface ALL adds/cuts the advisor produced, not just those
-        # that landed in proposed_text after _apply_swaps_to_dck's
-        # adds==cuts balancing. The ``applied`` flag tells the UI
-        # which entries are in proposed_text (safe to drop into
-        # Forge) vs which are loose recommendations (the user
-        # needs to choose what to swap them in for).
-        #
-        # Live-audit 2026-05-14 surfaced the need: the new heuristic
-        # cut-gate (MIN_EDHREC_SIGNAL_FOR_CUTS) correctly emits zero
-        # cuts when EDHREC's data is sparse, but the previous
-        # ``applied_add_set`` filter dropped EVERY add silently
-        # because min(adds, 0) = 0. Users got "no recommendations"
-        # instead of "here are 8 manabase upgrades, choose what to
-        # cut yourself."
-        # Pull EDHREC's salt list once per audit (cached 7 days)
-        # so we can flag socially-spicy picks. Best-effort: empty
-        # dict on fetch failure → no salt annotations, no warning.
-        try:
-            salt_map = fetch_salt_list()
-        except Exception:  # noqa: BLE001
-            salt_map = {}
-        applied_add_set = {n.lower() for n in added}
-        applied_cut_set = {n.lower() for n in removed}
-        added_payload = [
-            {
-                "card": rec.card,
-                "rationale": rec.reason or "",
-                "match_pct": _match_pct_from_evidence(rec.evidence),
-                "price_usd": (rec.evidence or {}).get("price_usd"),
-                # name_known: True/False/None. Default True for legacy
-                # stubs/recs that predate the validator.
-                "name_known": getattr(rec, "name_known", True),
-                # Per-rec source so the UI can render a distinguishing
-                # badge when match_pct is null (manabase essentials,
-                # vanilla Claude recs). Values mirror evidence.source.
-                "source": (rec.evidence or {}).get("source"),
-                # True when this rec landed in proposed_text;
-                # False = "recommended but no cut to balance against."
-                # UI styles unapplied entries with a muted look + a
-                # "needs manual cut" pill so the user knows the deck
-                # text isn't pre-built for them.
-                "applied": rec.card.lower() in applied_add_set,
-                # EDHREC salt score (0..5) — None when the card
-                # isn't in the top-100 salty list. UI shows a "salt"
-                # pill when ≥ 2.0; low-bracket users can audit-wise
-                # avoid table-talk-problematic picks.
-                "salt": salt_map.get(rec.card.lower()),
-            }
-            for rec in report.recommendations
-            if rec.action == "add"
-        ]
-        removed_payload = [
-            {
-                "card": rec.card,
-                "rationale": rec.reason or "",
-                "name_known": getattr(rec, "name_known", True),
-                "applied": rec.card.lower() in applied_cut_set,
-                # Cutting a salty card is GOOD news at low bracket;
-                # surface the score so the UI can highlight it.
-                "salt": salt_map.get(rec.card.lower()),
-            }
-            for rec in report.recommendations
-            if rec.action == "cut"
-        ]
-        # Hallucination flag: only count cards Scryfall *confirmed* are
-        # fake (False). Skip None (validator couldn't reach Scryfall)
-        # so a network blip never spuriously raises the count.
-        unknown_card_count = sum(
-            1 for entry in added_payload + removed_payload
-            if entry["name_known"] is False
-        )
-        actual_source = getattr(report, "source", "heuristic")
-        fallback_reason = getattr(report, "fallback_reason", None)
-        warning = None
-        requested_label = _SOURCE_LABEL.get(requested, requested)
-        if actual_source != requested:
-            # advise() silently falls back to heuristic when the
-            # requested backend can't run (no Claude API key, no
-            # bracket-peer references found, network blip). Tell the
-            # UI exactly why so the user can fix it or accept the
-            # degraded source instead of guessing.
-            if fallback_reason:
-                warning = (
-                    f"{requested_label} fell back to EDHREC heuristic. "
-                    f"Reason: {fallback_reason}"
-                )
-            elif (requested == "claude"
-                  and not byo_key
-                  and not os.environ.get("ANTHROPIC_API_KEY")):
-                warning = (
-                    "Claude analyst was requested but no API key was "
-                    "provided. Click 'Set API key' (sk-…) and try again."
-                )
-            else:
-                warning = (
-                    f"{requested_label} was requested but unavailable — "
-                    "falling back to EDHREC heuristic."
-                )
-        return jsonify({
-            "deck": deck_id,
-            "bracket": bracket,
-            "proposed_text": proposed_text,
-            "added": added_payload,
-            "removed": removed_payload,
-            "kept_count": kept,
-            # main_count reflects what's ACTUALLY in proposed_text -- the
-            # cards Forge will load. Previously this was computed as
-            # ``kept + len(added_payload) + padded_count`` which counts
-            # every recommendation including ones balancing/protection
-            # dropped, producing a misleading headline (e.g. First Sliver
-            # B3 reported 143 main on a 99-card proposed deck). Count
-            # quantity-prefixed [Main] lines directly to keep the
-            # headline truthful.
-            "main_count": _count_main_lines(proposed_text),
-            "diagnosis": getattr(report.diagnosis, "pattern_summary", ""),
-            "weakness_signals": list(getattr(
-                report.diagnosis, "weakness_signals", [],
-            ) or []),
-            "source": actual_source,
-            # The originally-requested backend. Older clients read
-            # `requested_llm`; new clients can read `requested_source`.
-            # Both populated to the same value for transition.
-            "requested_llm": requested,
-            "requested_source": requested,
-            "warning": warning,
-            # Backlog: padding info so the UI can warn if we synthesized
-            # basic lands to bring a sub-100 source deck up to legal size.
-            "basics_padded": padded_count,
-            "basics_padded_breakdown": padded_breakdown,
-            # Hallucination defense — non-zero on Claude analyst path
-            # when the LLM invented a card name Scryfall doesn't recognize.
-            "unknown_card_count": unknown_card_count,
-            # Adds the saturation guard dropped because the deck already
-            # has enough cards in that role bucket. Each entry:
-            # {card, role, deck_count, threshold}. Lets the UI show
-            # "skipped 3 ramp adds — you already have 13" so a short
-            # list isn't mistaken for the advisor giving up.
-            "skipped_for_saturation": list(
-                getattr(report, "skipped_for_saturation", []) or []
-            ),
-            # Non-zero only when source=claude AND the LLM call shipped
-            # bracket-peer references in the prompt. Lets the UI render
-            # 'Claude analyst (5 peer refs)' so users can tell when
-            # archetype data informed the recommendations vs. just
-            # EDHREC averages.
-            "bracket_peer_ref_count": int(
-                getattr(report, "bracket_peer_ref_count", 0) or 0,
-            ),
-            # Proposed-deck pricing — feeds the cost-evolution view
-            # + lets the UI surface "$X → $Y (Δ)" alongside the diff.
-            # All three fields are nullable: None when no priced
-            # cards were found in the corresponding deck text.
-            "original_price_usd": original_total,
-            "proposed_price_usd": proposed_total,
-            "price_delta_usd": price_delta,
-            "n_priced_cards_original": original_priced,
-            "n_priced_cards_proposed": proposed_priced,
-            # EDHREC bracket-specific sample build — feeds the
-            # audit panel's collapsible "Average deck preview"
-            # section. None when EDHREC has no published average
-            # deck for this commander+bracket or the fetch failed,
-            # so the UI knows to hide the <details> entirely.
-            "average_deck_preview": project_average_deck_preview(
-                getattr(report, "average_deck", None),
-                getattr(report, "edhrec_categories", {}) or {},
-                original,
-            ),
-            # Aggregate salt-score banner — fires above the audit
-            # recommendations when the user's current deck carries
-            # salty picks at a low bracket. Null at B4/B5 (high-
-            # power tables expect salt) or when EDHREC's salt-list
-            # was unreachable. The per-rec ``salt`` annotations on
-            # added/removed entries are unaffected.
-            "salt_warning": project_salt_warning(
-                original, salt_map, bracket,
-            ),
-            # Per-deck protected-cards list from [metadata] Protect=
-            # entries. Surfaced so the UI can badge protected cards
-            # in the cuts list with a 🔒 — the auto-curate path
-            # already strips these, but the audit endpoint produces
-            # advisory suggestions and the user might still want to
-            # see what the advisor flagged.
-            "protected_cards": read_protected_cards(original),
-            # Deck-health tile row signals: MDFC count, spell density,
-            # mana sinks, wincon-specific protection, self-mill
-            # enablement. These surface deck-construction quality
-            # signals the advisor's recommendation engine doesn't
-            # directly act on but the user benefits from seeing
-            # (e.g. "this combo deck has 0 Silence-class protection").
-            # Best-effort: any individual signal that fails returns
-            # its empty shape so the rest of the panel renders.
-            "deck_health": _compute_deck_health_safe(original),
-        })
+        return jsonify(_build_audit_payload(
+            report,
+            original=original,
+            deck_id=deck_id,
+            bracket=bracket,
+            requested=requested,
+            byo_key=byo_key,
+        ))
 
     @bp.route("/api/audit/stream")
     def audit_stream_route():
@@ -485,6 +486,9 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
             return jsonify({"error": "bracket must be int"}), 400
+        # Range check for parity with the other bracket-accepting routes.
+        if bracket is not None and bracket not in (1, 2, 3, 4, 5):
+            return jsonify({"error": "bracket must be 1..5"}), 400
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3
 
@@ -510,7 +514,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 }), 400
             requested = llm
         use_claude = requested == "claude"
-        byo_key = request.headers.get("X-Anthropic-API-Key", "").strip()
+        byo_key = _resolve_byo_key(request.headers.get("X-Anthropic-API-Key", ""))
         budget_raw = (request.args.get("budget") or "").strip().lower()
         budget = budget_raw in ("1", "true", "yes")
         claude_model = (request.args.get("model") or "").strip() or None
@@ -536,9 +540,12 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     f"data: {json.dumps(payload)}\n\n"
                 )
 
-            saved_key = os.environ.get("ANTHROPIC_API_KEY")
-            if use_claude and byo_key:
-                os.environ["ANTHROPIC_API_KEY"] = byo_key
+            # BYO key rides the explicit api_key parameter for the whole
+            # generator lifetime — it lives on this generator's stack, not
+            # in os.environ. The old approach held an env mutation (plus a
+            # global lock) across the entire SSE stream, which both
+            # serialized all Claude requests and widened the window in
+            # which other threads could observe the wrong key.
             try:
                 for phase in _advise_steps(
                     path, bracket=bracket,
@@ -546,6 +553,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     use_claude=use_claude,
                     claude_model=claude_model or DEFAULT_CLAUDE_MODEL,
                     budget=budget,
+                    api_key=(byo_key or None) if use_claude else None,
                 ):
                     if phase.phase == "error":
                         yield _sse("error", {
@@ -555,167 +563,19 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                         })
                         return
                     if phase.phase == "complete":
-                        # Re-do the same post-assembly the sync endpoint
-                        # does so the client gets a drop-in payload.
+                        # Drop-in payload identical to the sync endpoint —
+                        # both paths go through _build_audit_payload so the
+                        # warning logic + field names never diverge again.
                         report = phase.data["report"]
                         original = path.read_text(encoding="utf-8")
-                        proposed_text, added, removed, kept = (
-                            _apply_swaps_to_dck(
-                                original, report.recommendations,
-                            )
-                        )
-                        post_swap_main = kept + len(added)
-                        proposed_text, padded_count, padded_breakdown = (
-                            _pad_main_to_99(proposed_text, post_swap_main)
-                        )
-                        # Compute original + proposed deck prices for
-                        # the cost-delta UI. Same logic as the sync
-                        # endpoint — see its matching block for the
-                        # rationale.
-                        (
-                            original_total, original_priced,
-                        ) = _total_price_for_deck_text(original)
-                        (
-                            proposed_total, proposed_priced,
-                        ) = _total_price_for_deck_text(proposed_text)
-                        if (original_total is not None
-                                and proposed_total is not None):
-                            price_delta = round(
-                                proposed_total - original_total, 2,
-                            )
-                        else:
-                            price_delta = None
-                        # Pull EDHREC's salt list once per audit
-                        # (cached 7 days). Best-effort: empty dict on
-                        # fetch failure → no salt annotations.
-                        try:
-                            salt_map = fetch_salt_list()
-                        except Exception:  # noqa: BLE001
-                            salt_map = {}
-                        # Surface ALL recommendations (not just those
-                        # that landed in proposed_text). See the sync
-                        # endpoint's matching block for the rationale —
-                        # the live-audit 2026-05-14 cut-gate fix would
-                        # otherwise silently drop every add when cuts=0.
-                        applied_add_set = {n.lower() for n in added}
-                        applied_cut_set = {n.lower() for n in removed}
-                        added_payload = [
-                            {
-                                "card": rec.card,
-                                "rationale": rec.reason or "",
-                                "match_pct": _match_pct_from_evidence(
-                                    rec.evidence,
-                                ),
-                                "price_usd": (rec.evidence or {}).get(
-                                    "price_usd",
-                                ),
-                                "name_known": getattr(
-                                    rec, "name_known", True,
-                                ),
-                                "source": (rec.evidence or {}).get("source"),
-                                "applied": rec.card.lower() in applied_add_set,
-                                "salt": salt_map.get(rec.card.lower()),
-                            }
-                            for rec in report.recommendations
-                            if rec.action == "add"
-                        ]
-                        removed_payload = [
-                            {
-                                "card": rec.card,
-                                "rationale": rec.reason or "",
-                                "name_known": getattr(
-                                    rec, "name_known", True,
-                                ),
-                                "applied": rec.card.lower() in applied_cut_set,
-                                "salt": salt_map.get(rec.card.lower()),
-                            }
-                            for rec in report.recommendations
-                            if rec.action == "cut"
-                        ]
-                        unknown_card_count = sum(
-                            1 for entry in added_payload + removed_payload
-                            if entry["name_known"] is False
-                        )
-                        actual_source = getattr(report, "source", "heuristic")
-                        fallback_reason = getattr(
-                            report, "fallback_reason", None,
-                        )
-                        warning = None
-                        if actual_source != requested and fallback_reason:
-                            warning = (
-                                f"{_SOURCE_LABEL.get(requested, requested)} "
-                                f"fell back to EDHREC heuristic. "
-                                f"Reason: {fallback_reason}"
-                            )
-                        yield _sse("complete", {
-                            "deck": deck_id,
-                            "bracket": bracket,
-                            "proposed_text": proposed_text,
-                            "added": added_payload,
-                            "removed": removed_payload,
-                            "kept_count": kept,
-                            # Count from proposed_text directly so the
-                            # headline matches what Forge will load --
-                            # see the sync /api/audit endpoint for the
-                            # rationale and the pre-fix bug context.
-                            "main_count": _count_main_lines(proposed_text),
-                            "rationale": (
-                                getattr(report.diagnosis, "pattern_summary", "")
-                                or ""
-                            ),
-                            "weakness_signals": list(getattr(
-                                report.diagnosis, "weakness_signals", [],
-                            ) or []),
-                            "source": actual_source,
-                            "requested_llm": requested,
-                            "requested_source": requested,
-                            "warning": warning,
-                            "basics_padded": padded_count,
-                            "basics_padded_breakdown": padded_breakdown,
-                            "unknown_card_count": unknown_card_count,
-                            "skipped_for_saturation": list(
-                                getattr(
-                                    report, "skipped_for_saturation", [],
-                                ) or []
-                            ),
-                            "bracket_peer_ref_count": int(
-                                getattr(
-                                    report, "bracket_peer_ref_count", 0,
-                                ) or 0,
-                            ),
-                            "original_price_usd": original_total,
-                            "proposed_price_usd": proposed_total,
-                            "price_delta_usd": price_delta,
-                            "n_priced_cards_original": original_priced,
-                            "n_priced_cards_proposed": proposed_priced,
-                            # EDHREC average-deck preview — mirrors the
-                            # sync /api/audit endpoint. None when no
-                            # average deck is available; the UI hides
-                            # the <details> panel accordingly.
-                            "average_deck_preview": project_average_deck_preview(
-                                getattr(report, "average_deck", None),
-                                getattr(report, "edhrec_categories", {}) or {},
-                                original,
-                            ),
-                            # Salt-warning banner — mirrors the sync
-                            # endpoint. None at B4/B5 or when no salt
-                            # data is available.
-                            "salt_warning": project_salt_warning(
-                                original, salt_map, bracket,
-                            ),
-                            # Per-deck protected-cards list from
-                            # [metadata] Protect= entries — same
-                            # surface as the sync endpoint.
-                            "protected_cards": read_protected_cards(
-                                original,
-                            ),
-                            # Deck-health tile signals — mirrors the
-                            # sync endpoint shape so the UI renderer
-                            # is shared.
-                            "deck_health": _compute_deck_health_safe(
-                                original,
-                            ),
-                        })
+                        yield _sse("complete", _build_audit_payload(
+                            report,
+                            original=original,
+                            deck_id=deck_id,
+                            bracket=bracket,
+                            requested=requested,
+                            byo_key=byo_key,
+                        ))
                         continue
                     # Intermediate phases (diagnosis / manabase / primary)
                     # — emit the phase's data dict as-is. The client
@@ -731,14 +591,6 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                     "error": "audit failed",
                     "detail": f"{type(exc).__name__}: {exc}",
                 })
-            finally:
-                # Always restore the BYO Anthropic key — the env mutation
-                # must not linger across requests.
-                if use_claude and byo_key:
-                    if saved_key is None:
-                        os.environ.pop("ANTHROPIC_API_KEY", None)
-                    else:
-                        os.environ["ANTHROPIC_API_KEY"] = saved_key
 
         return Response(
             stream_with_context(event_stream()),
@@ -763,6 +615,9 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             bracket_raw = request.args.get("bracket")
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
+            return jsonify({"error": "bracket must be an integer 1..5"}), 400
+        # Enforce the range the error message above already promises.
+        if bracket is not None and bracket not in (1, 2, 3, 4, 5):
             return jsonify({"error": "bracket must be an integer 1..5"}), 400
         if bracket is None:
             bracket = _bracket_from_filename(deck_id) or 3

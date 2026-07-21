@@ -26,12 +26,13 @@ Usage:
 from __future__ import annotations
 
 import json
-import re
+import os
 import shutil
 import subprocess
 import sys
 import threading
-from dataclasses import asdict, dataclass, field
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -45,99 +46,61 @@ VENDOR_FORGE = REPO_ROOT / "vendor" / "forge"
 DEFAULT_TIMEOUT_PER_GAME_SEC = 180
 MIN_TIMEOUT_SEC = 300
 
-# Days after which the bundled Forge jar is considered stale and worth
-# replacing. New MTG sets ship roughly every 4-6 weeks; 90 days gives
-# enough headroom that most installs don't bounce in and out of the
-# warning, but not so much that errata-sensitive cards (Sephiroth, Vivi)
-# silently misbehave.
-FORGE_STALE_AGE_DAYS = 90
+# Anthropic credential vars that must NEVER reach a child process spawned
+# here. `_secrets.load_credentials()` exports ANTHROPIC_API_KEY into
+# os.environ for the SDK's benefit, and subprocesses inherit the parent env
+# by default — meaning every Forge JVM would silently hold a live Anthropic
+# credential. A card-game simulator has no business with that key (least
+# privilege; a JVM crash dump or Forge log must never be able to contain
+# it). The subscription-billing invariant for the `claude` CLI (never
+# inherit ANTHROPIC_API_KEY or it flips from subscription to API billing)
+# is enforced separately at its own launch site in proposer.py.
+_ANTHROPIC_CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
-_FORGE_JAR_VERSION_RE = re.compile(
-    r"forge-gui-desktop-(\d+(?:\.\d+)+)",
-)
+
+def scrubbed_child_env() -> dict[str, str]:
+    """Copy of os.environ with Anthropic credential vars removed.
+
+    Passed as ``env=`` to every Forge JVM launch (blocking + streaming
+    paths, and verify_forge's probes). Everything else is inherited
+    unchanged — Forge needs PATH/JAVA_HOME/LOCALAPPDATA etc."""
+    return {
+        k: v for k, v in os.environ.items()
+        if k not in _ANTHROPIC_CREDENTIAL_VARS
+    }
+
+
+def coerce_output_text(data: "str | bytes | None") -> str:
+    """Normalize a captured subprocess stream to ``str``.
+
+    With ``encoding=`` set on ``subprocess.run``, a CompletedProcess always
+    carries str streams — but ``TimeoutExpired.stdout``/``.stderr`` are NOT
+    guaranteed to be: CPython's POSIX implementation re-raises the timeout
+    with the raw *bytes* read so far (the text decode happens only on the
+    successful CompletedProcess path), and both attributes are None when
+    nothing was captured before the kill. Downstream consumers
+    (``Path.write_text``, the log_parser regexes over ``SimResult.stdout``)
+    hard-require str, so every timeout handler funnels through here:
+
+      - None  -> ""  (nothing captured)
+      - bytes -> UTF-8 decode with replacement — Forge emits UTF-8 (deck
+        names carry emoji/non-Latin characters in practice), and replacement
+        keeps a partial capture usable instead of raising mid-error-path
+      - str   -> unchanged
+    """
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
 
 
 def _utcnow(tz=timezone.utc):
     """Indirection so tests can pin "now" deterministically."""
+    # Stays here (not forge_version.py) because tests patch
+    # commander_builder.forge_runner._utcnow; forge_version's
+    # detect_forge_version late-binds it through this module.
     return datetime.now(tz)
-
-
-@dataclass
-class ForgeVersionInfo:
-    """Snapshot of the bundled Forge jar — version, build date, age.
-
-    ``is_stale`` is conservative: True only when ``age_days`` is known
-    AND exceeds ``FORGE_STALE_AGE_DAYS``. Missing build.txt or
-    malformed timestamps leave ``is_stale=False`` so we don't alarm
-    the user about unknowable state.
-    """
-    jar_path: Optional[Path] = None
-    version: Optional[str] = None
-    build_date: Optional[datetime] = None
-    age_days: Optional[int] = None
-    is_stale: bool = False
-
-
-def detect_forge_version(forge_dir: Path = VENDOR_FORGE) -> ForgeVersionInfo:
-    """Inspect the vendor/forge directory and return version metadata.
-
-    Looks for ``forge-gui-desktop-*.jar`` and parses the version out of
-    the filename (the only place the bundle reliably exposes it). Reads
-    the optional ``build.txt`` for a real build timestamp; falls back
-    to ``age_days=None`` when build.txt is missing or malformed.
-
-    Always returns a ForgeVersionInfo — never raises. A missing jar
-    surfaces as ``version=None, jar_path=None`` so callers can render a
-    "Forge install not found" warning without try/except boilerplate.
-    """
-    info = ForgeVersionInfo()
-    if not forge_dir.exists() or not forge_dir.is_dir():
-        return info
-
-    # Rank candidates by parsed version (semver-ish) — lexicographic
-    # sort would put "2.0.10" before "2.0.12" because "0" < "2" at the
-    # relevant position, so the prior sorted(...)[0] picked the OLDER
-    # jar when a user kept both around after an upgrade.
-    # Fat jars ("jar-with-dependencies") win over thin within the same
-    # version because forge_runner.locate() runs the fat one.
-    candidates: list[tuple[tuple[int, ...], bool, Path]] = []
-    for jar_path in forge_dir.glob("forge-gui-desktop-*.jar"):
-        m = _FORGE_JAR_VERSION_RE.search(jar_path.name)
-        if not m:
-            continue
-        try:
-            version_tuple = tuple(int(part) for part in m.group(1).split("."))
-        except ValueError:
-            continue
-        is_fat = "jar-with-dependencies" in jar_path.name
-        candidates.append((version_tuple, is_fat, jar_path))
-    if not candidates:
-        return info
-    # Highest version first; within a version, fat jar first.
-    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-    _, _, jar = candidates[0]
-    info.jar_path = jar
-    m = _FORGE_JAR_VERSION_RE.search(jar.name)
-    if m:
-        info.version = m.group(1)
-
-    build_txt = forge_dir / "build.txt"
-    if build_txt.exists():
-        try:
-            text = build_txt.read_text(encoding="utf-8").strip()
-            # Forge bundles a "YYYY-MM-DD HH:MM:SS" timestamp.
-            info.build_date = datetime.strptime(
-                text, "%Y-%m-%d %H:%M:%S",
-            ).replace(tzinfo=timezone.utc)
-        except (OSError, ValueError):
-            info.build_date = None
-
-    if info.build_date is not None:
-        delta = _utcnow() - info.build_date
-        info.age_days = max(0, int(delta.total_seconds() // 86400))
-        info.is_stale = info.age_days > FORGE_STALE_AGE_DAYS
-
-    return info
 
 
 @dataclass
@@ -183,14 +146,21 @@ def _run_blocking(
             cwd=cwd,
             encoding="utf-8",
             errors="replace",
+            # Never hand the Forge JVM an Anthropic credential — see
+            # scrubbed_child_env() for the least-privilege rationale.
+            env=scrubbed_child_env(),
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         returncode = proc.returncode
     except subprocess.TimeoutExpired as exc:
         timed_out = True
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        # exc.stdout/.stderr can be bytes (POSIX re-raises the raw pipe
+        # contents) or None even though encoding= was set above — normalize
+        # so SimResult.stdout is always the str the parsers expect. See
+        # coerce_output_text for the full rationale.
+        stdout = coerce_output_text(exc.stdout)
+        stderr = coerce_output_text(exc.stderr)
         error = f"Timed out after {timeout}s"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -238,6 +208,9 @@ def _run_streaming(
             encoding="utf-8",
             errors="replace",
             bufsize=1,  # line-buffered
+            # Never hand the Forge JVM an Anthropic credential — see
+            # scrubbed_child_env() for the least-privilege rationale.
+            env=scrubbed_child_env(),
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -331,14 +304,45 @@ class ForgeRunner:
                         "Java not found. Expected vendor/jre/bin/java[.exe] or `java` on PATH."
                     )
                 java = Path(sys_java)
-        jars = sorted(VENDOR_FORGE.glob("forge-gui-desktop-*.jar"))
-        fat = [j for j in jars if "jar-with-dependencies" in j.name]
-        jar = (fat or jars or [None])[0]
-        if jar is None:
+        # Rank candidates by PARSED version (semver-ish), preferring the
+        # fat ("jar-with-dependencies") jar within a version. Lexicographic
+        # sort would put "2.0.10" before "2.0.12" because "0" < "2" at the
+        # relevant position, so the prior `sorted(...)[0]` picked the
+        # OLDER jar when a user kept both around after an upgrade. Mirrors
+        # the fix already in `detect_forge_version`.
+        candidates: list[tuple[tuple[int, ...], bool, Path]] = []
+        for jar_path in VENDOR_FORGE.glob("forge-gui-desktop-*.jar"):
+            m = _FORGE_JAR_VERSION_RE.search(jar_path.name)
+            if not m:
+                continue
+            try:
+                version_tuple = tuple(int(p) for p in m.group(1).split("."))
+            except ValueError:
+                continue
+            is_fat = "jar-with-dependencies" in jar_path.name
+            candidates.append((version_tuple, is_fat, jar_path))
+        if not candidates:
             raise FileNotFoundError(
                 f"Forge jar not found in {VENDOR_FORGE}. Expected forge-gui-desktop-*.jar."
             )
+        # highest version first; within a version, fat jar first
+        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        jar = candidates[0][2]
         return cls(java_path=java, forge_jar=jar, forge_dir=VENDOR_FORGE)
+
+    @classmethod
+    def for_profile(cls, forge_dir: "Path | str") -> "ForgeRunner":
+        """Build a runner that shares the located java + jar but runs in a
+        different cwd-isolated profile dir (FP-003 concurrent sims).
+
+        The jar/java are resolved by ``locate()`` (absolute paths, shared by
+        every profile); only ``forge_dir`` — the subprocess cwd — differs.
+        Each profile must have its own ``forge.profile.properties`` +
+        ``userdata/`` so the two Forge instances don't collide on the deck
+        dir, cache, or forge.log."""
+        base = cls.locate()
+        return cls(java_path=base.java_path, forge_jar=base.forge_jar,
+                   forge_dir=Path(forge_dir))
 
     def run(
         self,
@@ -349,6 +353,7 @@ class ForgeRunner:
         stream: bool = False,
         on_line: Optional["Callable[[str], None]"] = None,
         abort_check: Optional["Callable[[str], bool]"] = None,
+        keep_partial_output: bool = False,
     ) -> SimResult:
         """Run one Forge sim. Returns a SimResult with full stdout captured.
 
@@ -367,8 +372,17 @@ class ForgeRunner:
         compare_versions to terminate a pod early when its in-pod margin
         becomes uncatchable. Implies the streaming path.
 
-        When neither `stream` nor `on_line` nor `abort_check` is set, falls
-        back to the battle-tested `subprocess.run` path."""
+        `keep_partial_output=True` routes through the streaming reader
+        (without echoing to the terminal) so stdout emitted before a timeout
+        kill survives in the SimResult. The blocking `subprocess.run` path
+        loses the buffered output when the process is killed, which made the
+        timeout-salvage looper-credit in forge_batch a no-op ("credited to
+        none (no Turn line found)"). Set this whenever the caller inspects
+        stdout after a timeout.
+
+        When none of `stream` / `on_line` / `abort_check` /
+        `keep_partial_output` is set, falls back to the battle-tested
+        `subprocess.run` path."""
         if not deck_filenames:
             raise ValueError("deck_filenames must contain at least 2 decks.")
         if game_format == "commander" and len(deck_filenames) != 4:
@@ -395,9 +409,10 @@ class ForgeRunner:
         ]
 
         timeout = timeout_sec or max(MIN_TIMEOUT_SEC, num_games * DEFAULT_TIMEOUT_PER_GAME_SEC)
-        started = datetime.now()
+        started = time.monotonic()
 
-        if stream or on_line is not None or abort_check is not None:
+        if (stream or on_line is not None or abort_check is not None
+                or keep_partial_output):
             stdout, stderr, returncode, timed_out, error = _run_streaming(
                 cmd, timeout, str(self.forge_dir),
                 stream=stream, on_line=on_line, abort_check=abort_check,
@@ -407,7 +422,7 @@ class ForgeRunner:
                 cmd, timeout, str(self.forge_dir),
             )
 
-        duration = (datetime.now() - started).total_seconds()
+        duration = (time.monotonic() - started)
         return SimResult(
             cmd=cmd,
             returncode=returncode,
@@ -420,13 +435,29 @@ class ForgeRunner:
         )
 
     @staticmethod
+    def _find_forge_log(forge_dir: Path) -> Optional[Path]:
+        """Locate the forge.log for a profile rooted at ``forge_dir``.
+
+        Forge writes its log under ``userDir`` (our profiles set
+        ``userDir=./userdata``), i.e. ``forge_dir/userdata/forge.log`` — NOT
+        the program-dir root, despite the SimResult docstring's old claim.
+        We check ``userdata/forge.log`` first, then fall back to the root for
+        any profile that left userDir at the default. Returns the first that
+        exists, else None."""
+        for candidate in (forge_dir / "userdata" / "forge.log",
+                          forge_dir / "forge.log"):
+            if candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
     def _read_forge_log_tail_impl(forge_dir: Path, max_bytes: int = 64 * 1024) -> str:
         """Read the tail of forge.log. Static helper so the streaming runner
         path doesn't need a ForgeRunner instance to call it."""
-        log_path = forge_dir / "forge.log"
+        log_path = ForgeRunner._find_forge_log(forge_dir)
+        if log_path is None:
+            return ""
         try:
-            if not log_path.exists():
-                return ""
             size = log_path.stat().st_size
             with log_path.open("rb") as f:
                 if size > max_bytes:
@@ -437,234 +468,56 @@ class ForgeRunner:
             return ""
 
     def _read_forge_log_tail(self, max_bytes: int = 64 * 1024) -> str:
-        """Return the last ~64KB of vendor/forge/forge.log if present.
+        """Return the last ~64KB of this profile's forge.log if present.
 
         Forge appends across runs, so the full file is unbounded; the tail is
         what's relevant to the just-finished sim. Best-effort — a missing or
         unreadable log returns empty rather than crashing the run."""
-        log_path = self.forge_dir / "forge.log"
-        try:
-            if not log_path.exists():
-                return ""
-            size = log_path.stat().st_size
-            with log_path.open("rb") as f:
-                if size > max_bytes:
-                    f.seek(size - max_bytes)
-                data = f.read()
-            return data.decode("utf-8", errors="replace")
-        except OSError:
-            return ""
+        return self._read_forge_log_tail_impl(self.forge_dir, max_bytes)
 
 
 # ---------------------------------------------------------------------------
-# A/B simulation harness — old-deck vs new-deck head-to-head
+# Re-exports (2026-06-12 module split).
+#
+# detect_forge_version + ForgeVersionInfo moved to forge_version.py; the
+# A/B + gauntlet + parallel orchestration harnesses moved to forge_batch.py.
+# Every moved name is re-exported here so ALL existing importers keep working
+# unchanged, e.g. `from commander_builder.forge_runner import
+# run_gauntlet_simulation` (scripts/soak_pool.py), VENDOR_FORGE consumers
+# (knowledge_log.py and friends), tests/, and the web routes.
+#
+# These imports MUST stay at the END of the module: forge_version and
+# forge_batch import VENDOR_FORGE / ForgeRunner from this module at import
+# time, so importing them any earlier would hit a partially-initialized
+# forge_runner.
 # ---------------------------------------------------------------------------
-
-# Sentinel statuses for ABResult.status. Plain strings (rather than an enum)
-# so the dict round-trips cleanly through JSON for the iteration row and the
-# UI's status pill can switch on them without an import.
-_AB_STATUS_PENDING = "pending"
-_AB_STATUS_RUNNING = "running"
-_AB_STATUS_DONE = "done"
-_AB_STATUS_SKIPPED = "skipped"
-_AB_STATUS_FAILED = "failed"
-
-# Default per-game timeout for the A/B sim. Commander games can stall on
-# board states that confuse the AI; cap each game at this many seconds so
-# one bad game can't hang the whole 5-game batch indefinitely.
-_AB_TIMEOUT_PER_GAME_SEC = 180
-
-
-@dataclass
-class ABResult:
-    """Aggregate result of a head-to-head A/B Forge sim.
-
-    Persisted into the iteration row's sim_report so the UI can render
-    "Old: 3 wins / New: 2 wins (5 games)" alongside the audit history.
-    ``status`` is the lifecycle pill:
-
-    - ``pending`` — queued but not yet started
-    - ``running`` — in flight on the background worker
-    - ``done`` — completed; ``wins_a`` / ``wins_b`` are authoritative
-    - ``skipped`` — Forge unreachable, missing fillers, etc.; no wins
-    - ``failed`` — Forge ran but errored; ``error`` carries the reason
-    """
-    deck_a: str = ""
-    deck_b: str = ""
-    wins_a: int = 0
-    wins_b: int = 0
-    games: int = 0
-    avg_turns_a: float = 0.0
-    avg_turns_b: float = 0.0
-    status: str = _AB_STATUS_PENDING
-    error: Optional[str] = None
-    duration_sec: float = 0.0
-    # The per-game deck_filenames lists we sent to Forge — handy for
-    # debugging seat-order alternation and for showing the user which
-    # filler decks the harness picked.
-    seat_orders: list[list[str]] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-def _ab_deck_name_for_match(deck_path: Path) -> str:
-    """Normalize a deck path to the name Forge writes into Match Result
-    lines. The runner accepts filename-style decks (e.g.
-    ``[USER] Goblin [B4].dck``) but the parser keys on the deck's
-    internal Name= field, which strips the [USER] prefix and the
-    `.dck`/[B<n>] suffix. log_parser._normalize encodes that mapping —
-    reuse it so the test fakes and the production path stay aligned."""
-    # Imported lazily to avoid a module-level cycle (log_parser depends
-    # on nothing in forge_runner, but downstream callers may have
-    # patched things at import time).
-    from .log_parser import _normalize
-    return _normalize(deck_path.stem)
-
-
-def run_ab_simulation(
-    deck_a_path: Path,
-    deck_b_path: Path,
-    games: int = 5,
-    *,
-    runner: Optional["ForgeRunner"] = None,
-    fillers: Optional[list[str]] = None,
-    game_format: str = "commander",
-) -> ABResult:
-    """Run a 5-game (configurable) head-to-head between two decks.
-
-    Alternates seat order across games — game 1 puts ``deck_a`` in
-    seat 1, game 2 puts ``deck_b`` in seat 1, … — so first-player
-    advantage is balanced over an even number of games.
-
-    Commander format expects a 4-player pod, so the caller must supply
-    two filler deck filenames (already present in the Forge userdata
-    commander/ directory). The harness skips with status='skipped'
-    when fewer than 2 fillers are supplied; same for when ForgeRunner
-    can't be located on the host.
-
-    The function never raises — every failure mode lands in the
-    returned ABResult so the background worker on /api/save_iteration
-    can record it on the iteration row without try/except boilerplate.
-    """
-    # Lazy imports so a missing optional dep in log_parser/game_analyzer
-    # doesn't break ``from forge_runner import ...`` at module import
-    # time. (Both are local imports, so cost is one-time per call.)
-    from .log_parser import parse as _parse_sim
-    from .game_analyzer import analyze as _analyze_match
-
-    result = ABResult(
-        deck_a=deck_a_path.name,
-        deck_b=deck_b_path.name,
-        games=0,
-        status=_AB_STATUS_PENDING,
-    )
-
-    # Locate Forge first — if the host doesn't have it we bail before
-    # touching the runner. The save-iteration HTTP response shouldn't
-    # care whether Forge is reachable; the worker logs the skip and
-    # the UI surfaces 'skipped' in the status pill.
-    if runner is None:
-        try:
-            runner = ForgeRunner.locate()
-        except (FileNotFoundError, OSError) as exc:
-            result.status = _AB_STATUS_SKIPPED
-            result.error = f"Forge not available: {exc}"
-            return result
-
-    if game_format == "commander":
-        if fillers is None or len(fillers) < 2:
-            result.status = _AB_STATUS_SKIPPED
-            result.error = (
-                "commander A/B sim needs at least 2 filler decks "
-                "(got "
-                + (str(len(fillers)) if fillers is not None else "0")
-                + ")"
-            )
-            return result
-        filler_a = fillers[0]
-        filler_b = fillers[1]
-
-    name_a = _ab_deck_name_for_match(deck_a_path)
-    name_b = _ab_deck_name_for_match(deck_b_path)
-
-    a_turns: list[int] = []
-    b_turns: list[int] = []
-    started = datetime.now()
-    result.status = _AB_STATUS_RUNNING
-
-    for i in range(games):
-        # Alternate seat order — even iters: A first; odd iters: B first.
-        # The filler pair stays in seats 3+4 in both cases; only the
-        # head-to-head pair flips.
-        if game_format == "commander":
-            if i % 2 == 0:
-                order = [deck_a_path.name, deck_b_path.name, filler_a, filler_b]
-            else:
-                order = [deck_b_path.name, deck_a_path.name, filler_a, filler_b]
-        else:
-            order = (
-                [deck_a_path.name, deck_b_path.name]
-                if i % 2 == 0
-                else [deck_b_path.name, deck_a_path.name]
-            )
-        result.seat_orders.append(order)
-
-        try:
-            sim = runner.run(
-                deck_filenames=order,
-                num_games=1,
-                game_format=game_format,
-                timeout_sec=_AB_TIMEOUT_PER_GAME_SEC,
-            )
-        except Exception as exc:  # noqa: BLE001 — never raise from background
-            result.status = _AB_STATUS_FAILED
-            result.error = f"{type(exc).__name__}: {exc}"
-            result.duration_sec = (datetime.now() - started).total_seconds()
-            return result
-
-        # Treat any non-zero exit OR captured error as a failure for
-        # the batch — don't try to salvage partial sims; the dashboard
-        # banner is more useful with "failed at game 2/5" than a
-        # noisy 1-of-5 partial.
-        if sim.error or (sim.returncode is not None and sim.returncode != 0):
-            result.status = _AB_STATUS_FAILED
-            result.error = sim.error or f"Forge exited with code {sim.returncode}"
-            result.duration_sec = (datetime.now() - started).total_seconds()
-            return result
-
-        parsed = _parse_sim(sim.stdout)
-        match = _analyze_match(sim.stdout)
-
-        # Attribute wins by normalized deck name (seat-agnostic).
-        for d in parsed.deck_results:
-            if d.normalized_name == name_a:
-                result.wins_a += d.wins
-            elif d.normalized_name == name_b:
-                result.wins_b += d.wins
-
-        # Per-game turn stats. game_analyzer attributes a winner per
-        # game; we tally only the games each deck actually won so
-        # avg_turns_a reflects "how fast does A close out games it
-        # wins" rather than "average length of all games A played".
-        for g in match.games:
-            if g.end_turn is None:
-                continue
-            winner = g.winner_normalized
-            if winner == name_a:
-                a_turns.append(g.end_turn)
-            elif winner == name_b:
-                b_turns.append(g.end_turn)
-
-        result.games = i + 1
-
-    if a_turns:
-        result.avg_turns_a = round(sum(a_turns) / len(a_turns), 2)
-    if b_turns:
-        result.avg_turns_b = round(sum(b_turns) / len(b_turns), 2)
-    result.status = _AB_STATUS_DONE
-    result.duration_sec = round((datetime.now() - started).total_seconds(), 2)
-    return result
+from .forge_version import (  # noqa: E402,F401
+    FORGE_STALE_AGE_DAYS,
+    ForgeVersionInfo,
+    _FORGE_JAR_VERSION_RE,
+    detect_forge_version,
+)
+from .forge_batch import (  # noqa: E402,F401
+    ABJob,
+    ABResult,
+    GauntletResult,
+    _AB_STATUS_DONE,
+    _AB_STATUS_FAILED,
+    _AB_STATUS_PENDING,
+    _AB_STATUS_RUNNING,
+    _AB_STATUS_SKIPPED,
+    _AB_TIMEOUT_PER_GAME_SEC,
+    _AB_TURN_LINE,
+    _default_max_workers,
+    _discover_profiles,
+    _even_chunks,
+    _last_active_seat,
+    _runner_for,
+    run_ab_batch,
+    run_ab_parallel,
+    run_ab_simulation,
+    run_gauntlet_simulation,
+)
 
 
 if __name__ == "__main__":
