@@ -22,7 +22,7 @@ from commander_builder.forge_runner import (
     run_ab_simulation,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 FORGE1 = REPO / "vendor" / "forge"
 FORGE2 = REPO / "vendor" / "forge2"
 

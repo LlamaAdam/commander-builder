@@ -21,11 +21,11 @@ orients you + covers fresh-machine setup:
 
 | Doc | What it is |
 |-----|-----------|
-| **[docs/STATUS.md](STATUS.md)** | **Source of truth.** Current state, ranked open backlog, and *Parked plans* (the FP-### catalog). Start here. |
-| [docs/CHANGELOG.md](CHANGELOG.md) | Per-commit history of what landed. |
+| **[docs/STATUS.md](../STATUS.md)** | **Source of truth.** Current state, ranked open backlog, and *Parked plans* (the FP-### catalog). Start here. |
+| [docs/CHANGELOG.md](../CHANGELOG.md) | Per-commit history of what landed. |
 | `docs/future-plans.md` | Consolidated detailed FP plans/findings (FP-002 margin analysis + deck-gen, FP-007, FP-010). |
-| `docs/PROJECT-MANAGER.md` | **PM agent prompt + routing playbook** — triage work to the orchestrator, an isolated local worker, or escalate. Use to drive the project at scale. |
-| `docs/orch-worklist.md` | The live orchestrator red-test queue + workflow. |
+| `docs/archive/PROJECT-MANAGER.md` | **PM agent prompt + routing playbook** — triage work to the orchestrator, an isolated local worker, or escalate. Use to drive the project at scale. |
+| `docs/archive/orch-worklist.md` | The live orchestrator red-test queue + workflow. |
 | `docs/architecture.md` | Architecture + key decisions. |
 
 - **Branch:** `feature/2026-04-28-session` (the active line; on `origin`).
@@ -40,10 +40,10 @@ orients you + covers fresh-machine setup:
 
 ## Future plans
 
-The FP-### catalog + current status lives in **[STATUS.md](STATUS.md) -> Parked
+The FP-### catalog + current status lives in **[STATUS.md](../STATUS.md) -> Parked
 plans**; the detailed per-FP plans/findings are in
-**[future-plans.md](future-plans.md)**. To check for changes, skim those two
-plus recent [CHANGELOG.md](CHANGELOG.md).
+**[future-plans.md](../future-plans.md)**. To check for changes, skim those two
+plus recent [CHANGELOG.md](../CHANGELOG.md).
 
 ---
 
@@ -75,7 +75,7 @@ pip install -e .[claude]          # commander-* CLIs on PATH; [claude] = anthrop
 **Credentials (one-time, outside the repo).** The curator's API-key path reads
 `~/.commander-builder/credentials` (never committed). Skip if you only use the
 heuristic advisor. `commander-config init`, paste the key, then `chmod 600` on
-Unix. Details: [docs/SECRETS.md](SECRETS.md).
+Unix. Details: [docs/SECRETS.md](../SECRETS.md).
 
 **Forge (optional, for A/B sims).** Install under `vendor/forge/` (the desktop
 fat jar + `res/`); optional portable JRE under `vendor/jre/bin/`. Both are

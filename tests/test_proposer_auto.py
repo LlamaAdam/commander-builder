@@ -3350,7 +3350,7 @@ def test_auto_curate_main_batch_rejects_neither_positional_nor_batch(
 # --parallelism N (AGENT_BACKLOG #016 / FP-003) — concurrent Forge sims
 # ---------------------------------------------------------------------------
 #
-# The 2026-05-19 feasibility spike (scripts/_spike_concurrent_forge.py)
+# The 2026-05-19 feasibility spike (scripts/experiments/_spike_concurrent_forge.py)
 # confirmed two Forge JVMs co-exist in the same install cwd with no
 # lock contention. These tests cover the dispatch layer over that
 # substrate:
