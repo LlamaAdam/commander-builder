@@ -21,7 +21,9 @@ trim); this module decides WHICH lands fill that budget.
 THE THREE MODELS (all documented inline, all cite their source).
 ================================================================
 1. Land count from the curve  — ``target_land_count``.
-2. Color sources per color    — ``color_source_targets`` (Karsten-anchored).
+2. Color sources per color    — ``color_source_targets`` (the FULL Karsten
+                                per-CMC table, most-demanding-card rule;
+                                two-anchor fallback for unresolvable costs).
 3. Fill order                 — ``build_manabase`` (keep seed → top-up
                                 fixing from the advisor's land tiers → basics).
 
@@ -126,32 +128,107 @@ def target_land_count(
 
 # SOURCE-COUNT MODEL — READ THIS, it is the load-bearing MTG knowledge here.
 # ------------------------------------------------------------------------
-# The reference standard is Frank Karsten's source-count work ("How Many
-# Colored Mana Sources Do You Need to Consistently Cast Your Spells?",
-# 2018/2022 updates), which tabulates, for a given deck size, how many
-# sources of a color you need to reliably have the right mana on curve.
-# His headline Commander (99-card) guidance, which we anchor to:
+# The reference standard is Frank Karsten's source-count work. FP-014.2's
+# first cut used a two-anchor simplification (kept below as the FALLBACK
+# path); this second cut implements his FULL per-CMC table:
 #
-#   * a card with a SINGLE colored pip ({C}) wants ~13-16 sources of C to be
-#     reliably castable around its curve — we use 14 as the representative
-#     midpoint;
-#   * a card with a DOUBLE colored pip ({C}{C}) wants ~19-23 — we use 21.
+#   Frank Karsten, "How Many Sources Do You Need to Consistently Cast Your
+#   Spells? A 2022 Update" (ChannelFireball, 2022; now hosted on TCGplayer
+#   Infinite). The 99-card Commander column.
 #
-# We DO NOT reproduce Karsten's full per-CMC table (it keys on the exact turn
-# you want to cast each card, which a from-scratch assembler doesn't know).
-# Instead we scale between the single- and double-pip anchors by how pip-
-# intensive each color actually is in THIS deck: a color cast mostly off
-# single pips targets ~14 sources; a color with many {C}{C} cards targets
-# toward 21. This is an explicit simplification of Karsten's tables — SAID
-# SO plainly — chosen because it needs only pip data (which we have) and
-# still captures the real signal: double-pip colors demand more sources.
+# WHAT THE PUBLISHED NUMBERS MEAN (so future readers can re-verify them):
+# Karsten simulates millions of games and asks: for a spell with mana value
+# M needing N pips of one color, how many sources of that color does a
+# 99-card deck need so that P(>= N sources by turn M, ON CURVE) hits his
+# consistency bar — defined as (89 + M)%, i.e. 90% for one-drops rising to
+# ~96% for seven-drops (this is the "~90% castability" band; there is no
+# separate column per probability — the bar scales with M by design, because
+# missing a game-winning 5-drop hurts more than missing a 1-drop). The
+# probability is CONDITIONAL on having drawn >= M lands by turn M (colored-
+# ratio failures only, not land-count failures), assumes a 41-land 99-card
+# deck, a reasonable London mulligan strategy, and — new in the 2022 update —
+# Commander's free mulligan (CR 103.4c) and the starting player's turn-one
+# draw in multiplayer (CR 800.7). Those two Commander rules are why the
+# 1-drop and 2-drop rows are noticeably LOWER than a naive 60→99 scale-up,
+# and why C and 1C both land on 19 (more cards seen early).
+#
+# THE TABLE, keyed on (cmc, pips-of-that-color) — transcribed verbatim from
+# the article's summary table, 99-card column:
+#
+#   cost   (cmc,pips)  sources      cost   (cmc,pips)  sources
+#   C        (1,1)       19         CC       (2,2)       30
+#   1C       (2,1)       19         1CC      (3,2)       28
+#   2C       (3,1)       18         2CC      (4,2)       26
+#   3C       (4,1)       16         3CC      (5,2)       23
+#   4C       (5,1)       15         4CC      (6,2)       22
+#   5C       (6,1)       14         5CC      (7,2)       20
+#                                   CCC      (3,3)       36
+#   CCCC     (4,4)       39         1CCC     (4,3)       33
+#   1CCCC    (5,4)       36         2CCC     (5,3)       30
+#                                   3CCC     (6,3)       28
+#                                   4CCC     (7,3)       26
+#
+# CAST TURN = THE CARD'S CMC (the assembler's necessary simplification).
+# Karsten's table keys on the turn you INTEND to cast the card; a from-
+# scratch assembler has no play pattern to read that from, so we assume
+# on-curve casting (turn M for a CMC-M card) — exactly the assumption the
+# published table itself is built on. Cards cast off-curve on purpose
+# (alternative costs, delve, X spells held late) are modelled at their
+# printed CMC; that overstates their demand slightly, which errs safe.
+#
+# GAPS IN THE PUBLISHED TABLE (marked ⇐carry below): Karsten did not publish
+# 6C (CMC-7 single-pip) or 4-pip rows past 1CCCC. For those cells we carry
+# the nearest published LOWER-CMC value of the same pip count forward —
+# demand falls as cast turn rises (more draws seen), so carrying the earlier
+# turn's number can only OVERSTATE the requirement. Conservative, never
+# fabricated-low.
 #
 # These are TARGETS, not hard requirements. In 3+ color decks the sum of
-# per-color targets exceeds any legal land count (5 colors * 14 = 70 sources
-# in ~38 lands is impossible) — Karsten notes the same. ``build_manabase``
-# treats unmet targets as priorities and allocates the real land budget
-# toward them, accepting lower consistency in high-color decks exactly as a
-# human deckbuilder does.
+# per-color targets exceeds any legal land count (Karsten notes the same).
+# ``build_manabase`` treats unmet targets as priorities and allocates the
+# real land budget toward them, accepting lower consistency in high-color
+# decks exactly as a human deckbuilder does. That softening is unchanged
+# from the first cut.
+KARSTEN_99_SOURCES: dict[tuple[int, int], int] = {
+    # -- single pip: C / 1C / 2C / 3C / 4C / 5C --------------------------
+    (1, 1): 19, (2, 1): 19, (3, 1): 18, (4, 1): 16, (5, 1): 15, (6, 1): 14,
+    (7, 1): 14,  # ⇐carry: 6C not published; carry 5C's 14 (see note above).
+    # -- double pip: CC / 1CC / 2CC / 3CC / 4CC / 5CC --------------------
+    (2, 2): 30, (3, 2): 28, (4, 2): 26, (5, 2): 23, (6, 2): 22, (7, 2): 20,
+    # -- triple pip: CCC / 1CCC / 2CCC / 3CCC / 4CCC ---------------------
+    (3, 3): 36, (4, 3): 33, (5, 3): 30, (6, 3): 28, (7, 3): 26,
+    # -- quadruple pip: CCCC / 1CCCC (all Karsten published) -------------
+    (4, 4): 39, (5, 4): 36,
+    (6, 4): 36, (7, 4): 36,  # ⇐carry: not published; carry 1CCCC's 36.
+}
+
+
+def karsten_sources(cmc: float, pips: int) -> int:
+    """Published source count for a card of ``cmc`` needing ``pips`` of one
+    color — with the clamping that maps real cards onto the table's domain:
+
+      * ``cmc`` caps at 7 (Karsten's table stops at seven-drops; past turn
+        seven you've seen so many cards the 7-drop row is already generous);
+      * ``cmc`` floors at ``pips`` (a real cost always has CMC >= its pip
+        count; defensive for X-costs parsed at X=0, e.g. {X}{R}{R} → CMC 2);
+      * ``pips`` caps at 4 (the deepest published row — 5+ pip cards are
+        vanishingly rare and the 4-pip row is already near the table max).
+    """
+    p = max(1, min(4, pips))
+    m = max(p, min(7, int(round(cmc)) or 1))
+    return KARSTEN_99_SOURCES[(m, p)]
+
+
+# TWO-ANCHOR FALLBACK (the FP-014.2 first-cut model — kept, not deleted).
+# ------------------------------------------------------------------------
+# Before the per-CMC table above, this module interpolated between two
+# anchors from the same Karsten line of work: a single-pip card wants ~14
+# sources, a double-pip card ~21, scaled by each color's double-pip
+# fraction. That model needs only pip data — no CMC — so it remains the
+# documented DEGRADED path for cards/colors whose mana cost can't be
+# resolved offline (see ``color_source_targets``): when we can't read a
+# card's (cmc, pips) we do NOT fabricate a table entry, we fall back to
+# this coarser-but-honest estimate and say so in the summary.
 SINGLE_PIP_SOURCES = 14
 DOUBLE_PIP_SOURCES = 21
 
@@ -168,6 +245,22 @@ class _PipStats:
     cards_double: dict[str, int] = field(default_factory=dict)
     # average mana value across the resolvable spells (drives land count).
     avg_mana_value: float = _PIVOT_MV
+    # PER-CMC TABLE DATA (FP-014 second cut). color -> the most demanding
+    # card seen for that color: (table sources, card name, cmc, pips).
+    # Karsten's rule is "meet the requirement of your most demanding card"
+    # (his Rakdos worked example does exactly this: MAX per color, not an
+    # average) — so we only need the running max, kept stable on ties
+    # (first card seen wins, for deterministic summaries).
+    table_demands: dict[str, tuple[int, str, int, int]] = field(
+        default_factory=dict,
+    )
+    # HONESTY COUNTERS for the summary: how many spells were scored off the
+    # per-CMC table (mana cost resolved) vs fell back / were skipped because
+    # their cost couldn't be resolved offline. A constructed _PipStats with
+    # no table data (older tests, degraded paths) leaves table_demands empty
+    # and routes every color through the two-anchor fallback.
+    table_scored: int = 0
+    fallback_scored: int = 0
 
 
 def _parse_cost(mana_cost: str) -> tuple[dict[str, int], float]:
@@ -198,10 +291,22 @@ def _parse_cost(mana_cost: str) -> tuple[dict[str, int], float]:
 def pip_stats(
     names, lookup: Callable[[str], Optional[dict]],
 ) -> _PipStats:
-    """Aggregate the colored-pip + mana-value signal across ``names``.
+    """Aggregate the colored-pip + mana-value + per-CMC-demand signal.
 
-    Cards ``lookup`` can't resolve contribute nothing (no cost = no signal);
-    they're a minority and the models degrade gracefully.
+    Every spell lands in exactly one of two honesty buckets (surfaced in the
+    manabase summary so a degraded build is visible, not silent):
+
+      * TABLE-SCORED — ``lookup`` resolved a mana cost. The card gets a
+        Karsten table entry per colored pip group: ``karsten_sources(cmc,
+        pips-of-that-color)``, and competes for "most demanding card" of
+        each of its colors. A resolved cost with zero colored pips (a {3}
+        artifact) is still table-scored — "demands nothing" is a true
+        table reading, not a gap.
+      * FALLBACK-SCORED — ``lookup`` failed / returned nothing / returned a
+        card with no mana cost. No cost means no (cmc, pips) — we DO NOT
+        fabricate one. The card is skipped from every per-color max and
+        counted, and any color left with pips but no table entries at all
+        is scored by the two-anchor fallback in ``color_source_targets``.
     """
     stats = _PipStats(
         weights={c: 0 for c in _WUBRG},
@@ -214,10 +319,15 @@ def pip_stats(
         try:
             card = lookup(nm)
         except Exception:  # noqa: BLE001 — a lookup blip must not crash a build.
+            card = None
+        cost = (card.get("mana_cost") or "") if card else ""
+        if not cost.strip():
+            # Unresolvable offline (or a genuinely costless card) — counted,
+            # never guessed at. See the fallback bucket note above.
+            stats.fallback_scored += 1
             continue
-        if not card:
-            continue
-        pips, mv = _parse_cost(card.get("mana_cost") or "")
+        pips, mv = _parse_cost(cost)
+        stats.table_scored += 1
         mv_total += mv
         mv_n += 1
         for color, n in pips.items():
@@ -225,6 +335,12 @@ def pip_stats(
             stats.cards_with[color] += 1
             if n >= 2:
                 stats.cards_double[color] += 1
+            # Karsten per-CMC entry for THIS card in THIS color. Cast turn
+            # = CMC (on-curve assumption — see the table's header comment).
+            need = karsten_sources(mv, n)
+            best = stats.table_demands.get(color)
+            if best is None or need > best[0]:
+                stats.table_demands[color] = (need, nm, int(round(mv)), n)
     stats.avg_mana_value = (mv_total / mv_n) if mv_n else _PIVOT_MV
     return stats
 
@@ -232,16 +348,36 @@ def pip_stats(
 def color_source_targets(
     colors: list[str], stats: _PipStats,
 ) -> dict[str, int]:
-    """Desired source count per color (Karsten-anchored — see model note).
+    """Desired source count per color — full Karsten per-CMC model.
 
-    For each color in the identity: interpolate between the single-pip
-    (``SINGLE_PIP_SOURCES``) and double-pip (``DOUBLE_PIP_SOURCES``) anchors
-    by the fraction of that color's spells that are double-pip. A color in
-    the identity that no spell actually needs (0 pips) gets a target of 0 —
-    the basics floor in ``build_manabase`` still gives it a token source.
+    THE RULE (Karsten's own): a color's requirement is set by its MOST
+    DEMANDING card — the max of the table entries, not an average. His 2022
+    article applies it exactly this way in the Rakdos worked example ("check
+    the most constraining restrictions for all colors"): if the deck holds
+    one Wrath of God, the white count must satisfy Wrath of God, no matter
+    how many easy 4C white cards sit alongside it. Averaging would let a
+    pile of splashy singles vote down the one card that actually strains
+    the mana.
+
+    Per color, in order:
+      1. table max  — ``stats.table_demands`` (cards with resolved costs);
+      2. two-anchor fallback — the color has pips but NO table entries
+         (cost data unresolvable offline, or a hand-built _PipStats):
+         interpolate 14→21 by the double-pip fraction, the documented
+         first-cut model. Coarser, honest, never fabricated;
+      3. zero — a color in the identity no spell actually needs; the
+         basics floor in ``build_manabase`` still gives it a token source.
+
+    Targets remain PRIORITIES, not guarantees — the 3+ color softening in
+    ``build_manabase`` (largest-remainder over deficits when the sum
+    exceeds the land budget) is unchanged from the first cut.
     """
     targets: dict[str, int] = {}
     for c in colors:
+        demand = stats.table_demands.get(c)
+        if demand is not None:
+            targets[c] = demand[0]
+            continue
         n_with = stats.cards_with.get(c, 0)
         if n_with <= 0:
             targets[c] = 0
@@ -342,6 +478,20 @@ class ManabaseSummary:
     basic_count: int                # basic lands.
     kept_seed_lands: int            # of the fixing lands, how many came from the seed.
     degraded: bool                  # True → fell back toward basics-only.
+    # --- FP-014 second cut: per-CMC table inspectability -------------------
+    # (defaulted so older call sites/tests constructing the summary by
+    # keyword keep working unchanged.)
+    # color -> (card name, cmc, pips): the card that SET that color's target
+    # under Karsten's most-demanding-card rule. The target value itself is
+    # ``targets[color]`` — this names the card responsible for it.
+    most_demanding: dict[str, tuple[str, int, int]] = field(
+        default_factory=dict,
+    )
+    spells_table_scored: int = 0    # spells scored off the per-CMC table.
+    spells_fallback_scored: int = 0  # spells with unresolvable cost (skipped).
+    # colors whose target came from the two-anchor fallback (pips seen but
+    # no per-card cost data for that color at all).
+    fallback_colors: list[str] = field(default_factory=list)
 
     def format_lines(self) -> list[str]:
         """Human-readable summary lines for the CLI."""
@@ -356,6 +506,27 @@ class ManabaseSummary:
         ]
         if srcs:
             lines.append(f"  sources (have/target): {srcs}")
+        # WHY each target is what it is: name the card that set it (Karsten's
+        # most-demanding-card rule made inspectable). "Wrath of God (cmc 4,
+        # WW) → 26" reads straight back into the published table.
+        demanding = "  ".join(
+            f"{c}: {name} (cmc {cmc}, {'C' * pips}) → {self.targets.get(c, 0)}"
+            for c in _WUBRG
+            if c in self.most_demanding
+            for (name, cmc, pips) in [self.most_demanding[c]]
+        )
+        if demanding:
+            lines.append(f"  most demanding: {demanding}")
+        if self.spells_table_scored or self.spells_fallback_scored:
+            scoring = (
+                f"  spell scoring: {self.spells_table_scored} per-CMC table"
+                f" / {self.spells_fallback_scored} fallback (cost unresolved)"
+            )
+            if self.fallback_colors:
+                scoring += (
+                    f"; two-anchor colors: {','.join(self.fallback_colors)}"
+                )
+            lines.append(scoring)
         if self.degraded:
             lines.append(
                 "  NOTE: land data unavailable — degraded to a basics-only "
@@ -434,6 +605,8 @@ def build_manabase(
             land_count=sum(basics.values()), sources={}, targets={},
             fixing_land_count=0, basic_count=sum(basics.values()),
             kept_seed_lands=0, degraded=True,
+            spells_table_scored=stats.table_scored,
+            spells_fallback_scored=stats.fallback_scored,
         )
         return Manabase(lands=[], basics=basics, summary=summary)
 
@@ -533,6 +706,19 @@ def build_manabase(
         final_sources[c] += basics_by_color[c]
 
     basic_total = sum(basics.values())
+    # Inspectability (FP-014 second cut): name the card that set each color's
+    # target, and say how much of the deck the per-CMC table actually saw —
+    # a build with many fallback-scored spells deserves less trust in its
+    # targets, and the summary should make that legible, not bury it.
+    most_demanding = {
+        c: (name, cmc, pips)
+        for c, (_need, name, cmc, pips) in stats.table_demands.items()
+        if c in identity
+    }
+    fallback_colors = [
+        c for c in color_list
+        if stats.cards_with.get(c, 0) > 0 and c not in stats.table_demands
+    ]
     summary = ManabaseSummary(
         land_count=len(lands) + basic_total,
         sources=final_sources,
@@ -541,5 +727,9 @@ def build_manabase(
         basic_count=basic_total,
         kept_seed_lands=kept_count,
         degraded=False,
+        most_demanding=most_demanding,
+        spells_table_scored=stats.table_scored,
+        spells_fallback_scored=stats.fallback_scored,
+        fallback_colors=fallback_colors,
     )
     return Manabase(lands=lands, basics=basics, summary=summary)

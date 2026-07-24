@@ -4,7 +4,10 @@ Covers the three documented models in ``deck_builder_manabase`` and their
 integration through ``deck_builder._assemble``:
 
   * MODEL 1 — land count from the curve (+ seed reconciliation);
-  * MODEL 2 — Karsten-anchored per-color source targets;
+  * MODEL 2 — the FULL Karsten per-CMC source table (second cut): pinned
+    transcription spot checks against the published 99-card numbers, the
+    most-demanding-card (max) rule, the two-anchor fallback for
+    unresolvable costs, and the table-vs-fallback honesty counters;
   * MODEL 3 — the fill order (keep seed lands → top-up fixing → basics),
     that a dual counts for both its colors, mono/2/5-color behavior, and
     graceful degrade to basics-only when land data is unavailable.
@@ -17,10 +20,12 @@ from commander_builder import deck_builder
 from commander_builder.deck_builder import _assemble
 from commander_builder.deck_builder_manabase import (
     DOUBLE_PIP_SOURCES,
+    KARSTEN_99_SOURCES,
     SINGLE_PIP_SOURCES,
     _PipStats,
     build_manabase,
     color_source_targets,
+    karsten_sources,
     land_color_sources,
     pip_stats,
     target_land_count,
@@ -111,26 +116,124 @@ def test_land_count_trusts_a_plausible_seed_over_the_model():
 
 
 # ===========================================================================
-# MODEL 2 — Karsten-anchored source targets.
+# MODEL 2 — the full Karsten per-CMC source table (second cut).
 # ===========================================================================
+# Transcription spot checks. The pinned values ARE the published numbers
+# from Frank Karsten, "How Many Sources Do You Need to Consistently Cast
+# Your Spells? A 2022 Update" — the 99-card Commander column. If one of
+# these pins ever fails, someone touched the transcription: re-verify
+# against the article, do not re-tune to make the test pass.
 
 
-def test_source_target_single_pip_hits_the_single_anchor():
-    # All white cards are single-pip → target is exactly the single anchor.
+def test_karsten_table_transcription_spot_checks():
+    # Single pip, published column: C=19, 1C=19, 2C=18, 3C=16, 4C=15, 5C=14.
+    assert karsten_sources(1, 1) == 19   # C     (Monastery Swiftspear row)
+    assert karsten_sources(2, 1) == 19   # 1C    (Ledger Shredder row)
+    assert karsten_sources(3, 1) == 18   # 2C    (Reckless Stormseeker row)
+    assert karsten_sources(4, 1) == 16   # 3C    (Collected Company row)
+    assert karsten_sources(5, 1) == 15   # 4C    (Doubling Season row)
+    assert karsten_sources(6, 1) == 14   # 5C    (Drowner of Hope row)
+    # Double pip: CC=30, 1CC=28, 2CC=26, 3CC=23, 4CC=22, 5CC=20.
+    assert karsten_sources(2, 2) == 30   # CC    (Lord of Atlantis row)
+    assert karsten_sources(3, 2) == 28   # 1CC   (Narset, Parter of Veils row)
+    assert karsten_sources(4, 2) == 26   # 2CC   (Wrath of God row)
+    assert karsten_sources(5, 2) == 23   # 3CC   (Baneslayer Angel row)
+    assert karsten_sources(6, 2) == 22   # 4CC   (Primeval Titan row)
+    assert karsten_sources(7, 2) == 20   # 5CC   (Hullbreaker Horror row)
+    # Triple pip: CCC=36, 1CCC=33, 2CCC=30, 3CCC=28, 4CCC=26.
+    assert karsten_sources(3, 3) == 36   # CCC   (Goblin Chainwhirler row)
+    assert karsten_sources(4, 3) == 33   # 1CCC  (Cryptic Command row)
+    assert karsten_sources(5, 3) == 30   # 2CCC  (Garruk, Primal Hunter row)
+    assert karsten_sources(6, 3) == 28   # 3CCC  (Massacre Wurm row)
+    assert karsten_sources(7, 3) == 26   # 4CCC  (Nyxbloom Ancient row)
+    # Quadruple pip (both published rows): CCCC=39, 1CCCC=36.
+    assert karsten_sources(4, 4) == 39   # CCCC  (Dawn Elemental row)
+    assert karsten_sources(5, 4) == 36   # 1CCCC (Unnatural Growth row)
+
+
+def test_karsten_table_early_drops_demand_more_than_late_ones():
+    # The signature shape the two-anchor model could NOT express: a CMC-1
+    # single-pip card (19 sources) demands MORE than a CMC-4 single-pip
+    # card (16) — fewer draws seen by its cast turn. And thanks to
+    # Commander's free mulligan + turn-one draw, C and 1C tie at 19.
+    assert karsten_sources(1, 1) > karsten_sources(4, 1)
+    assert karsten_sources(1, 1) == karsten_sources(2, 1) == 19
+    # Within a CMC, more pips always demand more sources.
+    assert karsten_sources(4, 3) > karsten_sources(4, 2) > karsten_sources(4, 1)
+
+
+def test_karsten_lookup_clamps_to_the_published_domain():
+    # CMC past 7 clamps to the 7-drop row (table stops at seven-drops).
+    assert karsten_sources(11, 2) == karsten_sources(7, 2) == 20
+    # CMC-7 single pip (6C) was NOT published — the carried-forward 5C value.
+    assert karsten_sources(7, 1) == 14
+    # 5+ pips clamp to the deepest published pip row (4).
+    assert karsten_sources(5, 5) == karsten_sources(5, 4) == 36
+    # CMC below the pip count (X-costs parsed at X=0) floors at pips.
+    assert karsten_sources(0, 2) == karsten_sources(2, 2) == 30
+    # Every published cell is present for CMC 1-7 x pips 1-4.
+    for pips in (1, 2, 3, 4):
+        for cmc in range(max(1, pips), 8):
+            assert (cmc, pips) in KARSTEN_99_SOURCES
+
+
+def test_most_demanding_card_sets_the_color_target():
+    # Karsten's max-over-cards rule: five easy {1}{W} spells target 19, but
+    # ONE greedy {W}{W} two-drop drags white's target to the CC row's 30 —
+    # an average would have voted the greedy card down; the max must not.
+    lookup = dict(
+        [(f"W {i}", {"mana_cost": "{1}{W}"}) for i in range(5)]
+        + [("Greedy Two-Drop", {"mana_cost": "{W}{W}"})]
+    ).get
+    easy = pip_stats([f"W {i}" for i in range(5)], lookup)
+    assert color_source_targets(["W"], easy) == {"W": 19}
+    greedy = pip_stats(
+        [f"W {i}" for i in range(5)] + ["Greedy Two-Drop"], lookup,
+    )
+    assert color_source_targets(["W"], greedy) == {"W": 30}
+    # ...and the summary can say WHO set it: (sources, name, cmc, pips).
+    assert greedy.table_demands["W"] == (30, "Greedy Two-Drop", 2, 2)
+
+
+def test_pip_stats_counts_table_scored_vs_fallback_scored():
+    # 2 resolvable spells → table-scored; 1 unknown name + 1 costless card
+    # → fallback-scored (skipped from every max, never fabricated).
+    lookup = {
+        "W One": {"mana_cost": "{W}"},
+        "W Two": {"mana_cost": "{2}{W}"},
+        "Costless Oddity": {"mana_cost": ""},  # e.g. a suspend-only card.
+    }.get
+    stats = pip_stats(
+        ["W One", "W Two", "Unknown Card", "Costless Oddity"], lookup,
+    )
+    assert stats.table_scored == 2
+    assert stats.fallback_scored == 2
+    # The target came from the resolvable cards only: {W} at CMC 1 → 19.
+    assert color_source_targets(["W"], stats) == {"W": 19}
+
+
+# --- The two-anchor FALLBACK path (the documented first-cut model). --------
+# These pins are UNCHANGED from FP-014.2: a hand-built _PipStats with no
+# table_demands is exactly the "cost data unresolvable" shape, so it routes
+# through the preserved two-anchor interpolation.
+
+
+def test_fallback_single_pip_hits_the_single_anchor():
+    # No table data + all single-pip → exactly the single anchor (14).
     stats = _PipStats(weights={"W": 10}, cards_with={"W": 10},
                       cards_double={"W": 0})
     assert color_source_targets(["W"], stats) == {"W": SINGLE_PIP_SOURCES}
 
 
-def test_source_target_double_pip_hits_the_double_anchor():
-    # Every white card is {W}{W} → target rises to the double anchor.
+def test_fallback_double_pip_hits_the_double_anchor():
+    # No table data + every card double-pip → the double anchor (21).
     stats = _PipStats(weights={"W": 20}, cards_with={"W": 10},
                       cards_double={"W": 10})
     assert color_source_targets(["W"], stats) == {"W": DOUBLE_PIP_SOURCES}
 
 
-def test_source_target_interpolates_between_anchors():
-    # Half the white cards are double-pip → halfway between 14 and 21.
+def test_fallback_interpolates_between_anchors():
+    # Half the white cards double-pip → halfway between 14 and 21.
     stats = _PipStats(weights={"W": 15}, cards_with={"W": 10},
                       cards_double={"W": 5})
     target = color_source_targets(["W"], stats)["W"]
@@ -151,6 +254,9 @@ def test_pip_stats_counts_double_pips_and_mana_value():
     assert stats.cards_with["G"] == 1
     assert stats.cards_double["B"] == 0
     assert stats.avg_mana_value == 4.0
+    # Per-CMC demand recorded for both colors: 3C row (CMC 4, 1 pip) → 16.
+    assert stats.table_demands["B"] == (16, "Golgari Boss", 4, 1)
+    assert stats.table_demands["G"] == (16, "Golgari Boss", 4, 1)
 
 
 # ===========================================================================
@@ -201,12 +307,64 @@ def test_two_color_keeps_seed_dual_and_splits_sources():
     assert mb.summary.kept_seed_lands == 1
     # Top-up added more BG fixing from the advisor tiers (not hand-rolled).
     assert mb.summary.fixing_land_count > 1
-    # Both colors reach their (single-pip, 14) source target; the dual and
-    # every BG fixer counted toward BOTH.
+    # Both colors reach their source target — per the per-CMC table the
+    # {1}{B}/{1}{G} spells hit the 1C row (CMC 2, 1 pip) → 19, up from the
+    # old two-anchor 14; the dual and every BG fixer counted toward BOTH.
+    assert mb.summary.targets == {"B": 19, "G": 19}
     assert mb.summary.sources["B"] >= mb.summary.targets["B"]
     assert mb.summary.sources["G"] >= mb.summary.targets["G"]
     # Exactly the land budget, no drift.
     assert mb.total_cards() == 37
+
+
+def test_summary_names_the_most_demanding_card_per_color():
+    # The summary's inspectability line: which card set each color's target.
+    names = _names({"B": 10, "G": 10}) + ["Golgari Boss"]
+    stats = pip_stats(names, _fake_lookup)
+    mb = build_manabase(
+        ["B", "G"], names, [], 37, lookup=_fake_lookup, stats=stats,
+    )
+    # {1}{B} synthetics hit the 1C row (19) > Golgari Boss's 3C row (16),
+    # so a synthetic 1C card owns each color's target (first seen wins).
+    assert mb.summary.most_demanding["B"] == ("B 0", 2, 1)
+    assert mb.summary.most_demanding["G"] == ("G 0", 2, 1)
+    assert mb.summary.spells_table_scored == len(names)
+    assert mb.summary.spells_fallback_scored == 0
+    text = "\n".join(mb.summary.format_lines())
+    assert "most demanding:" in text
+    assert "spell scoring: 21 per-CMC table / 0 fallback" in text
+
+
+def test_summary_counts_unresolvable_cards_as_fallback_scored():
+    # An unresolvable card is skipped from the max and COUNTED — the build
+    # must say how much of the deck the table actually saw, not pretend.
+    names = _names({"B": 10}) + ["Mystery Card A", "Mystery Card B"]
+    stats = pip_stats(names, _fake_lookup)  # _fake_lookup → None for these.
+    mb = build_manabase(["B"], names, [], 37, lookup=_fake_lookup, stats=stats)
+    assert mb.summary.spells_table_scored == 10
+    assert mb.summary.spells_fallback_scored == 2
+    # The resolvable cards still set the target off the table (1C → 19).
+    assert mb.summary.targets == {"B": 19}
+    assert "2 fallback" in "\n".join(mb.summary.format_lines())
+
+
+def test_color_with_pips_but_no_cost_data_uses_two_anchor_fallback():
+    # A color whose EVERY card is cost-unresolvable: pips are known (hand-
+    # built stats) but no table entries exist → the color's target comes
+    # from the preserved two-anchor path, and the summary flags the color.
+    stats = _PipStats(
+        weights={"B": 12, "G": 8}, cards_with={"B": 12, "G": 8},
+        cards_double={"B": 0, "G": 0},
+        table_demands={"B": (19, "B 0", 2, 1)},  # B table-scored; G not.
+        table_scored=12, fallback_scored=8,
+    )
+    mb = build_manabase(
+        ["B", "G"], [], [], 37, lookup=_fake_lookup, stats=stats,
+    )
+    assert mb.summary.targets["B"] == 19                    # table max.
+    assert mb.summary.targets["G"] == SINGLE_PIP_SOURCES    # two-anchor.
+    assert mb.summary.fallback_colors == ["G"]
+    assert "two-anchor colors: G" in "\n".join(mb.summary.format_lines())
 
 
 def test_five_color_sane_land_count_every_color_gets_sources():
