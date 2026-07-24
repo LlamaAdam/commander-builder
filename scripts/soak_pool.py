@@ -32,8 +32,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import psutil
-
 # Force UTF-8 stdout/stderr so a stray non-ASCII char in a log line can
 # never crash the run on a cp1252 Windows console (this killed a prior
 # launch). errors="replace" makes encoding failures non-fatal.
@@ -227,7 +225,13 @@ class Soak:
 
     def _record_gauntlet(self, res, err, test: Path):
         with self.lock:
-            if res is not None and getattr(res, "status", None) == "done":
+            # 'loop_unattributed' is a legitimate SHORT row, not a failure:
+            # the batch was cut by a looping game that no seat could be
+            # credited for (Forge prints the game log only after a game
+            # completes, so a hung game has no Turn line to attribute), but
+            # every game counted in res.games DID complete and is real data.
+            if res is not None and getattr(res, "status", None) in (
+                    "done", "loop_unattributed"):
                 self.sims_done += 1
                 self.games_done += res.games or 0
                 # Reuse the wins_a/wins_b summary counters as test-wins /
@@ -310,6 +314,10 @@ class Soak:
 
     # --- run --------------------------------------------------------------
     def run(self):
+        # Deferred so importing this module (e.g. the test suite exercising
+        # _record_gauntlet) doesn't require psutil — it's only needed by the
+        # CPU-autoscaling control loop below, and only on a soak host.
+        import psutil
         if self.mode == "gauntlet":
             units = f"{len(self.test_decks)} test decks vs {len(GAUNTLET)}-deck gauntlet"
         else:

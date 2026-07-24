@@ -503,6 +503,7 @@ from .forge_batch import (  # noqa: E402,F401
     GauntletResult,
     _AB_STATUS_DONE,
     _AB_STATUS_FAILED,
+    _AB_STATUS_LOOP_UNATTRIBUTED,
     _AB_STATUS_PENDING,
     _AB_STATUS_RUNNING,
     _AB_STATUS_SKIPPED,

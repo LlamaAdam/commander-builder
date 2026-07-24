@@ -93,7 +93,12 @@ def load_rows(inbox: str, pattern: str = "*throughput*.jsonl") -> list[dict]:
                         r = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if r.get("status") == "done":
+                    # 'loop_unattributed' rows are honest SHORT rows: the
+                    # batch was cut by a looping game no seat could be
+                    # credited for, but the games they carry all completed.
+                    # They participate here and are gated by --min-games like
+                    # any other row (a 17-game row is legitimately sub-40).
+                    if r.get("status") in ("done", "loop_unattributed"):
                         rows.append(r)
         except OSError:
             continue

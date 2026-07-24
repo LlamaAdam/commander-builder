@@ -40,6 +40,17 @@ _AB_STATUS_RUNNING = "running"
 _AB_STATUS_DONE = "done"
 _AB_STATUS_SKIPPED = "skipped"
 _AB_STATUS_FAILED = "failed"
+# A gauntlet batch cut short by a looping game that could NOT be credited to
+# any seat. Forge's SimulateMatch prints the game log (including every
+# "Turn:" line) only AFTER a game completes — a hung/looping game leaves no
+# Turn line in the partial stdout, so `_last_active_seat` has nothing to read
+# and seat attribution is impossible BY CONSTRUCTION, no matter how faithfully
+# the partial stdout was captured (keep_partial_output already routes the kill
+# through the streaming reader). The games that DID complete are real data:
+# consumers (soak_pool, margin_analysis, merge_soak) treat this status as a
+# legitimate SHORT row — completed games count, the hung game is excluded —
+# not as a failure.
+_AB_STATUS_LOOP_UNATTRIBUTED = "loop_unattributed"
 
 # Default per-game timeout for the A/B sim. Commander games can stall on
 # board states that confuse the AI; cap each game at this many seconds so
@@ -346,7 +357,11 @@ class GauntletResult:
     - ``losses`` — games a GAUNTLET seat won by the same three rules.
     - ``draws``  — games with no resolved winner (true turn-cap draw).
 
-    wins + losses + draws == games for a ``done`` result.
+    wins + losses + draws == games for a ``done`` result, and also for a
+    ``loop_unattributed`` one: when a looping game times out with no seat
+    attributable from the partial stdout (Forge only prints the game log
+    after a game completes), the hung game is EXCLUDED from every tally and
+    the batch ends early with the completed games kept — an honest short row.
     """
     test_deck: str = ""
     gauntlet: list[str] = field(default_factory=list)
@@ -443,20 +458,36 @@ def run_gauntlet_simulation(
             return result
 
         # TIMEOUT SALVAGE (same policy as run_ab_simulation): credit the
-        # looping game to the active seat. Win if that's the test seat, loss if
-        # it's a gauntlet seat, draw if no Turn line was found. Subprocess is
-        # dead, so we stop the batch here with what we have.
+        # looping game to the active seat — win if that's the test seat, loss
+        # if it's a gauntlet seat. When NO Turn line is present in the partial
+        # stdout there is no seat to credit: Forge's SimulateMatch prints the
+        # game log only after a game completes, so a hung game leaves nothing
+        # to attribute (see _AB_STATUS_LOOP_UNATTRIBUTED). The old behavior
+        # counted that unattributable game as a DRAW and reported "credited to
+        # active seat None" — a misleading error on a phantom game. Now the
+        # hung game is excluded entirely and the row ends as an honest short
+        # 'loop_unattributed' row with the completed games kept. Subprocess is
+        # dead either way, so we stop the batch here with what we have.
         if sim.timed_out:
             active_seat = _last_active_seat(sim.stdout)
-            if active_seat == test_seat:
-                result.wins += 1
-            elif active_seat is not None:
-                result.losses += 1
+            if active_seat is None:
+                result.games = i
+                result.status = _AB_STATUS_LOOP_UNATTRIBUTED
+                result.error = (
+                    f"loop at game {i + 1}: no seat attributable from partial "
+                    f"stdout (Forge prints the game log only after a game "
+                    f"completes); kept {i} completed games"
+                )
             else:
-                result.draws += 1
-            result.games = i + 1
-            result.status = _AB_STATUS_DONE
-            result.error = f"loop at game {i + 1} credited to active seat {active_seat}"
+                if active_seat == test_seat:
+                    result.wins += 1
+                else:
+                    result.losses += 1
+                result.games = i + 1
+                result.status = _AB_STATUS_DONE
+                result.error = (
+                    f"loop at game {i + 1} credited to active seat {active_seat}"
+                )
             # Finalize avg_turns_win from games completed before the timeout
             # (otherwise it's silently reported as 0.0 on the salvage path).
             if win_turns:
