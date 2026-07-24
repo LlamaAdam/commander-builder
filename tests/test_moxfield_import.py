@@ -762,6 +762,215 @@ def test_reimport_with_ambiguous_duplicate_ids_is_deterministic(
     assert sorted(p.name for p in tmp_path.glob("*.dck")) == [a.name, b.name]
 
 
+# --- version-lineage resolution for shared Moxfield ids ---------------------
+# snapshot_deck and apply_proposal_to_deck deliberately preserve [metadata]
+# on versioned copies, so a base file and its ` v<N>` siblings ALL record one
+# Moxfield= id — that is the deck's identity across versions, not a stray
+# hand copy. The deck sweep found 41 such base/v2 [USER] pairs, each firing
+# the duplicate-id ambiguity WARN on every id-map build and resolving to
+# "sorted-first" (only accidentally the base). These tests pin the lineage
+# policy: same tag-stripped root ⇒ one lineage ⇒ resolve to the BASE (or the
+# lowest version when no base survives) with NO warning; the loud WARN is
+# reserved for TRUE collisions (unrelated stems / uniquify siblings).
+
+
+def _dck_with_id(path, pid):
+    """Write a minimal deck file recording the given Moxfield id."""
+    path.write_text(
+        "[metadata]\nName=%s\nMoxfield=%s\n[Main]\n1 Sol Ring\n"
+        % (path.stem, pid),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_lineage_root_split():
+    """Unit pin for the stem split: version token and bracket tag are both
+    stripped from the root; a uniquify counter is NOT a version."""
+    from commander_builder.moxfield_import import _lineage_root
+
+    assert _lineage_root("[USER] Foo [B3]") == ("[USER] Foo", None)
+    assert _lineage_root("[USER] Foo v2 [B3]") == ("[USER] Foo", 2)
+    assert _lineage_root("[USER] Foo v12 [B?]") == ("[USER] Foo", 12)
+    assert _lineage_root("Foo v3") == ("Foo", 3)  # no bracket tag
+    # A `(2)` uniquify counter marks a DIFFERENT deck — never a version.
+    assert _lineage_root("[USER] Foo (2) [B3]") == ("[USER] Foo (2)", None)
+    # Counter between version and tag (never machine-written): not a
+    # version token either — falls through whole.
+    assert _lineage_root("[USER] Foo v2 (2) [B3]") == ("[USER] Foo v2 (2)", None)
+
+
+def test_v1_v2_lineage_resolves_to_base_without_warning(tmp_path, capsys):
+    """The 41-pair shape, minimal: base + v2 sharing one id is a LINEAGE —
+    the map hands out the base, deterministically and silently."""
+    from commander_builder import moxfield_import as mi
+
+    base = _dck_with_id(tmp_path / "[USER] Hakbal [B3].dck", "pid-1")
+    _dck_with_id(tmp_path / "[USER] Hakbal v2 [B3].dck", "pid-1")
+
+    assert mi._existing_moxfield_ids(tmp_path, is_user=True) == {"pid-1": base}
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_deep_lineage_resolves_to_base_without_warning(tmp_path, capsys):
+    """base + v1 + v2 + v3: still one lineage, still the base, still silent
+    — regardless of how the version numbers sort against the base name."""
+    from commander_builder import moxfield_import as mi
+
+    base = _dck_with_id(tmp_path / "[USER] Hakbal [B3].dck", "pid-1")
+    for v in (1, 2, 3):
+        _dck_with_id(tmp_path / f"[USER] Hakbal v{v} [B3].dck", "pid-1")
+
+    assert mi._existing_moxfield_ids(tmp_path, is_user=True) == {"pid-1": base}
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_lineage_without_base_resolves_to_lowest_version(tmp_path, capsys):
+    """Base hand-deleted, only frozen versions remain: the LOWEST version
+    stands in (oldest surviving member ≈ the live file), silently. Includes
+    a two-digit version so numeric (not lexicographic) order is pinned:
+    v2 < v10."""
+    from commander_builder import moxfield_import as mi
+
+    v2 = _dck_with_id(tmp_path / "[USER] Hakbal v2 [B3].dck", "pid-1")
+    _dck_with_id(tmp_path / "[USER] Hakbal v10 [B3].dck", "pid-1")
+
+    assert mi._existing_moxfield_ids(tmp_path, is_user=True) == {"pid-1": v2}
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_drift_renamed_base_with_stale_versioned_sibling_is_still_lineage(
+    tmp_path, capsys,
+):
+    """THE drift-rename edge: _rename_for_bracket_drift renamed the live
+    base [B3]→[B4], but the frozen v2 snapshot keeps its old [B3] stem.
+    Lineage roots strip BOTH the version token and the bracket tag, so the
+    pair still groups as one deck and the (renamed) base wins — silently."""
+    from commander_builder import moxfield_import as mi
+
+    base = _dck_with_id(tmp_path / "[USER] Hakbal [B4].dck", "pid-1")
+    _dck_with_id(tmp_path / "[USER] Hakbal v2 [B3].dck", "pid-1")
+
+    assert mi._existing_moxfield_ids(tmp_path, is_user=True) == {"pid-1": base}
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_uniquify_sibling_same_id_is_a_true_collision(tmp_path, capsys):
+    """`Foo (2)` is a DIFFERENT deck that lost a name collision, never a
+    version of `Foo`. If it records the same id anyway (hand copy), that is
+    a TRUE collision: warn loudly, resolve sorted-first deterministically."""
+    from commander_builder import moxfield_import as mi
+
+    _dck_with_id(tmp_path / "[USER] Foo [B3].dck", "pid-1")
+    counter = _dck_with_id(tmp_path / "[USER] Foo (2) [B3].dck", "pid-1")
+
+    id_map = mi._existing_moxfield_ids(tmp_path, is_user=True)
+    # '(' sorts before '[', so the (2) file is the deterministic
+    # sorted-first winner — determinism, not preference, is the contract
+    # for true collisions.
+    assert id_map == {"pid-1": counter}
+    out = capsys.readouterr().out
+    assert "WARN" in out and "pid-1" in out
+
+
+def test_two_unversioned_lineage_members_still_warn(tmp_path, capsys):
+    """Two BASE-rank files of one root (hand copy across brackets — drift
+    RENAMES, it never duplicates): the pick is a guess, so the ambiguity
+    WARN must still fire."""
+    from commander_builder import moxfield_import as mi
+
+    b3 = _dck_with_id(tmp_path / "[USER] Foo [B3].dck", "pid-1")
+    _dck_with_id(tmp_path / "[USER] Foo [B4].dck", "pid-1")
+
+    id_map = mi._existing_moxfield_ids(tmp_path, is_user=True)
+    assert id_map == {"pid-1": b3}  # sorted-first among the tied rank
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_mixed_lineage_plus_unrelated_claimant_warns_once(tmp_path, capsys):
+    """A clean lineage PLUS an unrelated hand copy of the id: the lineage
+    collapses silently to its base, then the cross-root ambiguity warns —
+    exactly one WARN, about the two roots, not three files."""
+    from commander_builder import moxfield_import as mi
+
+    base = _dck_with_id(tmp_path / "[USER] Hakbal [B3].dck", "pid-1")
+    _dck_with_id(tmp_path / "[USER] Hakbal v2 [B3].dck", "pid-1")
+    _dck_with_id(tmp_path / "[USER] Unrelated Copy [B3].dck", "pid-1")
+
+    id_map = mi._existing_moxfield_ids(tmp_path, is_user=True)
+    # base 'Hakbal' sorts before 'Unrelated Copy' among the two lineage
+    # representatives.
+    assert id_map == {"pid-1": base}
+    out = capsys.readouterr().out
+    assert out.count("WARN") == 1
+    assert "Unrelated Copy" in out
+    # The v2 member is lineage-internal — it must not be named as a stray.
+    assert "v2" not in out
+
+
+def test_real_world_41_pair_shape_builds_silent_correct_map(tmp_path, capsys):
+    """The deck-sweep shape that motivated the policy: many base/v2 [USER]
+    pairs, one id each. The map must resolve every id to its base with ZERO
+    warnings."""
+    from commander_builder import moxfield_import as mi
+
+    expected = {}
+    for i in range(8):
+        pid = f"pid-{i}"
+        base = _dck_with_id(tmp_path / f"[USER] Deck {i} [B3].dck", pid)
+        _dck_with_id(tmp_path / f"[USER] Deck {i} v2 [B3].dck", pid)
+        expected[pid] = base
+
+    assert mi._existing_moxfield_ids(tmp_path, is_user=True) == expected
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_repull_overwrites_base_never_frozen_v2(tmp_path, monkeypatch, capsys):
+    """Frozen-snapshot rule, end to end: with base + v2 on disk (the audit
+    A/B pair), a re-pull of the shared id must overwrite the BASE in place
+    — the v2 snapshot stays byte-identical, no new file appears, and the
+    lineage pair produces no WARN."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.snapshot_deck import snapshot
+
+    decks = {"pid-1": _deck_json(main_card="Sol Ring")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    base = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    # Freeze the audit baseline via the REAL snapshot writer (metadata —
+    # including Moxfield= — carried on purpose).
+    frozen = snapshot(base.name, "v2", base=tmp_path)
+    assert frozen.name == "[USER] My Deck v2 [B3].dck"
+    frozen_before = frozen.read_text(encoding="utf-8")
+    assert "Moxfield=pid-1" in frozen_before  # premise: id shared by design
+
+    # Deck changed upstream; re-pull the same id.
+    decks["pid-1"] = _deck_json(main_card="Arcane Signet")
+    out = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+
+    assert out == base  # the live file, never the snapshot
+    assert "Arcane Signet" in base.read_text(encoding="utf-8")
+    assert frozen.read_text(encoding="utf-8") == frozen_before  # untouched
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == sorted(
+        [base.name, frozen.name])
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_write_deck_skips_when_only_versioned_members_exist(tmp_path, capsys):
+    """Harvest dedupe with the base hand-deleted: the surviving v2 still
+    records the id, so the deck IS on disk — _write_deck must skip (no
+    fresh base minted next to a frozen snapshot) and stay silent."""
+    from commander_builder import moxfield_import as mi
+
+    v2 = _dck_with_id(tmp_path / "My Deck v2 [B3].dck", "pid-1")
+    before = v2.read_text(encoding="utf-8")
+
+    assert mi._write_deck(_deck_json(pid="pid-1"), 3, tmp_path) is None
+    assert v2.read_text(encoding="utf-8") == before
+    assert sorted(p.name for p in tmp_path.glob("*.dck")) == [v2.name]
+    assert "WARN" not in capsys.readouterr().out
+
+
 # --- Name=-from-final-filename-stem stamping -------------------------------
 # Regression tests for the non-ASCII / ':' deck-name break: to_dck stamps the
 # RAW Moxfield name into Name=, but safe_filename strips non-ASCII and

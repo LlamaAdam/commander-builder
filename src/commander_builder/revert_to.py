@@ -159,9 +159,11 @@ def revert_to_iteration(
     # since — e.g. "Foo [B3].dck" -> "Foo [B4].dck" when the deck's Moxfield
     # bracket changed on a later re-pull. Reverting a PRE-drift iteration by
     # that stale name would rewrite the OLD "Foo [B3].dck" filename, leaving
-    # TWO same-role files that both record the same Moxfield= id — which then
-    # trips _existing_moxfield_ids' deterministic sorted-first ambiguity WARN
-    # and makes bracket filters double-count until someone cleans up by hand.
+    # TWO same-role UNVERSIONED files that both record the same Moxfield= id —
+    # which _existing_moxfield_ids treats as a genuine same-rank ambiguity
+    # (two would-be BASE files of one lineage; version-lineage resolution
+    # only silences base + ` v<N>` snapshot groups) and WARNs on, while
+    # bracket filters double-count until someone cleans up by hand.
     #
     # The stable identity across a rename is the Moxfield= publicId, not the
     # filename. So: if the snapshot carries an id AND a DIFFERENT same-role
@@ -171,6 +173,13 @@ def revert_to_iteration(
     # stale copy) via the same reader moxfield_import uses. Scope the lookup to
     # is_user=True: the revert target is always a user deck ([USER]-prefixed),
     # and a same-id opponent-pool copy is a different ROLE we must not touch.
+    # The id map is version-lineage aware: when frozen ` v<N>` snapshot
+    # copies of this deck also record the id (they do — the version writers
+    # preserve metadata by design), the lookup returns the BASE, so a revert
+    # restores into the live file and never into a frozen snapshot — even
+    # when a drift rename left the base's bracket tag out of step with a
+    # stale-named v2 sibling (lineage roots strip both the version token
+    # and the bracket tag, so the pair still groups as one deck).
     snapshot_id = _moxfield_id_from_text(target.deck_snapshot)
     if snapshot_id:
         # out_path.parent is the deck dir for both the CLI (DECK_DIR) and the

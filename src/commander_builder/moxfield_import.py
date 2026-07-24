@@ -412,6 +412,138 @@ def _is_user_deck_file(path: Path) -> bool:
     return path.name.startswith(_USER_PREFIX)
 
 
+# Trailing ` v<N>` version token on a stem CORE (i.e. AFTER the ` [B<n>]`
+# bracket tag has been stripped). This is the machine convention shared by
+# BOTH version writers:
+#   - snapshot_deck.versioned_path:  `[USER] Foo [B3].dck` + "v1"
+#                                      -> `[USER] Foo v1 [B3].dck`
+#   - proposer._bump_version_filename: `[USER] Foo [B3].dck`
+#                                      -> `[USER] Foo v2 [B3].dck`
+# Both insert ` v<digits>` immediately before the bracket tag. A `(2)`
+# uniquify counter is NOT a version: _uniquify's counter marks a DIFFERENT
+# deck whose name sanitized onto the same filename, so `Foo (2)` must never
+# be folded into `Foo`'s lineage (they carry different Moxfield ids anyway,
+# but the distinction matters for how we CLASSIFY a same-id pair below).
+_VERSION_TOKEN = re.compile(r"^(?P<root>.+) v(?P<ver>\d+)$")
+
+
+def _lineage_root(stem: str) -> tuple[str, Optional[int]]:
+    """Split a .dck filename STEM into (lineage root, version-or-None).
+
+    `[USER] Foo v2 [B3]` -> ("[USER] Foo", 2)
+    `[USER] Foo [B3]`    -> ("[USER] Foo", None)   # unversioned = the BASE
+    `[USER] Foo (2) [B3]`-> ("[USER] Foo (2)", None)  # counter != version
+
+    WHY the bracket tag is stripped from the root too: bracket drift
+    (_rename_for_bracket_drift) renames only the LIVE base file's ` [B<n>]`
+    tag; frozen version snapshots keep their old stems. After a drift
+    rename, `[USER] Foo [B4]` (base) and `[USER] Foo v2 [B3]` (stale-tagged
+    snapshot) are still ONE deck's lineage — comparing tag-stripped roots is
+    what keeps them grouped. That is the whole drift-rename edge decision:
+    lineage identity = stem minus bracket tag minus version token, nothing
+    fancier (no bracket matching heuristics — the shared Moxfield id is
+    already the identity; the root check only guards against UNRELATED
+    files that happen to share an id)."""
+    # _BRACKET_TAG_STEM is defined further down (module-level regex shared
+    # with _uniquify) — resolved at call time, so the ordering is fine.
+    m = _BRACKET_TAG_STEM.match(stem)
+    core = m.group("base") if m else stem
+    vm = _VERSION_TOKEN.match(core)
+    if vm:
+        return vm.group("root"), int(vm.group("ver"))
+    return core, None
+
+
+def _lineage_representative(members: list[Path]) -> tuple[Path, bool]:
+    """Pick the file that represents ONE lineage (same root, same id).
+
+    Rule (the frozen-snapshot rule): the BASE — the member WITHOUT a
+    version token — is the live, mutable file; ` v<N>` members are frozen
+    audit snapshots (snapshot_deck) or proposal outputs (proposer) that a
+    re-pull/dedupe/revert must never treat as "the" deck. So:
+
+      1. an unversioned member always wins;
+      2. with no unversioned member on disk (base hand-deleted), the LOWEST
+         version stands in — it is the oldest surviving member and the
+         closest thing to the live file; minting nothing and pointing
+         nowhere would break every same-id consumer.
+
+    Returns (winner, ambiguous). `ambiguous` is True when TWO members tie
+    at the winning rank — e.g. `Foo [B3]` and `Foo [B4]` both unversioned
+    with the same id (a hand copy across brackets, NOT drift: drift RENAMES
+    the base, it never duplicates it). That is a genuine ambiguity the
+    caller should still warn about; the tie-break is sorted-first for
+    determinism."""
+    def rank(p: Path) -> tuple[int, int]:
+        ver = _lineage_root(p.stem)[1]
+        # Base (no version) outranks every version; versions sort ascending.
+        return (0, 0) if ver is None else (1, ver)
+
+    ordered = sorted(members, key=lambda p: (rank(p), p.name))
+    ambiguous = len(ordered) > 1 and rank(ordered[0]) == rank(ordered[1])
+    return ordered[0], ambiguous
+
+
+def _resolve_same_id_group(pid: str, paths: list[Path]) -> Path:
+    """Resolve several same-role files recording ONE Moxfield id to the
+    single path the id map should hand out.
+
+    LINEAGE vs COLLISION — the load-bearing distinction:
+
+    - LINEAGE (expected, silent): the versioning writers (snapshot_deck,
+      apply_proposal_to_deck) copy a deck's [metadata] verbatim, so a base
+      file and its ` v<N>` copies ALL record the same Moxfield= id — by
+      design, that id IS the deck's identity across versions. The deck
+      sweep found 41 base/v2 [USER] pairs in this exact shape; warning on
+      them (the old behavior) was 41 spurious WARNs per id-map build, and
+      "sorted-first" was only accidentally the base. Same tag-stripped
+      root ⇒ one deck ⇒ resolve to the base (see
+      _lineage_representative), NO warning.
+
+    - TRUE COLLISION (unexpected, loud): files whose stems are NOT one
+      lineage (unrelated names, or a `(2)` uniquify sibling — a different
+      deck by definition) claiming one id means someone hand-copied a .dck.
+      "The" same-id destination is genuinely ambiguous: keep the loud WARN
+      and the deterministic sorted-first winner, exactly the pre-lineage
+      behavior. Never crash — a stray manual copy must not break imports.
+
+    Mixed groups (a lineage PLUS an unrelated claimant) collapse each root
+    to its lineage representative first — the intra-lineage part stays
+    silent — then warn about the cross-root ambiguity that remains."""
+    by_root: dict[str, list[Path]] = {}
+    for p in paths:
+        by_root.setdefault(_lineage_root(p.stem)[0], []).append(p)
+
+    reps: list[Path] = []
+    for root in sorted(by_root):
+        rep, ambiguous = _lineage_representative(by_root[root])
+        if ambiguous:
+            # Two same-rank members of one root (hand copy) — the intra-
+            # lineage pick is itself a guess; say so.
+            others = ", ".join(
+                p.name for p in sorted(by_root[root]) if p != rep
+            )
+            print(
+                f"  WARN: {others} and {rep.name} both record "
+                f"Moxfield={pid} at the same version; treating {rep.name} "
+                f"(first sorted) as the canonical copy. Delete or re-id "
+                f"the stray duplicate.",
+            )
+        reps.append(rep)
+
+    if len(reps) == 1:
+        return reps[0]
+    winner = min(reps, key=lambda p: p.name)
+    for loser in sorted(reps, key=lambda p: p.name):
+        if loser != winner:
+            print(
+                f"  WARN: {loser.name} and {winner.name} both record "
+                f"Moxfield={pid}; treating {winner.name} (first sorted) as "
+                f"the canonical copy. Delete or re-id the stray duplicate.",
+            )
+    return winner
+
+
 def _existing_moxfield_ids(
     out_dir: Path,
     bracket: Optional[int] = None,
@@ -445,18 +577,26 @@ def _existing_moxfield_ids(
     patch are invisible to this scan — callers still get best-effort dedupe
     via the "unknown" verdict path on the base destination.
 
-    Two files claiming the SAME id (user copied a .dck by hand) would make
-    "the" same-id destination ambiguous: iterate in sorted() order so the
-    first name deterministically wins, and warn loudly so the user knows
-    which copy future re-imports will target. Never crash — a stray manual
-    copy must not break the import pipeline. (A user copy + a pool copy of
-    one id is NOT that situation — a role-scoped scan sees only one of
-    them, so the legitimate cross-role pair never trips this warning.)
+    Several files claiming the SAME id are resolved by
+    _resolve_same_id_group, which tells apart the two very different ways
+    that happens:
+
+    - a VERSION LINEAGE — base + ` v<N>` snapshots that legitimately share
+      the id because the version writers preserve metadata by design —
+      resolves silently to the BASE (the live file; frozen snapshots must
+      never be "the" same-id target), or to the lowest version when no
+      base survives;
+    - a TRUE COLLISION — unrelated stems (hand-copied .dck) — keeps the
+      loud WARN and the deterministic sorted-first winner.
+
+    (A user copy + a pool copy of one id is NEITHER situation — a
+    role-scoped scan sees only one of them, so the legitimate cross-role
+    pair never reaches the resolver.)
 
     Note: globbing `*[B<n>].dck` doesn't work — pathlib treats the brackets as
     a character class. Glob `*.dck` and filter by suffix instead."""
     suffix = f" [B{bracket}].dck" if bracket is not None else None
-    out: dict[str, Path] = {}
+    groups: dict[str, list[Path]] = {}
     for path in sorted(out_dir.glob("*.dck")):
         if suffix is not None and not path.name.endswith(suffix):
             continue
@@ -466,15 +606,12 @@ def _existing_moxfield_ids(
         pid = _read_moxfield_id(path)
         if pid is None:
             continue
-        if pid in out:
-            print(
-                f"  WARN: {path.name} and {out[pid].name} both record "
-                f"Moxfield={pid}; treating {out[pid].name} (first sorted) as "
-                f"the canonical copy. Delete or re-id the stray duplicate.",
-            )
-            continue
-        out[pid] = path
-    return out
+        groups.setdefault(pid, []).append(path)
+    return {
+        pid: (paths[0] if len(paths) == 1
+              else _resolve_same_id_group(pid, paths))
+        for pid, paths in groups.items()
+    }
 
 
 def safe_filename(name: str) -> str:
@@ -774,7 +911,13 @@ def import_deck(
         # filters key on. The file KEEPS its existing base name and any
         # uniquify counter — the recorded id, not the filename, is the
         # deck's identity, and renaming the base would orphan every
-        # name-keyed history row. ONE exception: a stale ` [B<n>]` tag.
+        # name-keyed history row. Frozen-snapshot rule, pinned: `same_path`
+        # comes from the lineage-aware id map, so when this deck also has
+        # ` v<N>` snapshot/proposal copies on disk (which share the id by
+        # design) the map hands back the BASE — a re-pull overwrites the
+        # live file and NEVER a frozen v2 snapshot (that would silently
+        # rewrite the audit A/B's "before" side). ONE exception: a stale
+        # ` [B<n>]` tag.
         # The bracket lives in the filename for every bracket consumer, so
         # when Moxfield's bracket drifted since the last pull the tag must
         # follow (rename BEFORE reading, so the merge sees the final file).
@@ -997,7 +1140,11 @@ def _write_deck(
     same_path = id_map.get(public_id) if public_id else None
     if same_path is not None:
         # Same Moxfield deck already harvested — wherever it lives in the
-        # pool, base name or uniquified sibling. Skip is the correct dedupe
+        # pool, base name or uniquified sibling. The lineage-aware map also
+        # means: if only versioned ` v<N>` copies of this id survive on
+        # disk, same_path is the lowest of them and this still SKIPS — the
+        # deck IS on disk, and re-writing a fresh base next to frozen
+        # snapshots is not this bulk path's call. Skip is the correct dedupe
         # for the bulk pool (unlike import_deck's user re-pull, nothing here
         # implies "give me the fresh version"). But the FILENAME must not go
         # stale: we just fetched the deck and know its current bracket, so
