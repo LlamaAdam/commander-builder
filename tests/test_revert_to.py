@@ -455,6 +455,44 @@ def test_revert_after_bracket_drift_restores_into_renamed_file(tmp_path):
     assert "1 Live Card" in result.backup_path.read_text(encoding="utf-8")
 
 
+def test_revert_drift_resolution_targets_base_not_frozen_v2(tmp_path, capsys):
+    """Version-lineage rule inside the revert's drift resolution: the live
+    (drift-renamed) base AND a stale-named frozen v2 snapshot both record
+    the deck's Moxfield= id — by design, the version writers preserve
+    metadata. The id lookup must resolve to the BASE ([B4]), restore into
+    it, leave the frozen snapshot byte-identical, and emit NO duplicate-id
+    WARN (base + v<N> is a lineage, not an ambiguity)."""
+    db = tmp_path / "kl.sqlite"
+    rid = _seed_pre_drift_iteration(db)
+
+    # The live, post-drift-rename base.
+    renamed = tmp_path / "[USER] Test [B4].dck"
+    renamed.write_text("\n".join([
+        "[metadata]", "Name=[USER] Test [B4]", "Moxfield=stable-id",
+        "[Main]", "1 Live Card",
+    ]) + "\n", encoding="utf-8")
+    # Frozen v2 snapshot from before the drift rename: OLD [B3] stem (drift
+    # renames only the live file), same id.
+    frozen = tmp_path / "[USER] Test v2 [B3].dck"
+    frozen.write_text("\n".join([
+        "[metadata]", "Name=[USER] Test v2 [B3]", "Moxfield=stable-id",
+        "[Main]", "1 Frozen Card",
+    ]) + "\n", encoding="utf-8")
+    frozen_before = frozen.read_text(encoding="utf-8")
+
+    stale = tmp_path / "[USER] Test [B3].dck"  # recorded name; not on disk
+    result = revert_to_iteration(rid, deck_path=stale, db_path=db,
+                                 record_revert=False)
+
+    assert result.restored_path == renamed  # the base, never the snapshot
+    assert "1 Old Card" in renamed.read_text(encoding="utf-8")
+    assert frozen.read_text(encoding="utf-8") == frozen_before
+    assert not stale.exists()
+    # The lineage pair must not have tripped the duplicate-id ambiguity
+    # WARN during the id-map build.
+    assert "WARN" not in capsys.readouterr().out
+
+
 def test_revert_no_drift_common_case_restores_by_name(tmp_path):
     """No rename happened: the recorded name still owns the id. The id lookup
     resolves to the SAME file, so the by-name path is taken unchanged (no
