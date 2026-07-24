@@ -62,7 +62,8 @@ from . import dck_meta, deck_builder_personalize as personalize, lift_analysis
 from ._proposer_filters import enforce_color_identity
 from .bracket_estimator import estimate_bracket
 from .collection import load_collection, name_key, owns, parse_collection_lines
-from .dck_utils import COMMANDER_DECK_SIZE, count_main_cards
+from .dck_utils import COMMANDER_DECK_SIZE, count_main_cards, main_target
+from .edhrec_client import commander_slug
 from .deck_builder_manabase import (
     ManabaseSummary,
     _parse_cost,
@@ -83,15 +84,15 @@ from .web.deck_text_ops import _pad_main_to_target
 
 # Commander decks are exactly 100 cards TOTAL: the command zone plus the
 # mainboard, i.e. the mainboard target is ``100 - commander_count`` — 99
-# for a single commander, 98 for a partner pair. This builder currently
-# only assembles SINGLE-commander decks (``build_deck`` takes one
-# commander name; partner-pair building is future work), so the derived
-# MAIN_SIZE below is 99 — but it is deliberately written as the
-# subtraction so the invariant stays correct when partner building
-# arrives (bump _N_COMMANDERS from the pair input, everything downstream
-# follows).
-_N_COMMANDERS = 1  # single-commander builds only; partners are future work.
-MAIN_SIZE = COMMANDER_DECK_SIZE - _N_COMMANDERS
+# for a single commander, 98 for a partner pair. The assembler now handles
+# BOTH: ``_assemble`` derives its per-build ``main_size`` from how many
+# commanders it was given (``COMMANDER_DECK_SIZE - len(commanders)``), the
+# same ``100 - commanders`` rule ``dck_utils.main_target`` reads off a
+# rendered [Commander] section — the two derivations are cross-checked at
+# emit time so a mis-rendered command zone can never ship. MAIN_SIZE stays
+# as the module-level single-commander constant because that is what every
+# pre-partner import site (and the CLI-summary tests) mean by it.
+MAIN_SIZE = COMMANDER_DECK_SIZE - 1
 
 # Land-count target when we can't read one off a seed. 37 is the midpoint of
 # the 36-38 band the FP-014 plan cites for a "normal" two/three-color deck.
@@ -130,6 +131,13 @@ class BuildResult:
     source: str  # "average-deck seed" | "commander-page fallback"
     dropped_off_color: list[str]
     manabase: ManabaseSummary  # per-color sources vs target (FP-014.2)
+
+    # ---- FP-014 second cut: partner pairs ---------------------------------
+    # None for a classic single-commander build (the overwhelmingly common
+    # case — every pre-partner caller constructs BuildResult without this and
+    # the default keeps them working). When set, the deck's command zone has
+    # TWO cards and the mainboard target was 98, not 99.
+    partner: Optional[str] = None
 
     # ---- FP-014.3 personalization provenance -----------------------------
     # Each is empty/None when its stage was disabled or made no change, so a
@@ -320,6 +328,179 @@ def _fallback_candidates(page) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# Partner-pair support (FP-014 second cut)
+# --------------------------------------------------------------------------
+#
+# OFFLINE-VALIDATION HONESTY POLICY (read before touching _partner_status).
+# =========================================================================
+# Whether two legends may legally share a command zone is oracle-text
+# knowledge ("Partner", "Partner with <name>", "Friends forever", "Doctor's
+# companion", "Choose a Background" + a Background). The ONLY local source
+# for that text is the Scryfall snapshot cache the existing card-resolution
+# already reads (``lookup_card`` → oracle_snapshots/<slug>.json). We refuse
+# to add network calls to the build hot path for validation — the cache
+# either has the card (with oracle_text/keywords) or it doesn't. That gives
+# three honest outcomes, NOT two:
+#
+#   * both commanders POSITIVELY carry a pairing ability  → proceed silently;
+#   * detection UNAVAILABLE (card unresolved, or the cached dict carries
+#     neither ``oracle_text`` nor ``keywords`` to judge from) → proceed WITH
+#     A PRINTED WARNING — we will not block a legal pair we merely cannot
+#     verify, and Forge (the ground truth) will reject an illegal one at
+#     load time anyway;
+#   * a commander POSITIVELY detected as lacking every pairing ability
+#     (card resolved, oracle data present, no marker) → HARD ERROR. This is
+#     the one case where silence would guarantee an illegal deck.
+#
+# We deliberately do NOT try to fully adjudicate "Partner with" pairings
+# offline (nicknames/DFC faces make name matching fuzzy); a detected
+# mismatch downgrades to the same printed warning, never a hard error.
+
+# Keyword markers Scryfall puts in ``keywords`` / phrases in oracle text for
+# every pairing mechanic printed to date. Lowercase; matched as substrings
+# of lowercased keywords ("Partner with Haldan..." contains "partner").
+_PAIRING_PHRASES = (
+    "partner",              # Partner AND Partner with — substring covers both.
+    "friends forever",
+    "doctor's companion",
+    "choose a background",
+)
+# Word-boundary regex for oracle text: "partner" must be its own word so a
+# hypothetical card whose flavor text says "counterpart" can't false-match.
+_PARTNER_WORD_RE = re.compile(r"\bpartner\b")
+
+
+def _partner_status(
+    name: str, lookup: Callable[[str], Optional[dict]],
+) -> tuple[str, Optional[dict]]:
+    """Classify ``name``'s pairing ability from LOCAL data only.
+
+    Returns ``(status, card)`` where status is:
+      * ``"yes"``     — a pairing marker was found (Partner / Partner with /
+                        Friends forever / Doctor's companion / Choose a
+                        Background, or the card IS a Background);
+      * ``"no"``      — the card resolved AND carries judgeable oracle data
+                        (``keywords`` or ``oracle_text`` present) AND no
+                        marker was found — a POSITIVE absence;
+      * ``"unknown"`` — the card didn't resolve, or the cached dict has
+                        neither field to judge from (e.g. a price-only
+                        snapshot). Unknown is NOT "no" — see the policy note.
+    """
+    try:
+        card = lookup(name)
+    except Exception:  # noqa: BLE001 — a lookup blip must not crash a build.
+        return "unknown", None
+    if not card:
+        return "unknown", None
+    keywords = card.get("keywords")
+    oracle = card.get("oracle_text")
+    if keywords is None and oracle is None:
+        # Card resolved but the local snapshot carries no ability data at
+        # all — we genuinely cannot judge, and claiming "no" here would
+        # hard-fail legal pairs on thin caches. Honesty: unknown.
+        return "unknown", card
+    kw_blob = " ".join(
+        k.lower() for k in (keywords or []) if isinstance(k, str)
+    )
+    text = (oracle or "").lower()
+    type_line = (card.get("type_line") or "").lower()
+    has_marker = (
+        any(p in kw_blob for p in _PAIRING_PHRASES)
+        or _PARTNER_WORD_RE.search(text) is not None
+        or any(p in text for p in _PAIRING_PHRASES[1:])
+        # A Background pairs with a "Choose a Background" commander; the
+        # Background card itself carries no Partner keyword, its TYPE is
+        # the marker.
+        or "background" in type_line
+    )
+    return ("yes" if has_marker else "no"), card
+
+
+def _validate_partner_pair(
+    commander: str, partner: str, lookup: Callable[[str], Optional[dict]],
+) -> None:
+    """Enforce the offline-validation policy documented above.
+
+    Raises ``ValueError`` only on POSITIVE detection of a missing pairing
+    ability; prints (never raises) for everything we cannot verify offline.
+    """
+    status_a, card_a = _partner_status(commander, lookup)
+    status_b, card_b = _partner_status(partner, lookup)
+    for nm, status in ((commander, status_a), (partner, status_b)):
+        if status == "no":
+            raise ValueError(
+                f"cannot build: {nm!r} has no Partner-style pairing ability "
+                f"(Partner / Partner with / Friends forever / Doctor's "
+                f"companion / Background) — two commanders would be an "
+                f"illegal command zone"
+            )
+    if "unknown" in (status_a, status_b):
+        print(
+            "[build] WARNING: cannot verify Partner ability offline for "
+            f"{commander!r} + {partner!r} — proceeding, but Forge will "
+            "reject an illegal pairing at load time.",
+            flush=True,
+        )
+        return
+    # Both positively paired. Best-effort "Partner with" cross-check: when a
+    # commander names its partner explicitly, the OTHER commander's front
+    # face should appear in that oracle text. Name matching across DFC faces
+    # and nicknames is fuzzy, so a miss is a warning, never an error (policy).
+    for card, other in ((card_a, partner), (card_b, commander)):
+        text = ((card or {}).get("oracle_text") or "").lower()
+        if "partner with" in text:
+            other_front = other.split("//")[0].strip().lower()
+            if other_front and other_front not in text:
+                print(
+                    f"[build] WARNING: a commander reads 'Partner with' but "
+                    f"its text does not name {other!r} — the pairing may be "
+                    f"illegal (Forge will reject it if so).",
+                    flush=True,
+                )
+
+
+def _fetch_partner_seed(
+    fetch_avg: Callable, commander: str, partner: str, bracket: int,
+):
+    """Fetch the EDHREC average deck for a PARTNER PAIR.
+
+    EDHREC hosts partner pages under a COMBINED slug — the two individual
+    commander slugs joined with a hyphen, e.g.
+    ``pako-arcane-retriever-haldan-avid-arcanist``. The pair's canonical
+    order is EDHREC's editorial choice, NOT derivable from
+    ``commander_slug`` (Pako/Haldan proves it isn't alphabetical: 'h' < 'p'
+    yet Pako leads). So we cheaply try BOTH orderings — ``fetch_avg``
+    returns None on a 404, so a wrong-order miss costs one request and is
+    silent. ``fetch_average_deck`` slugifies its first argument via
+    ``commander_slug``, which is idempotent on an already-hyphenated slug,
+    so passing the combined slug through the normal entry point is safe.
+
+    Falls back to the PRIMARY commander's own average deck with a printed
+    note — a half-right coherence source beats no seed, and the union-CI
+    filter downstream keeps whatever we take legal for the pair.
+    """
+    slug_a = commander_slug(commander)
+    slug_b = commander_slug(partner)
+    for combined in (f"{slug_a}-{slug_b}", f"{slug_b}-{slug_a}"):
+        try:
+            avg = fetch_avg(combined, bracket)
+        except Exception:  # noqa: BLE001 — a fetch failure just means no seed.
+            avg = None
+        if avg is not None and getattr(avg, "cards", None):
+            return avg
+    print(
+        f"[build] note: no combined EDHREC average deck for "
+        f"{commander!r} + {partner!r} (tried both slug orders) — seeding "
+        f"from {commander!r}'s own page instead.",
+        flush=True,
+    )
+    try:
+        return fetch_avg(commander, bracket)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# --------------------------------------------------------------------------
 # Core assembler
 # --------------------------------------------------------------------------
 
@@ -329,6 +510,7 @@ def _assemble(
     bracket: int,
     collection_path: Optional[Path] = None,
     *,
+    partner: Optional[str] = None,
     fetch_avg: Optional[Callable] = None,
     fetch_page: Optional[Callable] = None,
     resolve_ci: Optional[Callable[[str], Optional[str]]] = None,
@@ -351,7 +533,13 @@ def _assemble(
     power_pool: Optional[list[str]] = None,
     owned_names: Optional[list[str]] = None,
 ) -> BuildResult:
-    """Assemble a legal 99 for ``commander`` at ``bracket``. See module docs.
+    """Assemble a legal main deck for ``commander`` at ``bracket``.
+
+    See the module docs. With ``partner`` set the command zone gets BOTH
+    legends, the mainboard target drops to 98 (``100 - 2``, the same rule
+    ``dck_utils.main_target`` applies), and the color identity is the UNION
+    of both commanders' identities (rule 903.4: a deck's identity is the
+    combined identity of everything in its command zone).
 
     The fetchers/resolvers are injectable so tests run fully offline; they
     default to the real EDHREC/Scryfall entry points. Defaults resolve at
@@ -361,13 +549,16 @@ def _assemble(
 
     Returns a ``BuildResult`` (text + provenance). ``build_deck`` is the
     text-only public wrapper; ``main`` uses the full result for its summary.
-    Raises ``ValueError`` for bad input or when EDHREC has no data at all.
+    Raises ``ValueError`` for bad input, when EDHREC has no data at all, or
+    when a partner is POSITIVELY detected as un-pairable (see the
+    offline-validation policy above ``_partner_status``).
     """
     if not commander or not commander.strip():
         raise ValueError("commander is required")
     if bracket not in (1, 2, 3, 4, 5):
         raise ValueError(f"bracket must be an integer 1-5, got {bracket!r}")
     commander = commander.strip()
+    partner = partner.strip() if partner and partner.strip() else None
     if fetch_avg is None:
         fetch_avg = fetch_average_deck
     if fetch_page is None:
@@ -377,28 +568,72 @@ def _assemble(
     if resolve_ci is None:
         resolve_ci = lambda nm: _resolve_ci_via_lookup(nm, lookup)  # noqa: E731
 
-    ci = resolve_ci(commander)  # WUBRG string, "" colorless, or None.
+    # ---- 0. PARTNER PAIR: validate + derive the pair-wide invariants ------
+    if partner is not None and name_key(partner) == name_key(commander):
+        raise ValueError("partner must be a different card from the commander")
+    if partner is not None:
+        # Offline Partner-ability detection — hard error ONLY on positive
+        # absence; unverifiable pairs proceed with a printed warning (the
+        # honesty policy documented above _partner_status).
+        _validate_partner_pair(commander, partner, lookup)
+    commanders = [commander] + ([partner] if partner is not None else [])
+    # The mainboard target is 100 minus the command zone — 99 or 98. This
+    # is the SAME derivation dck_utils.main_target reads off the rendered
+    # [Commander] section; the two are cross-checked at emit time below.
+    main_size = COMMANDER_DECK_SIZE - len(commanders)
+
+    if partner is None:
+        ci = resolve_ci(commander)  # WUBRG string, "" colorless, or None.
+    else:
+        # UNION-CI RULE (rule 903.4): with two commanders the deck may run
+        # anything inside the COMBINED identity — Pako (URG) + Haldan (U)
+        # is a URG deck. We union the two resolved identities in WUBRG
+        # order so the string stays canonical for enforce_color_identity.
+        # If EITHER side fails to resolve we degrade to ci=None (filter
+        # pass-through, warned below) rather than filtering on the half we
+        # do know — filtering on one commander's identity would wrongly
+        # strip cards that are legal only through the OTHER commander.
+        ci_a = resolve_ci(commander)
+        ci_b = resolve_ci(partner)
+        if ci_a is None or ci_b is None:
+            ci = None
+        else:
+            union = set(ci_a) | set(ci_b)
+            ci = "".join(c for c in "WUBRG" if c in union)
 
     # ---- 1. SEED from the EDHREC average deck (the coherence source) -----
+    # Partner pairs seed from EDHREC's COMBINED partner page (both slug
+    # orders tried, then the primary commander's page — see
+    # _fetch_partner_seed). The partner=None branch is byte-for-byte the
+    # pre-partner call shape: same fetcher, same arguments — pinned by
+    # test_partner_none_path_byte_identical_to_golden.
     avg = None
-    try:
-        avg = fetch_avg(commander, bracket)
-    except Exception:  # noqa: BLE001 — a fetch failure just means no seed.
-        avg = None
+    if partner is None:
+        try:
+            avg = fetch_avg(commander, bracket)
+        except Exception:  # noqa: BLE001 — a fetch failure just means no seed.
+            avg = None
+    else:
+        avg = _fetch_partner_seed(fetch_avg, commander, partner, bracket)
 
+    cmdr_keys = {name_key(c) for c in commanders}
     seed_land_count: Optional[int] = None
     if avg is not None and getattr(avg, "cards", None):
         source = "average-deck seed"
         # The average deck IS the coherence for this first cut — take its
-        # cardlist verbatim as the base (commander + lands stripped below).
+        # cardlist verbatim as the base (commanders + lands stripped below).
         raw_names = [c.name for c in avg.cards]
         # Match the seed's own land ratio rather than a fixed target.
         seed_land_count = _count_lands(
-            [n for n in raw_names if name_key(n) != name_key(commander)],
+            [n for n in raw_names if name_key(n) not in cmdr_keys],
             lookup,
         )
     else:
         # ---- 2. FALLBACK — no published average deck for this commander --
+        # For a partner pair this is the PRIMARY commander's page: EDHREC's
+        # per-pair commander pages are sparse, and the primary's page is the
+        # better-populated coherence source (noted to the user by
+        # _fetch_partner_seed's fallback print above).
         page = None
         try:
             page = fetch_page(commander)
@@ -422,7 +657,6 @@ def _assemble(
     # fallback has no tuned base to preserve, so its lands are dropped (they
     # get rebuilt from the tiers + basics like FP-014.1).
     keep_seed_lands = source == "average-deck seed"
-    cmdr_key = name_key(commander)
     seen: set[str] = set()
     nonlands: list[str] = []
     seed_lands: list[str] = []
@@ -430,8 +664,8 @@ def _assemble(
         if not nm or not nm.strip():
             continue
         k = name_key(nm)
-        if k == cmdr_key:
-            continue  # commander lives in the command zone, not [Main].
+        if k in cmdr_keys:
+            continue  # commanders live in the command zone, not [Main].
         if _is_land(nm, lookup):
             if keep_seed_lands and not is_basic_land(nm) and k not in seen:
                 seen.add(k)
@@ -450,9 +684,12 @@ def _assemble(
     seed_lands, dropped_lands = enforce_color_identity(seed_lands, ci)
     dropped_off_color = dropped_off_color + dropped_lands
     if ci is None:
+        # For a pair this also covers the "one side unresolved" degrade —
+        # the union can't be computed, so the filter passes through.
+        who = " + ".join(repr(c) for c in commanders)
         print(
             f"[build] WARNING: could not resolve color identity for "
-            f"{commander!r} — skipping the color-identity filter "
+            f"{who} — skipping the color-identity filter "
             f"(cards may be off-color).",
             flush=True,
         )
@@ -467,9 +704,12 @@ def _assemble(
     if coll is not None:
         nonlands.sort(key=lambda nm: 0 if owns(coll, nm) else 1)
 
-    # ---- 4. MANABASE (color-source-aware, FP-014.2) + exactly-99 sizing --
-    # The land BUDGET and the 99-card invariant live HERE (deck_builder owns
-    # them); WHICH lands fill the budget lives in deck_builder_manabase.
+    # ---- 4. MANABASE (color-source-aware, FP-014.2) + exact-size budget --
+    # The land BUDGET and the main-size invariant (99 single / 98 partner)
+    # live HERE (deck_builder owns them); WHICH lands fill the budget lives
+    # in deck_builder_manabase — that module never sees a commander count,
+    # it just fills the ``land_slots`` handed to it, so the partner budget
+    # flows through untouched.
     #
     # Land count: from the curve model, reconciled against the seed's own
     # count (the seed wins when it's plausible — it's community-tuned). See
@@ -483,17 +723,18 @@ def _assemble(
     # exactly the FP-014.1 behavior). Never trim below the kept lands: the
     # tuned base is not up for negotiation, so widen the land budget if the
     # kept lands alone already exceed it.
-    nonland_target = MAIN_SIZE - land_target
+    nonland_target = main_size - land_target
     if len(nonlands) > nonland_target:
         # More spells than the budget leaves room for — trim the tail
-        # (lowest EDHREC priority / least-owned) so lands + spells == 99.
+        # (lowest EDHREC priority / least-owned) so lands + spells hit the
+        # main-size target exactly (99 single / 98 partner).
         nonlands = nonlands[:nonland_target]
-    land_slots = MAIN_SIZE - len(nonlands)
+    land_slots = main_size - len(nonlands)
     if land_slots < len(seed_lands):
         # Kept base is bigger than the budget — keep it all, shed spells.
         land_slots = len(seed_lands)
-        nonlands = nonlands[:MAIN_SIZE - land_slots]
-        land_slots = MAIN_SIZE - len(nonlands)
+        nonlands = nonlands[:main_size - land_slots]
+        land_slots = main_size - len(nonlands)
 
     # Colors to fix for: the commander's identity. When identity is
     # unresolved or colorless, fall back to the colors that actually appear
@@ -502,19 +743,25 @@ def _assemble(
     if not ci_colors:
         ci_colors = [c for c in "WUBRG" if stats.weights.get(c, 0) > 0]
 
-    # Tribal utility lands (Cavern of Souls etc.) apply when the commander's
+    # Tribal utility lands (Cavern of Souls etc.) apply when a commander's
     # oracle text reads tribal — the same detector the advisor uses. Best-
-    # effort: no oracle text → no tribe → no tribal lands.
+    # effort: no oracle text → no tribe → no tribal lands. For a partner
+    # pair we check the primary first, then the partner (first hit wins —
+    # a pair with two different tribes is rare enough that picking the
+    # primary's tribe is the sane default).
     tribe = None
-    try:
-        cmdr_card = lookup(commander)
-        if cmdr_card:
-            tribe = detect_tribal_type(
-                cmdr_card.get("oracle_text") or "",
-                cmdr_card.get("type_line") or "",
-            )
-    except Exception:  # noqa: BLE001 — tribal detection is a nicety, not load-bearing.
-        tribe = None
+    for cmdr_name in commanders:
+        try:
+            cmdr_card = lookup(cmdr_name)
+            if cmdr_card:
+                tribe = detect_tribal_type(
+                    cmdr_card.get("oracle_text") or "",
+                    cmdr_card.get("type_line") or "",
+                )
+        except Exception:  # noqa: BLE001 — tribal detection is a nicety, not load-bearing.
+            tribe = None
+        if tribe:
+            break
 
     manabase = build_manabase(
         ci_colors, nonlands, seed_lands, land_slots,
@@ -540,7 +787,7 @@ def _assemble(
         bracket_estimate,
         buy_list,
     ) = _personalize(
-        commander, bracket, nonlands, manabase, ci, lookup, cmdr_key,
+        commanders, bracket, nonlands, manabase, ci, lookup, cmdr_keys,
         coll=coll,
         collection_path=collection_path,
         enable_lift=enable_lift,
@@ -556,28 +803,43 @@ def _assemble(
     )
 
     # ---- 5. OUTPUT + INVARIANT -------------------------------------------
-    display_name = name or f"{commander} Build"
+    if name:
+        display_name = name
+    elif partner is not None:
+        display_name = f"{commander} + {partner} Build"
+    else:
+        display_name = f"{commander} Build"
     # Stem the dashboard/improve loop and the win-attribution pipeline key
     # on: "[USER] <name> [B<n>]". Name= is stamped to match it (dck_meta).
     stem = f"[USER] {safe_filename(display_name)} [B{bracket}]"
-    text = _render_dck(commander, nonlands, manabase.lands, manabase.basics)
+    text = _render_dck(commanders, nonlands, manabase.lands, manabase.basics)
     text = dck_meta.rewrite_name(text, stem)
 
-    # Guarantee exactly MAIN_SIZE. The manabase sums to ``land_slots`` and
-    # ``land_slots + len(nonlands) == MAIN_SIZE`` by construction, so we
+    # Guarantee exactly ``main_size``. The manabase sums to ``land_slots``
+    # and ``land_slots + len(nonlands) == main_size`` by construction, so we
     # should be exact; ``_pad_main_to_target`` is the belt-and-suspenders
     # backstop (reuses the shipped guard — it reads its target off the
-    # rendered text's own [Commander] section, which matches MAIN_SIZE for
-    # the single-commander decks this builder emits). Overshoot is a real
+    # rendered text's own [Commander] section via dck_utils.main_target,
+    # which is 99 for one commander line and 98 for the partner pair we
+    # just rendered, i.e. it agrees with ``main_size`` BY CONSTRUCTION).
+    # ``main_target(text)`` is cross-checked against our arithmetic first:
+    # if the two derivations of "how big is a legal main" ever disagree, we
+    # mis-rendered the command zone and must not emit. Overshoot is a real
     # bug — raise rather than emit an illegal deck.
+    if main_target(text) != main_size:
+        raise RuntimeError(
+            f"rendered [Commander] section implies a {main_target(text)}-card "
+            f"main but the assembler budgeted {main_size} for "
+            f"{' + '.join(commanders)}; refusing to emit an illegal deck"
+        )
     main = count_main_cards(text)
-    if main < MAIN_SIZE:
+    if main < main_size:
         text, _added, _breakdown = _pad_main_to_target(text, main)
         main = count_main_cards(text)
-    if main != MAIN_SIZE:
+    if main != main_size:
         raise RuntimeError(
             f"assembler produced {main} main cards for {commander!r} "
-            f"(expected {MAIN_SIZE}); refusing to emit an illegal deck"
+            f"(expected {main_size}); refusing to emit an illegal deck"
         )
 
     return BuildResult(
@@ -590,6 +852,7 @@ def _assemble(
         source=source,
         dropped_off_color=dropped_off_color,
         manabase=manabase.summary,
+        partner=partner,
         bracket_target=bracket,
         bracket_estimate=bracket_estimate,
         lift_swaps=lift_swap_notes,
@@ -626,12 +889,18 @@ def _revalidate_swaps(prev, new, reserved_keys, ci_ok):
 
 
 def _personalize(
-    commander, bracket, nonlands, manabase, ci, lookup, cmdr_key,
+    commanders, bracket, nonlands, manabase, ci, lookup, cmdr_keys,
     *, coll, collection_path, enable_lift, enable_steer, owned_bias,
     deck_dir, lift_matrix, estimate_fn, is_game_changer, is_fast_mana,
     power_pool, owned_names,
 ):
     """Run the FP-014.3 stages over ``nonlands``; return the provenance.
+
+    ``commanders`` is the full command zone (one name, or two for a partner
+    pair) — every stage treats ALL of them as reserved (a swap may never
+    collide with either commander) and scores synergy against the whole
+    zone (a card that pairs with the PARTNER is exactly as deck-relevant as
+    one that pairs with the primary).
 
     Returns ``(nonlands, lift_notes, lift_skipped, steer_notes, owned_swaps,
     bracket_estimate, buy_list)``. Every stage is wrapped so its failure is
@@ -645,9 +914,10 @@ def _personalize(
     bracket_estimate: Optional[int] = None
     buy_list: list[str] = []
 
-    # Keys a swap candidate must never collide with: the commander and every
-    # land/basic already committed (personalization only trades nonlands).
-    reserved: set[str] = {cmdr_key}
+    # Keys a swap candidate must never collide with: EVERY commander in the
+    # command zone and every land/basic already committed (personalization
+    # only trades nonlands).
+    reserved: set[str] = set(cmdr_keys)
     reserved |= {name_key(land) for land in manabase.lands}
     reserved |= {name_key(b) for b in manabase.basics}
 
@@ -695,15 +965,19 @@ def _personalize(
             matrix = None
 
     # quality = lift deck-synergy over the ORIGINAL shell (built before any
-    # swaps so all stages score against the same baseline fabric).
-    base_deck_keys = {cmdr_key} | {name_key(n) for n in nonlands}
+    # swaps so all stages score against the same baseline fabric). Both
+    # commanders of a pair are part of the fabric being scored against.
+    base_deck_keys = set(cmdr_keys) | {name_key(n) for n in nonlands}
     quality_of = personalize.synergy_scorer(matrix, bracket, base_deck_keys)
 
     # --- STAGE 1: LIFT SWAPS ----------------------------------------------
     if enable_lift:
         try:
             new, lift_notes, lift_skipped = personalize.lift_swaps(
-                nonlands, commander=commander, bracket=bracket, matrix=matrix,
+                nonlands, commander=commanders[0], bracket=bracket,
+                matrix=matrix, partner=(
+                    commanders[1] if len(commanders) > 1 else None
+                ),
                 reserved_keys=reserved, role_of=role_of, ci_ok=ci_ok,
             )
             nonlands, ok = _revalidate_swaps(nonlands, new, reserved, ci_ok)
@@ -724,13 +998,13 @@ def _personalize(
             pool = power_pool
             if pool is None:
                 # Corpus-sourced power candidates: the lift picks for this
-                # commander+shell that happen to be power cards belong to
+                # command-zone+shell that happen to be power cards belong to
                 # THIS deck (unlike a generic "all Game Changers" list).
-                pool = _default_power_pool(matrix, commander, nonlands, bracket)
+                pool = _default_power_pool(matrix, commanders, nonlands, bracket)
 
             def render_fn(nl):
                 return _render_dck(
-                    commander, nl, manabase.lands, manabase.basics,
+                    commanders, nl, manabase.lands, manabase.basics,
                 )
 
             new, steer_notes, bracket_estimate = personalize.steer_bracket(
@@ -813,19 +1087,24 @@ def _default_is_fast_mana() -> Callable[[str], bool]:
     return lambda nm: name_key(nm) in fm
 
 
-def _default_power_pool(matrix, commander, nonlands, bracket) -> list[str]:
+def _default_power_pool(matrix, commanders, nonlands, bracket) -> list[str]:
     """Corpus-sourced candidate power cards for the steer stage.
 
-    The lift candidates for this commander+shell are, by construction, cards
-    the harvested community pairs with THIS deck — so when some of them are
-    Game Changers / fast mana they're commander-appropriate power to add
-    (far better than a blind 'every GC in-color' list). Empty when there's
-    no usable corpus: without a source we can only soften, never add — the
-    honest limit, reported in the steer notes.
+    ``commanders`` is the full command zone (one or two names — a partner
+    pair contributes BOTH to the deck-key set, so candidates that pair with
+    the partner rank just as they should). The lift candidates for this
+    zone+shell are, by construction, cards the harvested community pairs
+    with THIS deck — so when some of them are Game Changers / fast mana
+    they're commander-appropriate power to add (far better than a blind
+    'every GC in-color' list). Empty when there's no usable corpus: without
+    a source we can only soften, never add — the honest limit, reported in
+    the steer notes.
     """
     if not matrix or matrix.get("too_small"):
         return []
-    deck_keys = {name_key(commander)} | {name_key(n) for n in nonlands}
+    deck_keys = {name_key(c) for c in commanders} | {
+        name_key(n) for n in nonlands
+    }
     try:
         cands = lift_analysis.lift_candidates(
             matrix, deck_keys, bracket=bracket, limit=30,
@@ -836,23 +1115,30 @@ def _default_power_pool(matrix, commander, nonlands, bracket) -> list[str]:
 
 
 def _render_dck(
-    commander: str,
+    commanders: list[str],
     nonlands: list[str],
     lands: list[str],
     basics: dict[str, int],
 ) -> str:
     """Render the Forge ``.dck`` text: [metadata]/[Commander]/[Main].
 
+    ``commanders`` is the full command zone — one line per commander, so a
+    partner pair renders TWO ``1 <name>`` lines under [Commander] (which is
+    exactly what makes ``dck_utils.main_target`` read 98 back off the file:
+    the section IS the source of truth for the main-size invariant).
+
     Matches ``moxfield_import.to_dck``'s section layout so the dashboard and
     improve loop accept the file unchanged. ``lands`` are the singleton
     nonbasic lands (kept-from-seed + topped-up fixing); ``basics`` is the
     basic-land multiset. Card lines are name-only (no ``|SET|CN`` edition
     tail) — Forge falls back to any printing, and resolving an exact printing
-    per card would mean a Scryfall round-trip for all 99. The ``Name=`` here
-    is a placeholder; the caller stamps the real stem via
+    per card would mean a Scryfall round-trip for the whole main. The
+    ``Name=`` here is a placeholder; the caller stamps the real stem via
     ``dck_meta.rewrite_name``.
     """
-    lines = ["[metadata]", "Name=", "[Commander]", f"1 {commander}", "[Main]"]
+    lines = ["[metadata]", "Name=", "[Commander]"]
+    lines.extend(f"1 {nm}" for nm in commanders)
+    lines.append("[Main]")
     lines.extend(f"1 {nm}" for nm in nonlands)
     lines.extend(f"1 {nm}" for nm in lands)  # singleton nonbasic lands.
     lines.extend(f"{qty} {basic}" for basic, qty in basics.items() if qty > 0)
@@ -864,6 +1150,7 @@ def build_deck(
     bracket: int,
     collection_path: Optional[Path] = None,
     *,
+    partner: Optional[str] = None,
     fetch_avg: Optional[Callable] = None,
     fetch_page: Optional[Callable] = None,
     resolve_ci: Optional[Callable[[str], Optional[str]]] = None,
@@ -875,18 +1162,21 @@ def build_deck(
     deck_dir: Optional[Path] = None,
     **personalize_kwargs,
 ) -> str:
-    """Build a legal 99-card Commander deck for ``commander`` and return the
-    Forge ``.dck`` TEXT (the caller decides where to write it).
+    """Build a legal Commander deck (99 main for one commander, 98 + two
+    [Commander] lines when ``partner`` is given) and return the Forge
+    ``.dck`` TEXT (the caller decides where to write it).
 
     Thin wrapper over ``_assemble`` — see that function and the module
-    docstring for the full contract and the honest scope notes. The FP-014.3
-    toggles + injectable seams pass straight through (``**personalize_kwargs``
+    docstring for the full contract and the honest scope notes (including
+    the partner offline-validation policy). The FP-014.3 toggles +
+    injectable seams pass straight through (``**personalize_kwargs``
     forwards the lift-matrix / estimator / power-pool test hooks).
     """
     return _assemble(
         commander,
         bracket,
         collection_path,
+        partner=partner,
         fetch_avg=fetch_avg,
         fetch_page=fetch_page,
         resolve_ci=resolve_ci,
@@ -922,6 +1212,13 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--commander", required=True,
                         help="Commander card name (e.g. \"Krenko, Mob Boss\").")
+    parser.add_argument("--partner", default=None, metavar="NAME",
+                        help="Second commander for a partner pair (e.g. "
+                             "\"Haldan, Avid Arcanist\"). The deck gets two "
+                             "[Commander] lines, a 98-card main, and the "
+                             "UNION of both color identities. Partner "
+                             "legality is checked from local card data when "
+                             "available (see the build module's policy).")
     parser.add_argument("--bracket", type=int, default=3,
                         help="Target power bracket 1-5 (default 3 = Upgraded).")
     parser.add_argument("--deck-dir", "--out", dest="deck_dir", default=None,
@@ -967,6 +1264,7 @@ def main(argv=None) -> int:
             args.commander,
             args.bracket,
             collection_path,
+            partner=args.partner,
             # The corpus lift matrix is read from the deck dir the build
             # writes into — the same pool the harvester/improve loop use.
             deck_dir=deck_dir,
@@ -986,6 +1284,14 @@ def main(argv=None) -> int:
 
     colors = result.colors or "colorless"
     print(f"Wrote {out_path}")
+    # Partner pair: name both commanders + the UNION identity explicitly —
+    # the single-commander summary line below stays untouched so existing
+    # output (and anything scraping it) is unchanged when --partner is off.
+    if result.partner:
+        print(
+            f"  commanders: {args.commander} + {result.partner}   "
+            f"union identity: {colors}   main target: 98"
+        )
     print(
         f"  name: {result.name}   colors: {colors}   "
         f"nonland: {result.nonland_count}   land: {result.land_count}   "

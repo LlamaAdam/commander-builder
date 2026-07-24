@@ -139,8 +139,16 @@ def lift_swaps(
     role_of: Callable[[str], str],
     ci_ok: Callable[[str], bool],
     max_swaps: int = DEFAULT_MAX_LIFT_SWAPS,
+    partner: Optional[str] = None,
 ) -> tuple[list[str], list[str], Optional[str]]:
     """Trade marginal seed cards for higher-synergy in-corpus candidates.
+
+    ``partner`` (a second commander for a partner-pair build) joins the
+    deck-key set the lift math scores against: a candidate that pairs
+    above-chance with the PARTNER is exactly as deck-relevant as one that
+    pairs with the primary, and leaving the partner out would silently
+    under-rank half the pair's synergy package. Defaults to None so every
+    single-commander caller is untouched.
 
     Returns ``(new_nonlands, swap_notes, skipped_reason)``. When the corpus
     is unavailable or below ``lift_analysis``'s floor we return the input
@@ -178,6 +186,8 @@ def lift_swaps(
         )
 
     deck_keys = {name_key(commander)} | {name_key(n) for n in nonlands}
+    if partner:
+        deck_keys.add(name_key(partner))
     # Over-fetch: color/role/singleton filtering below drops some, and we
     # want enough survivors to reach ``max_swaps``.
     candidates = lift_analysis.lift_candidates(
