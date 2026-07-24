@@ -536,11 +536,13 @@ the web surface is the "Build from scratch" tab wiring the async
   role-target-filled shell from the commander page: that path is a
   *defensible pile*, not a coherent deck. This is the "hard 20%" below, and
   it is **not** solved — it is deferred to the improve loop.
-- **The manabase uses a simplified Karsten source model**, not the full
-  per-CMC source table: a per-color source target derived from pip weight,
-  keeping the seed's tuned duals/fetches and topping up from the advisor's
-  land tiers. Good enough to cast on curve, not a precise Frank-Karsten
-  computation.
+- **The manabase now uses the full Karsten per-CMC source table** (second
+  cut): per-color targets are the MAX over each card's (cmc, pips) entry
+  from the published 99-card Commander column (Karsten 2022 update), with
+  the old two-anchor pip model preserved as the fallback for costs that
+  can't be resolved offline. Cast turn is assumed = CMC (on-curve), the
+  assembler's necessary simplification. Seed duals/fetches are still kept
+  and topped up from the advisor's land tiers.
 - **Lift personalization needs a harvested corpus (≥10 decks) or it skips.**
   With no corpus the lift stage is a no-op; bracket-steer and owned-bias
   still run.

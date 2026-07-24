@@ -60,7 +60,7 @@ the FP-014 build-from-scratch first cut, 4 commits on top of
 `feature/manafoundry-parity`.
 `commander-build --commander "<name>" --bracket <n>`
 assembles a legal exactly-99: EDHREC average-deck seed → color-source
-manabase (`deck_builder_manabase.py`, simplified Karsten source model) →
+manabase (`deck_builder_manabase.py`, full Karsten per-CMC source table) →
 lift/bracket/collection personalization (`deck_builder_personalize.py`) →
 optional `--improve N` hand-off to the empirical loop. Commits: `76f1ca7`
 (core assembler `deck_builder.py` + CLI), `d02fc62` (manabase), `dd818b1`
