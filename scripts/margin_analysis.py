@@ -139,6 +139,7 @@ class GauntletPair:
     v2_w: int = 0
     v2_l: int = 0
     v2_g: int = 0
+    rows: int = 0                       # soak rows folded into this pair
 
     @staticmethod
     def _wr(w: int, l: int) -> Optional[float]:
@@ -191,6 +192,7 @@ def aggregate_gauntlet(rows: list[dict], min_games: int = 0) -> dict[str, Gauntl
         w = int(r.get("wins", 0) or 0)
         l = int(r.get("losses", 0) or 0)
         g = int(r.get("games", 0) or 0)
+        p.rows += 1
         if role == "base":
             p.base_w += w
             p.base_l += l
@@ -205,13 +207,19 @@ def aggregate_gauntlet(rows: list[dict], min_games: int = 0) -> dict[str, Gauntl
 def build_gauntlet_samples(
     pairs: dict[str, GauntletPair],
     decks_dirs: list[str],
-) -> tuple[list[Sample], list[str]]:
+) -> tuple[list[Sample], list[str], dict[str, int]]:
     """Join each complete gauntlet pair to its base deck file -> feature sample.
 
     Features describe the ORIGINAL (base) deck, same substrate as the A/B path,
-    so the two analyses are directly comparable."""
+    so the two analyses are directly comparable.
+
+    Returns ``(samples, skipped, missing_decks)`` where ``missing_decks``
+    maps each deck filename that could NOT be found on disk to the number of
+    soak rows dropped because of it. A loud per-file warning is printed to
+    stderr (once per missing deck) so the exclusion is never silent."""
     samples: list[Sample] = []
     skipped: list[str] = []
+    missing: dict[str, int] = {}
     for name, p in sorted(pairs.items()):
         m = p.margin
         if m is None:
@@ -220,6 +228,8 @@ def build_gauntlet_samples(
         path = _find_deck(p.pair_base, decks_dirs)
         if path is None:
             skipped.append(f"{name} (deck file not found)")
+            missing[p.pair_base] = p.rows
+            _warn_missing_deck(p.pair_base, p.rows)
             continue
         try:
             with open(path, encoding="utf-8") as fh:
@@ -231,7 +241,7 @@ def build_gauntlet_samples(
             deck=name, margin=m, games=p.base_g + p.v2_g,
             features=deck_features(text, name),
         ))
-    return samples, skipped
+    return samples, skipped, missing
 
 
 # --------------------------------------------------------------------------- #
@@ -415,17 +425,33 @@ def _find_deck(filename: str, decks_dirs: list[str]) -> Optional[str]:
     return None
 
 
+def _warn_missing_deck(filename: str, rows_dropped: int) -> None:
+    """Loud, per-file stderr warning for a soak row whose deck left the disk.
+
+    Rows referencing a vanished deck (renamed/pruned from the library, e.g.
+    '[USER] Black Mage Blitz SPDET5-931 [B4].dck') are EXCLUDED from the
+    regression -- that is correct (we cannot feature a deck we cannot read),
+    but it must never be silent, or n quietly shrinks between runs."""
+    print(f"WARNING: deck file not found: {filename!r} -- "
+          f"excluding {rows_dropped} soak row(s) from the analysis",
+          file=sys.stderr)
+
+
 def build_samples(
     pairs: dict[str, Pair],
     decks_dirs: list[str],
-) -> tuple[list[Sample], list[str]]:
+) -> tuple[list[Sample], list[str], dict[str, int]]:
     """Join each decided pair to its original deck file -> feature sample.
 
     `decks_dirs` is a search path; the first dir containing the deck wins.
-    Returns (samples, skipped) where `skipped` notes pairs we couldn't feature
-    (missing deck file or no decisive games)."""
+    Returns (samples, skipped, missing_decks) where `skipped` notes pairs we
+    couldn't feature (missing deck file or no decisive games) and
+    `missing_decks` maps each deck file absent from disk to the number of
+    soak rows dropped because of it (also warned loudly on stderr, once per
+    missing deck)."""
     samples: list[Sample] = []
     skipped: list[str] = []
+    missing: dict[str, int] = {}
     for name, p in sorted(pairs.items()):
         m = p.margin
         if m is None:
@@ -434,6 +460,8 @@ def build_samples(
         path = _find_deck(p.deck_a, decks_dirs)
         if path is None:
             skipped.append(f"{name} (deck file not found)")
+            missing[p.deck_a] = p.rows
+            _warn_missing_deck(p.deck_a, p.rows)
             continue
         try:
             with open(path, encoding="utf-8") as fh:
@@ -445,7 +473,7 @@ def build_samples(
             deck=name, margin=m, games=p.games,
             features=deck_features(text, name),
         ))
-    return samples, skipped
+    return samples, skipped, missing
 
 
 def analyze(samples: list[Sample]) -> dict:
@@ -513,15 +541,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.mode == "gauntlet":
         rows = load_rows(args.inbox, "*gauntlet*.jsonl")
         pairs = aggregate_gauntlet(rows, min_games=args.min_games)
-        samples, skipped = build_gauntlet_samples(pairs, decks_dirs)
+        samples, skipped, missing = build_gauntlet_samples(pairs, decks_dirs)
     else:
         rows = load_rows(args.inbox)
         pairs = aggregate_pairs(rows, min_games=args.min_games)
-        samples, skipped = build_samples(pairs, decks_dirs)
+        samples, skipped, missing = build_samples(pairs, decks_dirs)
     report = analyze(samples)
     report["mode"] = args.mode
     report["skipped"] = skipped
     report["min_games"] = args.min_games
+    report["missing_deck_files"] = missing            # {deck: rows dropped}
+    report["missing_deck_rows_dropped"] = sum(missing.values())
 
     if args.json:
         print(json.dumps(report, indent=2))
@@ -550,6 +580,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if skipped:
         print(f"\n  skipped {len(skipped)} pair(s): "
               + "; ".join(skipped[:6]) + ("..." if len(skipped) > 6 else ""))
+    if missing:
+        print(f"\n  WARNING: {len(missing)} deck file(s) missing from disk -> "
+              f"{report['missing_deck_rows_dropped']} soak row(s) EXCLUDED "
+              f"(see stderr for per-file detail)")
     print("\n  note: |t|>=2 (~p<.05, df=n-2) flagged with *. With ~30 decks this "
           "is exploratory.")
     return 0

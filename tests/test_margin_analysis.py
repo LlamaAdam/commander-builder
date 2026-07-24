@@ -108,20 +108,28 @@ def test_build_samples_joins_deck_file(tmp_path):
     pairs = ma.aggregate_pairs(
         [_row("[USER] D [B4].dck", "[USER] D v2 [B4].dck", 40, 10, 14)],
         min_games=40)
-    samples, skipped = ma.build_samples(pairs, [str(tmp_path)])
-    assert len(samples) == 1 and not skipped
+    samples, skipped, missing = ma.build_samples(pairs, [str(tmp_path)])
+    assert len(samples) == 1 and not skipped and not missing
     s = samples[0]
     assert s.features["bracket"] == 4.0          # parsed from [B4]
     assert s.features["basic_lands"] == 10.0      # 10 Forest
     assert s.margin == pytest.approx((14 - 10) / 24)
 
 
-def test_build_samples_reports_missing_deck(tmp_path):
+def test_build_samples_reports_missing_deck(tmp_path, capsys):
     pairs = ma.aggregate_pairs(
-        [_row("[USER] Gone [B3].dck", "[USER] Gone v2 [B3].dck", 40, 5, 7)],
+        [_row("[USER] Gone [B3].dck", "[USER] Gone v2 [B3].dck", 40, 5, 7),
+         _row("[USER] Gone [B3].dck", "[USER] Gone v2 [B3].dck", 40, 6, 8)],
         min_games=40)
-    samples, skipped = ma.build_samples(pairs, [str(tmp_path)])
+    samples, skipped, missing = ma.build_samples(pairs, [str(tmp_path)])
+    # excluded from the regression ...
     assert not samples and len(skipped) == 1 and "not found" in skipped[0]
+    # ... counted (2 soak rows dropped for this one missing deck) ...
+    assert missing == {"[USER] Gone [B3].dck": 2}
+    # ... and warned LOUDLY on stderr, once per missing deck.
+    err = capsys.readouterr().err
+    assert err.count("WARNING: deck file not found") == 1
+    assert "[USER] Gone [B3].dck" in err and "2 soak row(s)" in err
 
 
 def _grow(*, pair_base, role, games, wins, losses, draws=0):
@@ -179,10 +187,46 @@ def test_build_gauntlet_samples_joins_and_skips(tmp_path):
         _grow(pair_base="[USER] Gone [B3].dck", role="v2", games=40, wins=5, losses=35),
     ]
     pairs = ma.aggregate_gauntlet(rows, min_games=40)
-    samples, skipped = ma.build_gauntlet_samples(pairs, [str(tmp_path)])
+    samples, skipped, missing = ma.build_gauntlet_samples(pairs, [str(tmp_path)])
     assert len(samples) == 1 and samples[0].deck == "[USER] D [B4].dck"
     assert samples[0].margin == pytest.approx(0.25)
     assert len(skipped) == 1 and "not found" in skipped[0]
+    assert missing == {"[USER] Gone [B3].dck": 2}   # 2 rows (base + v2) dropped
+
+
+def test_gauntlet_missing_deck_warns_once_and_counts_rows(tmp_path, capsys):
+    rows = [
+        _grow(pair_base="[USER] Gone [B3].dck", role="base", games=40, wins=5, losses=35),
+        _grow(pair_base="[USER] Gone [B3].dck", role="base", games=40, wins=6, losses=34),
+        _grow(pair_base="[USER] Gone [B3].dck", role="v2", games=40, wins=5, losses=35),
+    ]
+    pairs = ma.aggregate_gauntlet(rows, min_games=40)
+    samples, skipped, missing = ma.build_gauntlet_samples(pairs, [str(tmp_path)])
+    assert not samples                                # excluded from the math
+    assert missing == {"[USER] Gone [B3].dck": 3}     # all 3 rows counted
+    err = capsys.readouterr().err
+    assert err.count("WARNING: deck file not found") == 1   # once per deck
+    assert "3 soak row(s)" in err
+
+
+def test_main_reports_missing_deck_totals_in_json(tmp_path, capsys):
+    import json
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "x_throughput.jsonl").write_text(
+        json.dumps(_row("[USER] Gone [B3].dck", "[USER] Gone v2 [B3].dck",
+                        40, 5, 7)) + "\n",
+        encoding="utf-8")
+    decks = tmp_path / "decks"          # empty -> the deck is missing
+    decks.mkdir()
+    rc = ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                  "--min-games", "40", "--json"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["missing_deck_files"] == {"[USER] Gone [B3].dck": 1}
+    assert report["missing_deck_rows_dropped"] == 1
+    assert "WARNING: deck file not found" in captured.err
 
 
 def test_analyze_counts_verdicts_and_ranks_features(tmp_path):
@@ -194,7 +238,7 @@ def test_analyze_counts_verdicts_and_ranks_features(tmp_path):
         _row("[USER] B [B4].dck", "[USER] B v2 [B4].dck", 40, 16, 4),   # reverted
     ]
     pairs = ma.aggregate_pairs(rows, min_games=40)
-    samples, _ = ma.build_samples(pairs, [str(tmp_path)])
+    samples, _, _ = ma.build_samples(pairs, [str(tmp_path)])
     report = ma.analyze(samples)
     assert report["n_decks"] == 2
     assert report["verdicts"]["kept"] == 1

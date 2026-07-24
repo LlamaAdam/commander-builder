@@ -8,36 +8,39 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-21 (`feature/fp014-build-from-scratch` —
-**FP-014 build-from-scratch deck assembly shipped as a first cut**
-(`commander-build`: commander + bracket → legal exactly-99, EDHREC-seeded,
-color-source manabase, personalized, optional improve hand-off); unmerged
-pending PR; see the branch note below and CHANGELOG 2026-07-21.) Prior:
-2026-07-21 (`feature/manafoundry-parity` — six user-facing
-ManaFoundry-parity features landed.) Prior: 2026-07-20 (merged
-`feature/2026-04-28-session` —
-PRs #9/#10, the forge_batch/forge_version/web-module split, FP-013
-gate items — into the adversarial-review fix branch
-`fix/adversarial-review-2026-07-19`; all 40 review-fix commits ported
-onto the new module layout. Prior upstream milestone 2026-07-04:
-stale PRs #9 — 4 known bug fixes — and #10 — advisor tribal-bypass —
-merged after re-review against the June refactor, plus the
-streaming-runner follow-up `6156514`:
-`ForgeRunner.run(keep_partial_output=True)` routes timeout-salvage sims
-through the streaming reader so looper-credit attribution actually
-works — salvaged rows no longer read "credited to none")
+**Last updated:** 2026-07-23 (`master` @ `763bdfc` — **everything is
+merged**: PRs #13–#19 landed the ManaFoundry-parity six (#13), FP-014
+build-from-scratch (#14), the MIT license (#15), the revert-drift
+resolution fix (#16), the adversarial-review-carrying session branch
+(#17, #19), and the tree tidy-up (#18). The
+`feature/2026-04-28-session` era is **CLOSED** — `master` is 7 commits
+ahead of it and is the live tip. **FP-002 unblock fired**: the gauntlet
+margin dataset reached **n=45 of the ~80-deck gate** (10,360 games at
+min_games=40; docs previously recorded n=26). The 2026-07-23 re-analysis:
+mean margin −0.0133, verdicts 7 kept / 12 reverted / 26 neutral, and
+**no feature passes |t|≥2** — the n=26-era candidate signals
+(deficit_total, under_built_roles) collapsed toward zero as n grew; the
+A/B-only "hits" still fail to replicate in the unconfounded design. See
+the 2026-07-23 result block in
+[docs/future-plans.md](future-plans.md). A gauntlet soak
+(`--games 40 --append`, started 2026-07-23) is running toward the
+~80-deck predictor gate.) Prior milestones: 2026-07-21 — FP-014
+build-from-scratch first cut + the six ManaFoundry-parity features;
+2026-07-20 — session branch + all 40 adversarial-review fixes ported;
+2026-07-04 — stale PRs #9/#10 merged + looper-credit salvage fixed
+(`6156514`).
 **Phase status:** Phase 2 complete + FP-006 web GUI shipped +
 `commander-auto-curate` end-to-end loop (advisor → Claude curator →
 apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-014
-(build-from-scratch deck assembly) shipped as a first cut** (`commander-build`
+(build-from-scratch deck assembly) merged** (PR #14; `commander-build`
 + web "Build from scratch" tab; EDHREC-seeded, improve-loop is the quality
-path). **FP-003 (concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML predictor)
-REOPENED** under the margin-regression framing now that 40-game soak
-rows supply a negative class — curation is empirically ~neutral across
-two designs (A/B + unconfounded gauntlet); no feature survives
-cross-validation. See Parked plans +
-[docs/future-plans.md](future-plans.md). 130+
-commits on `feature/2026-04-28-session` ahead of `master`.
+path). **FP-003 (concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML
+predictor) REOPENED, unblock fired at n=45/80** under the
+margin-regression framing — curation is empirically ~neutral across
+two designs (A/B + unconfounded gauntlet) and at n=45 **no pre-sim
+feature predicts margin**; the running gauntlet soak grows n toward the
+~80-deck gate where the question gets closed cleanly. See Parked plans +
+[docs/future-plans.md](future-plans.md).
 
 ---
 
@@ -45,17 +48,17 @@ commits on `feature/2026-04-28-session` ahead of `master`.
 
 - **Tests:** 2155 passing fast lane / 155 skipped (+slow with
   `--run-slow`), ~170s offline.
-- **Branch:** `feature/fp014-build-from-scratch` (worktree at
-  `C:\dev\cb-review-fixes`) — the FP-014 build-from-scratch first cut (4
-  commits) on top of the `feature/manafoundry-parity` six-feature branch,
-  which itself sits on the adversarial-review fix branch carrying
-  `feature/2026-04-28-session` (PRs #9/#10 + the 2026-06-12
-  forge_batch/forge_version/web-module split) with all 40
-  adversarial-review fix commits ported onto the new layout.
+- **Branch:** `master` (`763bdfc`) is the live tip — PRs #13–#19 merged
+  every outstanding feature/fix branch (see the header). The long-lived
+  stacked-branch era (`feature/2026-04-28-session` → review-fix →
+  manafoundry-parity → fp014) is over; **working convention going
+  forward: short-lived branches cut from `master`**, PR'd back and
+  merged (current example: `chore/fp002-n45-refresh`).
 
-**`feature/fp014-build-from-scratch` (2026-07-21):** the FP-014
-build-from-scratch first cut, 4 commits on top of `feature/manafoundry-parity`
-(unmerged, pending PR). `commander-build --commander "<name>" --bracket <n>`
+**`feature/fp014-build-from-scratch` (2026-07-21, merged via PR #14):**
+the FP-014 build-from-scratch first cut, 4 commits on top of
+`feature/manafoundry-parity`.
+`commander-build --commander "<name>" --bracket <n>`
 assembles a legal exactly-99: EDHREC average-deck seed → color-source
 manabase (`deck_builder_manabase.py`, simplified Karsten source model) →
 lift/bracket/collection personalization (`deck_builder_personalize.py`) →
@@ -482,7 +485,16 @@ feature clears significance under cross-validation. Graduation needs
 **more unique decks (~80+), not more games per deck**, and trusting only
 features that agree across both designs. Actionable today (no model):
 curation's expected gain is ~0; fix structure (F2 `under_built`) before
-curating. Covered by `tests/test_margin_analysis.py` (18 tests).
+curating. Covered by `tests/test_margin_analysis.py` (22 tests).
+
+**UPDATE 2026-07-23 — the ≥+10-deck unblock fired at gauntlet n=45**
+(10,360 games; a `--games 40 --append` soak keeps growing it toward the
+~80-deck gate). Re-analysis: mean margin −0.0133 (7 kept / 12 reverted /
+26 neutral), **no feature at |t|≥2**, and the n=26-era candidate signals
+— including the "directionally-consistent" `deficit_total` /
+`under_built_roles` lever — **collapsed toward zero as n grew** (noise
+signature, not an effect gaining power). Full table + honest reading in
+[docs/future-plans.md](future-plans.md) "Result 2026-07-23".
 
 **Next (decided 2026-05-26): grow to ~80+ unique decks** to attempt a real
 out-of-sample predictor on the cross-validated `deficit_total` signal —
