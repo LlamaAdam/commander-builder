@@ -518,8 +518,8 @@ function renderProposeResult(container, body) {
       "p", { class: "muted" },
       "Forge ran but reported zero games. Most common cause: the " +
       "proposed deck has the wrong card count (Commander needs " +
-      "exactly 99 mainboard + 1 commander = 100). Check the textarea " +
-      "above and re-run.",
+      "mainboard + commanders = 100 exactly: 99+1, or 98+2 with " +
+      "partners). Check the textarea above and re-run.",
     ));
     container.appendChild(wrap);
     return;
@@ -1492,10 +1492,14 @@ function renderAuditResult(container, body) {
       ));
     }
     // Footnote when not all cards have prices — keeps the user
-    // from misreading a partial total as authoritative.
+    // from misreading a partial total as authoritative. Compare
+    // against the deck's ACTUAL mainboard count (99 single-commander,
+    // 98 partners) rather than a hardcoded 99, else a fully-priced
+    // partner deck shows a spurious "98 cards priced" footnote.
     const origN = body.n_priced_cards_original ?? 0;
     const propN = body.n_priced_cards_proposed ?? 0;
-    if (origN < 99 || propN < 99) {
+    const mainN = body.main_count ?? 99;
+    if (origN < mainN || propN < mainN) {
       priceP.appendChild(el(
         "span",
         { class: "muted",
@@ -1568,7 +1572,7 @@ function renderAuditResult(container, body) {
       { class: "muted", style: "font-size: 12px;" },
       `Source deck was sub-100; padded with `
       + (parts || `${body.basics_padded} basics`)
-      + ` to reach 99 mainboard.`,
+      + ` to reach a legal mainboard (100 minus commanders).`,
     ));
   }
 

@@ -43,7 +43,7 @@ WHAT IS DELIBERATELY DEFERRED.
 
 The assembler reuses the shipped, tested substrate rather than re-deriving
 it: ``enforce_color_identity`` for legality, ``count_main_cards`` +
-``_pad_main_to_99`` for the exactly-99 guard, ``dck_meta.rewrite_name`` for
+``_pad_main_to_target`` for the main-size guard, ``dck_meta.rewrite_name`` for
 the name-stamp invariant, and ``moxfield_import``'s filename/section
 conventions so the dashboard/improve loop accept the output unchanged.
 
@@ -62,7 +62,7 @@ from . import dck_meta, deck_builder_personalize as personalize, lift_analysis
 from ._proposer_filters import enforce_color_identity
 from .bracket_estimator import estimate_bracket
 from .collection import load_collection, name_key, owns, parse_collection_lines
-from .dck_utils import count_main_cards
+from .dck_utils import COMMANDER_DECK_SIZE, count_main_cards
 from .deck_builder_manabase import (
     ManabaseSummary,
     _parse_cost,
@@ -79,11 +79,19 @@ from .staples import (
     detect_tribal_type,
     is_basic_land,
 )
-from .web.deck_text_ops import _pad_main_to_99
+from .web.deck_text_ops import _pad_main_to_target
 
-# Commander decks are exactly 100 cards: 1 commander in the command zone +
-# 99 in the mainboard. Every path below funnels to this invariant.
-MAIN_SIZE = 99
+# Commander decks are exactly 100 cards TOTAL: the command zone plus the
+# mainboard, i.e. the mainboard target is ``100 - commander_count`` — 99
+# for a single commander, 98 for a partner pair. This builder currently
+# only assembles SINGLE-commander decks (``build_deck`` takes one
+# commander name; partner-pair building is future work), so the derived
+# MAIN_SIZE below is 99 — but it is deliberately written as the
+# subtraction so the invariant stays correct when partner building
+# arrives (bump _N_COMMANDERS from the pair input, everything downstream
+# follows).
+_N_COMMANDERS = 1  # single-commander builds only; partners are future work.
+MAIN_SIZE = COMMANDER_DECK_SIZE - _N_COMMANDERS
 
 # Land-count target when we can't read one off a seed. 37 is the midpoint of
 # the 36-38 band the FP-014 plan cites for a "normal" two/three-color deck.
@@ -227,7 +235,7 @@ def _distribute_basics_by_pips(
         hand out the remainder in proportion to pip weight using the
         largest-remainder method — the same exact-sum distribution
         ``edhrec_client.AverageDeck.to_moxfield_shape`` and
-        ``deck_text_ops._pad_main_to_99`` already use, so the counts always
+        ``deck_text_ops._pad_main_to_target`` already use, so the counts always
         sum to ``total`` with no drift.
 
     Returns ``{basic_land_name: quantity}`` (zero-quantity entries omitted).
@@ -555,14 +563,16 @@ def _assemble(
     text = _render_dck(commander, nonlands, manabase.lands, manabase.basics)
     text = dck_meta.rewrite_name(text, stem)
 
-    # Guarantee exactly 99. The manabase sums to ``land_slots`` and
-    # ``land_slots + len(nonlands) == 99`` by construction, so we should be
-    # exact; ``_pad_main_to_99`` is the belt-and-suspenders backstop (reuses
-    # the shipped guard). Overshoot is a real bug — raise rather than emit
-    # an illegal deck.
+    # Guarantee exactly MAIN_SIZE. The manabase sums to ``land_slots`` and
+    # ``land_slots + len(nonlands) == MAIN_SIZE`` by construction, so we
+    # should be exact; ``_pad_main_to_target`` is the belt-and-suspenders
+    # backstop (reuses the shipped guard — it reads its target off the
+    # rendered text's own [Commander] section, which matches MAIN_SIZE for
+    # the single-commander decks this builder emits). Overshoot is a real
+    # bug — raise rather than emit an illegal deck.
     main = count_main_cards(text)
     if main < MAIN_SIZE:
-        text, _added, _breakdown = _pad_main_to_99(text, main)
+        text, _added, _breakdown = _pad_main_to_target(text, main)
         main = count_main_cards(text)
     if main != MAIN_SIZE:
         raise RuntimeError(

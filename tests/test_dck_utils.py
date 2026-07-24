@@ -7,11 +7,13 @@ summing, |set|cn stripping, case-insensitive headers, malformed lines,
 section boundaries) are load-bearing for all of them.
 """
 from commander_builder.dck_utils import (
+    count_commander_cards,
     count_main_cards,
     iter_main_cards,
     iter_section_lines,
     main_card_names,
     main_card_quantities,
+    main_target,
     parse_card_line,
     section_card_names,
 )
@@ -215,3 +217,52 @@ def test_section_card_names_skips_lines_without_qty_prefix():
 def test_section_card_names_case_insensitive_header():
     text = "[COMMANDER]\n1 Atraxa, Praetors' Voice|CMM|1\n"
     assert section_card_names(text, "Commander") == ["Atraxa, Praetors' Voice"]
+
+
+# --- count_commander_cards / main_target (partner invariant) -----------------
+# A legal Commander deck is main + commanders == 100. The mainboard
+# target is therefore 100 - commander_count: 99 single, 98 partners.
+# Hardcoding 99 corrupted a real partner deck on disk (Pako/Haldan
+# padded from 98 to 99 main → illegal 101-card deck).
+
+PARTNER_DCK = """\
+[metadata]
+Name=Dog Moves
+
+[Commander]
+1 Pako, Arcane Retriever|CMR|282
+1 Haldan, Avid Arcanist|CMR|281
+
+[Main]
+1 Sol Ring|C21|263
+40 Forest
+"""
+
+
+def test_count_commander_cards_single():
+    assert count_commander_cards(SAMPLE_DCK) == 1
+
+
+def test_count_commander_cards_partner_pair():
+    assert count_commander_cards(PARTNER_DCK) == 2
+
+
+def test_count_commander_cards_no_section_or_empty():
+    assert count_commander_cards("[Main]\n1 Sol Ring\n") == 0
+    assert count_commander_cards("") == 0
+    assert count_commander_cards(None) == 0
+
+
+def test_main_target_single_commander_is_99():
+    assert main_target(SAMPLE_DCK) == 99
+
+
+def test_main_target_partner_pair_is_98():
+    assert main_target(PARTNER_DCK) == 98
+
+
+def test_main_target_fragment_without_commander_keeps_99():
+    # A [Main]-only fragment carries no commander info; keep the
+    # historical single-commander assumption.
+    assert main_target("[Main]\n1 Sol Ring\n") == 99
+    assert main_target("") == 99

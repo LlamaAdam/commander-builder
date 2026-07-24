@@ -48,6 +48,7 @@ from ._helpers import (  # noqa: F401
     _match_pct_from_evidence,
     _normalize_pasted_deck,
     _pad_main_to_99,
+    _pad_main_to_target,
     _resolve_deck_path,
     _to_constructed_format,
 )

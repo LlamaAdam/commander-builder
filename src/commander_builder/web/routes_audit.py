@@ -46,7 +46,7 @@ from ._helpers import (
     _bracket_from_filename,
     _build_suggested_adds,
     _match_pct_from_evidence,
-    _pad_main_to_99,
+    _pad_main_to_target,
     _resolve_deck_path,
     _total_price_for_deck_text,
     project_average_deck_preview,
@@ -249,9 +249,11 @@ def _build_audit_payload(
     )
     # Pad sub-100 source decks with basics mirroring the deck's color
     # distribution so Forge will load the proposed deck; ``kept`` stays
-    # truthful and ``padded_count`` is surfaced separately.
+    # truthful and ``padded_count`` is surfaced separately. The padder
+    # reads its target off the deck's own [Commander] section (99 for
+    # a single commander, 98 for partners).
     post_swap_main = kept + len(added)
-    proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
+    proposed_text, padded_count, padded_breakdown = _pad_main_to_target(
         proposed_text, post_swap_main,
     )
     original_total, original_priced = _total_price_for_deck_text(original)

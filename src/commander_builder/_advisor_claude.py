@@ -60,7 +60,7 @@ Return JSON ONLY (no prose, no markdown):
 }
 
 Constraints:
-- Recommend 4-8 adds and 4-8 removes (the deck must stay at 99 cards in the [Main]).
+- Recommend 4-8 adds and 4-8 removes (the [Main] card count must not change — 99 for a single commander, 98 for partner decks).
 - Each `added` card SHOULD appear in `bracket_peer_references` when present, OR in EDHREC's data; rare deviations need strong synergy reason in the rationale.
 - Each `removed` card MUST be in the current decklist.
 - **Don't recommend cutting ANY land** (basic, dual, fetch, shock, MDFC, utility).

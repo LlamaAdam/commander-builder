@@ -55,6 +55,7 @@ from .deck_text_ops import (  # noqa: F401
     _is_basic_land_name,
     _normalize_pasted_deck,
     _pad_main_to_99,
+    _pad_main_to_target,
     _to_constructed_format,
 )
 from .deck_insights import (  # noqa: F401
