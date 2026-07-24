@@ -277,7 +277,8 @@ def _import_reference(deck_json: dict, source: str,
     # bracket came from Moxfield/EDHREC metadata and the estimator is
     # a heuristic; the import always proceeds. mismatch_warning
     # returns None both on agreement and on bracket 0/None (EDHREC
-    # decks that never declared one).
+    # decks that never declared one), and a NOTE (not a WARN) when the
+    # estimate is low-confidence — insufficient signal, not a mismatch.
     from .bracket_estimator import mismatch_warning
     warning = mismatch_warning(out_path.name, text, bracket)
     if warning:

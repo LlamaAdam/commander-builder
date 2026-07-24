@@ -763,7 +763,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # A mislabeled deck poisons the pool it joins (a de-facto B4 list
     # tagged [B2] farms wins off genuine B2 decks and skews every
     # ranking downstream), but the estimator is a heuristic so the
-    # human decides. mismatch_warning never raises; the per-deck read
+    # human decides. Low-confidence estimates come back as a NOTE
+    # ("unavailable/low-signal"), not a WARN — insufficient signal is
+    # not a mismatch. mismatch_warning never raises; the per-deck read
     # is guarded so one unreadable file can't abort curation.
     from .bracket_estimator import mismatch_warning
     for cand in candidates:

@@ -8,7 +8,11 @@ Pins:
     floor 4, 2+ extra turns -> floor 4;
   * each weighted signal's DIRECTION (tutors / fast mana / archetype /
     curve / salt push the raw score the right way);
-  * the mismatch policy (>= 1 -> "check", >= 2 -> "mismatch"/True);
+  * the mismatch policy (>= 1 -> "check", >= 2 -> "mismatch"/True) at
+    medium/high confidence, and the CONFIDENCE GATE: low-confidence
+    estimates (signal starvation) report "low_signal" instead of
+    check/mismatch, mismatch stays False, and every consumer renders
+    distinct "unavailable/low-signal" copy instead of a warning;
   * the never-raises contract on degenerate decks;
   * the dashboard payload shape;
   * the pool-hygiene warning (fires at diff >= 2, silent at 1) at the
@@ -268,6 +272,90 @@ def test_no_declared_no_mismatch_fields_set():
 
 
 # ---------------------------------------------------------------------------
+# Confidence gate: low-confidence estimates are "low_signal", never a
+# mismatch (the Atraxa/Chulane FP2 sweep case — a starved estimator
+# defaults to the B2 baseline and must not accuse the declared tag)
+# ---------------------------------------------------------------------------
+
+def test_low_confidence_gap_reports_low_signal_not_mismatch():
+    """Nothing fires (no GCs/tutors/fast mana/combos, no avg_cmc /
+    archetype / salt context) -> B2 baseline at LOW confidence.
+    Declared B4 (diff 2) must NOT flag a mismatch — it reports the
+    distinct 'low_signal' level with mismatch False."""
+    r = estimate_bracket(_deck(filler=30), declared=4)
+    assert r["estimate"] == 2
+    assert r["confidence"] == "low"
+    assert r["mismatch"] is False
+    assert r["mismatch_level"] == "low_signal"
+
+
+def test_low_confidence_diff_1_is_low_signal_not_check():
+    r = estimate_bracket(_deck(filler=30), declared=3)
+    assert r["confidence"] == "low"
+    assert r["mismatch_level"] == "low_signal"
+    assert r["mismatch"] is False
+
+
+def test_low_confidence_agreement_stays_clean():
+    """Low confidence + declared == estimate: no level at all (the
+    gate only rewrites disagreements, never invents one)."""
+    r = estimate_bracket(_deck(filler=30), declared=2)
+    assert r["confidence"] == "low"
+    assert r["mismatch_level"] is None
+    assert r["mismatch"] is False
+
+
+def test_medium_confidence_mismatch_still_flags():
+    """The gate is EXACTLY confidence == 'low': a medium-confidence
+    estimate (1-2 weighted signals, no floor) keeps the original >= 2
+    mismatch policy unchanged."""
+    deck = _deck("Diabolic Tutor", "Green Sun's Zenith",
+                 "Chord of Calling", "Fabricate", filler=30)
+    r = estimate_bracket(deck, declared=1)
+    assert r["confidence"] == "medium"
+    assert r["estimate"] - 1 >= 2
+    assert r["mismatch"] is True
+    assert r["mismatch_level"] == "mismatch"
+
+
+def test_mismatch_warning_low_confidence_gives_low_signal_note():
+    """mismatch_warning on a starved deck declared 2+ off: a NOTE with
+    the distinct unavailable/low-signal copy, never a WARN. Diff 1 at
+    low confidence stays silent (parity with the medium/high rule)."""
+    deck = _deck(filler=30)  # estimates B2 at low confidence
+    note = mismatch_warning("Cold Deck [B4].dck", deck, 4)
+    assert note is not None
+    assert note.startswith("NOTE:")
+    assert "WARN" not in note
+    assert "unavailable/low-signal: B2?" in note
+    assert "insufficient signal" in note
+    assert mismatch_warning("Cold Deck [B3].dck", deck, 3) is None
+
+
+def test_report_text_renders_low_signal_estimate():
+    """commander-advise report line: low_signal renders the distinct
+    unavailable/low-signal copy, no MISMATCH/check verdict."""
+    from commander_builder.improvement_advisor import (
+        AdviceReport, _format_report_text,
+    )
+    report = AdviceReport(
+        deck_filename="x.dck", deck_id=None, bracket=4,
+        commander_names=["Test Commander"],
+    )
+    est = estimate_bracket(_deck(filler=30), declared=4)
+    assert est["mismatch_level"] == "low_signal"
+    text = _format_report_text(report, bracket_estimate=est)
+    assert "Estimated bracket: unavailable/low-signal: B2?" in text
+    assert "insufficient signal" in text
+    assert "MISMATCH" not in text
+    # And a well-signaled mismatch keeps the legacy verdict line.
+    est2 = estimate_bracket(_four_gc_deck(), declared=2)
+    assert est2["mismatch_level"] == "mismatch"
+    text2 = _format_report_text(report, bracket_estimate=est2)
+    assert "MISMATCH vs declared" in text2
+
+
+# ---------------------------------------------------------------------------
 # Never-raises contract
 # ---------------------------------------------------------------------------
 
@@ -414,3 +502,57 @@ def test_pool_curator_main_warns_on_mislabeled_candidate(
     assert not any(
         "ok" in line for line in out.splitlines() if "WARN" in line
     )
+
+
+def test_meta_test_import_low_signal_ref_notes_not_warns(tmp_path, capsys):
+    """A starved reference (nothing classifiable) claiming B4 prints
+    the low-signal NOTE — never the mismatch WARN — and the import
+    proceeds."""
+    from commander_builder.meta_test import _import_reference
+
+    deck_json = {
+        "name": "Cold Ref", "publicId": "mx-2", "bracket": 4,
+        "boards": {
+            "commanders": {"cards": {
+                "k0": {"quantity": 1, "card": {"name": "Cmdr"}},
+            }},
+            "mainboard": {"cards": {
+                f"k{i}": {"quantity": 1, "card": {"name": f"Filler {i}"}}
+                for i in range(30)
+            }},
+        },
+    }
+    ref = _import_reference(deck_json, "moxfield_top_likes",
+                            deck_dir=tmp_path)
+    out = capsys.readouterr().out
+    assert "WARN" not in out
+    assert "NOTE" in out and ref.deck_filename in out
+    assert "unavailable/low-signal" in out
+
+
+def test_pool_curator_low_signal_candidate_notes_not_warns(
+    tmp_path, monkeypatch, capsys,
+):
+    """Starved candidates tagged [B4]: the hygiene pass prints the
+    low-signal NOTE instead of the mismatch WARN."""
+    import commander_builder.pool_curator as pc
+    from commander_builder.pool_curator import InsufficientSurvivorsError
+
+    names = [f"cold{i} [B4].dck" for i in range(4)]
+    for n in names:
+        (tmp_path / n).write_text(_deck(filler=30), encoding="utf-8")
+
+    monkeypatch.setattr(pc, "DECK_DIR", tmp_path)
+    monkeypatch.setattr(
+        pc, "_list_bracket_candidates", lambda bracket: list(names),
+    )
+    monkeypatch.setattr(
+        pc, "curate_bracket",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            InsufficientSurvivorsError("stop", rejected=[])
+        ),
+    )
+    assert pc.main(["--bracket", "4"]) == 3
+    out = capsys.readouterr().out
+    assert "WARN" not in out
+    assert "NOTE" in out and "unavailable/low-signal" in out

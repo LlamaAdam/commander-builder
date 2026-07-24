@@ -1062,21 +1062,30 @@ def _format_report_text(
     # bracket_estimator.estimate_bracket dict; None keeps the legacy
     # output byte-identical (callers that don't compute it lose
     # nothing). Mismatch levels per the estimator's documented rule:
-    # diff >= 2 hard "MISMATCH", diff == 1 soft "check".
+    # diff >= 2 hard "MISMATCH", diff == 1 soft "check", and
+    # "low_signal" when the estimate is low-confidence (signal
+    # starvation) — rendered as unavailable/low-signal, never as a
+    # verdict against the declared bracket.
     if bracket_estimate and bracket_estimate.get("estimate") is not None:
         est = bracket_estimate["estimate"]
         level = bracket_estimate.get("mismatch_level")
-        if level == "mismatch":
-            verdict = "MISMATCH vs declared"
-        elif level == "check":
-            verdict = "check vs declared"
+        if level == "low_signal":
+            lines.append(
+                f"Estimated bracket: unavailable/low-signal: B{est}? "
+                f"(insufficient signal to compare vs declared)"
+            )
         else:
-            verdict = "matches declared"
-        lines.append(
-            f"Estimated bracket: B{est} "
-            f"({bracket_estimate.get('confidence', '?')} confidence) — "
-            f"{verdict}"
-        )
+            if level == "mismatch":
+                verdict = "MISMATCH vs declared"
+            elif level == "check":
+                verdict = "check vs declared"
+            else:
+                verdict = "matches declared"
+            lines.append(
+                f"Estimated bracket: B{est} "
+                f"({bracket_estimate.get('confidence', '?')} confidence) — "
+                f"{verdict}"
+            )
         for reason in bracket_estimate.get("reasons", []):
             lines.append(f"    {reason}")
     # Health grade (ManaFoundry parity) — one letter aggregating the
