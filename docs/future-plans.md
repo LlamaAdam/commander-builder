@@ -619,3 +619,312 @@ per-CMC Karsten source model. The first cut leans on the seed for coherence
 and hands the rest to the improve loop; closing that gap — genuine
 synthesis for commanders with no published average deck — is the remaining
 FP-014 research.
+
+---
+
+# FP-015 — Unified per-card scoring formula (`CardScore`)
+
+**Status: PARKED — spec'd 2026-07-24, not started.** Unblock condition:
+none external; this is buildable today against shipped modules. Held out
+of the active queue because it should land *behind a flag* and be
+validated as a ranking, not merged on face plausibility (see
+"How this gets validated" — that framing is the whole point of the plan).
+
+## The gap
+
+There is **no per-card score anywhere in the codebase.** Card ordering is
+done in four unrelated places, none of which produce a comparable scalar,
+and two of which are not scores at all:
+
+- `_advisor_heuristic._heuristic_swap_recommendations` orders adds by
+  **bucket insertion order** (`high_synergy` → `top_cards` →
+  `average_deck` → `tag_*` → `new_cards`), then re-sorts by
+  `_rank(r) = (role_rank, trending_rank)`. `inclusion_pct` and
+  `synergy_pct` are used **only as boolean gates** (`>= MIN_SYNERGY_PCT`
+  25.0, `>= MIN_INCLUSION_PCT_FOR_ADD` 30.0) and to build rationale
+  strings. Neither ever enters a sort key.
+- Cuts are ordered by `sorted(deck_cards)` — **alphabetically**. The
+  comment at `_advisor_heuristic.py:490` concedes it: *"no per-card score
+  exists at this point."*
+- `lift_analysis.lift_candidates` is the only genuine per-card number:
+  `score = mean(top-5 lifts)` where `lift = (co * n) / (ca * cb)`.
+  Co-occurrence only — no mana value, no role, no color, no price, no
+  curve, no combo membership.
+- `deck_builder_personalize.synergy_scorer` computes a *different* shape
+  over the same matrix (`Σ (lift - 1)` over all deck cards — unbounded,
+  rewards breadth) and is used side-by-side with `lift_candidates`'
+  mean-of-top-5 in `lift_swaps`. **The two are not on the same scale.**
+
+Two "match %" scales also already disagree: `deck_dashboard.match_score`
+adds a `max(0, 5 - rank_in_list)` bonus that
+`web/_helpers._match_pct_from_evidence` deliberately omits.
+
+Meanwhile these signals exist, are computed, and are **thrown away at
+ranking time**: `CardEntry.num_decks` (parsed, read nowhere), combo
+membership (a candidate that completes a 2-card combo already half-present
+in the deck gets **zero** boost), mana value, role deficit *magnitude*
+(only the ordered role list survives), salt, Game-Changer status (boolean
+gate only), ownership (tiebreak only), price, and Scryfall's `edhrec_rank`
+and `produced_mana` (present in every cached snapshot, **read by zero
+code**).
+
+## Honest framing — read this before building
+
+FP-014 states the project's position plainly: *"assembled decks get
+Forge-VALIDATED, not just heuristically scored… Every other from-scratch
+builder stops at a static power heuristic."* And FP-002's 2026-07-23
+result is that at n=45, **no pre-sim deck feature predicts curation margin
+at |t| >= 2**.
+
+Both are reasons to scope this correctly rather than reasons to skip it.
+`CardScore` is **not** a truth claim about card quality and must not be
+sold as one. It is a **ranking prior that shrinks the search space Forge
+has to validate.** The curator/sim stays the arbiter; the formula decides
+what gets simmed first.
+
+That framing survives FP-002's null result — a scorer can be a useful
+*ordering* even when no single feature *regresses* on margin. And it
+composes with FP-012: the score becomes the UCB1/Thompson **prior**, so
+the bandit's arm search starts warm instead of uniform, which is where the
+sim-cost savings actually come from.
+
+## Shape
+
+Multiplicative gates × weighted additive base × bounded modifiers. Same
+structural pattern as `bracket_estimator.DEFAULT_WEIGHTS` — **one
+documented dict as the tuning surface**, every term explainable in a UI
+tooltip, no term that can't be written as one sentence to the user.
+
+```
+CardScore(card | deck, commander, bracket, context)
+  = Gate(card) * [ 100 * Σ w_k * f_k(card | deck) + Σ m_j(card | deck) ]
+  clamped to [0, 100]
+```
+
+### Gates (multiplicative, 0 or 1; a failure is reported with its reason)
+
+| Gate | Zero when |
+|---|---|
+| `legal` | `legalities.commander != "legal"` — **from Scryfall, not a hardcoded set** (see the FP-015 prerequisite below) |
+| `color_identity` | `card.color_identity` not a subset of the commander's |
+| `singleton` | already in the deck and not a basic land |
+| `bracket_cap` | adding it would exceed the bracket's Game Changer cap (0 at B1/B2, 3 at B3) |
+
+### Base components (all `f_k` in `[0, 1]`; weights sum to 1.0)
+
+```python
+CARD_SCORE_WEIGHTS = {
+    "consensus":   0.18,   # does the format agree this belongs here
+    "synergy":     0.24,   # does it fit THIS deck
+    "role_fit":    0.28,   # does the deck need this job done
+    "curve_fit":   0.16,   # does it fit the curve and land count
+    "mana_fit":    0.14,   # does it help meet Karsten color-source targets
+}
+```
+
+**`consensus`** — `clamp(inclusion_pct / 60.0, 0, 1)`. 60% saturates;
+above that we're measuring "is a staple," which `role_fit` handles better.
+Offline fallback uses Scryfall's `edhrec_rank` (already cached, unread):
+`clamp(1 - log10(rank) / 4.5, 0, 1)`.
+
+**`synergy`** — blends the two independent synergy signals:
+```
+0.55 * clamp(synergy_pct / 40.0, 0, 1)
++ 0.45 * clamp((lift_score - 1.0) / 2.0, 0, 1)
+```
+When the corpus is under `MIN_CORPUS_DECKS` (10), **renormalize to the
+EDHREC term alone** rather than feeding a zero — the same
+"unavailable != bad" contract `deck_health` signals already honor by
+returning `None`.
+
+**`role_fit`** — the deficit-driven term, and the thing that makes this
+deck-relative rather than a global power ranking:
+```python
+if count < target:
+    f = 0.5 + 0.5 * (target - count) / target
+elif count < ROLE_SATURATION_THRESHOLDS[role]:
+    f = 0.5 * (1 - (count - target) / (sat - target))
+else:
+    f = 0.0
+```
+Two upstream changes this needs: add `finisher: 3` to `ROLE_TARGETS`
+(today there is **no win-condition target at all** — a deck of 99 ramp and
+draw satisfies every role), and make `role_target_report` count the
+commander, letting a commander that fills a role reduce that role's target
+(Edric should not demand 10 draw spells).
+
+**`curve_fit`** — needs an MV histogram, which nothing currently computes:
+```python
+deficit = max(0.0, target_curve[mv] - actual_curve[mv])
+f = clamp(deficit / max(1.0, target_curve[mv]), 0, 1)
+```
+`target_curve` shifts down for aggro/combo, up for control. **This is
+where `archetype.classify` finally earns its keep** — today it feeds only
+pod diversity and a bracket nudge, and touches card selection nowhere.
+
+**`mana_fit`** — highest-value component, and the one no competitor has,
+because the math is already written:
+```python
+targets  = color_source_targets(identity, pip_stats(deck_names, lookup))
+sources  = current_source_counts(deck_names, lookup)   # land_color_sources()
+produced = card.get("produced_mana") or []             # <- currently unread
+f = mean(clamp((targets[c] - sources[c]) / max(1, targets[c]), 0, 1)
+         for c in produced if c in identity) if produced else 0.0
+```
+`KARSTEN_99_SOURCES` + `color_source_targets` currently run **only at
+build time** and are never used to evaluate an existing deck. This turns
+the best math in the repo from write-only into an evaluative signal.
+
+### Modifiers (additive on the 0–100 scale, each bounded, each with an explanation string)
+
+| Modifier | Range | Trigger |
+|---|---|---|
+| `combo_completion` | **+15** | completes a known combo where every other piece is already in the deck |
+| `combo_partial` | **+6** | 3-card combo with 2 pieces present |
+| `redundancy_relief` | **+5** | deck has < 3 instances of an effect this card duplicates |
+| `owned` | **+6** | `collection.owns()` and collection bias is active |
+| `price_penalty` | −0 … −12 | `-12 * clamp((usd - soft_cap) / soft_cap, 0, 1)` |
+| `salt_penalty` | −0 … −10 | bracket <= 3 only: `-10 * clamp((salt - 1.5) / 2.5, 0, 1)`, matching `_SALT_WARN_THRESHOLD` |
+| `bracket_pressure` | −0 … −20 | tutors already at the bracket's budget ("tutors should be sparse" at B1/B2); fast mana over budget; an extra-turn card when one is already present (B1/B2 forbid outright, B3 forbids chaining); any MLD card at B <= 3 |
+| `mdfc_bonus` | **+3** | modal land — already tracked in `_MDFC_LANDS`, already worth 0.5 land in the health grade |
+
+`combo_completion` is the modifier that visibly changes recommendations on
+day one, and it costs almost nothing: `combo_detection` already loads the
+combo list, it just never gets consulted during ranking.
+
+## Cut scoring
+
+Cuts are alphabetical today. Reuse the same function against the deck
+*minus that card*, so a saturated role correctly surfaces its weakest
+member:
+
+```python
+cut_score(card) = 100 - CardScore(card | deck_without_card, ...)
+```
+
+Guard rails, **all of which already exist** and must be preserved: never
+cut a `Protect=` line; never cut below `ROLE_TARGETS` on any role; never
+cut a land if effective lands would drop below the 33 floor; never cut a
+piece of a detected in-deck combo; respect the like-for-like role
+constraint enforced at `deck_builder_personalize.lift_swaps:217-224`.
+
+## Plug-in seams (highest leverage first, signatures current)
+
+1. **`_advisor_heuristic.py:403`** — replace `_rank(r) -> tuple[int, int]`
+   with `score_card(...) -> float`. `inclusion_pct`, `synergy_pct`,
+   `candidate_bucket`, `role`, and `is_trending` are **all already in
+   scope** at that point and discarded. The values already flow into
+   `SwapRecommendation.evidence` (lines 383–389), so the UI can render the
+   component breakdown with **no schema change**.
+2. **`_advisor_heuristic.py:490`** — the alphabetical cut loop.
+3. **`deck_builder_personalize.synergy_scorer` (line 91)** — already
+   consumed as `quality_of: Callable[[str], float]` by
+   `apply_collection_bias` and `lift_swaps`. A composite scorer drops into
+   that slot with **zero signature churn**, upgrading personalization
+   stages 1 and 3 at once.
+4. **`deck_builder._fallback_candidates` (line 304)** — raw bucket
+   concatenation, truncated by `nonlands[:nonland_target]`. Ordering here
+   literally decides which cards make the 99 on the no-average-deck path,
+   which is exactly FP-014's acknowledged weak path ("a *defensible pile*,
+   not a coherent deck"). **Biggest single quality win for
+   `commander-build`.**
+5. **`lift_analysis.lift_candidates` (line 458)** — its docstring calls it
+   *"the one true definition — every surface routes through here."*
+   Widening its row with `components: dict` propagates the breakdown to
+   dashboard, advisor, CLI report, and builder for free.
+
+**Do NOT put this in `staples.classify_role`** — that function's internal
+`score` field is a classifier argmax with entirely different semantics.
+Overloading it would silently change role labels project-wide.
+
+## Prerequisites (small, independently shippable, each valuable alone)
+
+- **Scryfall-backed legality.** `web/routes_decks.py:885` `_CORE_BANS` is
+  a hand-typed set inside a route function and is wrong in both
+  directions as of the 2026-02-09 B&R: it flags **Coalition Victory** and
+  **Panoptic Mirror** as banned (both are on the *Game Changers* list —
+  we tell users a WotC-blessed B3 card is illegal), plus Painter's
+  Servant, Worldfire, Sway of the Stars, and Tempest Efreet; and it
+  **misses** Balance, Fastbond, Flash, Golos, Griselbrand, Karakas,
+  Leovold, Paradox Engine, Rofellos, and Tolarian Academy. It also has no
+  representation for Lutri, the Spellchaser's new **"banned as a
+  companion"** designation, and lists `Time Vault` twice.
+  `legalities.commander` is already in every snapshot
+  (`scryfall_client.py:246` projects it) and auto-updates with the format.
+  Delete the set; keep a tiny overlay only for the Lutri carve-out.
+- **MV histogram + `finisher` in `ROLE_TARGETS`** — prerequisites for
+  `curve_fit` and `role_fit` respectively.
+- **`manabase_report()`** — run the existing
+  `pip_stats` → `color_source_targets` → `land_color_sources` pipeline
+  over an *existing* deck. Prerequisite for `mana_fit`, and a health-grade
+  component in its own right.
+- **`combo_detection.one_piece_away()`** — prerequisite for
+  `combo_completion`, and the most actionable single suggestion type the
+  advisor could emit.
+- **Pass `avg_cmc` + `archetype` to every `estimate_bracket` caller.**
+  Only `deck_dashboard.py:565` does today; `improvement_advisor.py:1283`
+  and `deck_builder.py:994` (the **bracket-steering loop**) pass neither,
+  so `curve_tight` / `curve_high` / `archetype_combo` / `archetype_stax` —
+  1.5 points on a 1–5 scale — can never fire during `commander-build`
+  steering or `commander-advise`. Not strictly a `CardScore` prerequisite,
+  but it's the same missing plumbing (`avg_cmc` is one line;
+  `deck_dashboard.py:384` already computes it).
+
+## How this gets validated (the part that makes it worth merging)
+
+**Not** R² against margin. FP-002 already establishes that no pre-sim
+feature clears |t| >= 2 at n=45; a card scorer would fail that bar too and
+that failure would be uninformative. Four tiers instead, cheapest first:
+
+1. **Ordinal sanity suite** — assert known orderings on fixed decks.
+   Sol Ring > Worn Powerstone in every deck; Rhystic Study > Divination at
+   B4 with the gap narrowing at B2. Pure-stdlib, offline, milliseconds.
+   Catches sign errors and weight typos, which is most of what goes wrong.
+2. **Rank correlation against our own history** — for every
+   `knowledge_log` iteration with `verdict='kept'`, the manifest's added
+   cards should score above its cut cards. Spearman ρ over the manifest.
+   **Mind the data caveats:** the win-rate denominator changed
+   2026-07-19/20 (bucket by write date) and `id < 314` rows are A/B
+   name-attribution artifacts.
+3. **The real test — top-k-by-score vs. k-by-current-bucket-order**, both
+   A/B simmed through `compare_versions` at equal game counts. This is a
+   direct, conclusive answer to *"does the formula help?"* using the
+   harness that already exists, and unlike a regression it does not need a
+   per-feature t-stat to be readable.
+4. **Feed FP-002.** The per-color source deficits from `manabase_report`
+   (and consistency metrics, if the opening-hand work lands) are exactly
+   the kind of **pre-sim, continuous** features the 31-feature set lacks —
+   its current features are overwhelmingly post-hoc sim outputs plus
+   coarse `deck_health` counts, which is part of why nothing regresses.
+
+Ship behind a flag; default off until tier 3 reads positive.
+
+## Substrate that already exists (why this is cheap to start)
+
+`staples.classify_role_extended` / `ROLE_TARGETS` /
+`ROLE_SATURATION_THRESHOLDS` / `role_target_report`, `lift_analysis`,
+`edhrec_client.CardEntry`, `combo_detection`, `game_changers`,
+`collection.owns`, `deck_pricing`, `bracket_estimator.DEFAULT_WEIGHTS`
+(the pattern to copy), `deck_builder_manabase.KARSTEN_99_SOURCES` /
+`color_source_targets` / `pip_stats` / `land_color_sources`, and the
+Scryfall snapshot cache (including `edhrec_rank` and `produced_mana`,
+both cached and both currently unread) are all shipped and tested.
+
+## Honest limitations to write into the module docstring
+
+- **It is a prior, not a verdict.** Every number it emits is a heuristic
+  ordering. Forge remains the arbiter; nothing about this plan changes
+  that, and the UI must not present a `CardScore` as a power rating.
+- **Weights are hand-set until tier 3 reads positive.** They encode our
+  priors about Commander, not measured effect sizes.
+- **`role_fit` inherits `classify_role`'s regex accuracy.** Misclassified
+  cards get mis-scored, and the failure is silent. The Forge card scripts
+  (`forge_script_parser.CardScript.abilities[].effect` — the actual Forge
+  effect primitive, fully offline) are the better long-term classifier and
+  are currently used only for aggregate counters in
+  `deck_library_analyzer`.
+- **`synergy` degrades to EDHREC-only under 10 harvested decks**, so early
+  users get a meaningfully different (and more generic) ranking than
+  users with a corpus. Surface which mode is active rather than hiding it.
+- **`curve_fit` assumes cast turn = MV**, the same simplification
+  `deck_builder_manabase` already makes and documents.

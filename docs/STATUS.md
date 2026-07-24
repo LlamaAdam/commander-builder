@@ -610,6 +610,51 @@ manifests + sim outcomes + Magic rules + oracle snapshots. ~$80–$200
 LoRA cost on A100. **Status: PARKED, do not promote.** Needs 2000+
 iteration rows; realistic timeline 18–30 months out.
 
+### FP-015 — Unified per-card scoring formula (`CardScore`)
+
+There is **no per-card score anywhere in the codebase**: the advisor
+orders adds by bucket insertion order then `(role_rank, trending_rank)`,
+and orders **cuts alphabetically** (`_advisor_heuristic.py:490` concedes
+it). `inclusion_pct` / `synergy_pct` are boolean gates and rationale text
+only — they never enter a sort key. Combo membership, mana value, role
+deficit *magnitude*, salt, price, ownership, and Scryfall's cached
+`edhrec_rank` + `produced_mana` are all discarded at ranking time.
+
+The plan: gates × five weighted components (consensus, synergy, role fit,
+curve fit, mana fit) × bounded modifiers, mirroring
+`bracket_estimator.DEFAULT_WEIGHTS` as a single documented tuning surface.
+Plugs into `_advisor_heuristic._rank`, the cut loop,
+`deck_builder_personalize.synergy_scorer` (already a
+`Callable[[str], float]` slot — zero signature churn), and
+`deck_builder._fallback_candidates` (which decides the 99 on FP-014's
+weak no-average-deck path).
+
+**Status: PARKED — spec'd 2026-07-24, not started.** No external blocker;
+buildable today against shipped modules. Parked because it must ship
+**behind a flag** and be validated as a *ranking*, not merged on face
+plausibility: top-k-by-score vs. k-by-current-bucket-order, both A/B
+simmed through `compare_versions`. **Explicitly not** validated by
+regression on margin — FP-002 already shows nothing clears |t| >= 2 at
+n=45, and a card scorer would fail that bar uninformatively. Framed
+throughout as a **ranking prior that shrinks the space Forge validates**,
+not a power rating (FP-014's "Forge-VALIDATED, not just heuristically
+scored" stance is preserved, not contradicted); it also gives FP-012's
+bandit a warm prior instead of a uniform one.
+
+**Small independently-shippable prerequisites**, each worth doing alone:
+Scryfall-backed legality (`_CORE_BANS` at `web/routes_decks.py:885` is
+wrong in **both** directions post-2026-02-09 — it flags Coalition Victory
+and Panoptic Mirror as banned when both are on the *Game Changers* list,
+and misses 10 actually-banned cards incl. Fastbond, Flash, Griselbrand,
+Karakas, Tolarian Academy, with no handling for Lutri's new "banned as a
+companion" status); passing `avg_cmc` + `archetype` to **all three**
+`estimate_bracket` callers (only the dashboard does today, so 1.5 points
+of weight can never fire during `commander-build` bracket steering);
+`manabase_report()` to run the existing Karsten math on existing decks;
+an MV histogram; `finisher` in `ROLE_TARGETS`; and
+`combo_detection.one_piece_away()`. Full spec in
+[docs/future-plans.md](future-plans.md).
+
 ### Sister projects
 
 - **`forge_py`** at `C:\dev\forge_py\` — Python-native goldfish + combat
