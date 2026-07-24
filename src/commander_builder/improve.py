@@ -535,7 +535,31 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                         "(default 0.2).")
     p.add_argument("--ucb-c", type=float, default=1.4,
                    help="Exploration constant for --bandit-policy ucb1 "
-                        "(default 1.4).")
+                        "(default 1.4). Also used by --search-budget's "
+                        "UCB1 policy.")
+    # Budget-bounded swap search (FP-012 full slice). 0 = disabled, and
+    # the greedy path is then byte-identical to pre-slice behavior
+    # (pinned by test: the search module is never even imported).
+    p.add_argument("--search-budget", type=int, default=0, metavar="N",
+                   help="Total probe sims per round for the UCB1 swap "
+                        "search (default 0 = disabled; plain greedy "
+                        "rounds). When set, each round builds swap arms "
+                        "from the advisor's OFFLINE candidate pool (no "
+                        "Claude in the inner loop), spends N single-swap "
+                        "A/B sims learning which swaps move the win "
+                        "rate, applies the best arm(s) with at least "
+                        "--search-min-pulls observations, then runs the "
+                        "normal keep-if-better verdict sim. HONEST COST: "
+                        "each pull is a FULL A/B sim of --sim-games pod "
+                        "games, so a round costs ~(N+1) x sim-games "
+                        "Forge games (~(N+1) x 10+ min at the 45-game "
+                        "default). Incompatible with --strategy bandit.")
+    p.add_argument("--search-min-pulls", type=int, default=2, metavar="K",
+                   help="Minimum pulls (independent probe sims) an arm "
+                        "needs before it may be applied (default 2 -- a "
+                        "single ~22-decisive-game sim has a ~0.1 win-rate "
+                        "standard error, so one lucky pull is not "
+                        "evidence). Only used with --search-budget.")
     # Intent learning (FP-012 Slice A).
     p.add_argument("--learn-intent", dest="learn_intent_path",
                    type=Path, default=None, metavar="DCK",
@@ -580,6 +604,35 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     if args.rounds < 1:
         print(f"ERROR: --rounds must be >= 1, got {args.rounds}", flush=True)
         return 2
+
+    # --search-budget validation, all before any Forge/LLM/deck work.
+    if args.search_budget < 0:
+        print(f"ERROR: --search-budget must be >= 0, got "
+              f"{args.search_budget}", flush=True)
+        return 2
+    if args.search_budget and args.strategy == "bandit":
+        # Two different searches over the same swap space in one run
+        # makes no sense: --strategy bandit REPLACES the round loop,
+        # --search-budget runs INSIDE it. Refuse rather than pick one.
+        print("ERROR: --search-budget runs inside the greedy round loop "
+              "and is incompatible with --strategy bandit; drop one.",
+              flush=True)
+        return 2
+    if args.search_budget:
+        if args.search_min_pulls < 1:
+            print(f"ERROR: --search-min-pulls must be >= 1, got "
+                  f"{args.search_min_pulls}", flush=True)
+            return 2
+        if args.search_budget < args.search_min_pulls:
+            # Structurally useless: no arm could ever accumulate
+            # min_pulls observations, so every round would burn the
+            # whole budget and then apply nothing. Refuse up front
+            # instead of wasting hours of Forge time on a no-op.
+            print(f"ERROR: --search-budget {args.search_budget} < "
+                  f"--search-min-pulls {args.search_min_pulls}: no arm "
+                  f"could ever qualify, every round would be a no-op. "
+                  f"Raise the budget or lower min-pulls.", flush=True)
+            return 2
 
     # Resolve the deck to an on-disk .dck.
     from .web._helpers import _bracket_from_filename, _resolve_deck_path
@@ -661,14 +714,28 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
         )
 
     if not args.json:
+        search_note = (f", search-budget={args.search_budget} pulls/round"
+                       if args.search_budget else "")
         print(f"[improve] {deck_id} (B{args.bracket}) -- strategy={args.strategy}, "
               f"up to {args.rounds} rounds, mode={args.mode}, "
-              f"{args.sim_games} games/round", flush=True)
+              f"{args.sim_games} games/round{search_note}", flush=True)
 
     if args.strategy == "bandit":
         return _run_bandit_strategy(deck_path, deck_id, args)
 
-    result = run_improve_loop(deck_path, deck_id, args.rounds, args)
+    # Round-fn selection (FP-012 full slice): --search-budget swaps the
+    # curator-driven round for the bandit-search round. The import is
+    # deliberately INSIDE the branch so the disabled path (budget 0,
+    # the default) never even loads the search module — the greedy
+    # behavior stays byte-identical, and the test suite pins that by
+    # spying that make_search_round_fn is never constructed.
+    round_fn = _default_round_fn
+    if args.search_budget:
+        from .improve_search import make_search_round_fn
+        round_fn = make_search_round_fn()
+
+    result = run_improve_loop(deck_path, deck_id, args.rounds, args,
+                              round_fn=round_fn)
 
     if args.json:
         print(json.dumps(result.to_dict(), indent=2))
