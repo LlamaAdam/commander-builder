@@ -365,6 +365,73 @@ remains, parked on `forge_py` game-state (with FP-001).
 
 ---
 
+# FP-012 — budget-bounded UCB1 swap search in the improve loop (full slice)
+
+**Status: SHIPPED 2026-07-24 (code + tests); empirical validation
+PENDING post-soak.** The full-slice search deliberately shipped without
+a live Forge shakedown — the gauntlet soak owns the CPU — so the design
+below is unit-verified against injected sims only. Post-soak, run a
+real `--search-budget` improve round and compare against a plain greedy
+round before trusting it with overnight budgets.
+
+## What shipped
+
+`commander-improve --search-budget N` (plus `--search-min-pulls`,
+default 2) puts a UCB1 bandit INSIDE each greedy improve round:
+`improve_search.py` builds swap arms, searches under a sim budget, and
+hands the winners to the unchanged keep-if-better round machinery.
+`--search-budget 0` (default) is byte-identical greedy — pinned by a
+test that spies the search module is never constructed.
+
+- **Arm** = one concrete (cut X, add Y) swap from the advisor's
+  already-filtered candidate pool (`improvement_advisor.advise`,
+  offline sources only: `heuristic` = EDHREC inclusion/synergy,
+  `bracket_peers` = local tuned builds; `--source claude` is coerced to
+  `heuristic` with a stderr note — the curator stays OUT of the search
+  inner loop, rewards come from sims, not model judgment). Adds pair
+  with cuts i-mod-n, the slice-2 convention; protected cards
+  (`--protect`, `--protect-from`, deck `Protect=`, intent wincons)
+  never become cut arms. Pool capped at `budget // min_pulls` — a
+  wider pool only dilutes UCB1's mandatory cold-start.
+- **Pull** = apply that ONE swap to the round's base deck (through the
+  shared `apply_proposal_to_deck` legality path) and run ONE A/B sim of
+  `--sim-games`. **Reward** = the decisive margin mapped to UCB1's
+  required [0,1]: `(m+1)/2` with `m = (wins_new − wins_old)/decisive`,
+  which collapses to `wins_new/decisive`. Zero decisive games → no
+  reward update, arm marked dead (no signal ≠ break-even).
+- **Budget** = `--search-budget` total pulls per round; UCB1
+  exploration constant reuses `--ucb-c` (default 1.4 ≈ √2). After
+  exhaustion, arms with ≥ `--search-min-pulls` pulls AND mean strictly
+  above break-even (0.5) win, best-mean first, capped at 3 applied
+  swaps per round (interaction effects are unmeasured by independent
+  arms — that's the still-parked GP slice B2).
+- **Round contract unchanged:** winners form a normal `Proposal`
+  (source `bandit-search`), applied via the shared legality guards,
+  logged to knowledge_log, verdict-simmed once more as a combined deck,
+  and `run_improve_loop` advances only on `kept`, exactly as before.
+- **Honest cost:** a round costs ≈ `(N+1) × sim-games` Forge pod games
+  (documented in `--help`); `--search-budget < --search-min-pulls` is
+  refused up front because no arm could ever qualify.
+
+Tests: `tests/test_improve_search.py` — 27 deterministic tests
+(hand-computed UCB1 pull-sequence pin, reward-mapping algebra,
+zero-decisive marking, budget/min-pulls interplay, winner cap, offline
+candidate sourcing incl. the claude-coercion, full round integration
+through `run_improve_loop` with injected arm builder + sim, legality
+guard kill-path, CLI wiring + validation). No test touches Forge.
+
+## Open questions for the post-soak shakedown
+
+1. Does per-swap probing beat spending the same total games on one
+   bigger verdict sim of the curator's proposal? (FP-002 says curation
+   is ~neutral on average — the bandit's bet is that per-swap
+   attribution finds the wins the averaged proposal buries.)
+2. Is 45 games/pull the right probe size, or do cheaper noisier pulls
+   (more of them) win under UCB1? Reward variance vs pull count is
+   exactly the bandit's trade to tune.
+
+---
+
 # FP-010 — Desktop EXE (status + how to build)
 
 **Decision (2026-05-26):** package the web app as a double-click desktop EXE.

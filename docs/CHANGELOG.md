@@ -6,6 +6,27 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-24 — FP-012 full slice: budget-bounded UCB1 swap search in the improve loop
+
+#### Added
+
+- **`feat(fp-012)`: `commander-improve --search-budget N`** (+
+  `--search-min-pulls`). New `improve_search.py`: each improve round runs a
+  UCB1 bandit over single-swap arms drawn from the advisor's OFFLINE
+  candidate pool (heuristic / bracket_peers; `--source claude` is coerced —
+  the curator stays out of the search inner loop). One pull = one A/B sim of
+  one swap; reward = decisive-share win rate `wins_new/decisive` (the [0,1]
+  affine map of the decisive margin); zero-decisive pulls mark the arm dead
+  with no reward update. After the budget, arms with ≥ min-pulls evidence and
+  mean strictly above break-even (max 3) form the round's proposal, applied
+  through the shared legality-guard path, and the UNCHANGED keep-if-better
+  verdict machinery decides advancement. `--search-budget 0` (default) is
+  byte-identical greedy, pinned by a never-constructed spy test. Honest cost
+  in `--help`: ≈ `(N+1) × sim-games` pod games per round. 27 new
+  deterministic tests (injected sims; hand-computed UCB1 sequence pin).
+  **Empirical Forge shakedown deferred post-soak** — see FP-012 in
+  [future-plans.md](future-plans.md).
+
 ### 2026-07-21 — FP-014 build-from-scratch, first cut (4 commits, UNMERGED)
 
 Lives on `feature/fp014-build-from-scratch`, pending PR. The first vertical
