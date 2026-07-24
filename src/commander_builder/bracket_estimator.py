@@ -191,6 +191,16 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 # means the deck is playing a different game than its label — the
 # pool-poisoning case pool_curator/meta_test warn about). The boolean
 # ``mismatch`` field is True only at the hard >= 2 level.
+#
+# CONFIDENCE GATE: both levels require the estimate to be better than
+# "low" confidence. A low-confidence estimate means NOTHING fired — the
+# deck hit none of the name lists and no context signal (avg_cmc /
+# archetype / salt cache) was available — so the "estimate" is just the
+# untouched B2 baseline. That is evidence of signal starvation, not of
+# mislabeling: a genuinely casual list and an un-classifiable powerful
+# list look identical to it. Such estimates report the distinct
+# "low_signal" level instead (mismatch stays False) so consumers can
+# say "insufficient signal" rather than accuse the declared tag.
 _MISMATCH_HARD_DIFF = 2
 
 
@@ -314,9 +324,16 @@ def estimate_bracket(
           "signals": {..},        # raw signal values for programmatic
                                   # consumers / the UI details pane
           "declared": int|None,
-          "mismatch": bool,       # |est - declared| >= 2
-          "mismatch_level": None | "check" | "mismatch",
+          "mismatch": bool,       # |est - declared| >= 2 AND the
+                                  # confidence is better than "low"
+          "mismatch_level": None | "check" | "mismatch" | "low_signal",
         }
+
+    ``"low_signal"`` replaces both other levels whenever the estimate
+    is low-confidence (nothing fired / tiny list): the estimator has
+    insufficient signal to dispute the declared bracket, so consumers
+    should render "estimate unavailable/low-signal", never a mismatch
+    warning.
     """
     try:
         return _estimate_bracket_inner(
@@ -527,10 +544,16 @@ def _estimate_bracket_inner(
         confidence = "low"
 
     # --- declared-vs-estimated ----------------------------------------------
+    # Confidence-gated (see _MISMATCH_HARD_DIFF policy comment): a
+    # low-confidence estimate is signal starvation, not evidence, so
+    # any disagreement reports "low_signal" instead of check/mismatch
+    # and the boolean stays False.
     mismatch_level: Optional[str] = None
     if declared is not None:
         diff = abs(estimate - declared)
-        if diff >= _MISMATCH_HARD_DIFF:
+        if diff >= 1 and confidence == "low":
+            mismatch_level = "low_signal"
+        elif diff >= _MISMATCH_HARD_DIFF:
             mismatch_level = "mismatch"
         elif diff >= 1:
             mismatch_level = "check"
@@ -581,15 +604,31 @@ def mismatch_warning(
     Shared by pool_curator's candidate listing and meta_test's
     reference importer so both surfaces phrase the warning identically.
     Never raises (estimate_bracket guarantees it).
+
+    Confidence-aware: when the estimate is LOW-confidence and would
+    have flagged (diff >= 2), the return is a NOTE line saying the
+    estimate is low-signal — distinct copy, so a starved estimator
+    never accuses a declared tag it has no evidence against. Diff-1
+    disagreements stay silent at every confidence (soft "check" is
+    dashboard territory).
     """
     if declared is None or declared == 0:
         return None
     result = estimate_bracket(deck_text, declared=declared)
-    if not result.get("mismatch"):
-        return None
-    return (
-        f"WARN: {filename} declares B{declared} but estimates "
-        f"B{result['estimate']} ({result['confidence']} confidence) — "
-        f"mislabeled decks poison sim pools. "
-        f"Top reason: {result['reasons'][0] if result['reasons'] else 'n/a'}"
-    )
+    if result.get("mismatch"):
+        return (
+            f"WARN: {filename} declares B{declared} but estimates "
+            f"B{result['estimate']} ({result['confidence']} confidence) — "
+            f"mislabeled decks poison sim pools. "
+            f"Top reason: {result['reasons'][0] if result['reasons'] else 'n/a'}"
+        )
+    if (
+        result.get("mismatch_level") == "low_signal"
+        and abs(result["estimate"] - declared) >= _MISMATCH_HARD_DIFF
+    ):
+        return (
+            f"NOTE: {filename} declares B{declared}; bracket estimate "
+            f"unavailable/low-signal: B{result['estimate']}? "
+            f"(insufficient signal — not flagged as mismatch)"
+        )
+    return None

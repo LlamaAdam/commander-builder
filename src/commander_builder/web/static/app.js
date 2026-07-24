@@ -2648,15 +2648,22 @@ function bracketTile(t, estimate) {
   }
   // Explainable bracket estimate (ManaFoundry parity). Backend rule:
   // |estimate - declared| >= 2 is a hard "mismatch" (warn styling),
-  // == 1 is a soft "check" — mismatch_level carries which. Reasons
-  // render inside a collapsed <details>, matching the lazy-expand
-  // pattern used by priceTile's savings breakdown.
+  // == 1 is a soft "check" — mismatch_level carries which. A
+  // "low_signal" level means the estimate is low-confidence (signal
+  // starvation): render neutral "unavailable/low-signal" copy, never
+  // the warn styling — the estimator has no evidence against the
+  // declared tag. Reasons render inside a collapsed <details>,
+  // matching the lazy-expand pattern used by priceTile's savings
+  // breakdown.
   if (estimate && estimate.estimate != null) {
     const declared = estimate.declared;
-    const level = estimate.mismatch_level; // null | "check" | "mismatch"
+    // null | "check" | "mismatch" | "low_signal"
+    const level = estimate.mismatch_level;
     let text;
     if (declared == null) {
       text = `Estimated bracket: ${estimate.estimate}`;
+    } else if (level === "low_signal") {
+      text = `Estimated bracket: unavailable/low-signal: ${estimate.estimate}? — insufficient signal (declared ${declared})`;
     } else if (level === "mismatch") {
       text = `Estimated bracket: ${estimate.estimate} — declared ${declared} ⚠ mismatch`;
     } else if (level === "check") {
