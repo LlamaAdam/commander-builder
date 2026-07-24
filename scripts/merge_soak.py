@@ -75,7 +75,10 @@ def report(rows: list[dict]) -> dict:
     for r in rows:
         a = agg[r["source"]]
         a["rows"] += 1
-        if r.get("status") == "done":
+        # loop_unattributed = an honest short row (batch cut by an
+        # unattributable looping game); its games all completed, so it
+        # counts as data alongside 'done' rows.
+        if r.get("status") in ("done", "loop_unattributed"):
             a["done"] += 1
             a["games"] += r.get("games") or 0
     print(f"{'source':<28}{'rows':>7}{'done':>7}{'games':>9}")

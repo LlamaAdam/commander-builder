@@ -57,6 +57,25 @@ def test_non_done_rows_ignored_by_loader(tmp_path):
     assert len(rows) == 1 and rows[0]["deck_a"] == "D.dck"
 
 
+def test_loader_accepts_loop_unattributed_short_rows(tmp_path):
+    """'loop_unattributed' rows (batch cut by a looping game no seat could be
+    credited for) carry only COMPLETED games — they load like 'done' rows and
+    are gated by min_games downstream, not discarded as errors."""
+    f = tmp_path / "x_throughput.jsonl"
+    import json
+    f.write_text(
+        json.dumps(_row("D.dck", "D v2.dck", 17, 5, 9,
+                        status="loop_unattributed")) + "\n"
+        + json.dumps(_row("E.dck", "E v2.dck", 40, 5, 5, status="failed")) + "\n",
+        encoding="utf-8",
+    )
+    rows = ma.load_rows(str(tmp_path))
+    assert len(rows) == 1 and rows[0]["deck_a"] == "D.dck"
+    # min_games still gates the short row out of a 40-game aggregation.
+    assert ma.aggregate_pairs(rows, min_games=40) == {}
+    assert "D.dck" in ma.aggregate_pairs(rows, min_games=0)
+
+
 # --------------------------------------------------------------------------- #
 # margin + verdict
 # --------------------------------------------------------------------------- #

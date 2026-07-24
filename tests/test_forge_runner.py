@@ -1196,6 +1196,83 @@ def test_run_gauntlet_simulation_timeout_salvage_credits_active_seat(tmp_path):
     assert (result.wins, result.losses, result.draws) == (1, 0, 0)
 
 
+def test_run_gauntlet_simulation_loop_unattributed_keeps_completed_games(tmp_path):
+    """A looping game whose partial stdout carries NO Turn line (the real
+    shape: Forge's SimulateMatch prints the game log only AFTER a game
+    completes, so a hung game's capture is just the pre-game header) must NOT
+    be counted as a phantom draw. The row ends as an honest short
+    'loop_unattributed' row: the hung game is excluded, the completed games
+    are kept, and the error says why instead of 'credited to active seat
+    None'."""
+    from commander_builder.forge_runner import (
+        run_gauntlet_simulation, _AB_STATUS_LOOP_UNATTRIBUTED)
+
+    test_deck = tmp_path / "[USER] T [B4].dck"
+    test_deck.write_text("[Main]\n", encoding="utf-8")
+    gauntlet = ["G1.dck", "G2.dck", "G3.dck"]
+
+    # Verbatim pre-game header shapes from a live Forge 2.0.12 capture —
+    # everything a hung game's partial stdout actually contains.
+    hung_partial_stdout = (
+        "Simulation mode\n"
+        "Ai(1)-Salty IronMan vs Ai(2)-Eldrazi Incursion [M3C] [2024] vs "
+        "Ai(3)-Graveyard Overdrive [M3C] [2024] vs "
+        "Ai(4)-Creative Energy [M3C] [2024] - one game of Commander\n"
+        "SVar 'Double' not found in ability, fallback to Card "
+        "(Overclocked Electromancer). Ability is ()\n"
+    )
+
+    sims = [
+        # g0: test seat 1 wins decisively -> WIN
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0, stderr="",
+                  timed_out=False, error=None,
+                  stdout=_ab_canned_stdout(
+                      10, 1, "T", seats=["T", "G1", "G2", "G3"])),
+        # g1: test seat 2, gauntlet G1 (seat 1) wins -> LOSS
+        SimResult(cmd=["x"], returncode=0, duration_sec=1.0, stderr="",
+                  timed_out=False, error=None,
+                  stdout=_ab_canned_stdout(
+                      9, 1, "G1", seats=["G1", "T", "G2", "G3"])),
+        # g2: hangs -> per-game timeout kill; partial stdout has no Turn line.
+        _timeout_sim(hung_partial_stdout),
+    ]
+    result = run_gauntlet_simulation(
+        test_deck, gauntlet, games=40, runner=_make_seq_runner(sims))
+
+    assert result.status == _AB_STATUS_LOOP_UNATTRIBUTED
+    assert result.games == 2                       # hung game NOT counted
+    assert (result.wins, result.losses, result.draws) == (1, 1, 0)
+    assert result.wins + result.losses + result.draws == result.games
+    assert result.error is not None and result.error.isascii()
+    assert "loop at game 3" in result.error
+    assert "kept 2 completed games" in result.error
+    assert "seat None" not in result.error         # the old misleading string
+
+
+def test_turn_line_regex_matches_real_forge_2012_shapes():
+    """_AB_TURN_LINE vs VERBATIM Turn lines from vendor Forge 2.0.12 logs
+    (plain and bracketed deck names) — documents that the regex is NOT why
+    loop-abort seat attribution fails; a hung game simply has no Turn line
+    because Forge dumps the game log only after a game completes."""
+    from commander_builder.forge_runner import _last_active_seat
+
+    real_lines = (
+        "Turn: Turn 17 (Ai(2)-Black Mage Blitz)\n"
+        "Turn: Turn 18 (Ai(3)-Celestial Tribunal)\n"
+        "Turn: Turn 19 (Ai(4)-Eldrazi Incursion [M3C] [2024])\n"
+    )
+    assert _last_active_seat(real_lines) == 4
+
+    # And the real hung-game capture (pre-game header only) yields None.
+    header_only = (
+        "Simulation mode\n"
+        "Ai(1)-Salty IronMan vs Ai(2)-Eldrazi Incursion [M3C] [2024] vs "
+        "Ai(3)-Graveyard Overdrive [M3C] [2024] vs "
+        "Ai(4)-Creative Energy [M3C] [2024] - one game of Commander\n"
+    )
+    assert _last_active_seat(header_only) is None
+
+
 def test_run_gauntlet_simulation_skips_on_wrong_gauntlet_size(tmp_path):
     from commander_builder.forge_runner import (
         run_gauntlet_simulation, _AB_STATUS_SKIPPED)
