@@ -746,3 +746,402 @@ def test_assemble_lift_skips_when_corpus_too_small(monkeypatch):
     _assert_invariants(result.text)
     assert result.lift_swaps == []
     assert result.lift_skipped and "too small" in result.lift_skipped
+
+
+# ==========================================================================
+# FP-014 second cut — partner-pair builds
+# ==========================================================================
+#
+# Everything below runs offline: fetchers/resolvers injected, and
+# scryfall_client.lookup_card monkeypatched wherever enforce_color_identity
+# is exercised (same convention as the single-commander tests above).
+
+from pathlib import Path
+
+from commander_builder.dck_utils import main_target
+
+
+# Pako (URG) + Haldan (U) — the canonical "Partner with" pair. Oracle text
+# carries the pairing marker AND names the partner, so offline detection
+# resolves to a silent "yes" for both.
+_PAKO = {
+    "type_line": "Legendary Creature — Elemental Dog",
+    "color_identity": ["U", "R", "G"], "mana_cost": "{2}{R}{G}",
+    "oracle_text": "Partner with Haldan, Avid Arcanist\nWhen Pako attacks...",
+    "keywords": ["Partner with"],
+}
+_HALDAN = {
+    "type_line": "Legendary Creature — Human Wizard",
+    "color_identity": ["U"], "mana_cost": "{1}{U}",
+    "oracle_text": "Partner with Pako, Arcane Retriever\nYou may play...",
+    "keywords": ["Partner with"],
+}
+# A legend that POSITIVELY has no pairing ability: resolved card, oracle
+# data present (empty keywords, partner-free text) — the one hard-error case.
+_LONER = {
+    "type_line": "Legendary Creature — Human Soldier",
+    "color_identity": ["W"], "mana_cost": "{1}{W}",
+    "oracle_text": "Vigilance. Other creatures you control get +1/+1.",
+    "keywords": ["Vigilance"],
+}
+_G_CREATURE = {
+    "type_line": "Creature — Bear", "color_identity": ["G"],
+    "mana_cost": "{1}{G}",
+}
+_W_CREATURE = {
+    "type_line": "Creature — Human", "color_identity": ["W"],
+    "mana_cost": "{1}{W}",
+}
+
+_PARTNER_CARDS = {
+    "Pako, Arcane Retriever": _PAKO,
+    "Haldan, Avid Arcanist": _HALDAN,
+    "Lonely General": _LONER,
+    "Command Tower": {
+        "type_line": "Land", "color_identity": [], "mana_cost": "",
+    },
+    "Green Bear": dict(_G_CREATURE),      # in-union via Pako's G
+    "White Knight X": dict(_W_CREATURE),  # OUT of the URG union → dropped
+}
+
+
+def _partner_lookup(name):
+    if name in _PARTNER_CARDS:
+        return _PARTNER_CARDS[name]
+    if name.startswith(("Goblin ", "Spell ")):
+        return dict(_R_CREATURE)   # red — in-union via Pako
+    if name.startswith("Merfolk "):
+        return dict(_U_CREATURE)   # blue — in-union via Haldan
+    return None
+
+
+def _partner_ci(name):
+    return {
+        "Pako, Arcane Retriever": "URG",
+        "Haldan, Avid Arcanist": "U",
+        "Lonely General": "W",
+    }.get(name)
+
+
+def _partner_seed():
+    # Both commanders in the seed (they must be stripped to the command
+    # zone), spells spanning both identities, one out-of-union card, one
+    # keepable nonbasic land.
+    return (
+        ["Pako, Arcane Retriever", "Haldan, Avid Arcanist"]
+        + [f"Goblin {i}" for i in range(20)]     # R (Pako)
+        + [f"Merfolk {i}" for i in range(10)]    # U (Haldan)
+        + ["Green Bear", "White Knight X", "Command Tower"]
+    )
+
+
+def test_partner_build_98_main_two_commander_lines(monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _partner_lookup,
+    )
+    result = _assemble(
+        "Pako, Arcane Retriever", 3,
+        partner="Haldan, Avid Arcanist",
+        fetch_avg=lambda c, b: _avg(_partner_seed()),
+        fetch_page=lambda c: None,
+        resolve_ci=_partner_ci,
+        lookup=_partner_lookup,
+        name="Pako Haldan",
+    )
+    text = result.text
+    # THE partner invariant: two [Commander] lines, exactly 98 main — and
+    # main_target (the PR #23 plumbing) reads the same 98 back off the file.
+    assert section_card_names(text, "Commander") == [
+        "Pako, Arcane Retriever", "Haldan, Avid Arcanist",
+    ]
+    assert count_main_cards(text) == 98
+    assert main_target(text) == 98
+    # Name= stamped to the stem (the dashboard-loadability contract).
+    assert result.stem == "[USER] Pako Haldan [B3]"
+    assert f"Name={result.stem}" in text.splitlines()[1]
+    assert result.partner == "Haldan, Avid Arcanist"
+    # Neither commander leaks into [Main].
+    mains = main_card_quantities(text)
+    assert "Pako, Arcane Retriever" not in mains
+    assert "Haldan, Avid Arcanist" not in mains
+
+
+def test_partner_union_color_identity(monkeypatch):
+    """The union-CI rule (903.4): a mono-color card of EACH commander's
+    identity survives; a card outside the union is dropped."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _partner_lookup,
+    )
+    result = _assemble(
+        "Pako, Arcane Retriever", 3,
+        partner="Haldan, Avid Arcanist",
+        fetch_avg=lambda c, b: _avg(_partner_seed()),
+        fetch_page=lambda c: None,
+        resolve_ci=_partner_ci,
+        lookup=_partner_lookup,
+        name="Pako Haldan",
+    )
+    assert result.colors == "URG"  # WUBRG-ordered union of URG | U
+    mains = main_card_quantities(result.text)
+    # Pako-side (G) and Haldan-side (U) mono-color cards both survive.
+    assert "Green Bear" in mains
+    assert "Merfolk 0" in mains
+    # Out-of-union white card is dropped and reported.
+    assert "White Knight X" not in mains
+    assert "White Knight X" in result.dropped_off_color
+    # Basics can only be union-colored.
+    basics_present = {n for n in mains if n in
+                      {"Plains", "Island", "Swamp", "Mountain", "Forest"}}
+    assert "Plains" not in basics_present and "Swamp" not in basics_present
+
+
+def test_partner_combined_slug_both_orders_then_fallback(capsys):
+    """Seeding tries <a>-<b>, then <b>-<a>, then falls back to the primary
+    commander's own average deck with a printed note."""
+    calls = []
+
+    def fetch_avg(commander_or_slug, bracket):
+        calls.append(commander_or_slug)
+        # Only the PRIMARY commander's own page exists.
+        if commander_or_slug == "Pako, Arcane Retriever":
+            return _avg(_partner_seed())
+        return None  # 404 → fetch_average_deck returns None
+
+    result = _assemble(
+        "Pako, Arcane Retriever", 3,
+        partner="Haldan, Avid Arcanist",
+        fetch_avg=fetch_avg,
+        fetch_page=lambda c: None,
+        resolve_ci=_partner_ci,
+        lookup=_partner_lookup,
+        name="Pako Haldan",
+    )
+    assert calls == [
+        "pako-arcane-retriever-haldan-avid-arcanist",
+        "haldan-avid-arcanist-pako-arcane-retriever",
+        "Pako, Arcane Retriever",
+    ]
+    assert "no combined EDHREC average deck" in capsys.readouterr().out
+    assert count_main_cards(result.text) == 98
+
+
+def test_partner_combined_slug_reverse_order_hit(capsys):
+    """A hit on the REVERSED combined slug stops the walk — no fallback,
+    no note (EDHREC's pair order isn't alphabetical, so both must be tried)."""
+    calls = []
+
+    def fetch_avg(commander_or_slug, bracket):
+        calls.append(commander_or_slug)
+        if commander_or_slug == "haldan-avid-arcanist-pako-arcane-retriever":
+            return _avg(_partner_seed())
+        return None
+
+    result = _assemble(
+        "Pako, Arcane Retriever", 3,
+        partner="Haldan, Avid Arcanist",
+        fetch_avg=fetch_avg,
+        fetch_page=lambda c: None,
+        resolve_ci=_partner_ci,
+        lookup=_partner_lookup,
+        name="Pako Haldan",
+    )
+    assert calls == [
+        "pako-arcane-retriever-haldan-avid-arcanist",
+        "haldan-avid-arcanist-pako-arcane-retriever",
+    ]
+    assert "no combined EDHREC average deck" not in capsys.readouterr().out
+    assert result.source == "average-deck seed"
+
+
+# --- offline Partner-validation matrix -------------------------------------
+
+
+def test_partner_validation_both_detected_is_silent(capsys):
+    _assemble(
+        "Pako, Arcane Retriever", 3,
+        partner="Haldan, Avid Arcanist",
+        fetch_avg=lambda c, b: _avg(_partner_seed()),
+        fetch_page=lambda c: None,
+        resolve_ci=_partner_ci,
+        lookup=_partner_lookup,
+        name="Pako Haldan",
+    )
+    assert "cannot verify Partner ability" not in capsys.readouterr().out
+
+
+def test_partner_validation_undetectable_warns_but_builds(capsys):
+    """Cards missing from the local cache → we cannot verify; the honest
+    policy is to warn and proceed (Forge is the ground truth)."""
+
+    def thin_lookup(name):
+        # No oracle data for ANY card — simulates an empty snapshot cache.
+        return None
+
+    result = _assemble(
+        "Mystery A", 3,
+        partner="Mystery B",
+        fetch_avg=lambda c, b: _avg(
+            ["Mystery A", "Mystery B"] + [f"Goblin {i}" for i in range(40)]
+        ),
+        fetch_page=lambda c: None,
+        resolve_ci=lambda n: None,
+        lookup=thin_lookup,
+        name="Mystery Pair",
+    )
+    out = capsys.readouterr().out
+    assert "cannot verify Partner ability offline" in out
+    assert count_main_cards(result.text) == 98  # proceeded anyway
+
+
+def test_partner_validation_positive_non_partner_hard_errors():
+    """A commander RESOLVED with oracle data and no pairing marker is a
+    positive detection → hard error, never a warned-through build."""
+    with pytest.raises(ValueError, match="no Partner-style pairing ability"):
+        _assemble(
+            "Pako, Arcane Retriever", 3,
+            partner="Lonely General",
+            fetch_avg=lambda c, b: _avg(_partner_seed()),
+            fetch_page=lambda c: None,
+            resolve_ci=_partner_ci,
+            lookup=_partner_lookup,
+            name="Bad Pair",
+        )
+
+
+def test_partner_same_card_twice_is_an_error():
+    with pytest.raises(ValueError, match="different card"):
+        _assemble(
+            "Pako, Arcane Retriever", 3,
+            partner="Pako, Arcane Retriever",
+            fetch_avg=lambda c, b: _avg(_partner_seed()),
+            fetch_page=lambda c: None,
+            resolve_ci=_partner_ci,
+            lookup=_partner_lookup,
+        )
+
+
+# --- single-commander path pinned byte-identical ---------------------------
+
+
+def test_partner_none_path_byte_identical_to_golden(monkeypatch):
+    """The partner feature must not perturb single-commander builds AT ALL.
+
+    tests/fixtures/golden_single_commander_build.dck was captured from the
+    pre-partner assembler (master @ PR #25, 38d96da) with exactly this
+    fixture; the partner=None path must reproduce it byte for byte."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake_lookup,
+    )
+    cards = (
+        ["Krenko, Mob Boss"]
+        + [f"Goblin {i}" for i in range(40)]
+        + ["Command Tower", "Mountain"]
+    )
+    text = build_deck(
+        "Krenko, Mob Boss", 3,
+        fetch_avg=lambda c, b: _avg(cards),
+        fetch_page=lambda c: None,
+        resolve_ci=lambda n: "R",
+        lookup=_fake_lookup,
+        name="Krenko Golden",
+        enable_lift=False, enable_steer=False, owned_bias=False,
+    )
+    golden = Path(__file__).parent.joinpath(
+        "fixtures", "golden_single_commander_build.dck",
+    ).read_text(encoding="utf-8")
+    assert text == golden
+
+
+# --- CLI --partner smoke ----------------------------------------------------
+
+
+def test_main_cli_partner_smoke(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        deck_builder, "fetch_average_deck", lambda c, b: _avg(_partner_seed()),
+    )
+    monkeypatch.setattr(deck_builder, "fetch_commander_page", lambda c: None)
+    monkeypatch.setattr(deck_builder, "lookup_card", _partner_lookup)
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _partner_lookup,
+    )
+    rc = deck_builder.main([
+        "--commander", "Pako, Arcane Retriever",
+        "--partner", "Haldan, Avid Arcanist",
+        "--bracket", "3",
+        "--deck-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    files = list(tmp_path.glob("*.dck"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert count_main_cards(text) == 98
+    assert main_target(text) == 98
+    out = capsys.readouterr().out
+    # Summary names both commanders + the union identity.
+    assert "Pako, Arcane Retriever + Haldan, Avid Arcanist" in out
+    assert "union identity: URG" in out
+
+
+# --- personalization over a partner deck ------------------------------------
+
+
+def test_partner_personalize_stages_keep_invariants(monkeypatch):
+    """Lift + steer run over the 98-main partner deck without breaking the
+    main-size / singleton / union-CI invariants, and the steer's render sees
+    BOTH commander lines (its estimator gets the real two-commander text)."""
+    partner_cards = dict(_P13_CARDS)
+    partner_cards["Pako, Arcane Retriever"] = _PAKO
+    partner_cards["Haldan, Avid Arcanist"] = _HALDAN
+
+    def lookup(name):
+        if name in partner_cards:
+            return partner_cards[name]
+        return _p13_lookup(name)
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", lookup,
+    )
+    seed = (
+        ["Pako, Arcane Retriever", "Haldan, Avid Arcanist"]
+        + [f"Ramp {i}" for i in range(10)]
+        + [f"Draw {i}" for i in range(10)]
+        + [f"Removal {i}" for i in range(10)]
+        + [f"Threat {i}" for i in range(10)]
+        + ["Command Tower"]
+    )
+    rendered = {}
+
+    def estimator(text):
+        rendered["last"] = text
+        return _estimate_by_fastgc(text)
+
+    result = _assemble(
+        "Pako, Arcane Retriever", 4,
+        partner="Haldan, Avid Arcanist",
+        fetch_avg=lambda c, b: _avg(seed),
+        fetch_page=lambda c: None,
+        resolve_ci=_partner_ci,
+        lookup=lookup,
+        name="Pako Haldan",
+        lift_matrix=_p13_matrix(),
+        estimate_fn=estimator,
+        is_game_changer=lambda nm: deck_builder.name_key(nm) == "fast gc",
+        is_fast_mana=lambda nm: False,
+        power_pool=["Fast GC"],
+    )
+    text = result.text
+    assert count_main_cards(text) == 98
+    assert main_target(text) == 98
+    mains = main_card_quantities(text)
+    basics = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
+    for nm, qty in mains.items():
+        if nm not in basics:
+            assert qty == 1, f"{nm} broke singleton ({qty})"
+    assert "Pako, Arcane Retriever" not in mains
+    assert "Haldan, Avid Arcanist" not in mains
+    # Stages actually ran on the partner deck.
+    assert result.lift_swaps          # lift traded the marginal ramp card
+    assert "Fast GC" in mains         # steer added power toward B4
+    # The steer's estimator was fed the REAL two-commander render.
+    assert "1 Pako, Arcane Retriever" in rendered["last"]
+    assert "1 Haldan, Avid Arcanist" in rendered["last"]

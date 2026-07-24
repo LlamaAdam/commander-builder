@@ -1728,6 +1728,69 @@ def test_build_deck_owned_bias_off_without_collection(client, deck_dir, monkeypa
     assert seen["collection_path"] is None
 
 
+# --- FP-014 second cut: optional partner in the build payload ---------------
+
+
+def test_build_deck_partner_passes_through_to_assembler(client, deck_dir,
+                                                        monkeypatch):
+    """A valid partner string reaches _assemble as the ``partner`` kwarg;
+    the async job/result shape is otherwise unchanged (same done/summary
+    contract the single-commander tests pin)."""
+    seen = {}
+    from commander_builder import deck_builder
+
+    def fake_assemble(commander, bracket, collection_path=None, **kw):
+        seen["partner"] = kw.get("partner")
+        return _fake_build_result(commander=commander, bracket=bracket)
+    monkeypatch.setattr(deck_builder, "_assemble", fake_assemble)
+    resp = client.post("/api/build_deck", json={
+        "commander": "Pako, Arcane Retriever", "bracket": 3,
+        "partner": "Haldan, Avid Arcanist",
+    })
+    assert resp.status_code == 202, resp.get_json()
+    job = _wait_for_build(client, resp.get_json()["job_id"], {"done", "failed"})
+    assert job["status"] == "done", job
+    assert seen["partner"] == "Haldan, Avid Arcanist"
+
+
+def test_build_deck_partner_absent_is_none(client, deck_dir, monkeypatch):
+    """No partner key → the assembler gets partner=None (the pinned
+    byte-identical single-commander path)."""
+    seen = {}
+    from commander_builder import deck_builder
+
+    def fake_assemble(commander, bracket, collection_path=None, **kw):
+        seen["partner"] = kw.get("partner")
+        return _fake_build_result(commander=commander, bracket=bracket)
+    monkeypatch.setattr(deck_builder, "_assemble", fake_assemble)
+    resp = client.post("/api/build_deck", json={
+        "commander": "Krenko, Mob Boss", "bracket": 3,
+    })
+    _wait_for_build(client, resp.get_json()["job_id"], {"done", "failed"})
+    assert seen["partner"] is None
+
+
+def test_build_deck_partner_garbage_is_400(client, monkeypatch):
+    """Partner is validated like commander: when the key is PRESENT it must
+    be a non-empty string — blank / non-string / same-as-commander are all
+    synchronous client errors (no job created)."""
+    _install_build_stub(monkeypatch)
+    for bad in ("", "   ", 42, ["Haldan"]):
+        resp = client.post("/api/build_deck", json={
+            "commander": "Pako, Arcane Retriever", "bracket": 3,
+            "partner": bad,
+        })
+        assert resp.status_code == 400, (bad, resp.get_json())
+        assert "partner" in resp.get_json()["error"]
+    # Same card twice can never be a legal pair — rejected up front.
+    resp = client.post("/api/build_deck", json={
+        "commander": "Pako, Arcane Retriever", "bracket": 3,
+        "partner": "pako, arcane retriever",
+    })
+    assert resp.status_code == 400
+    assert "different card" in resp.get_json()["error"]
+
+
 # ---------------------------------------------------------------------------
 # /api/deck_text PUT + DELETE
 # ---------------------------------------------------------------------------

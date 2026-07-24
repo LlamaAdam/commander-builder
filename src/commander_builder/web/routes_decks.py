@@ -356,6 +356,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         Body::
 
             {"commander": "Krenko, Mob Boss", "bracket": 3,
+             "partner": "optional second commander (partner pair)",
              "options": {"no_lift": false, "no_steer": false,
                          "owned_bias": true}}
 
@@ -382,6 +383,26 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         commander = (payload.get("commander") or "").strip()
         if not commander:
             return jsonify({"error": "commander is required"}), 400
+
+        # Optional partner (FP-014 second cut). Validated LIKE commander —
+        # when the key is present it must be a non-empty string; absent/None
+        # means a classic single-commander build (byte-identical path in the
+        # assembler). Partner-ABILITY legality is the assembler's job (its
+        # offline-detection policy), but "same card twice" is a plain client
+        # error we can reject synchronously here, matching the endpoint's
+        # validate-on-request-thread contract.
+        partner_raw = payload.get("partner")
+        partner = None
+        if partner_raw is not None:
+            if not isinstance(partner_raw, str) or not partner_raw.strip():
+                return jsonify({
+                    "error": "partner must be a non-empty string when present",
+                }), 400
+            partner = partner_raw.strip()
+            if partner.lower() == commander.lower():
+                return jsonify({
+                    "error": "partner must be a different card from commander",
+                }), 400
 
         # Bracket 1..5. Absent/empty defaults to 3 (Upgraded) — matches the
         # import route and the CLI default. An explicitly-bad value is a
@@ -442,6 +463,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                     commander,
                     bracket,
                     coll_path,
+                    partner=partner,
                     name=display_name,
                     enable_lift=not no_lift,
                     enable_steer=not no_steer,

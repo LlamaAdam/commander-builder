@@ -3034,6 +3034,8 @@ function openNewDeckModal() {
   // FP-014.4 build tab — clear the last run's inputs + summary.
   const bCmdr = $("new-build-commander");
   if (bCmdr) bCmdr.value = "";
+  const bPartner = $("new-build-partner");
+  if (bPartner) bPartner.value = "";
   const bName = $("new-build-name");
   if (bName) bName.value = "";
   const bSummary = $("new-build-summary");
@@ -3258,6 +3260,12 @@ async function createPasteDeck() {
 // "Tune it" hand-off.
 async function buildFromScratch() {
   const commander = $("new-build-commander").value.trim();
+  // Optional partner pair (FP-014 second cut): when set the backend builds
+  // a two-commander deck (98 main + union color identity). Empty string ->
+  // omitted from the payload entirely so the single-commander API shape is
+  // untouched.
+  const partnerEl = $("new-build-partner");
+  const partner = partnerEl ? partnerEl.value.trim() : "";
   const name = $("new-build-name").value.trim();
   const bracket = parseInt($("new-build-bracket").value, 10);
   const noLift = $("new-build-no-lift").checked;
@@ -3274,7 +3282,8 @@ async function buildFromScratch() {
     status.textContent = "Enter a commander name.";
     return;
   }
-  status.textContent = `Building ${commander} (B${bracket})… seeding from EDHREC.`;
+  status.textContent =
+    `Building ${commander}${partner ? " + " + partner : ""} (B${bracket})… seeding from EDHREC.`;
   btn.disabled = true;
   try {
     const startResp = await fetch("/api/build_deck", {
@@ -3283,6 +3292,7 @@ async function buildFromScratch() {
       body: JSON.stringify({
         commander,
         bracket,
+        partner: partner || undefined,
         name: name || undefined,
         options: { no_lift: noLift, no_steer: noSteer, owned_bias: ownedBias },
       }),
