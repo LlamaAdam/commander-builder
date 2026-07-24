@@ -9,7 +9,9 @@
 
 # FP-002 (reframed) — curator margin regression
 
-**Status: REOPENED → first result in (2026-05-26).** The original FP-002 was a
+**Status: REOPENED → first result in (2026-05-26) → n=45 gauntlet re-run
+(2026-07-23, the ≥+10-deck unblock fired; see "Result 2026-07-23" below).**
+The original FP-002 was a
 *kept-vs-reverted classifier*. It was concluded NOT VIABLE on 2026-05-22 for a
 specific reason: after the A/B seat-attribution fix (`e8777b6`), the curator's
 swaps almost never made a deck strictly *worse*, so there was **no negative
@@ -41,9 +43,14 @@ Two things changed:
     report per-feature Pearson `r` + a two-sided t-stat (df = n−2).
   - `python scripts/margin_analysis.py [--mode gauntlet] --min-games 40`
     (text) or `--json`; `--decks DIR` (repeatable) overrides the search path.
-- `tests/test_margin_analysis.py` — 18 pure-logic tests (A/B + gauntlet
+- `tests/test_margin_analysis.py` — 22 pure-logic tests (A/B + gauntlet
   aggregation, margin banding, Pearson edge cases, the deck-file join,
-  end-to-end `analyze`).
+  end-to-end `analyze`, loud missing-deck-file accounting).
+- Rows whose original deck file has left the disk (renamed/pruned from the
+  library) are **excluded loudly**: a per-file stderr warning with the dropped
+  row count, plus `missing_deck_files` / `missing_deck_rows_dropped` totals in
+  the report (2026-07-23; the exclusion itself is unchanged — we cannot
+  feature a deck we cannot read).
 
 ## Result (min_games=40, n=29 decks, 11,960 games)
 
@@ -144,6 +151,63 @@ improvement is ~0** (confirmed by two independent designs). The only credible
 least to decks with big role-target shortfalls. That argues for using the
 deck-health `under_built` signal (F2) to **fix structure first, then curate** —
 and for not assuming curation is a free win on an already-coherent deck.
+
+## Result 2026-07-23 — gauntlet at n=45 (the ≥+10-deck unblock fired)
+
+The documented unblock condition — *re-run once the deck-gen campaign adds
+≥10 new decks* — fired: the gauntlet dataset grew **26 → 45 unique decks**
+(**10,360 games** at min_games=40; AB mode is unchanged at n=29 / 11,960
+games). A fresh gauntlet soak (`--games 40 --append`, started 2026-07-23) is
+still appending toward the ~80-deck predictor gate.
+
+```
+mode=gauntlet, min_games=40, n=45 decks, 10,360 games
+
+mean curator margin: -0.0133   (winrate(v2) - winrate(base) vs fixed gauntlet)
+per-deck verdicts:   kept=7  reverted=12  neutral=26
+
+feature -> margin correlation (|r| desc):
+  bracket              r=-0.219  t=-1.47      <- new top feature; still sub-threshold
+  main_count           r=+0.162  t=+1.08
+  spell_density        r=+0.144  t=+0.95
+  deficit_total        r=-0.109  t=-0.72      (was -0.359/-1.88 at n=26)
+  mdfc                 r=+0.105  t=+0.69
+  wincon_protection    r=+0.092  t=+0.60      (A/B's one-time star: still dead)
+  self_mill            r=-0.083  t=-0.54
+  basic_lands          r=-0.064  t=-0.42
+  mana_sinks           r=-0.040  t=-0.26      (was +0.332/+1.72 at n=26 -- sign flip again)
+  under_built_roles    r=-0.020  t=-0.13      (was -0.261/-1.32 at n=26)
+```
+
+### Honest reading at n=45
+
+1. **"Curation is ~neutral" holds — and leans slightly negative.** Mean margin
+   −0.0133 with 26/45 decks in the ±0.05 neutral band; among decided decks the
+   split is now 7 kept vs 12 reverted. Still ≈0 in absolute terms, but there
+   is *no* evidence curation helps on average in the unconfounded design.
+2. **NO feature passes |t|≥2 at n=45 — and, worse, every n=26-era candidate
+   collapsed as n grew** instead of gaining power: `deficit_total`
+   −0.36 → −0.11, `under_built_roles` −0.26 → −0.02, `wincon_protection`
+   +0.22 → +0.09, `mana_sinks` +0.33 → −0.04 (another sign flip). Real effects
+   sharpen with more data; these melted. That is the signature of noise.
+   **The 2026-05-26 "most credible weak lever" (structural deficit) is dead
+   at n=45** — the fix-structure-first advice may still be good deck-building
+   hygiene, but the margin data no longer supports it as a *predictor*.
+3. **The A/B cross-check makes the same point louder.** Re-running AB mode
+   (rows unchanged: n=29, mean +0.0009, kept=6/reverted=4/neutral=19) with
+   today's feature extractor now flags **three** features at |t|≥2 —
+   `wincon_protection` (+0.447/2.60), `spell_density` (+0.416/2.38),
+   `deficit_total` (−0.387/−2.18). (The r's moved vs the 2026-05-26 table
+   because `deck_health` evolved across the merged PRs; the soak rows did
+   not.) **None of the three replicates in the gauntlet design at n=45.**
+   Single-design AB "significance" keeps manufacturing hits that the clean
+   design keeps killing — do not build on AB-only results.
+4. **What the data supports at this n:** the curator's expected improvement is
+   ≈0 (both designs, now at larger n), and *no pre-sim deck feature predicts
+   the margin*. **What it does not support:** any feature-gated "when to
+   curate" policy. The ~80-deck gate stays the next checkpoint, but the prior
+   should now be that the predictor comes up empty — the value of finishing
+   the campaign is closing the question cleanly, not rescuing it.
 
 ---
 
