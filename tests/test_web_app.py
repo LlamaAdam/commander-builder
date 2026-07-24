@@ -2719,6 +2719,75 @@ def test_pad_main_to_99_falls_back_to_wastes_when_no_basics():
     assert breakdown == {"Wastes": 6}
 
 
+# --- Partner decks: the padder targets 100 - commander_count -----------------
+# Real incident (Dog Moves, Pako + Haldan): the padder's hardcoded 99
+# target padded a LEGAL 98-main partner deck up to 99, writing an
+# illegal 101-card deck to disk. The target is now read from the text's
+# own [Commander] section: 99 single-commander, 98 partner pair.
+
+_PARTNER_HEADER = (
+    "[metadata]\nName=Dog Moves\n"
+    "[Commander]\n"
+    "1 Pako, Arcane Retriever|CMR|282\n"
+    "1 Haldan, Avid Arcanist|CMR|281\n"
+)
+
+
+def test_pad_main_to_target_partner_deck_pads_to_98_not_99():
+    """A short partner deck (96 main + 2 commanders) pads up to 98 —
+    NOT 99, which would make the deck 101 cards total."""
+    from commander_builder.dck_utils import count_main_cards
+    from commander_builder.web.app import _pad_main_to_target
+    text = (
+        _PARTNER_HEADER
+        + "[Main]\n20 Forest\n20 Island\n"
+        + "1 Cultivate\n" * 56
+    )
+    out, padded, breakdown = _pad_main_to_target(text, current_main=96)
+    assert padded == 2
+    assert sum(breakdown.values()) == 2
+    assert count_main_cards(out) == 98
+
+
+def test_pad_main_to_target_partner_deck_at_98_is_untouched():
+    """The exact Dog Moves regression: a legal 98-main partner deck
+    must pass through byte-identical — the old hardcoded-99 padder
+    added a basic here, producing an illegal 101-card deck."""
+    from commander_builder.web.app import _pad_main_to_target
+    text = (
+        _PARTNER_HEADER
+        + "[Main]\n20 Forest\n20 Island\n"
+        + "1 Cultivate\n" * 58
+    )
+    out, padded, breakdown = _pad_main_to_target(text, current_main=98)
+    assert out == text
+    assert padded == 0
+    assert breakdown == {}
+
+
+def test_pad_main_to_target_single_commander_still_targets_99():
+    """Pin the single-commander behavior: byte-identical to the old
+    padder (96 + 1 commander → pad 3 to reach 99)."""
+    from commander_builder.dck_utils import count_main_cards
+    from commander_builder.web.app import _pad_main_to_target
+    text = (
+        "[metadata]\nName=Mono\n[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n30 Mountain\n"
+        + "1 Goblin Bushwhacker\n" * 66
+    )
+    out, padded, breakdown = _pad_main_to_target(text, current_main=96)
+    assert padded == 3
+    assert breakdown == {"Mountain": 3}
+    assert count_main_cards(out) == 99
+
+
+def test_pad_main_to_99_is_backcompat_alias_for_pad_main_to_target():
+    from commander_builder.web.deck_text_ops import (
+        _pad_main_to_99, _pad_main_to_target,
+    )
+    assert _pad_main_to_99 is _pad_main_to_target
+
+
 def test_cleanup_stale_staged_files_deletes_old_proposed_files(tmp_path):
     import os
     import time

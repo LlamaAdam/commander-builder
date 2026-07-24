@@ -37,6 +37,14 @@ from __future__ import annotations
 import re
 from typing import Iterator, Optional
 
+# A legal Commander deck is exactly 100 cards TOTAL: mainboard plus
+# command zone. The mainboard target is therefore NOT a constant 99 —
+# it is ``100 - <number of commanders>``: 99 for a single commander,
+# 98 for a partner pair (two lines in [Commander]). Code that hardcodes
+# 99 corrupts partner decks (real incident: a Pako/Haldan deck padded
+# from its legal 98 main to 99, writing a 101-card deck).
+COMMANDER_DECK_SIZE = 100
+
 # Quantity-summing convention: qty, base name (no "|"), optional |SET|CN tail.
 CARD_LINE_RE = re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
 
@@ -120,6 +128,38 @@ def count_main_cards(deck_text: Optional[str]) -> int:
         if parsed is not None:
             total += parsed[0]
     return total
+
+
+def count_commander_cards(deck_text: Optional[str]) -> int:
+    """Sum the quantity prefixes of every parseable [Commander] card line.
+
+    1 for a normal deck, 2 for a partner / Background pair, 0 for a
+    text fragment with no [Commander] section. Same parsing rules as
+    ``count_main_cards`` (``CARD_LINE_RE``), just a different section.
+    """
+    if not deck_text:
+        return 0
+    total = 0
+    for line in iter_section_lines(deck_text, "Commander"):
+        parsed = parse_card_line(line)
+        if parsed is not None:
+            total += parsed[0]
+    return total
+
+
+def main_target(deck_text: Optional[str]) -> int:
+    """The LEGAL mainboard size for ``deck_text``: ``100 - commanders``.
+
+    99 for a single commander, 98 for a partner pair. When the text
+    carries no [Commander] lines (a fragment, or a paste that hasn't
+    been sectioned yet) we keep the historical assumption of a single
+    commander and return 99 — every pre-partner-fix caller behaved
+    exactly this way, and a fragment gives us nothing better to go on.
+    """
+    n = count_commander_cards(deck_text)
+    if n <= 0:
+        return COMMANDER_DECK_SIZE - 1
+    return COMMANDER_DECK_SIZE - n
 
 
 def main_card_quantities(deck_text: Optional[str]) -> dict[str, int]:

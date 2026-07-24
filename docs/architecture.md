@@ -361,7 +361,7 @@ web/_helpers.py (pure, Flask-independent)
 ├── _format_added_line()                # Render added card for output
 ├── _iteration_to_dict()                # Serialize iteration row to JSON
 ├── _match_pct_from_evidence()          # Win/draw rate from records
-├── _pad_main_to_99()                   # Normalize deck to 99 cards
+├── _pad_main_to_target()               # Pad main to 100 - commander count (99 single, 98 partners)
 ├── _to_constructed_format()            # 1v1 / Constructed format
 └── _BASIC_LANDS constant               # Lands list
 

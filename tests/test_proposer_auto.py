@@ -1582,6 +1582,102 @@ def test_apply_proposal_guard_fires_on_dry_run_too(tmp_path):
     assert "1 Sol Ring" in src.read_text(encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Partner decks: the mainboard target is 100 - commander_count, i.e. 98
+# for a partner pair — NOT a hardcoded 99. Real incident (2026-07): the
+# curator's apply path padded '[USER] Dog Moves v2 [B4].dck' (Pako +
+# Haldan partners) from its LEGAL 98 main to 99, writing an illegal
+# 101-card deck to disk. Fixtures below use that exact deck shape.
+# ---------------------------------------------------------------------------
+
+def _make_partner_dck(tmp_path, name: str, main_cards: list[str]) -> Path:
+    """Dog Moves shape: two [Commander] lines (Pako + Haldan)."""
+    body = (
+        "[metadata]\nName=Dog Moves\n"
+        "[Commander]\n"
+        "1 Pako, Arcane Retriever|CMR|282\n"
+        "1 Haldan, Avid Arcanist|CMR|281\n"
+        "[Main]\n"
+    )
+    body += "\n".join(f"1 {c}" for c in main_cards) + "\n"
+    p = tmp_path / name
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_apply_proposal_partner_deck_98_main_passes_guard(tmp_path):
+    """A legal partner deck (98 main + 2 commanders) sails through
+    every guard: swaps apply, NO padding fires (the old hardcoded-99
+    padder would have added a basic here), and the output stays at
+    exactly 98 mainboard."""
+    main_cards = [f"Card {i}" for i in range(97)] + ["OldCard"]
+    src = _make_partner_dck(tmp_path, "[USER] Dog Moves [B4].dck", main_cards)
+    proposal = Proposal(
+        adds=["NewCard"], cuts=["OldCard"], rationale="x",
+        source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    assert proposal.applied_adds == ["NewCard"]
+    assert proposal.applied_cuts == ["OldCard"]
+    # The regression: padding must NOT top a partner deck up to 99.
+    assert proposal.padded_count == 0
+    assert _count_main(text) == 98
+    # Both partners survive in [Commander].
+    assert "1 Pako, Arcane Retriever|CMR|282" in text
+    assert "1 Haldan, Avid Arcanist|CMR|281" in text
+
+
+def test_apply_proposal_partner_guard_rejects_99_main(tmp_path):
+    """The exact Dog Moves damage shape: 99 main + 2 commanders = 101
+    cards. The guard must REFUSE it — and the error must name the
+    partner rule so the operator understands why 99 (the 'normal'
+    number) is illegal here."""
+    import pytest
+
+    main_cards = [f"Card {i}" for i in range(99)]
+    src = _make_partner_dck(tmp_path, "[USER] Dog Moves [B4].dck", main_cards)
+    proposal = Proposal(adds=["NewCard"], cuts=["Card 0"], rationale="x")
+    with pytest.raises(RuntimeError, match=r"not 98.*partner") as exc:
+        apply_proposal_to_deck(src, proposal)
+    # Error names the commander count so the diagnosis is immediate.
+    assert "2 commander(s)" in str(exc.value)
+    assert not (tmp_path / "[USER] Dog Moves v2 [B4].dck").exists()
+
+
+def test_apply_proposal_partner_guard_rejects_on_dry_run_too(tmp_path):
+    """Dry-run parity for the partner guard: preview and real run must
+    agree that a 99+2 deck is unwritable."""
+    import pytest
+
+    main_cards = [f"Card {i}" for i in range(99)]
+    src = _make_partner_dck(tmp_path, "[USER] Dog Moves [B4].dck", main_cards)
+    proposal = Proposal(adds=["NewCard"], cuts=["Card 0"], rationale="x")
+    with pytest.raises(RuntimeError, match=r"not 98.*partner"):
+        apply_proposal_to_deck(src, proposal, dry_run=True)
+    assert not (tmp_path / "[USER] Dog Moves v2 [B4].dck").exists()
+
+
+def test_apply_proposal_partner_short_deck_pads_to_98(tmp_path):
+    """A short partner deck (95 main) gets padded to 98, not 99 —
+    the padder reads its target off the deck's own [Commander]
+    section."""
+    main_cards = [f"Card {i}" for i in range(90)] + ["OldCard"] + (
+        ["Forest"] * 2 + ["Island"] * 2
+    )
+    src = _make_partner_dck(tmp_path, "[USER] Dog Moves [B4].dck", main_cards)
+    proposal = Proposal(
+        adds=["NewCard"], cuts=["OldCard"], rationale="x",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    text = out.read_text(encoding="utf-8")
+
+    assert proposal.padded_count == 3
+    assert sum(proposal.padded_breakdown.values()) == 3
+    assert _count_main(text) == 98
+
+
 def test_apply_proposal_duplicate_add_pair_dropped_and_reported(tmp_path):
     """An add for a non-basic already in [Main] would write an illegal
     ``2 <Name>`` line — the pair drops and lands under

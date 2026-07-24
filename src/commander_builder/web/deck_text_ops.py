@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..dck_utils import CARD_LINE_RE, count_main_cards, parse_card_line
+from ..dck_utils import (
+    CARD_LINE_RE,
+    count_main_cards,
+    main_target,
+    parse_card_line,
+)
 from ..import_formats import arena_to_dck, csv_to_lines, detect_paste_format
 
 
@@ -233,7 +238,7 @@ def _count_main_cards(text: str) -> int:
 
     Counts what is ACTUALLY in the deck text (``27 Mountain`` counts
     27), which is the number Forge's loader sees. Used by
-    ``proposer.apply_proposal_to_deck``'s last-resort ``!= 99`` write
+    ``proposer.apply_proposal_to_deck``'s last-resort main-target write
     guard; the web layer's ``routes_audit._count_main_lines`` does
     the same walk for the UI headline. Thin alias for the canonical
     ``dck_utils.count_main_cards`` (post-split shared primitive).
@@ -241,8 +246,19 @@ def _count_main_cards(text: str) -> int:
     return count_main_cards(text)
 
 
-def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, int]]:
-    """Top up the [Main] section with basic lands until it hits 99.
+def _pad_main_to_target(
+    text: str, current_main: int,
+) -> tuple[str, int, dict[str, int]]:
+    """Top up the [Main] section with basic lands until it hits the
+    legal mainboard size for THIS deck: ``100 - commander_count``.
+
+    The target is read from ``text``'s own [Commander] section
+    (``dck_utils.main_target``): 99 for a single commander, 98 for a
+    partner pair. Hardcoding 99 here corrupted partner decks — the
+    curator's apply path padded a legal 98-main Pako/Haldan deck to
+    99, writing an illegal 101-card deck. A fragment with no
+    [Commander] lines keeps the historical single-commander
+    assumption (target 99).
 
     The user's source decks sometimes ship short of legal Commander
     size (e.g. the Goblin deck is 71 mainboard). The advisor's adds==
@@ -254,7 +270,7 @@ def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, i
 
     Returns ``(padded_text, padding_added, breakdown)`` where breakdown
     is ``{basic_name: count_added}``. If the deck is already at or above
-    99 mainboard, returns the input text and an empty breakdown.
+    the target mainboard, returns the input text and an empty breakdown.
 
     ``padding_added`` reports what was ACTUALLY inserted, not the
     computed deficit. If the text has no [Main] header there is
@@ -263,9 +279,10 @@ def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, i
     deficit anyway, making callers (and their post-swap size math)
     believe 28 basics landed when zero did.
     """
-    if current_main >= 99:
+    target = main_target(text)
+    if current_main >= target:
         return text, 0, {}
-    deficit = 99 - current_main
+    deficit = target - current_main
 
     # Count basics currently in [Main] so we mirror the user's distribution.
     counts: dict[str, int] = {b: 0 for b in _BASIC_LANDS}
@@ -335,6 +352,13 @@ def _pad_main_to_99(text: str, current_main: int) -> tuple[str, int, dict[str, i
     return new_text, deficit, pad
 
 
+# Back-compat alias: the padder was named for its hardcoded target
+# before the partner fix (2026-07-23). External callers / tests that
+# imported the old name keep working; new code should use
+# ``_pad_main_to_target``.
+_pad_main_to_99 = _pad_main_to_target
+
+
 def _apply_swaps_to_dck(
     original_text: str, recommendations, *, drop_report: Optional[dict] = None,
 ) -> tuple[str, list[str], list[str], int]:
@@ -361,8 +385,9 @@ def _apply_swaps_to_dck(
       ``_format_added_line`` (Scryfall-resolved |SET|CN).
     - Other sections (sideboard, considering, metadata) are preserved.
 
-    **Adds and cuts are balanced** -- Commander needs exactly 99 main +
-    1 commander. The advisor's heuristic produces M adds and N cuts
+    **Adds and cuts are balanced** -- Commander needs main + commanders
+    == 100 (99+1 single, 98+2 partners), and swaps must not change the
+    mainboard size. The advisor's heuristic produces M adds and N cuts
     independently and they're often unequal, leaving an illegal deck
     that Forge refuses to load. We trim whichever list is longer so
     both have ``min(M, N)`` entries (priority: keep adds, since they

@@ -410,7 +410,8 @@ class Proposal:
       dropped_for_balance        -- adds OR cuts sliced off because
                                     the lists were unequal length.
       padded_count + padded_breakdown -- basics synthesized to bring
-                                        the proposed deck to 99 main.
+                                        the proposed deck to its main
+                                        target (100 - commander count).
     """
     adds: list[str] = field(default_factory=list)
     cuts: list[str] = field(default_factory=list)
@@ -454,7 +455,7 @@ class Proposal:
     # Swap PAIRS dropped by apply-time decklist validation (2026-07-19
     # fix). Each entry is ``{"cut": <name>, "add": <name>}`` — the pair
     # is dropped as a unit so adds == cuts stays true and the written
-    # deck keeps a legal 99-card mainboard. Reasons:
+    # deck keeps a legal-size mainboard. Reasons:
     #   dropped_unmatched_cut  -- the cut matched no [Main] card (LLM
     #                             hallucination, DFC naming drift the
     #                             matcher couldn't bridge, or an earlier
@@ -963,16 +964,19 @@ def apply_proposal_to_deck(
     Returns the path of the new file. In ``dry_run`` mode returns the
     path it WOULD have written without touching disk; the proposal's
     ``applied_*`` fields are still populated so the CLI can show what
-    would have landed. Dry-run runs the SAME 99-card guard as a real
-    run (invariant 4 below) — a preview that reports success on a deck
-    the real run would refuse is worse than useless.
+    would have landed. Dry-run runs the SAME main-target guard as a
+    real run (invariant 4 below) — a preview that reports success on a
+    deck the real run would refuse is worse than useless.
 
     The new file lives next to the source with a bumped version
     (``[USER] Foo [B3].dck`` -> ``[USER] Foo v2 [B3].dck``). Bracket
     suffix preserved as the last token.
 
     Deck-legality invariants -- shared with the audit-endpoint path
-    via ``web/_helpers._apply_swaps_to_dck`` and ``_pad_main_to_99``:
+    via ``web/_helpers._apply_swaps_to_dck`` and ``_pad_main_to_target``.
+    The mainboard target throughout is ``100 - commander_count``
+    (``dck_utils.main_target``): 99 for a single commander, 98 for a
+    partner pair — NOT a hardcoded 99.
 
       1. Adds and cuts are balanced via ``min(len(adds), len(cuts))``.
          Both lists are sliced to the smaller length so the resulting
@@ -988,7 +992,7 @@ def apply_proposal_to_deck(
          ``proposal.dropped_unmatched_cut`` /
          ``dropped_duplicate_add`` / ``dropped_commander_add``.
 
-      3. If the SOURCE deck was already short of 99 mainboard (some
+      3. If the SOURCE deck was already short of its main target (some
          imports land at 71-95), the proposed deck inherits the
          deficit and gets padded with basics matching the deck's
          existing color distribution. Padded count + breakdown
@@ -997,10 +1001,11 @@ def apply_proposal_to_deck(
 
       4. Last resort: the final mainboard is re-counted from the
          proposed text and the write is REFUSED (RuntimeError) if it
-         isn't exactly 99 — a corrupt deck on disk poisons every
-         downstream sim/iteration, so failing loudly beats writing.
-         This guard fires under ``dry_run`` too, so preview and real
-         run always agree on whether a proposal is writable.
+         isn't exactly ``100 - commander_count`` — a corrupt deck on
+         disk poisons every downstream sim/iteration, so failing
+         loudly beats writing. This guard fires under ``dry_run``
+         too, so preview and real run always agree on whether a
+         proposal is writable.
 
     This mirrors the invariants the web UI's /api/audit endpoint
     already enforces. The two flows are now in sync -- same balancing,
@@ -1019,7 +1024,7 @@ def apply_proposal_to_deck(
     # importing at module-load time would create a circular risk if
     # the web layer ever imports proposer.
     from ._advisor_models import SwapRecommendation
-    from .web._helpers import _apply_swaps_to_dck, _pad_main_to_99
+    from .web._helpers import _apply_swaps_to_dck, _pad_main_to_target
 
     out_path = src_path.parent / _bump_version_filename(src_path.name)
 
@@ -1061,11 +1066,13 @@ def apply_proposal_to_deck(
         text, recs, drop_report=drop_report,
     )
 
-    # Pad the proposed deck to 99 mainboard if it's short. The audit
-    # endpoint does this same step for the same reason: some imports
-    # ship sub-99 main and Forge refuses to load them.
+    # Pad the proposed deck to its mainboard target (100 minus the
+    # commander count read from the deck's own [Commander] section —
+    # 99 single, 98 partners) if it's short. The audit endpoint does
+    # this same step for the same reason: some imports ship short of
+    # target and Forge refuses to load them.
     post_swap_main = kept_count + len(applied_adds)
-    proposed_text, padded_count, padded_breakdown = _pad_main_to_99(
+    proposed_text, padded_count, padded_breakdown = _pad_main_to_target(
         proposed_text, post_swap_main,
     )
 
@@ -1106,12 +1113,14 @@ def apply_proposal_to_deck(
 
     # HARD GUARD — last-resort invariant before anything touches disk.
     # Everything above (pair validation, balancing, padding) should
-    # have produced exactly 99 mainboard cards for a Commander deck;
-    # if it didn't (over-sized source deck, missing [Main] header, a
-    # future regression in the swap/pad pipeline), writing the file
-    # would hand Forge a deck it rejects — or worse, silently mis-sims
-    # — and every downstream iteration builds on the corrupt list.
-    # Refuse loudly instead.
+    # have produced exactly ``100 - commander_count`` mainboard cards
+    # (99 single-commander, 98 partners; the count is read from the
+    # proposed text's own [Commander] section, which swaps never
+    # touch). If it didn't (over-sized source deck, missing [Main]
+    # header, a future regression in the swap/pad pipeline), writing
+    # the file would hand Forge a deck it rejects — or worse, silently
+    # mis-sims — and every downstream iteration builds on the corrupt
+    # list. Refuse loudly instead.
     #
     # The guard runs BEFORE the dry_run early-return on purpose: the
     # would-be final text is fully computed at this point, so dry-run
@@ -1120,14 +1129,21 @@ def apply_proposal_to_deck(
     # run refuses — the preview lies, and the operator only finds out
     # after committing to the real run. Dry-run still writes nothing;
     # it just raises the same RuntimeError the real run would.
+    from .dck_utils import count_commander_cards, main_target
     from .web._helpers import _count_main_cards
     final_main = _count_main_cards(proposed_text)
-    if final_main != 99:
+    expected_main = main_target(proposed_text)
+    if final_main != expected_main:
+        n_commanders = count_commander_cards(proposed_text)
         raise RuntimeError(
             f"refusing to write {out_path.name}: proposed mainboard has "
-            f"{final_main} cards, not 99. The swap/padding pipeline "
-            "should have produced a legal Commander mainboard — this "
-            "deck would be rejected (or silently mis-simmed) by Forge. "
+            f"{final_main} cards, not {expected_main}. A legal Commander "
+            f"deck is main + commanders == 100, and this deck has "
+            f"{n_commanders} commander(s) — partner decks run 98 main + "
+            "2 commanders, single-commander decks 99 + 1. The "
+            "swap/padding pipeline should have produced a legal "
+            "mainboard — this deck would be rejected (or silently "
+            "mis-simmed) by Forge. "
             f"Source deck: {src_path.name}; adds applied: "
             f"{len(applied_adds)}; cuts applied: {len(applied_cuts)}; "
             f"basics padded: {padded_count}."

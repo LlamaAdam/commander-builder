@@ -400,6 +400,33 @@ def test_build_dashboard_with_suggestions_adds_match_pct(tmp_path, monkeypatch):
     assert "Landfall" in field_dead["rationale"]
 
 
+def test_build_dashboard_partner_deck_98_main_is_size_legal(tmp_path, monkeypatch):
+    """Partner decks run 2 commanders + 98 main = 100 total. The
+    legality banner must report deck_size_ok — main + commanders is
+    the invariant, not main == 99. Uses the real Dog Moves shape
+    (Pako + Haldan) that surfaced the hardcoded-99 bug."""
+    p = tmp_path / "[USER] Dog Moves [B4].dck"
+    p.write_text(
+        "[metadata]\nName=Dog Moves\n"
+        "[Commander]\n"
+        "1 Pako, Arcane Retriever|CMR|282\n"
+        "1 Haldan, Avid Arcanist|CMR|281\n"
+        "[Main]\n"
+        + ("1 Forest\n" * 30)
+        + ("1 Island\n" * 20)
+        + "".join(f"1 Filler{i}\n" for i in range(48)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", lambda n: None,
+    )
+    result = build_dashboard(p, bracket=4)
+    assert result.deck_progress["current"] == 100
+    assert result.deck_progress["target"] == 100
+    assert result.legality["deck_total"] == 100
+    assert result.legality["deck_size_ok"] is True
+
+
 def test_build_dashboard_to_dict_serializable(tmp_path, monkeypatch):
     """The DashboardData should round-trip through json.dumps cleanly
     so it can be served by the future Flask layer."""
