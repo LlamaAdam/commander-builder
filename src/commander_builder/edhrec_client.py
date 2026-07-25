@@ -33,6 +33,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -279,7 +280,7 @@ def _http_get_text_with_retry(
         print(
             f"[edhrec] retry {attempt + 1}/{max_retries} "
             f"after {reason} — sleeping {delay:.1f}s",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
         time.sleep(delay)
     assert last_exc is not None  # the loop only exits via return or here
@@ -492,7 +493,7 @@ def _warn_empty_parse(kind: str, ident: str) -> None:
         "card data — EDHREC returned a page with no usable __NEXT_DATA__ "
         "(possibly a bot-challenge page, redirect interstitial, or schema "
         "change). Result NOT cached; will retry next run.",
-        flush=True,
+        file=sys.stderr, flush=True,
     )
 
 
@@ -544,7 +545,7 @@ def fetch_top_cards(
         print(
             f"[edhrec] WARNING: top-cards fetch failed for {slug!r} "
             f"({exc!r}) — continuing without trending signal",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
         return []
 
@@ -572,7 +573,7 @@ def fetch_top_cards(
             f"[edhrec] WARNING: top-cards page {slug!r} fetched OK but "
             "contained no recognizable cardlists — bad slug or JSON "
             "schema change. Result NOT cached; will retry next run.",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
     if cache and cards:
@@ -655,7 +656,7 @@ def fetch_commander_page(
         print(
             f"[edhrec] WARNING: commander-page fetch failed for {slug!r} "
             f"({exc!r}) — continuing without EDHREC signal",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
         return None
     page = _parse_commander_page(commander_or_slug, slug, html)
@@ -761,7 +762,7 @@ def fetch_salt_list(
         print(
             f"[edhrec] WARNING: salt-list fetch failed ({exc!r}) — "
             "continuing without salt scores",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
         return {}
 
@@ -880,7 +881,7 @@ def fetch_tag_page(
         print(
             f"[edhrec] WARNING: tag-page fetch failed for {safe_slug!r} "
             f"({exc!r}) — continuing without tag signal",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
         return None
     # Reuse the commander-page parser — tag pages have the same

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -230,7 +231,7 @@ def _log_divergence(names: set[str]) -> None:
         f"update _FALLBACK + prompts/moxfield_audit_v3.md. "
         f"ADDED: {', '.join(added) or 'none'}. "
         f"REMOVED: {', '.join(removed) or 'none'}.",
-        flush=True,
+        file=sys.stderr, flush=True,
     )
 
 
@@ -296,7 +297,7 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
                 f"(need >= {_MIN_SCRAPED_NAMES} names and "
                 f">= {_MIN_FALLBACK_OVERLAP:.0%} overlap) — "
                 f"using bundled fallback, not caching.",
-                flush=True,
+                file=sys.stderr, flush=True,
             )
         return set(_FALLBACK)
 

@@ -294,7 +294,7 @@ def test_trusted_scrape_logs_divergence_from_bundled_list(tmp_path, monkeypatch,
     )
 
     gc.fetch_game_changers()
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "[game_changers]" in out
     assert "Brand New Banger" in out          # reported as ADDED
     assert "Braids, Cabal Minion" in out      # reported as REMOVED
@@ -357,7 +357,7 @@ def test_rejected_scrape_is_logged(tmp_path, monkeypatch, capsys):
         lambda url, timeout=None: _scrape_html(["Rhystic Study"]),
     )
     gc.fetch_game_changers()
-    assert "rejecting scrape" in capsys.readouterr().out
+    assert "rejecting scrape" in capsys.readouterr().err
 
     import urllib.error
     def _down(url, timeout=None):
