@@ -120,8 +120,9 @@ def test_run_deck_sims_both_arms_and_picks_winner(tmp_path):
     assert len(simmed) == 2
     assert row["winner"] == "score"
     assert row["score_margin"] > row["bucket_margin"]
-    # Staged files exist for post-mortem.
-    assert (tmp_path / "stage" / "t__tier3_score.dck").exists()
+    # Staged decks are cleaned up (they live in the REAL deck dir) —
+    # the persisted compare reports are the durable record.
+    assert not list((tmp_path / "stage").glob("t__tier3_*.dck"))
 
 
 def test_run_deck_noop_arm_records_none_margin(tmp_path):
