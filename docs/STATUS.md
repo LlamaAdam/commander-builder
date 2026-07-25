@@ -30,7 +30,15 @@ sim-job sidecar persist-before-done fix (`c607718`), and Archidekt as
 the third corpus source (`336ce2d`). **Fast lane GREEN: 2582 passed /
 0 failed** (the sidecar fix also killed the reattach flake). Everything
 is flag-gated behind `COMMANDER_BUILDER_CARD_SCORE` (default off).
-Next: auto-curate verdict wiring; tier-3 bubble validation (Forge).
+Auto-curate verdict wiring landed (`400bb6f`) — every advise surface
+is budget-aware — plus the tier-3 harness (`3ca8f57`). **Full retest
+2026-07-25 night: 2755 passed / 0 failed including the slow lane**;
+PR #28 CI green on all three Python versions. **A tier-3 PILOT is
+RUNNING detached** (started ~18:30 local): 3 B3 decks × 2 arms × 40
+games via `scripts/validate_card_score.py`; stderr log at repo-root
+`_tier3_pilot.log`, JSON verdict lands at `_tier3_pilot_result.json`
+(staged arm decks in the deck dir's `_tier3_stage/`). Expect several
+hours; do NOT start competing Forge work while it runs.
 ⚠️ FP-002 note (2026-07-25 evening): the gauntlet soak is NOT running
 and the soak share `\\192.168.4.49\soak_inbox` is unreachable from
 box1 — the n=45 dataset is inaccessible until box2/the share returns;
