@@ -469,3 +469,117 @@ def test_main_json_happy_path(tmp_path, monkeypatch, capsys):
     assert payload["deck_score"]["verdict"] in {"keep", "polish",
                                                 "overhaul"}
     assert payload["bubble_cards"][0]["card"] == "Storm Crow"
+
+
+# ---------------------------------------------------------------------------
+# apply_verdict_to_report (advisor integration)
+# ---------------------------------------------------------------------------
+
+from commander_builder._advisor_models import (  # noqa: E402
+    AdviceReport,
+    SwapRecommendation,
+)
+from commander_builder.bubble_analysis import (  # noqa: E402
+    DeckScoreReport,
+    apply_verdict_to_report,
+)
+
+
+def rec(card, action, source=""):
+    return SwapRecommendation(card=card, action=action, reason="r",
+                              evidence={"source": source} if source else {})
+
+
+def make_report(*recs) -> AdviceReport:
+    return AdviceReport(deck_filename="d.dck", deck_id="d", bracket=3,
+                        recommendations=list(recs))
+
+
+def fake_score(verdict, budget):
+    ds = DeckScoreReport(total=80.0, verdict=verdict,
+                         change_budget=budget, components={},
+                         n_reference_decks=0)
+    return lambda **kw: ds
+
+
+def fake_bubbles(*cards):
+    out = [BubbleCard(card=c, cut_score=90.0, support=0.0, salt=0.0,
+                      replacement=None, ease=100.0 - i, reasons=())
+           for i, c in enumerate(cards)]
+    return lambda **kw: out
+
+
+def test_verdict_keep_trims_adds_and_cuts_to_budget():
+    report = make_report(
+        rec("Add A", "add"), rec("Add B", "add"), rec("Add C", "add"),
+        rec("Cut A", "cut"), rec("Cut B", "cut"), rec("Cut C", "cut"))
+    out = apply_verdict_to_report(
+        report, ctx=FakeCtx(), score_fn=fake_score("keep", (0, 2)),
+        bubble_fn=fake_bubbles())
+    adds = [r.card for r in out.recommendations if r.action == "add"]
+    cuts = [r.card for r in out.recommendations if r.action == "cut"]
+    assert adds == ["Add A", "Add B"]   # advisor order preserved
+    assert len(cuts) == 2
+    assert out.deck_score["verdict"] == "keep"
+
+
+def test_verdict_bubble_cuts_lead_the_cut_list():
+    report = make_report(rec("Cut A", "cut"), rec("Cut B", "cut"),
+                         rec("Cut C", "cut"))
+    out = apply_verdict_to_report(
+        report, ctx=FakeCtx(), score_fn=fake_score("polish", (2, 2)),
+        bubble_fn=fake_bubbles("Cut C", "Cut B"))
+    cuts = [r.card for r in out.recommendations if r.action == "cut"]
+    assert cuts == ["Cut C", "Cut B"]   # bubble order wins, budget caps
+
+
+def test_verdict_essentials_survive_the_trim():
+    report = make_report(
+        rec("Command Tower", "add", source="manabase_essentials"),
+        rec("Add A", "add"), rec("Add B", "add"))
+    out = apply_verdict_to_report(
+        report, ctx=FakeCtx(), score_fn=fake_score("keep", (0, 1)),
+        bubble_fn=fake_bubbles())
+    cards = [r.card for r in out.recommendations]
+    assert "Command Tower" in cards
+    assert cards.count("Add A") + cards.count("Add B") == 1
+
+
+def test_verdict_overhaul_trims_nothing():
+    report = make_report(*(rec(f"Add {i}", "add") for i in range(8)))
+    out = apply_verdict_to_report(
+        report, ctx=FakeCtx(), score_fn=fake_score("overhaul", (0, 0)),
+        bubble_fn=fake_bubbles())
+    assert len(out.recommendations) == 8
+    assert out.deck_score["verdict"] == "overhaul"
+
+
+def test_verdict_returns_new_report_and_never_mutates_input():
+    report = make_report(rec("Add A", "add"), rec("Add B", "add"),
+                         rec("Add C", "add"))
+    before = [r.card for r in report.recommendations]
+    out = apply_verdict_to_report(
+        report, ctx=FakeCtx(), score_fn=fake_score("keep", (0, 1)),
+        bubble_fn=fake_bubbles())
+    assert out is not report
+    assert [r.card for r in report.recommendations] == before
+    assert report.deck_score is None
+
+
+def test_verdict_attaches_bubble_dicts():
+    report = make_report()
+    out = apply_verdict_to_report(
+        report, ctx=FakeCtx(), score_fn=fake_score("keep", (0, 2)),
+        bubble_fn=fake_bubbles("Storm Crow"))
+    assert out.bubble_cards[0]["card"] == "Storm Crow"
+
+
+def test_land_candidates_never_offered_as_replacements():
+    ctx = FakeCtx(deck_cards=("Storm Crow",),
+                  cards={"temple garden": {"name": "Temple Garden",
+                                           "type_line": "Land - Forest Plains"}})
+    out = find_bubble_cards(
+        corpus=None, ctx=ctx, candidates=["Temple Garden"],
+        cutter=cutter_from({"Storm Crow": 90.0}),
+        scorer=scorer_from({"Temple Garden": 99.0}))
+    assert out[0].replacement is None

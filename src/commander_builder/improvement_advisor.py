@@ -1273,6 +1273,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             advise_kwargs["owned_only"] = True
     report = advise(Path(args.user), args.bracket, **advise_kwargs)
+    # Whole-deck verdict + change budget (FP-015 bubble slice). Only
+    # runs when the card-score flag is on; fail-quiet — any error
+    # (network, cache, parsing) leaves the report exactly as advise()
+    # produced it, so the default path stays byte-identical.
+    from .card_score import is_enabled as _card_score_on
+    if _card_score_on():
+        try:
+            from . import bubble_analysis as _bubble
+            _verdict_deck = Path(args.user)
+            if not _verdict_deck.is_absolute():
+                _verdict_deck = DECK_DIR / _verdict_deck
+            _corpus = None
+            if report.commander_names:
+                _corpus = _bubble.build_reference_corpus(
+                    " // ".join(report.commander_names),
+                    bracket=args.bracket,
+                )
+            report = _bubble.apply_verdict_to_report(
+                report,
+                deck_text=_verdict_deck.read_text(encoding="utf-8"),
+                corpus=_corpus,
+                bracket=args.bracket,
+            )
+        except Exception:  # noqa: BLE001 — advice must print regardless
+            pass
     # Bracket estimate for the report header. Fail-quiet: the deck
     # read is the only thing that can raise (estimate_bracket and
     # derive_signals never do by contract), and a missing estimate must
@@ -1319,6 +1344,27 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(text)
     except UnicodeEncodeError:
         sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+
+    # Whole-deck verdict section — present only when the FP-015 verdict
+    # pass ran above (card-score flag on and nothing raised).
+    if report.deck_score:
+        _ds = report.deck_score
+        _vlines = [
+            "",
+            f"Deck verdict: {_ds['total']}/100 -> {_ds['verdict']} "
+            f"(propose {_ds['change_budget'][0]}-"
+            f"{_ds['change_budget'][1]} changes)",
+        ]
+        for _b in report.bubble_cards[:5]:
+            _repl = _b.get("replacement")
+            _suffix = f" -> {_repl['card']}" if _repl else ""
+            _vlines.append(f"  bubble: {_b['card']}{_suffix}")
+        _vtext = "\n".join(_vlines)
+        try:
+            print(_vtext)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write(
+                (_vtext + "\n").encode("utf-8", errors="replace"))
 
     # Lift Web section (opt-in). Resolves the deck against DECK_DIR at
     # call time (same relative-filename contract as advise()) and uses

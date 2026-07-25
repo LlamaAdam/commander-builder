@@ -220,11 +220,15 @@ def _default_fetch_decks(commander: str, bracket: Optional[int],
 def _default_fetch_average(commander: str) -> list[str]:
     from .edhrec_client import fetch_average_deck
     try:
-        cards = fetch_average_deck(commander)
+        avg = fetch_average_deck(commander)
     except Exception:  # noqa: BLE001 — degrade, don't die, on network loss
         return []
+    # fetch_average_deck returns an AverageDeck whose .cards is a list of
+    # CardEntry (mainboard + commander mixed) — caught live 2026-07-25;
+    # the injected-fetcher tests couldn't see the real shape.
+    entries = getattr(avg, "cards", None) or []
     out: list[str] = []
-    for entry in cards or []:
+    for entry in entries:
         name = getattr(entry, "name", None) or (
             entry.get("name") if isinstance(entry, dict) else None)
         if name:
@@ -592,6 +596,13 @@ def find_bubble_cards(
         pool = []
     pool_scored: list[tuple[float, str, Optional[float]]] = []
     for cand in pool:
+        # Lands never replace nonland bubble cards — the manabase
+        # pipeline owns land counts. (Caught live 2026-07-25: Temple
+        # Garden outscored real spell candidates via its mana_fit
+        # component and was offered as a creature's replacement.)
+        cand_card = ctx.card(cand)
+        if cand_card and "Land" in (cand_card.get("type_line") or ""):
+            continue
         try:
             sc = scorer(cand, ctx)
         except Exception:  # noqa: BLE001 — one bad candidate, not the run
@@ -640,6 +651,82 @@ def find_bubble_cards(
 
     out.sort(key=lambda b: (b.ease, b.cut_score), reverse=True)
     return out[:max_results]
+
+
+# ---------------------------------------------------------------------------
+# Advisor integration
+# ---------------------------------------------------------------------------
+
+def apply_verdict_to_report(
+    report,
+    *,
+    deck_text: str = "",
+    corpus: Optional[ReferenceCorpus] = None,
+    ctx: Optional[DeckContext] = None,
+    score_fn: Optional[Callable] = None,
+    bubble_fn: Optional[Callable] = None,
+    **ctx_kwargs,
+):
+    """Attach the whole-deck verdict to an ``AdviceReport`` and trim its
+    recommendations to the change budget. Returns a NEW report — the
+    input is never mutated.
+
+    This is the "stop forcing 1-10 swaps" seam:
+
+    - ``verdict == "keep"`` / ``"polish"``: non-essential adds are
+      capped at the budget (they arrive advisor-ranked, so the cap
+      keeps the best); non-essential cuts are reordered **bubble-first**
+      (easiest replacements lead, so the downstream i-mod-n add/cut
+      pairing consumes bubble cards before coin-flip cuts) and capped
+      at the same budget. Recs whose ``evidence.source`` ends with
+      ``"_essentials"`` (manabase / tribal fixes) are structural and
+      always survive the trim.
+    - ``verdict == "overhaul"``: nothing is trimmed. The budget of 0
+      swaps means "swaps alone won't fix this deck" — but the
+      advisor's recommendations ARE the structural fixes, so they all
+      stay. The verdict text tells the user to fix structure first.
+
+    ``score_fn`` / ``bubble_fn`` default to :func:`score_deck` /
+    :func:`find_bubble_cards` and are injectable for tests.
+    """
+    from dataclasses import replace
+
+    if ctx is None:
+        if corpus is not None and "salt_scores" not in ctx_kwargs:
+            ctx_kwargs["salt_scores"] = corpus.salt_map
+        ctx = deck_context(deck_text=deck_text, **ctx_kwargs)
+
+    ds = (score_fn or score_deck)(corpus=corpus, ctx=ctx)
+    bubbles = (bubble_fn or find_bubble_cards)(corpus=corpus, ctx=ctx)
+    ds_dict = ds.to_dict() if hasattr(ds, "to_dict") else dict(ds)
+    bubble_dicts = [b.to_dict() if hasattr(b, "to_dict") else dict(b)
+                    for b in bubbles]
+
+    verdict = ds_dict.get("verdict")
+    budget_max = (ds_dict.get("change_budget") or [0, 0])[1]
+    recs = list(report.recommendations)
+
+    if verdict in ("keep", "polish"):
+        def _essential(rec) -> bool:
+            source = str((rec.evidence or {}).get("source", ""))
+            return source.endswith("_essentials")
+
+        bubble_rank = {str(b.get("card", "")).strip().lower(): i
+                       for i, b in enumerate(bubble_dicts)}
+        essentials = [r for r in recs if _essential(r)]
+        adds = [r for r in recs
+                if r.action == "add" and not _essential(r)]
+        cuts = [r for r in recs
+                if r.action == "cut" and not _essential(r)]
+        other = [r for r in recs
+                 if r.action not in ("add", "cut") and not _essential(r)]
+        cuts.sort(key=lambda r: bubble_rank.get(
+            r.card.strip().lower(), len(bubble_rank) + 1))
+        recs = (essentials + other
+                + adds[:budget_max] + cuts[:budget_max])
+
+    return replace(report, recommendations=recs,
+                   deck_score=ds_dict, bubble_cards=bubble_dicts)
 
 
 # ---------------------------------------------------------------------------

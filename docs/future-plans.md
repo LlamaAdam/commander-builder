@@ -53,12 +53,23 @@ EDHREC (average deck + salt), and further sites as they're added.
 - CLI: `python -m commander_builder.bubble_analysis <deck.dck>
   [--bracket N] [--refs 50] [--no-network] [--json]`.
 
-**Open (next slices):** wire the change budget + bubble list into the
-advisor/auto-curate path (respect the budget instead of the fixed swap
-count); Archidekt (or similar) as the third corpus source; validate the
-bubble ranking the same tier-3 way (bubble-swaps vs bucket-order swaps,
-both A/B simmed). Same honesty contract as CardScore: heuristic prior,
-Forge stays the arbiter.
+**Also shipped (2026-07-25, later):** advisor integration.
+`AdviceReport` gained optional `deck_score` / `bubble_cards` fields
+(default None/empty — the default path is untouched);
+`bubble_analysis.apply_verdict_to_report()` returns a NEW report with
+recommendations trimmed to the change budget (advisor-ranked adds
+capped; cuts reordered **bubble-first** then capped; `*_essentials`
+structural recs always survive; `overhaul` trims nothing — the recs ARE
+the structure fixes). `commander-advise` runs the verdict pass
+automatically when `COMMANDER_BUILDER_CARD_SCORE` is on (fail-quiet,
+corpus cache-first) and prints a "Deck verdict" section. 6 more tests.
+
+**Open (next slices):** surface the verdict in the web audit +
+auto-curate paths (they call `advise()` directly and skip the CLI
+wrapper today); Archidekt (or similar) as the third corpus source;
+validate the bubble ranking the same tier-3 way (bubble-swaps vs
+bucket-order swaps, both A/B simmed). Same honesty contract as
+CardScore: heuristic prior, Forge stays the arbiter.
 
 ## The gap
 
