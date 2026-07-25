@@ -93,6 +93,15 @@ budget-aware**. Also fixed en route: EDHREC/game_changers diagnostics
 now write to stderr (an EDHREC bot-challenge page was corrupting every
 --json mode via a stdout warning).
 
+**Also shipped (2026-07-25, late night):** the tier-3 validation
+harness (`scripts/validate_card_score.py` — both rankings via the real
+production `advise()` paths, staged through the shared legality path,
+each arm A/B simmed vs the original; a 3-deck × 40-game pilot is
+running detached, see STATUS) and **FP-015 seam #4**: the FP-014
+commander-page fallback pool is now corpus-augmented and
+CardScore-ordered when the flag is on (`_score_ordered_fallback` —
+flag off / any failure = byte-identical legacy pile).
+
 **Open (next slices):**
 validate the bubble ranking the same tier-3 way (bubble-swaps vs
 bucket-order swaps, both A/B simmed). Same honesty contract as

@@ -327,6 +327,58 @@ def _fallback_candidates(page) -> list[str]:
     return ordered
 
 
+def _score_ordered_fallback(
+    raw_names: list[str],
+    commander: str,
+    bracket: Optional[int],
+) -> list[str]:
+    """FP-015 seam #4 — upgrade the fallback pool when the flag is on.
+
+    The commander-page fallback is FP-014's acknowledged weak spot ("a
+    *defensible pile*, not a coherent deck"): bucket insertion order
+    literally decides which cards make the 99. With
+    ``COMMANDER_BUILDER_CARD_SCORE`` enabled this (1) augments the pool
+    with the reference corpus' high-consensus cards — what the top
+    Moxfield/Archidekt builds run that the EDHREC page missed — and
+    (2) orders the merged pool by ``CardScore`` against a
+    commander-only context, so role-filling, on-color, curve-sane cards
+    rise before trivia. Ties keep the original bucket order (stable).
+
+    Flag off → input returned unchanged (byte-identical legacy path).
+    Any failure (network, cache, scoring) also returns the input
+    unchanged — the fallback build must never get WORSE than the pile.
+    """
+    from .card_score import is_enabled
+    if not is_enabled():
+        return raw_names
+    try:
+        from . import bubble_analysis as _bubble
+        from .card_score import deck_context, score_card
+        pool = list(raw_names)
+        seen = {n.strip().lower() for n in pool}
+        corpus = _bubble.build_reference_corpus(commander, bracket=bracket)
+        if corpus is not None:
+            for cand in corpus.replacement_pool(frozenset()):
+                k = cand.strip().lower()
+                if k not in seen:
+                    seen.add(k)
+                    pool.append(cand)
+        ctx = deck_context(commander_names=[commander], deck_cards=[],
+                           bracket=bracket)
+        order = {n.strip().lower(): i for i, n in enumerate(pool)}
+
+        def _key_for(name: str):
+            try:
+                total = float(score_card(name, ctx).total)
+            except Exception:  # noqa: BLE001 — unscorable sinks, not dies
+                total = 0.0
+            return (-total, order[name.strip().lower()])
+
+        return sorted(pool, key=_key_for)
+    except Exception:  # noqa: BLE001 — never worse than the plain pile
+        return list(raw_names)
+
+
 # --------------------------------------------------------------------------
 # Partner-pair support (FP-014 second cut)
 # --------------------------------------------------------------------------
@@ -646,7 +698,9 @@ def _assemble(
                 f"cannot build: no EDHREC data for {commander}"
             )
         source = "commander-page fallback"
-        raw_names = _fallback_candidates(page)
+        raw_names = _score_ordered_fallback(
+            _fallback_candidates(page), commander, bracket,
+        )
 
     # ---- 3. LEGALITY: split commander / seed lands / spells, singleton ----
     # FP-014.2: unlike FP-014.1 (which discarded every land), we KEEP the

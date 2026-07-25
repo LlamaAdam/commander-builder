@@ -1145,3 +1145,52 @@ def test_partner_personalize_stages_keep_invariants(monkeypatch):
     # The steer's estimator was fed the REAL two-commander render.
     assert "1 Pako, Arcane Retriever" in rendered["last"]
     assert "1 Haldan, Avid Arcanist" in rendered["last"]
+
+
+# ---------------------------------------------------------------------------
+# FP-015 seam #4 — score-ordered fallback pool (flag-gated)
+# ---------------------------------------------------------------------------
+
+def test_score_ordered_fallback_flag_off_is_identity(monkeypatch):
+    monkeypatch.delenv("COMMANDER_BUILDER_CARD_SCORE", raising=False)
+    from commander_builder.deck_builder import _score_ordered_fallback
+    names = ["Zeta", "Alpha", "Mid"]
+    assert _score_ordered_fallback(names, "Krenko, Mob Boss", 3) is names
+
+
+def test_score_ordered_fallback_orders_by_score_and_merges_corpus(
+    monkeypatch,
+):
+    monkeypatch.setenv("COMMANDER_BUILDER_CARD_SCORE", "1")
+    import commander_builder.bubble_analysis as bub
+    import commander_builder.card_score as cs
+    from types import SimpleNamespace
+
+    class _Corpus:
+        def replacement_pool(self, exclude):
+            return ["Corpus Star"]
+
+    monkeypatch.setattr(bub, "build_reference_corpus",
+                        lambda *a, **k: _Corpus())
+    monkeypatch.setattr(cs, "deck_context", lambda **k: object())
+    scores = {"Weak": 10.0, "Strong": 90.0, "Corpus Star": 70.0}
+    monkeypatch.setattr(
+        cs, "score_card",
+        lambda name, ctx: SimpleNamespace(total=scores.get(name, 0.0)))
+
+    from commander_builder.deck_builder import _score_ordered_fallback
+    out = _score_ordered_fallback(["Weak", "Strong"], "X", 3)
+    assert out == ["Strong", "Corpus Star", "Weak"]
+
+
+def test_score_ordered_fallback_failure_returns_plain_pool(monkeypatch):
+    monkeypatch.setenv("COMMANDER_BUILDER_CARD_SCORE", "1")
+    import commander_builder.bubble_analysis as bub
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(bub, "build_reference_corpus", boom)
+    from commander_builder.deck_builder import _score_ordered_fallback
+    names = ["B", "A"]
+    assert _score_ordered_fallback(names, "X", 3) == ["B", "A"]
