@@ -24,6 +24,42 @@ separately) → full green run → PR → the tier-3 ranking validation
 below (top-k-by-score vs bucket-order, both A/B simmed) before the
 flag defaults on.
 
+## Addendum 2026-07-25 — deck-level verdict + bubble cards (first cut shipped)
+
+**Operator direction:** stop forcing 1–10 swaps. First decide whether
+the deck is *already good overall*; then surface only the cards that
+are **on the bubble** — weak in this deck AND rarely played in
+successful builds of the same commander AND cheaply replaceable. Ground
+"what good decks look like" in the top ~50 liked Moxfield builds,
+EDHREC (average deck + salt), and further sites as they're added.
+
+**Shipped:** `bubble_analysis.py` + 33 tests.
+- `build_reference_corpus(commander, bracket, n=50)` — top-liked
+  Moxfield decks (`find_top_liked_decks_for_commander`) + EDHREC
+  average deck + salt list, disk-cached 168h beside the EDHREC caches.
+  Fetchers are injectable — the seam for a third reference site
+  (Archidekt is the natural next one).
+- `score_deck(...)` — 0–100 whole-deck score over reference_alignment
+  (0.40) / role_fit (0.25) / mana_fit (0.25, Karsten) / salt_fit
+  (0.10, B≤3 only), unavailable components renormalized away. Verdict
+  bands → change budget: ≥75 "keep" (0–2 swaps), ≥55 "polish" (2–5),
+  else "overhaul" (0 swaps — fix structure first, FP-002's finding
+  operationalized).
+- `find_bubble_cards(...)` — bubble = cut_score ≥ 55 AND reference
+  support ≤ 0.25 (guard-railed/protected cards never qualify); each
+  bubble paired with the best replacement from the corpus'
+  high-consensus absentees (≥ +10 score margin, greedy so adds aren't
+  double-claimed); ranked by ease = score gap × replacement consensus.
+- CLI: `python -m commander_builder.bubble_analysis <deck.dck>
+  [--bracket N] [--refs 50] [--no-network] [--json]`.
+
+**Open (next slices):** wire the change budget + bubble list into the
+advisor/auto-curate path (respect the budget instead of the fixed swap
+count); Archidekt (or similar) as the third corpus source; validate the
+bubble ranking the same tier-3 way (bubble-swaps vs bucket-order swaps,
+both A/B simmed). Same honesty contract as CardScore: heuristic prior,
+Forge stays the arbiter.
+
 ## The gap
 
 There is **no per-card score anywhere in the codebase.** Card ordering is
