@@ -8,7 +8,25 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-23 (`master` @ `763bdfc` — **everything is
+**Last updated:** 2026-07-25 — ⚡ **work RESUMED after two usage-limit
+(rate-limit) interruptions on 2026-07-24/25; nothing was lost.** The
+in-flight work is `feature/eval-fixes`: the REVIEW.md evaluation
+(verified defects + rules-coverage gaps + the CardScore spec, repo
+root) is now **committed as `25c1a54`** (~10,100 lines —
+`card_score.py`, `deck_legality.py`, `consistency.py`,
+`interaction.py`, commander-aware `deck_health`, bracket-caller
+plumbing, and ~4,400 lines of new tests). Test state 2026-07-25:
+**2532 passed / 6 failed** — all 6 are `test_compare_versions.py` and
+are a **pre-existing hermeticity gap, not caused by the eval work**
+(on a box with ≥2 `vendor/forge*` profiles, `compare()`'s
+isolated-profile dispatch substitutes real profile runners for the
+injected FakeRunner, so real JVMs run and credit 0 games; the same
+tests pass 66/66 in a clean single-profile tree at the same HEAD).
+The hermeticity fix is in flight in a spawned worktree session.
+Next: land that fix → full green run → PR to master. Active queue is now the top of
+[docs/future-plans.md](future-plans.md) (reordered 2026-07-25:
+active items first, shipped reference last).
+Prior update: 2026-07-23 (`master` @ `763bdfc` — **everything is
 merged**: PRs #13–#19 landed the ManaFoundry-parity six (#13), FP-014
 build-from-scratch (#14), the MIT license (#15), the revert-drift
 resolution fix (#16), the adversarial-review-carrying session branch
@@ -629,9 +647,10 @@ Plugs into `_advisor_heuristic._rank`, the cut loop,
 `deck_builder._fallback_candidates` (which decides the 99 on FP-014's
 weak no-average-deck path).
 
-**Status: PARKED — spec'd 2026-07-24, not started.** No external blocker;
-buildable today against shipped modules. Parked because it must ship
-**behind a flag** and be validated as a *ranking*, not merged on face
+**Status: IN PROGRESS — implementation staged on `feature/eval-fixes`
+(2026-07-25), uncommitted; resumed after the 2026-07-24/25 usage-limit
+interruptions.** It still ships
+**behind a flag** and gets validated as a *ranking*, not merged on face
 plausibility: top-k-by-score vs. k-by-current-bucket-order, both A/B
 simmed through `compare_versions`. **Explicitly not** validated by
 regression on margin — FP-002 already shows nothing clears |t| >= 2 at
