@@ -81,6 +81,7 @@ def stage_arm(
     the staged ``.dck``. Returns False when the swaps were a no-op
     (nothing applied — no point simming an identical deck)."""
     from commander_builder._advisor_models import SwapRecommendation
+    from commander_builder.dck_meta import rewrite_name
     from commander_builder.web.deck_text_ops import _apply_swaps_to_dck
     recs = ([SwapRecommendation(card=c, action="add", reason="tier3")
              for c in adds]
@@ -91,7 +92,12 @@ def stage_arm(
     )
     if not applied_adds and not applied_cuts:
         return False
-    out_path.write_text(proposed, encoding="utf-8")
+    # Name= MUST match the staged filename stem — log_parser attributes
+    # wins by Forge's displayed deck name, and base + arm sharing the
+    # original Name= would resurrect the pre-e8777b6 attribution bug
+    # (caught live: first pilot parsed 0 games).
+    out_path.write_text(rewrite_name(proposed, out_path.stem),
+                        encoding="utf-8")
     return True
 
 
@@ -140,9 +146,13 @@ def run_deck(
             arm_margins[arm] = None
             continue
         # Stage the original beside it so compare() resolves both from
-        # one deck_dir.
+        # one deck_dir — with its Name= rewritten to the staged stem for
+        # the same attribution reason as the arm deck.
+        from commander_builder.dck_meta import rewrite_name
         original_copy = stage_dir / f"{stem}__tier3_base.dck"
-        original_copy.write_text(original_text, encoding="utf-8")
+        original_copy.write_text(
+            rewrite_name(original_text, original_copy.stem),
+            encoding="utf-8")
         report = compare_fn(
             old_deck=original_copy.name,
             new_deck=staged.name,
@@ -157,6 +167,14 @@ def run_deck(
                             if decisive else None)
         row[f"{arm}_sim"] = {"old_wins": old_wins, "new_wins": new_wins,
                              "games": report.old_stats.games}
+    # The staged decks live in the REAL deck dir (Forge requirement) —
+    # remove them so they never pollute the deck list / web UI. The
+    # persisted compare reports remain the durable record.
+    for leftover in stage_dir.glob(f"{stem}__tier3_*.dck"):
+        try:
+            leftover.unlink()
+        except OSError:
+            pass
     row["bucket_margin"] = arm_margins.get("bucket")
     row["score_margin"] = arm_margins.get("score")
     if (row["bucket_margin"] is not None
@@ -193,8 +211,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if missing:
         print(f"error: no such deck(s): {missing}", file=sys.stderr)
         return 2
+    # Stage INSIDE the Forge deck dir (the decks' own directory):
+    # Forge resolves decks from its userdata tree, so a sibling
+    # subfolder is invisible to it — the first pilot's pods exited in
+    # ~20s with 0 games because the staged decks didn't exist as far
+    # as Forge was concerned.
     stage_dir = (Path(args.stage_dir) if args.stage_dir
-                 else deck_paths[0].parent / "_tier3_stage")
+                 else deck_paths[0].parent)
 
     rows = []
     for p in deck_paths:
