@@ -22,8 +22,10 @@ are a **pre-existing hermeticity gap, not caused by the eval work**
 isolated-profile dispatch substitutes real profile runners for the
 injected FakeRunner, so real JVMs run and credit 0 games; the same
 tests pass 66/66 in a clean single-profile tree at the same HEAD).
-**PR #28 is OPEN** (`feature/eval-fixes` → master) carrying the full
-FP-015 arc: eval overhaul (`25c1a54`), compare-runner hermeticity fix
+**PR #28 is MERGED** (`b529392`, 2026-07-25 evening) — `master` is the
+live tip again and the `feature/eval-fixes` era is closed (23 commits;
+work going forward: short-lived branches cut from master). The merged
+arc: eval overhaul (`25c1a54`), compare-runner hermeticity fix
 (`b4b5492`), bubble analysis (`c9914c2`), advisor wiring (`626f57a`),
 web audit backend (`122bf72`), audit UI verdict panel (`36498a7`),
 sim-job sidecar persist-before-done fix (`c607718`), and Archidekt as
