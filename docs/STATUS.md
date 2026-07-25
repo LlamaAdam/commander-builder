@@ -34,11 +34,15 @@ Auto-curate verdict wiring landed (`400bb6f`) — every advise surface
 is budget-aware — plus the tier-3 harness (`3ca8f57`). **Full retest
 2026-07-25 night: 2755 passed / 0 failed including the slow lane**;
 PR #28 CI green on all three Python versions. **A tier-3 PILOT is
-RUNNING detached** (started ~18:30 local): 3 B3 decks × 2 arms × 40
-games via `scripts/validate_card_score.py`; stderr log at repo-root
-`_tier3_pilot.log`, JSON verdict lands at `_tier3_pilot_result.json`
-(staged arm decks in the deck dir's `_tier3_stage/`). Expect several
-hours; do NOT start competing Forge work while it runs.
+RUNNING detached** (relaunched ~19:35 local after the first attempt
+exposed two staging bugs — decks must live IN the Forge deck dir and
+carry Name= = filename, both fixed in `6163e8b`; a 4-game smoke then
+confirmed real attributed games): 3 B3 decks × 2 arms × 40 games/pod
+via `scripts/validate_card_score.py`. Clean JSON verdict lands at
+repo-root `_tier3_pilot_result.json` (`--out`); progress at
+`_tier3_pilot_progress.log`, stderr at `_tier3_pilot.log`. Staged
+`*__tier3_*` decks are auto-removed per deck. Expect several hours;
+do NOT start competing Forge work while it runs.
 ⚠️ FP-002 note (2026-07-25 evening): the gauntlet soak is NOT running
 and the soak share `\\192.168.4.49\soak_inbox` is unreachable from
 box1 — the n=45 dataset is inaccessible until box2/the share returns;
