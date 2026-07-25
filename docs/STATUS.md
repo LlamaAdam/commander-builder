@@ -22,13 +22,19 @@ are a **pre-existing hermeticity gap, not caused by the eval work**
 isolated-profile dispatch substitutes real profile runners for the
 injected FakeRunner, so real JVMs run and credit 0 games; the same
 tests pass 66/66 in a clean single-profile tree at the same HEAD).
-The hermeticity fix landed (`b4b5492` — compare() honors an injected
-runner in multi-profile dispatch) and the **full fast lane is GREEN:
-2572 passed / 0 failed** (155 skipped slow). `bubble_analysis.py`
-(`c9914c2`) adds the operator-directed whole-deck verdict + bubble-card
-report (FP-015 addendum in future-plans.md). Branch pushed to origin.
-Next: PR `feature/eval-fixes` → master; then wire the change budget +
-bubble list into the advisor/auto-curate path. Active queue is now the top of
+**PR #28 is OPEN** (`feature/eval-fixes` → master) carrying the full
+FP-015 arc: eval overhaul (`25c1a54`), compare-runner hermeticity fix
+(`b4b5492`), bubble analysis (`c9914c2`), advisor wiring (`626f57a`),
+web audit backend (`122bf72`), audit UI verdict panel (`36498a7`),
+sim-job sidecar persist-before-done fix (`c607718`), and Archidekt as
+the third corpus source (`336ce2d`). **Fast lane GREEN: 2582 passed /
+0 failed** (the sidecar fix also killed the reattach flake). Everything
+is flag-gated behind `COMMANDER_BUILDER_CARD_SCORE` (default off).
+Next: auto-curate verdict wiring; tier-3 bubble validation (Forge).
+⚠️ FP-002 note (2026-07-25 evening): the gauntlet soak is NOT running
+and the soak share `\\192.168.4.49\soak_inbox` is unreachable from
+box1 — the n=45 dataset is inaccessible until box2/the share returns;
+campaign paused pending operator. Active queue is now the top of
 [docs/future-plans.md](future-plans.md) (reordered 2026-07-25:
 active items first, shipped reference last).
 Prior update: 2026-07-23 (`master` @ `763bdfc` — **everything is
