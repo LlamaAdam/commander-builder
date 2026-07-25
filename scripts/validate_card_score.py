@@ -201,6 +201,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                              "_tier3_stage next to the first deck)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true", dest="as_json")
+    parser.add_argument("--out", default=None,
+                        help="also write the summary JSON to this file "
+                             "(clean — compare()'s progress lines go to "
+                             "stdout, so redirecting stdout is NOT a "
+                             "reliable way to capture the JSON)")
     args = parser.parse_args(argv)
 
     # advise() resolves RELATIVE paths against its own DECK_DIR, which
@@ -233,6 +238,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "ties": sum(1 for r in rows if r.get("winner") == "tie"),
         "skipped": sum(1 for r in rows if r.get("skipped")),
     }
+    if args.out:
+        Path(args.out).write_text(json.dumps(summary, indent=2),
+                                  encoding="utf-8")
     if args.as_json:
         print(json.dumps(summary, indent=2))
     else:
