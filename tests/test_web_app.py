@@ -6386,3 +6386,68 @@ def test_log_error_stops_writing_past_cap(client, deck_dir, monkeypatch):
     assert body["logged"] is False
     assert body["reason"] == "log full"
     assert log_path.stat().st_size == size_after_first
+
+
+# ---------------------------------------------------------------------------
+# /api/audit — FP-015 deck verdict passthrough (flag-gated)
+# ---------------------------------------------------------------------------
+
+def _stub_advise_report():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        recommendations=[
+            SimpleNamespace(card="Lotus Cobra", action="add",
+                            reason="ramp", evidence={}),
+        ],
+        diagnosis=SimpleNamespace(pattern_summary="x",
+                                  weakness_signals=[]),
+        source="heuristic",
+        commander_names=["Test Cmdr"],
+    )
+
+
+def test_audit_payload_has_null_verdict_when_flag_off(client, monkeypatch):
+    monkeypatch.delenv("COMMANDER_BUILDER_CARD_SCORE", raising=False)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda *a, **k: _stub_advise_report(),
+    )
+    body = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
+    assert body["deck_score"] is None
+    assert body["bubble_cards"] == []
+
+
+def test_audit_payload_carries_verdict_when_flag_on(client, monkeypatch):
+    monkeypatch.setenv("COMMANDER_BUILDER_CARD_SCORE", "1")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda *a, **k: _stub_advise_report(),
+    )
+    ds = {"total": 80.0, "verdict": "keep", "change_budget": [0, 2],
+          "components": {}, "n_reference_decks": 12, "explanations": []}
+    bubbles = [{"card": "Storm Crow", "cut_score": 90.0, "support": 0.0,
+                "salt": 0.0, "replacement": None, "ease": 0.0,
+                "reasons": []}]
+
+    def fake_apply(report, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            recommendations=report.recommendations,
+            diagnosis=report.diagnosis,
+            source=report.source,
+            commander_names=report.commander_names,
+            deck_score=ds,
+            bubble_cards=bubbles,
+        )
+
+    monkeypatch.setattr(
+        "commander_builder.bubble_analysis.build_reference_corpus",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "commander_builder.bubble_analysis.apply_verdict_to_report",
+        fake_apply,
+    )
+    body = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
+    assert body["deck_score"]["verdict"] == "keep"
+    assert body["bubble_cards"][0]["card"] == "Storm Crow"

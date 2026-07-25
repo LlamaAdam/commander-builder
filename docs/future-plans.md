@@ -64,9 +64,18 @@ the structure fixes). `commander-advise` runs the verdict pass
 automatically when `COMMANDER_BUILDER_CARD_SCORE` is on (fail-quiet,
 corpus cache-first) and prints a "Deck verdict" section. 6 more tests.
 
-**Open (next slices):** surface the verdict in the web audit +
-auto-curate paths (they call `advise()` directly and skip the CLI
-wrapper today); Archidekt (or similar) as the third corpus source;
+**Also shipped (2026-07-25, still later):** web audit backend. The
+verdict pass now lives at the TOP of `routes_audit._build_audit_payload`
+(flag-gated, fail-quiet) so the sync `/api/audit` and SSE stream
+payloads stay identical (the 2026-06 warning-asymmetry lesson), the
+trimmed recommendations drive proposed-text/pricing consistently, and
+the payload carries `deck_score` + `bubble_cards` keys (None/[] when
+the flag is off). 2 web tests.
+
+**Open (next slices):** render `deck_score`/`bubble_cards` in the audit
+UI (`app.js` — a verdict headline + bubble badges); auto-curate path
+(calls `advise()` directly and skips both wrappers today); Archidekt
+(or similar) as the third corpus source;
 validate the bubble ranking the same tier-3 way (bubble-swaps vs
 bucket-order swaps, both A/B simmed). Same honesty contract as
 CardScore: heuristic prior, Forge stays the arbiter.

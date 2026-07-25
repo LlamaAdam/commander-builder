@@ -244,6 +244,29 @@ def _build_audit_payload(
     ``diagnosis`` on both paths, so the streamed diagnosis never
     rendered). Both bugs are fixed by routing both endpoints through here.
     """
+    # FP-015 verdict pass (flag-gated, fail-quiet). Living HERE — not in
+    # the endpoints — keeps the sync and SSE payloads identical (the
+    # 2026-06 warning-asymmetry lesson). When COMMANDER_BUILDER_CARD_SCORE
+    # is on, the report gains deck_score/bubble_cards and its
+    # recommendations are trimmed to the change budget BEFORE
+    # proposed-text assembly, so the applied swaps, pricing, and payload
+    # lists all reflect the trimmed set. Any failure (network, cache)
+    # leaves the report exactly as advise() produced it.
+    try:
+        from ..card_score import is_enabled as _card_score_on
+        if _card_score_on():
+            from .. import bubble_analysis as _bubble
+            _corpus = None
+            if getattr(report, "commander_names", None):
+                _corpus = _bubble.build_reference_corpus(
+                    " // ".join(report.commander_names), bracket=bracket,
+                )
+            report = _bubble.apply_verdict_to_report(
+                report, deck_text=original, corpus=_corpus,
+                bracket=bracket,
+            )
+    except Exception:  # noqa: BLE001 — the audit must render regardless
+        pass
     proposed_text, added, removed, kept = _apply_swaps_to_dck(
         original, report.recommendations,
     )
@@ -370,6 +393,10 @@ def _build_audit_payload(
         # (ManaFoundry parity). Rendered as the tile row's header.
         "health_grade": _compute_health_grade_safe(original, health_signals),
         "combo_assessment": _assess_combos_safe(original, bracket),
+        # FP-015 whole-deck verdict + bubble cards. None/[] unless the
+        # card-score flag is on and the verdict pass above succeeded.
+        "deck_score": getattr(report, "deck_score", None),
+        "bubble_cards": list(getattr(report, "bubble_cards", []) or []),
     }
 
 
