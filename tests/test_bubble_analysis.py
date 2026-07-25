@@ -172,6 +172,7 @@ def test_build_corpus_from_injected_fetchers(ref_cache):
         ],
         fetch_average=lambda c: ["Impact Tremors"],
         fetch_salt=lambda: {"Rhystic Study": 3.2},
+        fetch_extra_lists=lambda c, b, n: [],
     )
     assert corpus is not None
     assert corpus.n_decks == 2
@@ -186,6 +187,7 @@ def test_build_corpus_returns_none_when_all_sources_empty(ref_cache):
         fetch_decks=lambda c, b, n: [],
         fetch_average=lambda c: [],
         fetch_salt=lambda: {},
+                  fetch_extra_lists=lambda c, b, n: [],
     )
     assert corpus is None
 
@@ -198,7 +200,8 @@ def test_build_corpus_caches_and_reuses(ref_cache):
         return [moxfield_deck_json("Sol Ring")]
 
     kwargs = dict(fetch_decks=fetch, fetch_average=lambda c: [],
-                  fetch_salt=lambda: {})
+                  fetch_salt=lambda: {},
+                  fetch_extra_lists=lambda c, b, n: [])
     first = build_reference_corpus("Krenko, Mob Boss", **kwargs)
     second = build_reference_corpus("Krenko, Mob Boss", **kwargs)
     assert calls["n"] == 1
@@ -208,7 +211,8 @@ def test_build_corpus_caches_and_reuses(ref_cache):
 
 def test_build_corpus_refetches_on_corrupt_cache(ref_cache):
     kwargs = dict(fetch_decks=lambda c, b, n: [moxfield_deck_json("A")],
-                  fetch_average=lambda c: [], fetch_salt=lambda: {})
+                  fetch_average=lambda c: [], fetch_salt=lambda: {},
+                  fetch_extra_lists=lambda c, b, n: [])
     build_reference_corpus("Krenko, Mob Boss", **kwargs)
     for f in ref_cache.iterdir():
         f.write_text("{not json", encoding="utf-8")
@@ -225,7 +229,8 @@ def test_build_corpus_skips_cache_when_disabled(ref_cache):
         return [moxfield_deck_json("A")]
 
     kwargs = dict(cache=False, fetch_decks=fetch,
-                  fetch_average=lambda c: [], fetch_salt=lambda: {})
+                  fetch_average=lambda c: [], fetch_salt=lambda: {},
+                  fetch_extra_lists=lambda c, b, n: [])
     build_reference_corpus("Krenko, Mob Boss", **kwargs)
     build_reference_corpus("Krenko, Mob Boss", **kwargs)
     assert calls["n"] == 2
@@ -583,3 +588,49 @@ def test_land_candidates_never_offered_as_replacements():
         cutter=cutter_from({"Storm Crow": 90.0}),
         scorer=scorer_from({"Temple Garden": 99.0}))
     assert out[0].replacement is None
+
+
+# ---------------------------------------------------------------------------
+# Archidekt merge (third corpus source)
+# ---------------------------------------------------------------------------
+
+def test_build_corpus_merges_extra_lists(ref_cache):
+    corpus = build_reference_corpus(
+        "Krenko, Mob Boss",
+        fetch_decks=lambda c, b, n: [moxfield_deck_json("Sol Ring")],
+        fetch_average=lambda c: [],
+        fetch_salt=lambda: {},
+        fetch_extra_lists=lambda c, b, n: [["Skirk Prospector", "Sol Ring"],
+                                           ["Impact Tremors"]],
+    )
+    assert corpus.n_decks == 3  # 1 moxfield + 2 archidekt
+    assert corpus.display_names["skirk prospector"] == "Skirk Prospector"
+
+
+def test_build_corpus_extra_lists_alone_suffice(ref_cache):
+    corpus = build_reference_corpus(
+        "Krenko, Mob Boss",
+        fetch_decks=lambda c, b, n: [],
+        fetch_average=lambda c: [],
+        fetch_salt=lambda: {},
+        fetch_extra_lists=lambda c, b, n: [["Sol Ring"]],
+    )
+    assert corpus is not None
+    assert corpus.n_decks == 1
+
+
+def test_build_corpus_extra_budget_capped():
+    seen = {}
+
+    def extra(c, b, n):
+        seen["n"] = n
+        return []
+
+    import commander_builder.archidekt_client as ac
+    build_reference_corpus(
+        "X", n=50, cache=False,
+        fetch_decks=lambda c, b, n: [moxfield_deck_json("A")],
+        fetch_average=lambda c: [], fetch_salt=lambda: {},
+        fetch_extra_lists=extra,
+    )
+    assert seen["n"] == ac.DEFAULT_N  # never the full Moxfield budget

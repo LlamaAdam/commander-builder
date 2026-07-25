@@ -244,6 +244,16 @@ def _default_fetch_salt() -> dict[str, float]:
         return {}
 
 
+def _default_fetch_extra_lists(commander: str, bracket: Optional[int],
+                               n: int) -> list[list[str]]:
+    """Archidekt — the corpus' third source (plain card-name lists)."""
+    from .archidekt_client import fetch_top_decks
+    try:
+        return fetch_top_decks(commander, bracket=bracket, n=n)
+    except Exception:  # noqa: BLE001 — a dead source shrinks the corpus,
+        return []      # it never sinks the build
+
+
 def build_reference_corpus(
     commander: str,
     bracket: Optional[int] = None,
@@ -255,6 +265,8 @@ def build_reference_corpus(
                                    list[dict]]] = None,
     fetch_average: Optional[Callable[[str], list[str]]] = None,
     fetch_salt: Optional[Callable[[], dict[str, float]]] = None,
+    fetch_extra_lists: Optional[Callable[[str, Optional[int], int],
+                                         list[list[str]]]] = None,
 ) -> Optional[ReferenceCorpus]:
     """Fetch (or load cached) reference data for ``commander``.
 
@@ -265,8 +277,11 @@ def build_reference_corpus(
     doesn't qualify — it isn't commander-specific.
 
     ``fetch_decks(commander, bracket, n)`` / ``fetch_average(commander)``
-    / ``fetch_salt()`` are injectable for tests and for future extra
-    reference sites (Archidekt et al.).
+    / ``fetch_salt()`` / ``fetch_extra_lists(commander, bracket, n)``
+    are injectable for tests. ``fetch_extra_lists`` defaults to the
+    Archidekt top-viewed decks (plain card-name lists, capped at its own
+    smaller request budget) and merges into the same reference pool —
+    ``support()`` is denominatored over ALL merged decks.
     """
     path = _cache_path(commander, bracket)
     if cache and path.exists():
@@ -293,6 +308,19 @@ def build_reference_corpus(
             keys.add(k)
             display.setdefault(k, name)
         deck_sets.append(frozenset(keys))
+
+    from .archidekt_client import DEFAULT_N as _ARCHIDEKT_N
+    extra_lists = (fetch_extra_lists or _default_fetch_extra_lists)(
+        commander, bracket, min(n, _ARCHIDEKT_N),
+    )
+    for names in extra_lists or []:
+        keys = set()
+        for name in names:
+            k = _key(name)
+            keys.add(k)
+            display.setdefault(k, name)
+        if keys:
+            deck_sets.append(frozenset(keys))
 
     avg_names = (fetch_average or _default_fetch_average)(commander)
     avg_keys = set()

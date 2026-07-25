@@ -72,10 +72,19 @@ trimmed recommendations drive proposed-text/pricing consistently, and
 the payload carries `deck_score` + `bubble_cards` keys (None/[] when
 the flag is off). 2 web tests.
 
-**Open (next slices):** render `deck_score`/`bubble_cards` in the audit
-UI (`app.js` — a verdict headline + bubble badges); auto-curate path
-(calls `advise()` directly and skips both wrappers today); Archidekt
-(or similar) as the third corpus source;
+**Also shipped (2026-07-25, evening):** the audit UI verdict panel
+(`renderDeckVerdict` — pill + budget line + collapsible "why" + top-5
+bubbles; live-verified in Chrome via SSE, zero console errors) and
+**Archidekt as the third corpus source** (`archidekt_client.py` —
+public JSON API, no auth, per-deck `edhBracket` soft-filter,
+category-flag-honoring mainboard extraction, own request budget of 25;
+merged into `build_reference_corpus` via the `fetch_extra_lists` seam;
+live-verified: 14-deck merged Krenko corpus). Also fixed: sim-job
+sidecar now persists BEFORE the terminal status is observable
+(restart-recoverability hole + the reattach-test flake).
+
+**Open (next slices):** auto-curate path
+(calls `advise()` directly and skips both wrappers today);
 validate the bubble ranking the same tier-3 way (bubble-swaps vs
 bucket-order swaps, both A/B simmed). Same honesty contract as
 CardScore: heuristic prior, Forge stays the arbiter.
