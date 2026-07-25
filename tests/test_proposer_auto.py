@@ -4011,3 +4011,91 @@ def test_process_one_deck_keyboard_interrupt_propagates(
     monkeypatch.setattr(cli, "auto_curate_main", raise_interrupt)
     with pytest.raises(KeyboardInterrupt):
         cli._process_one_deck(deck, ["--bracket", "3"], False, frozenset())
+
+
+# ---------------------------------------------------------------------------
+# FP-015 deck-verdict wiring (flag-gated)
+# ---------------------------------------------------------------------------
+
+def _write_verdict_deck(tmp_path):
+    deck = tmp_path / "[USER] Verdict [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Verdict\nMoxfield=v-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C1\n1 C2\n",
+        encoding="utf-8",
+    )
+    return deck
+
+
+def test_auto_curate_main_json_deck_score_null_when_flag_off(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.delenv("COMMANDER_BUILDER_CARD_SCORE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps(
+        {"adds": ["A1"], "cuts": ["C1"], "rationale": "x"}))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+    deck = _write_verdict_deck(tmp_path)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3",
+        "--db-path", str(tmp_path / "kl.sqlite"), "--dry-run", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deck_score"] is None
+
+
+def test_auto_curate_main_json_carries_deck_score_when_flag_on(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setenv("COMMANDER_BUILDER_CARD_SCORE", "1")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps(
+        {"adds": ["A1"], "cuts": ["C1"], "rationale": "x"}))
+
+    advice = _stub_advice_report()
+
+    class _Report:
+        commander_names = ["Test"]
+        deck_score = None
+
+        def to_manifest(self):
+            return advice
+
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda **kw: _Report(),
+    )
+    monkeypatch.setattr(
+        "commander_builder.bubble_analysis.build_reference_corpus",
+        lambda *a, **k: None,
+    )
+
+    def fake_apply(report, **kw):
+        report.deck_score = {"total": 80.0, "verdict": "keep",
+                             "change_budget": [0, 2]}
+        return report
+
+    monkeypatch.setattr(
+        "commander_builder.bubble_analysis.apply_verdict_to_report",
+        fake_apply,
+    )
+    deck = _write_verdict_deck(tmp_path)
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3",
+        "--db-path", str(tmp_path / "kl.sqlite"), "--dry-run", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deck_score"]["verdict"] == "keep"
+    assert payload["deck_score"]["change_budget"] == [0, 2]

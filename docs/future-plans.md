@@ -83,8 +83,17 @@ live-verified: 14-deck merged Krenko corpus). Also fixed: sim-job
 sidecar now persists BEFORE the terminal status is observable
 (restart-recoverability hole + the reattach-test flake).
 
-**Open (next slices):** auto-curate path
-(calls `advise()` directly and skips both wrappers today);
+**Also shipped (2026-07-25, night):** the auto-curate path.
+`auto_curate_main` runs the same flag-gated verdict pass after
+`advise()` — the curator prompt is built from the budget-trimmed
+candidate set, the text mode prints a `deck verdict:` line, and the
+`--json` payload carries `deck_score` (null when the flag is off).
+With that, **every advise surface (CLI, web sync+SSE, auto-curate) is
+budget-aware**. Also fixed en route: EDHREC/game_changers diagnostics
+now write to stderr (an EDHREC bot-challenge page was corrupting every
+--json mode via a stdout warning).
+
+**Open (next slices):**
 validate the bubble ranking the same tier-3 way (bubble-swaps vs
 bucket-order swaps, both A/B simmed). Same honesty contract as
 CardScore: heuristic prior, Forge stays the arbiter.
