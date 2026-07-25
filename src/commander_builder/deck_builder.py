@@ -60,7 +60,7 @@ from typing import Callable, Optional
 
 from . import dck_meta, deck_builder_personalize as personalize, lift_analysis
 from ._proposer_filters import enforce_color_identity
-from .bracket_estimator import estimate_bracket
+from .bracket_estimator import derive_signals, estimate_bracket
 from .collection import load_collection, name_key, owns, parse_collection_lines
 from .dck_utils import COMMANDER_DECK_SIZE, count_main_cards, main_target
 from .edhrec_client import commander_slug
@@ -325,6 +325,58 @@ def _fallback_candidates(page) -> list[str]:
             seen.add(k)
             ordered.append(entry.name)
     return ordered
+
+
+def _score_ordered_fallback(
+    raw_names: list[str],
+    commander: str,
+    bracket: Optional[int],
+) -> list[str]:
+    """FP-015 seam #4 — upgrade the fallback pool when the flag is on.
+
+    The commander-page fallback is FP-014's acknowledged weak spot ("a
+    *defensible pile*, not a coherent deck"): bucket insertion order
+    literally decides which cards make the 99. With
+    ``COMMANDER_BUILDER_CARD_SCORE`` enabled this (1) augments the pool
+    with the reference corpus' high-consensus cards — what the top
+    Moxfield/Archidekt builds run that the EDHREC page missed — and
+    (2) orders the merged pool by ``CardScore`` against a
+    commander-only context, so role-filling, on-color, curve-sane cards
+    rise before trivia. Ties keep the original bucket order (stable).
+
+    Flag off → input returned unchanged (byte-identical legacy path).
+    Any failure (network, cache, scoring) also returns the input
+    unchanged — the fallback build must never get WORSE than the pile.
+    """
+    from .card_score import is_enabled
+    if not is_enabled():
+        return raw_names
+    try:
+        from . import bubble_analysis as _bubble
+        from .card_score import deck_context, score_card
+        pool = list(raw_names)
+        seen = {n.strip().lower() for n in pool}
+        corpus = _bubble.build_reference_corpus(commander, bracket=bracket)
+        if corpus is not None:
+            for cand in corpus.replacement_pool(frozenset()):
+                k = cand.strip().lower()
+                if k not in seen:
+                    seen.add(k)
+                    pool.append(cand)
+        ctx = deck_context(commander_names=[commander], deck_cards=[],
+                           bracket=bracket)
+        order = {n.strip().lower(): i for i, n in enumerate(pool)}
+
+        def _key_for(name: str):
+            try:
+                total = float(score_card(name, ctx).total)
+            except Exception:  # noqa: BLE001 — unscorable sinks, not dies
+                total = 0.0
+            return (-total, order[name.strip().lower()])
+
+        return sorted(pool, key=_key_for)
+    except Exception:  # noqa: BLE001 — never worse than the plain pile
+        return list(raw_names)
 
 
 # --------------------------------------------------------------------------
@@ -646,7 +698,9 @@ def _assemble(
                 f"cannot build: no EDHREC data for {commander}"
             )
         source = "commander-page fallback"
-        raw_names = _fallback_candidates(page)
+        raw_names = _score_ordered_fallback(
+            _fallback_candidates(page), commander, bracket,
+        )
 
     # ---- 3. LEGALITY: split commander / seed lands / spells, singleton ----
     # FP-014.2: unlike FP-014.1 (which discarded every land), we KEEP the
@@ -990,9 +1044,34 @@ def _personalize(
     # --- STAGE 2: BRACKET STEERING ----------------------------------------
     if enable_steer:
         try:
-            _estimate = estimate_fn or (
-                lambda t: estimate_bracket(t, declared=bracket)
-            )
+            # The steering loop re-estimates after every swap, so it is THE
+            # code path where the estimator's curve/archetype weights matter
+            # most — and it was the one passing neither, leaving
+            # curve_tight/curve_high (+/-0.5) and archetype_combo/stax
+            # (+1.0/+0.5) permanently silent while steering. derive_signals
+            # supplies both, routed through the injected ``lookup`` so we
+            # reuse this build's Scryfall traffic instead of doubling it.
+            #
+            # Derived ONCE, lazily, from the first list the loop renders,
+            # then reused: a steer swaps a handful of the 99, which moves
+            # avg CMC by hundredths — nowhere near the 2.6/3.8 band edges —
+            # and cannot change the name-based archetype scan's winner.
+            # Re-deriving per iteration would cost a deck of lookups per
+            # swap for no decision change. No deck_path exists yet (the file
+            # is written after the build), so archetype comes from the
+            # content scan.
+            _steer_signals: list = []
+
+            def _estimate_with_context(t: str) -> dict:
+                if not _steer_signals:
+                    _steer_signals.append(derive_signals(t, lookup=lookup))
+                _avg_cmc, _archetype = _steer_signals[0]
+                return estimate_bracket(
+                    t, declared=bracket,
+                    avg_cmc=_avg_cmc, archetype=_archetype,
+                )
+
+            _estimate = estimate_fn or _estimate_with_context
             _is_gc = is_game_changer or _default_is_game_changer()
             _is_fm = is_fast_mana or _default_is_fast_mana()
             pool = power_pool

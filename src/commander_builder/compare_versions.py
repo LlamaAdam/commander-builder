@@ -701,6 +701,16 @@ def compare(
     ``userdata/decks/constructed/`` so Forge's ``-f constructed``
     can find them).
 
+    ``runner`` (default None) injects the ForgeRunner used for every pod;
+    None locates the repo-local install. An injected runner is ALWAYS
+    honored: parallel dispatch only replaces it with the per-worker
+    isolated-profile pool when the runner is itself bound to one of the
+    discovered vendor profiles (``ForgeRunner.locate()`` /
+    ``for_profile``) — i.e. when the pool reproduces it exactly. Any
+    other runner (a test double, a custom-profile runner) forces the
+    shared-runner dispatch path so caller-configured behavior is never
+    silently discarded.
+
     ``parallel`` (default True) dispatches multi-pod runs concurrently.
     Pods are I/O-bound (each spawns a Forge JVM as a subprocess) so a
     threaded executor is sufficient; the GIL is released while the
@@ -751,6 +761,7 @@ def compare(
     """
     if mode not in {"pod", "1v1"}:
         raise ValueError(f"mode must be 'pod' or '1v1', got {mode!r}")
+    injected_runner = runner
     runner = runner or ForgeRunner.locate()
 
     resolved_deck_dir = deck_dir or DECK_DIR
@@ -965,7 +976,20 @@ def compare(
         # forge, forge2..N) rather than duplicate it, so this dispatch and
         # run_ab_parallel agree on what a profile is and where it lives.
         profiles = _discover_profiles()
-        isolated = len(profiles) >= 2
+        # An explicitly injected ``runner`` may only be superseded by the
+        # per-worker profile pool when it is itself bound to one of the
+        # discovered profiles (ForgeRunner.locate() / for_profile): the pool's
+        # runner for that profile is behaviorally the injected runner, so
+        # pooling discards nothing the caller configured. Any OTHER injected
+        # runner — a test double, or a runner bound to a profile outside the
+        # vendor/ layout — carries caller behavior the pool cannot reproduce
+        # and must never be silently ignored: take the shared-runner fallback
+        # so every pod runs through it.
+        runner_is_pool_covered = (
+            injected_runner is None
+            or getattr(injected_runner, "forge_dir", None) in profiles
+        )
+        isolated = len(profiles) >= 2 and runner_is_pool_covered
         free_runners: "Optional[queue.Queue]" = None
         if isolated:
             # WORKER-vs-POD assignment (think carefully — this is the crux).
@@ -998,7 +1022,9 @@ def compare(
             )
         else:
             # FALLBACK — a single Forge profile on this host (the common
-            # single-install box, and every offline test). Keep bac47c1's
+            # single-install box, and every offline test), OR an injected
+            # runner the pool can't reproduce (see runner_is_pool_covered
+            # above). Keep bac47c1's
             # behavior exactly: run every pod concurrently in the one shared
             # profile passed as ``runner`` and blank forge_log_tail, because a
             # per-pod tail read from one shared forge.log is still an

@@ -556,3 +556,307 @@ def test_pool_curator_low_signal_candidate_notes_not_warns(
     out = capsys.readouterr().out
     assert "WARN" not in out
     assert "NOTE" in out and "unavailable/low-signal" in out
+
+
+# ---------------------------------------------------------------------------
+# derive_signals — the shared context helper
+#
+# estimate_bracket takes avg_cmc/archetype as optional pre-computed context
+# because deriving them costs a Scryfall lookup per card, which its
+# offline/never-blocks contract forbids. Only the dashboard ever passed them,
+# so curve_tight (+0.5), curve_high (-0.5), archetype_combo (+1.0) and
+# archetype_stax (+0.5) were dead weight in the CLI paths. These pin the one
+# derivation helper all three callers now share.
+# ---------------------------------------------------------------------------
+
+def _cmc_lookup(default=None, **by_name):
+    """Scryfall-shaped lookup. ``by_name`` keys use ``_`` for spaces."""
+    table = {k.replace("_", " "): v for k, v in by_name.items()}
+
+    def _lookup(name):
+        if name in table:
+            return table[name]
+        return dict(default) if default else None
+    return _lookup
+
+
+def test_derive_signals_computes_avg_cmc_from_scryfall():
+    from commander_builder.bracket_estimator import derive_signals
+    deck = _deck("Cheap Spell", "Pricey Spell", lands=0)
+    lookup = _cmc_lookup(
+        Test_Commander={"cmc": 4.0, "type_line": "Legendary Creature"},
+        Cheap_Spell={"cmc": 1.0, "type_line": "Instant"},
+        Pricey_Spell={"cmc": 7.0, "type_line": "Sorcery"},
+    )
+    avg_cmc, _archetype = derive_signals(deck, lookup=lookup)
+    assert avg_cmc == 4.0
+
+
+def test_derive_signals_excludes_lands_from_avg_cmc():
+    """Mirrors the dashboard's stat tile: lands are excluded, so a 35-land
+    deck doesn't read as the tightest curve ever built."""
+    from commander_builder.bracket_estimator import derive_signals
+    deck = _deck("Big Spell", lands=35)
+    lookup = _cmc_lookup(
+        Test_Commander={"cmc": 4.0, "type_line": "Legendary Creature"},
+        Big_Spell={"cmc": 6.0, "type_line": "Sorcery"},
+        Forest={"cmc": 0.0, "type_line": "Basic Land — Forest"},
+    )
+    avg_cmc, _ = derive_signals(deck, lookup=lookup)
+    assert avg_cmc == 5.0
+
+
+def test_derive_signals_is_quantity_weighted():
+    from commander_builder.bracket_estimator import derive_signals
+    deck = "[Commander]\n1 Cheap Spell\n[Main]\n9 Cheap Spell\n1 Big Spell\n"
+    lookup = _cmc_lookup(
+        Cheap_Spell={"cmc": 1.0, "type_line": "Instant"},
+        Big_Spell={"cmc": 11.0, "type_line": "Sorcery"},
+    )
+    avg_cmc, _ = derive_signals(deck, lookup=lookup)
+    # 10 copies of the 1-drop (1 in the command zone + 9 main) + one 11-drop.
+    assert avg_cmc == round(21 / 11, 2) == 1.91
+
+
+def test_derive_signals_avg_cmc_is_none_not_zero_when_nothing_resolves():
+    """A Scryfall outage must read as "signal unavailable", never as the
+    tightest possible curve. 0.0 would fire curve_tight (+0.5)."""
+    from commander_builder.bracket_estimator import derive_signals
+    avg_cmc, _ = derive_signals(_deck(filler=30), lookup=lambda n: None)
+    assert avg_cmc is None
+
+
+def test_derive_signals_avg_cmc_is_none_on_an_all_lands_deck():
+    from commander_builder.bracket_estimator import derive_signals
+    deck = "[Main]\n40 Forest\n"
+    lookup = _cmc_lookup(Forest={"cmc": 0.0, "type_line": "Basic Land — Forest"})
+    avg_cmc, _ = derive_signals(deck, lookup=lookup)
+    assert avg_cmc is None
+
+
+def test_derive_signals_skips_unresolvable_cards_rather_than_zeroing_them():
+    """A partial resolve averages what we know. Counting a 404 as CMC 0
+    would drag the curve down and fire curve_tight on a battlecruiser."""
+    from commander_builder.bracket_estimator import derive_signals
+    deck = _deck("Known Spell", "Mystery Card", lands=0)
+    lookup = _cmc_lookup(Known_Spell={"cmc": 5.0, "type_line": "Sorcery"})
+    avg_cmc, _ = derive_signals(deck, lookup=lookup)
+    assert avg_cmc == 5.0
+
+
+def test_derive_signals_survives_a_raising_lookup():
+    """Fail-quiet contract: a lookup that blows up yields None, not an
+    exception escaping into the CLI."""
+    from commander_builder.bracket_estimator import derive_signals
+
+    def _boom(_name):
+        raise RuntimeError("scryfall exploded")
+    avg_cmc, archetype = derive_signals(_deck(filler=30), lookup=_boom)
+    assert avg_cmc is None
+    assert archetype in (None, "midrange", "aggro", "control", "combo", "stax")
+
+
+def test_derive_signals_never_raises_on_garbage_input():
+    from commander_builder.bracket_estimator import derive_signals
+    for junk in ("", "\x00\xff not a deck", "[Main]\n"):
+        assert derive_signals(junk, lookup=lambda n: None) == (None, None)
+
+
+def test_derive_signals_uses_the_filename_hint_when_given_a_path(tmp_path):
+    """With a path we use the canonical archetype.classify ladder, whose
+    first rung is the filename — a deck the user named "Storm Combo" is
+    telling us the strategy outright."""
+    from commander_builder.bracket_estimator import derive_signals
+    deck_path = tmp_path / "[USER] Storm Combo [B4].dck"
+    deck_path.write_text(_deck(filler=30), encoding="utf-8")
+    _avg, archetype = derive_signals(
+        deck_path.read_text(encoding="utf-8"),
+        deck_path=deck_path,
+        lookup=lambda n: None,
+    )
+    assert archetype == "combo"
+
+
+def test_derive_signals_falls_back_to_the_content_scan_without_a_path():
+    """The steering loop scores rendered text that has no file yet."""
+    from commander_builder.bracket_estimator import derive_signals
+    deck = _deck("Winter Orb", "Static Orb", "Stasis", "Smokestack",
+                 "Tangle Wire", "Trinisphere", filler=25)
+    _avg, archetype = derive_signals(deck, lookup=lambda n: None)
+    assert archetype == "stax"
+
+
+def test_derive_signals_archetype_is_none_rather_than_fabricated():
+    """No winner in the content scan -> None ("unavailable"), NOT the
+    classifier's "midrange" default. A fabricated label would be a lie in
+    the signals payload the UI renders."""
+    from commander_builder.bracket_estimator import derive_signals
+    _avg, archetype = derive_signals(_deck(filler=30), lookup=lambda n: None)
+    assert archetype is None
+
+
+def test_derive_signals_ignores_a_deck_path_that_does_not_exist(tmp_path):
+    """classify() on a missing file silently returns its "midrange"
+    default; we must not launder that into a real-looking signal."""
+    from commander_builder.bracket_estimator import derive_signals
+    _avg, archetype = derive_signals(
+        _deck(filler=30),
+        deck_path=tmp_path / "gone.dck",
+        lookup=lambda n: None,
+    )
+    assert archetype is None
+
+
+def test_derived_signals_actually_move_the_estimate():
+    """The point of the whole fix: 1.5 points of signal that could never
+    fire in the CLI paths. combo archetype (+1.0) + tight curve (+0.5)."""
+    deck = _deck("Thassa's Oracle", "Isochron Scepter", "Dramatic Reversal",
+                 "Underworld Breach", "Ad Nauseam", "Food Chain", filler=25)
+    from commander_builder.bracket_estimator import derive_signals
+    lookup = _cmc_lookup(default={"cmc": 2.0, "type_line": "Instant"})
+    avg_cmc, archetype = derive_signals(deck, lookup=lookup)
+    assert archetype == "combo" and avg_cmc == 2.0
+
+    blind = estimate_bracket(deck)
+    informed = estimate_bracket(deck, avg_cmc=avg_cmc, archetype=archetype)
+    assert informed["signals"]["score_raw"] - blind["signals"]["score_raw"] == 1.5
+    assert informed["estimate"] > blind["estimate"]
+
+
+# ---------------------------------------------------------------------------
+# Call sites — all three estimator callers must now get the same treatment
+# ---------------------------------------------------------------------------
+
+def test_advise_cli_passes_derived_signals_to_the_estimator(
+    tmp_path, monkeypatch,
+):
+    """``commander-advise`` used to call estimate_bracket with the deck text
+    and nothing else, so its curve/archetype weights were permanently
+    silent. It must derive them — and hand over the PATH so the archetype
+    classifier gets its filename hint."""
+    import commander_builder.bracket_estimator as be
+    from commander_builder.improvement_advisor import AdviceReport
+    import commander_builder.improvement_advisor as ia
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    deck = deck_dir / "[USER] Storm Combo [B4].dck"
+    deck.write_text(_deck("Rhystic Study", filler=30), encoding="utf-8")
+
+    monkeypatch.setattr(ia, "DECK_DIR", deck_dir)
+    monkeypatch.setattr(
+        ia, "advise",
+        lambda deck_path, bracket, **kw: AdviceReport(
+            deck_filename=deck_path.name, deck_id=None, bracket=bracket,
+            commander_names=["Test Commander"],
+        ),
+    )
+    monkeypatch.setattr(
+        "commander_builder.deck_health.compute_health_grade",
+        lambda *a, **kw: None,
+    )
+
+    derived: dict = {}
+
+    def _spy_derive(deck_text, deck_path=None, lookup=None):
+        derived["deck_path"] = deck_path
+        return 2.1, "combo"
+    monkeypatch.setattr(be, "derive_signals", _spy_derive)
+
+    seen: dict = {}
+
+    def _spy_estimate(deck_text, declared=None, **kw):
+        seen.update(kw)
+        return real_estimate(deck_text, declared, **kw)
+    real_estimate = be.estimate_bracket
+    monkeypatch.setattr(be, "estimate_bracket", _spy_estimate)
+
+    assert ia.main(["--user", str(deck), "--bracket", "4"]) == 0
+    assert seen.get("avg_cmc") == 2.1
+    assert seen.get("archetype") == "combo"
+    # The path went along so archetype.classify can use the filename hint.
+    assert derived["deck_path"] is not None
+    assert derived["deck_path"].name == deck.name
+
+
+def test_deck_builder_steering_loop_passes_derived_signals(monkeypatch):
+    """The steering loop re-estimates after every swap — it is THE path
+    where the curve/archetype weights matter, and it was passing neither.
+    It must now feed derived context in, derive it ONCE (not per iteration),
+    and route the derivation through the build's own injected lookup."""
+    from commander_builder import deck_builder
+    from commander_builder.edhrec_client import CardEntry
+    from types import SimpleNamespace
+
+    cards = {
+        "Krenko, Mob Boss": {
+            "type_line": "Legendary Creature — Goblin", "color_identity": ["R"],
+            "mana_cost": "{2}{R}{R}", "cmc": 4.0, "oracle_text": "",
+        },
+        "Fast Rock": {
+            "type_line": "Artifact", "color_identity": [], "mana_cost": "{1}",
+            "cmc": 1.0, "oracle_text": "Add {R}.",
+        },
+    }
+    lookup_calls: list[str] = []
+
+    def _lookup(name):
+        lookup_calls.append(name)
+        if name in cards:
+            return cards[name]
+        if name.startswith("Goblin "):
+            return {"type_line": "Creature — Goblin", "color_identity": ["R"],
+                    "mana_cost": "{1}{R}", "cmc": 2.0, "oracle_text": ""}
+        if name == "Mountain":
+            return {"type_line": "Basic Land — Mountain", "color_identity": ["R"],
+                    "mana_cost": "", "cmc": 0.0, "oracle_text": ""}
+        return None
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _lookup)
+
+    seen: list[dict] = []
+
+    def _spy_estimate(text, declared=None, **kw):
+        seen.append(kw)
+        return {"estimate": 2}  # always under target -> the loop keeps going
+    monkeypatch.setattr(deck_builder, "estimate_bracket", _spy_estimate)
+
+    derive_calls: list = []
+    real_derive = deck_builder.derive_signals
+
+    def _counting_derive(deck_text, deck_path=None, lookup=None):
+        derive_calls.append(lookup)
+        return real_derive(deck_text, deck_path=deck_path, lookup=lookup)
+    monkeypatch.setattr(deck_builder, "derive_signals", _counting_derive)
+
+    seed = ["Krenko, Mob Boss"] + [f"Goblin {i}" for i in range(80)]
+    deck_builder._assemble(
+        "Krenko, Mob Boss", 4, None,
+        fetch_avg=lambda c, b: SimpleNamespace(
+            cards=[CardEntry(name=n) for n in seed]),
+        fetch_page=lambda c: None,
+        resolve_ci=lambda n: "R",
+        lookup=_lookup,
+        name="Krenko",
+        enable_lift=False,
+        owned_bias=False,
+        estimate_fn=None,          # <- the production path under test
+        is_game_changer=lambda nm: False,
+        is_fast_mana=lambda nm: deck_builder.name_key(nm) == "fast rock",
+        power_pool=["Fast Rock"],
+        owned_names=[],
+    )
+
+    assert seen, "the steering loop never called the estimator"
+    # Every estimate carried the derived context...
+    assert all("avg_cmc" in kw and "archetype" in kw for kw in seen)
+    # ...the curve signal actually resolved, into the tight-curve band the
+    # fake 2-drop-heavy DB implies (it was None on every call before)...
+    assert seen[0]["avg_cmc"] is not None
+    assert 0 < seen[0]["avg_cmc"] <= 2.6
+    # ...it is stable across iterations (derived once, then reused)...
+    assert len({kw["avg_cmc"] for kw in seen}) == 1
+    assert len(derive_calls) == 1
+    # ...and it reused the build's injected lookup instead of the network.
+    assert derive_calls[0] is _lookup

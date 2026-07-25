@@ -172,6 +172,95 @@ def _signals_to_priority_roles(signals: list[str]) -> list[str]:
     return out[:4]
 
 
+# ---------------------------------------------------------------------------
+# FP-015 CardScore adapters (opt-in, default OFF).
+#
+# These translate between what this module already has in scope at its two
+# ranking seams and ``card_score``'s API. They are deliberately thin and
+# fail-quiet: with the flag off none of them run, and with the flag on a
+# failure inside any of them falls back to the pre-FP-015 ordering rather
+# than taking down an audit. ``CardScore`` is a ranking prior, not a power
+# rating — no string produced here presents a score as card quality.
+# ---------------------------------------------------------------------------
+
+def _card_score_enabled() -> bool:
+    """True when ``COMMANDER_BUILDER_CARD_SCORE`` opts this run in."""
+    try:
+        from .card_score import is_enabled
+        return is_enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _card_score_context(deck_cards, edhrec_page, average_deck):
+    """Build the ``card_score.DeckContext`` for this audit.
+
+    Uses ``_cached_scryfall`` (cache-only, no network) as the lookup, so
+    every card_score derivation that honors the injected seam stays off
+    the wire. (``role_fit`` still routes through ``staples.lookup_card``,
+    which this cannot inject — see ``card_score``'s module docstring.)
+    The bracket comes from EDHREC's average-deck slug when we fetched one —
+    that is the only bracket signal in scope at these seams; without it
+    the bracket-dependent gate/modifiers simply don't fire.
+    """
+    from . import card_score
+    from .edhrec_client import BRACKET_SLUG
+    bracket = None
+    slug = getattr(average_deck, "bracket_slug", None)
+    if slug:
+        bracket = {v: k for k, v in BRACKET_SLUG.items()}.get(slug)
+    commander = getattr(edhrec_page, "commander_name", "") or ""
+    return card_score.deck_context(
+        deck_cards=sorted(deck_cards),
+        commander_names=[commander] if commander else [],
+        bracket=bracket,
+        lookup=_cached_scryfall,
+    )
+
+
+def _score_add(rec: SwapRecommendation, ctx):
+    """Score one add rec, reusing the numbers already in its evidence.
+
+    ``inclusion_pct``, ``synergy_pct`` and ``role`` were written into
+    ``evidence`` a few lines above; passing them through means the
+    scorer re-derives nothing. The breakdown is written BACK into
+    ``evidence["card_score"]`` — that dict already flows to the UI, so
+    the component breakdown surfaces with no schema change.
+    """
+    from . import card_score
+    ev = rec.evidence or {}
+    try:
+        result = card_score.score_card(
+            rec.card, ctx,
+            inclusion_pct=ev.get("inclusion_pct"),
+            synergy_pct=ev.get("synergy_pct"),
+            role=ev.get("role"),
+        )
+    except Exception:  # noqa: BLE001 — a bad card must not stop the audit
+        return card_score.CardScore(card=rec.card, total=0.0, base=0.0,
+                                    components={})
+    rec.evidence["card_score"] = result.as_evidence()
+    return result
+
+
+def _card_score_cut_order(deck_cards, edhrec_page, average_deck, fallback):
+    """Cut iteration order by ``100 - CardScore(card | deck - card)``.
+
+    Guard-railed names (``Protect=``, role floors, the 33 effective-land
+    floor, in-deck combo pieces) never appear. An EMPTY result is a real
+    answer ("every card is protected, propose no cuts"), not a failure —
+    only an exception falls back to the caller's alphabetical order,
+    because silently reverting on empty would hand the alphabetical loop
+    exactly the cards the guard rails just refused.
+    """
+    try:
+        from . import card_score
+        ctx = _card_score_context(deck_cards, edhrec_page, average_deck)
+        return card_score.cut_order(sorted(deck_cards), ctx)
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def _heuristic_swap_recommendations(
     deck_cards: set[str],
     edhrec_page: CommanderPage,
@@ -395,7 +484,16 @@ def _heuristic_swap_recommendations(
     # on EDHREC /top come first. When there's no diagnosis, role-rank is
     # constant so trending becomes the primary key (a recency boost over the
     # default synergy-then-top order). Stable sort preserves intra-key order.
-    if (diagnosis and diagnosis.priority_roles) or trending:
+    #
+    # FP-015 SEAM. When the operator opts into ``CardScore``
+    # (``COMMANDER_BUILDER_CARD_SCORE``, default OFF), the per-card score
+    # becomes the primary key and this ``(role_rank, trending_rank)``
+    # tuple demotes to the tiebreak. The score is a RANKING PRIOR, not a
+    # power rating — see ``card_score``'s module docstring — so it ships
+    # opt-in until the FP-015 tier-3 A/B sim reads positive. With the
+    # flag off, this block behaves exactly as it did pre-FP-015.
+    _score_ranking = _card_score_enabled()
+    if _score_ranking or (diagnosis and diagnosis.priority_roles) or trending:
         priority_index = (
             {r: i for i, r in enumerate(diagnosis.priority_roles)}
             if diagnosis else {}
@@ -405,7 +503,19 @@ def _heuristic_swap_recommendations(
             role_rank = priority_index.get(role, len(priority_index) + 1)
             trending_rank = 0 if r.evidence.get("trending") else 1
             return (role_rank, trending_rank)
-        add_recs.sort(key=_rank)
+        if _score_ranking:
+            _score_ctx = _card_score_context(
+                deck_cards, edhrec_page, average_deck,
+            )
+            # ``inclusion_pct`` / ``synergy_pct`` / ``role`` are already in
+            # ``evidence`` (lines 383-389) — the scorer reuses them rather
+            # than re-fetching anything.
+            _scores = {
+                id(r): _score_add(r, _score_ctx) for r in add_recs
+            }
+            add_recs.sort(key=lambda r: (-_scores[id(r)].total, _rank(r)))
+        else:
+            add_recs.sort(key=_rank)
 
     # Split adds into two pools:
     #
@@ -487,7 +597,19 @@ def _heuristic_swap_recommendations(
     # DIFFERENT cuts. Cut candidacy is pure absence (no per-card score
     # exists at this point), so plain name order is the deterministic
     # tiebreak: same deck + same EDHREC page → same cut list, always.
-    for card in sorted(deck_cards):
+    #
+    # FP-015 SEAM. With ``COMMANDER_BUILDER_CARD_SCORE`` on, a per-card
+    # score DOES exist at this point, so the loop walks
+    # ``100 - CardScore(card | deck_without_card)`` descending instead
+    # (still name-tiebroken, so the determinism argument above survives)
+    # and drops cards a cut guard rail protects. Flag off = unchanged
+    # alphabetical order.
+    _cut_iteration_order = sorted(deck_cards)
+    if _card_score_enabled():
+        _cut_iteration_order = _card_score_cut_order(
+            deck_cards, edhrec_page, average_deck, _cut_iteration_order,
+        )
+    for card in _cut_iteration_order:
         # Don't recommend cutting any land (basic, dual, fetch,
         # shock, MDFC, utility) or universal staples. The manabase
         # is a deliberate construction; a missing reference doesn't

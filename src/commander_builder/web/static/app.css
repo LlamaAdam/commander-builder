@@ -743,3 +743,32 @@ body {
      details column don't demand a >500px row. */
   #_card-ref-overlay > div { flex-direction: column; }
 }
+
+/* FP-015 whole-deck verdict panel (renders only when the server ships
+   deck_score — card-score flag on). The pill reuses the semantic
+   good/warn/bad palette: keep = leave the deck alone, polish = a few
+   bubble swaps, overhaul = structural work before swaps. */
+.deck-verdict {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border-radius: 8px;
+}
+.deck-verdict .pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.deck-verdict .pill.dv-keep     { background: var(--good); color: #08361d; }
+.deck-verdict .pill.dv-polish   { background: var(--warn); color: #4a3308; }
+.deck-verdict .pill.dv-overhaul { background: var(--bad);  color: #380808; }
+.deck-verdict .dv-details summary { cursor: pointer; font-size: 12px; }
+.deck-verdict .dv-bubble-head { margin: 8px 0 0; font-size: 12px; }
+.deck-verdict ul.dv-bubbles {
+  list-style: square;
+  font-size: 13px;
+  margin: 4px 0 0 18px;
+}

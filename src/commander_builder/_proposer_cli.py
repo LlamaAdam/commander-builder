@@ -343,12 +343,45 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         collection_path=_coll_path,
         owned_only=collection_keys is not None,
     )
+    # FP-015 verdict pass (flag-gated, fail-quiet — same contract as the
+    # commander-advise and web-audit wirings): when the card-score flag
+    # is on, attach the whole-deck verdict and trim the advisor's
+    # candidates to the change budget BEFORE the curator prompt is
+    # built, so the curator works from the budgeted set instead of a
+    # forced swap count. Any failure leaves the report exactly as
+    # advise() produced it.
+    deck_verdict: Optional[dict] = None
+    from .card_score import is_enabled as _card_score_on
+    if _card_score_on():
+        try:
+            from . import bubble_analysis as _bubble
+            _corpus = None
+            if report.commander_names:
+                _corpus = _bubble.build_reference_corpus(
+                    " // ".join(report.commander_names),
+                    bracket=args.bracket,
+                )
+            report = _bubble.apply_verdict_to_report(
+                report,
+                deck_text=args.deck_path.read_text(encoding="utf-8"),
+                corpus=_corpus,
+                bracket=args.bracket,
+            )
+            deck_verdict = report.deck_score
+        except Exception:  # noqa: BLE001 — curation proceeds regardless
+            deck_verdict = None
+
     advice_dict = report.to_manifest()
     candidate_add_count = len(advice_dict.get("added", []))
     candidate_cut_count = len(advice_dict.get("removed", []))
     if not args.json:
         print(f"      advisor produced {candidate_add_count} candidate adds, "
               f"{candidate_cut_count} candidate cuts", flush=True)
+    if deck_verdict and not args.json:
+        _vb = deck_verdict.get("change_budget") or [0, 0]
+        print(f"      deck verdict: {deck_verdict.get('total')}/100 -> "
+              f"{deck_verdict.get('verdict')} "
+              f"(budget {_vb[0]}-{_vb[1]} changes)", flush=True)
 
     # Resolve the protected-cards set from all three sources:
     #   - [metadata] Protect= entries in the .dck (persistent, per-deck)
@@ -464,6 +497,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             "output_deck": str(out_path),
             "dry_run": args.dry_run,
             "mode": args.mode,
+            "deck_score": deck_verdict,
             "max_adds": effective_max_adds,
             "max_cuts": effective_max_cuts,
             "proposal": proposal.to_dict(),

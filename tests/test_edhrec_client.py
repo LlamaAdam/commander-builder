@@ -755,7 +755,7 @@ def test_fetch_commander_page_degrades_on_persistent_incomplete_read(
 
     page = fetch_commander_page("Sephiroth")  # must not raise
     assert page is None
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     # The degradation is loud: warning line carries the exception repr.
     assert "[edhrec] WARNING" in out
     assert "IncompleteRead" in out
@@ -786,7 +786,7 @@ def test_fetch_top_cards_degrades_on_persistent_incomplete_read(
     from commander_builder.edhrec_client import fetch_top_cards
     cards = fetch_top_cards("year")  # must not raise
     assert cards == []
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "[edhrec] WARNING" in out
     assert "IncompleteRead" in out
 
@@ -927,7 +927,7 @@ def test_retry_logs_each_attempt(monkeypatch, capsys):
 
     _http_get_text_with_retry("https://edhrec.com/x", max_retries=3)
 
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     # Two retries fired (attempts 1 and 2 failed, attempt 3 succeeded).
     assert out.count("[edhrec] retry") == 2
     # Each log line names the status that triggered the retry.
@@ -941,7 +941,7 @@ def test_no_log_when_first_attempt_succeeds(monkeypatch, capsys):
     monkeypatch.setattr(ec.time, "sleep", lambda s: None)
 
     _http_get_text_with_retry("https://edhrec.com/x")
-    assert "[edhrec] retry" not in capsys.readouterr().out
+    assert "[edhrec] retry" not in capsys.readouterr().err
 
 
 # --- empty-parse cache-poisoning guard --------------------------------------
@@ -998,7 +998,7 @@ def test_fetch_commander_page_does_not_cache_challenge_page(
     # The poison never reaches disk.
     assert not (tmp_path / "vexing-commander.json").exists()
     assert list(tmp_path.glob("*.json")) == []
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "[edhrec] WARNING" in out
     assert "vexing-commander" in out
     assert "NOT cached" in out
@@ -1064,7 +1064,7 @@ def test_fetch_tag_page_does_not_cache_challenge_page(
     assert page is not None
     assert page.top_cards == []
     assert not (tmp_path / "edhrec_tag" / "dragons.json").exists()
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "[edhrec] WARNING" in out
     assert "dragons" in out
     assert "NOT cached" in out
@@ -1122,7 +1122,7 @@ def test_fetch_salt_list_challenge_page_warns_and_does_not_cache(
 
     assert fetch_salt_list() == {}
     assert not (tmp_path / "edhrec_salt" / "top-salt.json").exists()
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "[edhrec] WARNING" in out
     assert "NOT cached" in out
 
@@ -1145,7 +1145,7 @@ def test_fetch_commander_page_warns_on_network_failure(
     monkeypatch.setattr(ec, "_http_get_text", dns_down)
 
     assert fetch_commander_page("Sephiroth") is None
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert "[edhrec] WARNING" in out
     assert "URLError" in out  # exception repr present
 

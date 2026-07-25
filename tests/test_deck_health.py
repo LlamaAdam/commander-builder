@@ -752,7 +752,14 @@ def test_health_grade_weights_sum_to_one():
 
 def test_health_grade_healthy_deck_gets_a(fake_lookup):
     """Every role at target + lands in band + sinks/protection at the
-    UI's 'good' cutoff (>=3) -> perfect score, grade A."""
+    UI's 'good' cutoff (>=3) -> perfect score, grade A.
+
+    ``_BALANCED_DECK`` has no [Commander] section and its stub cards
+    carry no color identity, so ``commander_alignment`` and the Karsten
+    half of ``mana_health`` are both UNAVAILABLE here -- the score is
+    computed over the three components that can be measured. That is the
+    outage contract doing its job: a deck file we can't read a command
+    zone out of must not be marked down for it."""
     fake_lookup["mountain"] = "Basic Land — Mountain"
     fake_lookup["grizzly bears"] = "Creature — Bear"
     grade = deck_health.compute_health_grade(
@@ -761,7 +768,11 @@ def test_health_grade_healthy_deck_gets_a(fake_lookup):
     assert grade["grade"] == "A"
     assert grade["score"] == 100
     assert grade["reasons"] == []
-    assert all(c["available"] for c in grade["components"].values())
+    assert grade["components"]["commander_alignment"]["available"] is False
+    assert all(
+        grade["components"][name]["available"]
+        for name in ("role_deficits", "mana_health", "construction_signals")
+    )
 
 
 def test_health_grade_missing_ramp_and_draw_reasons_first(fake_lookup):
@@ -775,8 +786,13 @@ def test_health_grade_missing_ramp_and_draw_reasons_first(fake_lookup):
         _BALANCED_DECK,
         health=_health_fixture(role_counts={"ramp": 0, "draw": 0}),
     )
-    # role component: 100 * (1 - 20/35) = 42.857; weighted:
-    # 0.40*42.857 + 0.25*100 + 0.35*100 = 77.14 -> 77 -> C band.
+    # role component: 100 * (1 - 20/38) = 47.37 (total_target is 38, not
+    # 35, now that finisher:3 is a role target). Weighted over the three
+    # AVAILABLE components (commander_alignment is unavailable for this
+    # headless fixture, so its 0.10 is renormalized away):
+    #   (0.40*47.37 + 0.22*100 + 0.28*100) / 0.90 = 77.5 -> 77.
+    # Same 77 and the same C as before the rebalance: role_deficits kept
+    # its 0.40 weight precisely so this calibration point held.
     assert grade["score"] == 77
     assert grade["grade"] == "C"
     assert "ramp" in grade["reasons"][0].lower()
@@ -785,15 +801,18 @@ def test_health_grade_missing_ramp_and_draw_reasons_first(fake_lookup):
 
 
 def test_health_grade_land_shortage_reason_and_penalty(fake_lookup):
-    """20 lands is 13 under the 33-38 band -> mana_health floors at 0
-    and the land-count reason surfaces first (it outweighs everything
-    else when the rest of the deck is healthy)."""
+    """20 lands is 13 under the 33-38 band -> the land-count half of
+    mana_health floors at 0 and the land-count reason surfaces first (it
+    outweighs everything else when the rest of the deck is healthy)."""
     fake_lookup["mountain"] = "Basic Land — Mountain"
     fake_lookup["grizzly bears"] = "Creature — Bear"
     deck = "[Main]\n20 Mountain\n79 Grizzly Bears\n"
     grade = deck_health.compute_health_grade(deck, health=_health_fixture())
-    # 0.40*100 + 0.25*0 + 0.35*100 = 75 -> C band (B needs >= 80).
-    assert grade["score"] == 75
+    # The Karsten half is unavailable (stub cards have no color identity),
+    # so mana_health is the land half alone -> 0, exactly as before.
+    # (0.40*100 + 0.22*0 + 0.28*100) / 0.90 = 75.6 -> 76 (was 75 when the
+    # denominator was a flat 1.00 and mana carried 0.25). Still C.
+    assert grade["score"] == 76
     assert grade["grade"] == "C"
     assert "lands" in grade["reasons"][0]
     assert "below" in grade["reasons"][0]
@@ -816,9 +835,12 @@ def test_health_grade_unavailable_signal_excluded_from_denominator(
         health=_health_fixture(mana_sinks_count=None, wincon_count=1),
     )
     # Available: role_deficits (100) + construction_signals (wincon
-    # only, count 1 -> neutral 70). Reweighted over 0.40+0.35:
-    # (0.40*100 + 0.35*70) / 0.75 = 86.0 -> B.
-    assert grade["score"] == 86
+    # only, count 1 -> neutral 70). Both mana halves and the commander
+    # lookup are dead in the outage. Reweighted over 0.40+0.28:
+    # (0.40*100 + 0.28*70) / 0.68 = 87.6 -> 88 (was 86 when construction
+    # carried 0.35 of a 0.75 denominator -- the same two components, a
+    # slightly larger role share of the surviving weight).
+    assert grade["score"] == 88
     assert grade["grade"] == "B"
     assert grade["components"]["mana_health"]["available"] is False
     assert grade["components"]["mana_health"]["score"] is None
@@ -891,12 +913,208 @@ def test_health_grade_construction_warns_surface_as_reasons(fake_lookup):
         _BALANCED_DECK,
         health=_health_fixture(mana_sinks_count=0, wincon_count=0),
     )
-    # 0.40*100 + 0.25*100 + 0.35*30 = 75.5 -> rounds to 75/76 either
-    # side of float noise; both land in the C band (B needs >= 80).
+    # (0.40*100 + 0.22*100 + 0.28*30) / 0.90 = 78 -> C band (B needs
+    # >= 80). Construction's weight moved 0.35 -> 0.28 in the 2026-07
+    # rebalance, so an all-warn construction row costs a little less
+    # than it used to; the assertion stays a band, not a point value.
     assert grade["grade"] in {"C", "D"}
     joined = " ".join(grade["reasons"]).lower()
     assert "mana sink" in joined
     assert "wincon protection" in joined
+
+
+# ---------------------------------------------------------------------------
+# The finisher role target (2026-07) -- "can this deck actually win?"
+# ---------------------------------------------------------------------------
+
+def test_health_grade_missing_finisher_costs_points(fake_lookup):
+    """A deck at target on every OTHER role but with zero win conditions
+    used to be indistinguishable from a complete deck (the finisher
+    target did not exist). Now it loses points and says why."""
+    fake_lookup["mountain"] = "Basic Land — Mountain"
+    fake_lookup["grizzly bears"] = "Creature — Bear"
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK, health=_health_fixture(role_counts={"finisher": 0}),
+    )
+    # role component: 100 * (1 - 3/38) = 92.1; over the three available
+    # components: (0.40*92.1 + 0.22*100 + 0.28*100) / 0.90 = 96.5 -> 96.
+    assert grade["score"] == 96
+    assert any("finisher" in r.lower() for r in grade["reasons"])
+
+
+def test_health_grade_ramp_and_draw_only_deck_grades_badly(fake_lookup):
+    """The motivating failure: 99 cards of ramp and card draw. Every
+    pre-2026-07 role target was satisfied by construction (ramp and draw
+    were two of the five), so this deck graded A. It should not: it has
+    no removal, no wipes, no protection and no way to win."""
+    fake_lookup["mountain"] = "Basic Land — Mountain"
+    fake_lookup["grizzly bears"] = "Creature — Bear"
+    grade = deck_health.compute_health_grade(
+        _BALANCED_DECK,
+        health=_health_fixture(
+            role_counts={"ramp": 40, "draw": 59, "removal": 0, "wipe": 0,
+                         "protection": 0, "finisher": 0},
+            mana_sinks_count=0, wincon_count=0,
+        ),
+    )
+    # role deficits 8+3+4+3 = 18 of 38 -> 52.6; construction all-warn 30:
+    # (0.40*52.6 + 0.22*100 + 0.28*30) / 0.90 = 57.5 -> 57 -> D.
+    assert grade["grade"] in {"D", "F"}
+    joined = " ".join(grade["reasons"]).lower()
+    assert "finisher" in joined or "removal" in joined
+
+
+# ---------------------------------------------------------------------------
+# commander_alignment -- the grade can finally see the command zone
+# ---------------------------------------------------------------------------
+
+def _commander_deck(lands: int = 37) -> str:
+    return (
+        "[Commander]\n1 Test Commander\n"
+        f"[Main]\n{lands} Mountain\n{99 - lands} Grizzly Bears\n"
+    )
+
+
+def _commander_lookup(monkeypatch, commander_cmc: float):
+    """Stub Scryfall so only the commander's cost varies between runs."""
+    def _fake(name, **_kw):
+        low = name.lower()
+        if low == "test commander":
+            return {
+                "name": name, "type_line": "Legendary Creature — Human",
+                "cmc": commander_cmc, "mana_cost": "", "oracle_text": "",
+            }
+        return {
+            "name": name,
+            "type_line": (
+                "Basic Land — Mountain" if low == "mountain"
+                else "Creature — Bear"
+            ),
+            "mana_cost": "", "oracle_text": "",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+
+
+def test_expensive_commander_demands_more_ramp(monkeypatch):
+    """The same 8 ramp pieces are fine behind a 2-drop and thin behind a
+    6-drop. Before this component the two decks graded identically --
+    the module never read the [Commander] section at all."""
+    health = _health_fixture(role_counts={"ramp": 8})
+
+    _commander_lookup(monkeypatch, 2.0)
+    cheap = deck_health.compute_health_grade(_commander_deck(), health=health)
+    _commander_lookup(monkeypatch, 6.0)
+    expensive = deck_health.compute_health_grade(
+        _commander_deck(), health=health,
+    )
+
+    # 2-MV: expected ramp 10 + 1.5*(2-3.5) = 7.75 -> 8 ramp clears it.
+    assert cheap["components"]["commander_alignment"]["score"] == 100
+    # 6-MV: 10 + 1.5*2.5 = 13.75, capped by the band at 12 -> 8/12 = 67.
+    assert expensive["components"]["commander_alignment"]["score"] == 67
+    assert expensive["score"] < cheap["score"]
+    assert any("commander" in r.lower() for r in expensive["reasons"])
+
+
+def test_commander_alignment_unavailable_without_a_command_zone(
+    monkeypatch,
+):
+    """No [Commander] section -> the component is excluded and the
+    remaining weights renormalize. Absence of data is not a bad deck
+    (the module's standing outage contract)."""
+    _commander_lookup(monkeypatch, 6.0)
+    grade = deck_health.compute_health_grade(
+        "[Main]\n37 Mountain\n62 Grizzly Bears\n",
+        health=_health_fixture(role_counts={"ramp": 8}),
+    )
+    comp = grade["components"]["commander_alignment"]
+    assert comp["available"] is False
+    assert comp["score"] is None
+    assert grade["grade"] != "N/A"      # everything else still grades
+
+
+# ---------------------------------------------------------------------------
+# mana_health's second half -- Karsten color sources, not just land COUNT
+# ---------------------------------------------------------------------------
+
+def test_mana_health_penalizes_a_color_below_its_karsten_target(monkeypatch):
+    """37 lands is a perfect land COUNT, and until 2026-07 that was the
+    entire mana grade -- a Command Tower and a Wastes scored identically.
+    This deck's black requirement ({2}{B}{B} -> 26 sources) is met by 4
+    Swamps, and the grade now says so."""
+    cards = {
+        "test commander": {
+            "name": "Test Commander", "type_line": "Legendary Creature",
+            "color_identity": ["B"], "mana_cost": "{2}{B}{B}", "cmc": 4.0,
+        },
+        "swamp": {
+            "name": "Swamp", "type_line": "Basic Land — Swamp",
+            "produced_mana": ["B"], "color_identity": [], "mana_cost": "",
+        },
+        "wastes": {
+            "name": "Wastes", "type_line": "Basic Land",
+            "produced_mana": ["C"], "color_identity": [], "mana_cost": "",
+        },
+        "grizzly bears": {
+            "name": "Grizzly Bears", "type_line": "Creature — Bear",
+            "color_identity": [], "mana_cost": "{1}{G}", "cmc": 2.0,
+        },
+    }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_kw: cards.get(name.lower()),
+    )
+    deck = (
+        "[Commander]\n1 Test Commander\n"
+        "[Main]\n4 Swamp\n33 Wastes\n62 Grizzly Bears\n"
+    )
+    grade = deck_health.compute_health_grade(deck, health=_health_fixture())
+    # Land count (37 effective) is perfect -> 100; Karsten black is
+    # 4/26 -> 15.4. The component is the mean of its two halves.
+    assert grade["components"]["mana_health"]["score"] == 58
+    assert any("karsten" in r.lower() for r in grade["reasons"])
+    assert any("B sources 4/26" in r for r in grade["reasons"])
+
+
+def test_commander_mana_value_falls_back_to_the_printed_cost(monkeypatch):
+    """Snapshots without a ``cmc`` field still yield a mana value, via
+    the manabase module's existing cost parser (no second mana-cost
+    regex in this file). A commander with NEITHER is unavailable, not a
+    free 0-drop."""
+    def _fake(name, **_kw):
+        return {
+            "name": name, "type_line": "Legendary Creature",
+            "mana_cost": "{3}{W}{W}", "oracle_text": "",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    assert deck_health._commander_mana_value(_commander_deck()) == 5.0
+
+    def _costless(name, **_kw):
+        return {"name": name, "type_line": "Legendary Creature",
+                "mana_cost": "", "oracle_text": ""}
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _costless,
+    )
+    assert deck_health._commander_mana_value(_commander_deck()) is None
+
+
+def test_commander_alignment_unavailable_when_roles_are_degraded(
+    monkeypatch,
+):
+    """A degraded role signal (Scryfall outage inside count_deck_roles)
+    leaves no ramp count to compare the commander against -> unavailable,
+    never a fabricated 0."""
+    _commander_lookup(monkeypatch, 6.0)
+    degraded = dict(_health_fixture())
+    degraded["role_targets"] = {"roles": {}, "under_built": []}
+    grade = deck_health.compute_health_grade(
+        _commander_deck(), health=degraded,
+    )
+    assert grade["components"]["commander_alignment"]["available"] is False
 
 
 # CLI surface: the commander-advise report header renders the grade

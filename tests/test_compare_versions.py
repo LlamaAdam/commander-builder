@@ -5,6 +5,7 @@ property surface. The actual `compare()` loop hits Forge — exercised live, not
 in unit tests.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -1973,7 +1974,15 @@ def _make_profile_tracking_runner_factory(tail, sleep=0.15):
 
 class _ExplodingRunner:
     """Shared runner that must NEVER be used on the isolated path — proves the
-    isolated dispatch binds each pod to a pooled profile runner instead."""
+    isolated dispatch binds each pod to a pooled profile runner instead.
+
+    ``forge_dir`` marks it as bound to the primary discovered profile: the
+    pool may only supersede an injected runner that it can reproduce (see
+    compare()'s ``runner_is_pool_covered``), so without this attribute the
+    dispatch would — correctly — honor the injection and take the
+    shared-runner fallback instead of building the pool under test."""
+
+    forge_dir = Path("vendor/forge")
 
     def run(self, *a, **k):
         raise AssertionError(
@@ -2093,5 +2102,46 @@ def test_compare_single_profile_fallback_blanks_tail_and_uses_shared_runner(
 
     # Shared runner served both pods; each tail replaced by the marker.
     assert len(fr.sims) == 2
+    for sim in fr.sims:
+        assert sim.forge_log_tail == _PARALLEL_LOG_TAIL_MARKER
+
+
+def test_compare_multi_profile_host_honors_foreign_injected_runner(
+    tmp_path, monkeypatch,
+):
+    """Multiple profiles on the host, but the injected runner is NOT bound to
+    any discovered profile (no matching ``forge_dir`` — e.g. a test double):
+    the pool cannot reproduce it, so compare() must take the shared-runner
+    fallback and route EVERY pod through the injection instead of silently
+    provisioning real profile runners. _runner_for must never be consulted,
+    and the shared-profile tail marker applies."""
+    from commander_builder.compare_versions import _PARALLEL_LOG_TAIL_MARKER
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    monkeypatch.setattr(
+        cv, "_discover_profiles",
+        lambda: [Path("vendor/forge"), Path("vendor/forge2")],
+    )
+
+    def _boom(_profile):
+        raise AssertionError(
+            "a foreign injected runner must suppress the isolated pool"
+        )
+
+    monkeypatch.setattr(cv, "_runner_for", _boom)
+    fr = _tail_capturing_runner(_make_pod_stdout(1, 1), "interleaved tail")
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=fr,
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    # The injected runner served both pods (nothing was discarded)...
+    assert len(fr.sims) == 2
+    assert report.total_games == 4
+    # ...on the shared-profile path, so each tail carries the marker.
     for sim in fr.sims:
         assert sim.forge_log_tail == _PARALLEL_LOG_TAIL_MARKER

@@ -86,3 +86,19 @@ commander-builder already does and where it could drive an improvement.
   Surfaced in `/api/audit` (+ stream) as `combo_assessment`, rendered as a
   red bracket-pressure banner / collapsed info panel
   (`deck_health_ui.js:renderComboAssessment`).
+
+## MTG Agents deck-building guide (operator-supplied 2026-07-25)
+- **https://mtg-agents.com/deck-building-guide** — guide published by a
+  competitor tool (MTG Agents / "Karn" AI). Concrete bands: 36–38 lands,
+  10–12 ramp, 8–10 draw, 8–10 removal, 7–10 win conditions, 15–20
+  synergy, 3–5 flex; land formula `28 + 2×colors + avg MV`; target curve
+  2.5–3.5 avg MV; "30% of nonlands should be interaction or card draw".
+- Maps to: **corroborates `ROLE_TARGETS`** (our bands sit in the same
+  ranges) and the `bubble_analysis` verdict framing (their six-step
+  process ends at "test & refine" — our improve loop, except ours is
+  Forge-simulated). Their land formula is strictly coarser than the
+  Karsten per-CMC source model we already ship — keep Karsten. Their
+  7–10 "win conditions" band counts theme finishers more broadly than
+  our `finisher` target — worth a look next time ROLE_TARGETS is tuned.
+  Competitor context for FP-014: like ManaFoundry, heuristic-only with
+  no empirical validation — the sim moat holds.

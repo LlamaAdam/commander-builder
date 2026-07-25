@@ -8,7 +8,48 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-23 (`master` @ `763bdfc` — **everything is
+**Last updated:** 2026-07-25 — ⚡ **work RESUMED after two usage-limit
+(rate-limit) interruptions on 2026-07-24/25; nothing was lost.** The
+in-flight work is `feature/eval-fixes`: the REVIEW.md evaluation
+(verified defects + rules-coverage gaps + the CardScore spec, repo
+root) is now **committed as `25c1a54`** (~10,100 lines —
+`card_score.py`, `deck_legality.py`, `consistency.py`,
+`interaction.py`, commander-aware `deck_health`, bracket-caller
+plumbing, and ~4,400 lines of new tests). Test state 2026-07-25:
+**2532 passed / 6 failed** — all 6 are `test_compare_versions.py` and
+are a **pre-existing hermeticity gap, not caused by the eval work**
+(on a box with ≥2 `vendor/forge*` profiles, `compare()`'s
+isolated-profile dispatch substitutes real profile runners for the
+injected FakeRunner, so real JVMs run and credit 0 games; the same
+tests pass 66/66 in a clean single-profile tree at the same HEAD).
+**PR #28 is OPEN** (`feature/eval-fixes` → master) carrying the full
+FP-015 arc: eval overhaul (`25c1a54`), compare-runner hermeticity fix
+(`b4b5492`), bubble analysis (`c9914c2`), advisor wiring (`626f57a`),
+web audit backend (`122bf72`), audit UI verdict panel (`36498a7`),
+sim-job sidecar persist-before-done fix (`c607718`), and Archidekt as
+the third corpus source (`336ce2d`). **Fast lane GREEN: 2582 passed /
+0 failed** (the sidecar fix also killed the reattach flake). Everything
+is flag-gated behind `COMMANDER_BUILDER_CARD_SCORE` (default off).
+Auto-curate verdict wiring landed (`400bb6f`) — every advise surface
+is budget-aware — plus the tier-3 harness (`3ca8f57`). **Full retest
+2026-07-25 night: 2755 passed / 0 failed including the slow lane**;
+PR #28 CI green on all three Python versions. **A tier-3 PILOT is
+RUNNING detached** (relaunched ~19:35 local after the first attempt
+exposed two staging bugs — decks must live IN the Forge deck dir and
+carry Name= = filename, both fixed in `6163e8b`; a 4-game smoke then
+confirmed real attributed games): 3 B3 decks × 2 arms × 40 games/pod
+via `scripts/validate_card_score.py`. Clean JSON verdict lands at
+repo-root `_tier3_pilot_result.json` (`--out`); progress at
+`_tier3_pilot_progress.log`, stderr at `_tier3_pilot.log`. Staged
+`*__tier3_*` decks are auto-removed per deck. Expect several hours;
+do NOT start competing Forge work while it runs.
+⚠️ FP-002 note (2026-07-25 evening): the gauntlet soak is NOT running
+and the soak share `\\192.168.4.49\soak_inbox` is unreachable from
+box1 — the n=45 dataset is inaccessible until box2/the share returns;
+campaign paused pending operator. Active queue is now the top of
+[docs/future-plans.md](future-plans.md) (reordered 2026-07-25:
+active items first, shipped reference last).
+Prior update: 2026-07-23 (`master` @ `763bdfc` — **everything is
 merged**: PRs #13–#19 landed the ManaFoundry-parity six (#13), FP-014
 build-from-scratch (#14), the MIT license (#15), the revert-drift
 resolution fix (#16), the adversarial-review-carrying session branch
@@ -609,6 +650,52 @@ LoRA fine-tune Llama 3.1 8B / Qwen 2.5 7B on accumulated audit
 manifests + sim outcomes + Magic rules + oracle snapshots. ~$80–$200
 LoRA cost on A100. **Status: PARKED, do not promote.** Needs 2000+
 iteration rows; realistic timeline 18–30 months out.
+
+### FP-015 — Unified per-card scoring formula (`CardScore`)
+
+There is **no per-card score anywhere in the codebase**: the advisor
+orders adds by bucket insertion order then `(role_rank, trending_rank)`,
+and orders **cuts alphabetically** (`_advisor_heuristic.py:490` concedes
+it). `inclusion_pct` / `synergy_pct` are boolean gates and rationale text
+only — they never enter a sort key. Combo membership, mana value, role
+deficit *magnitude*, salt, price, ownership, and Scryfall's cached
+`edhrec_rank` + `produced_mana` are all discarded at ranking time.
+
+The plan: gates × five weighted components (consensus, synergy, role fit,
+curve fit, mana fit) × bounded modifiers, mirroring
+`bracket_estimator.DEFAULT_WEIGHTS` as a single documented tuning surface.
+Plugs into `_advisor_heuristic._rank`, the cut loop,
+`deck_builder_personalize.synergy_scorer` (already a
+`Callable[[str], float]` slot — zero signature churn), and
+`deck_builder._fallback_candidates` (which decides the 99 on FP-014's
+weak no-average-deck path).
+
+**Status: IN PROGRESS — implementation staged on `feature/eval-fixes`
+(2026-07-25), uncommitted; resumed after the 2026-07-24/25 usage-limit
+interruptions.** It still ships
+**behind a flag** and gets validated as a *ranking*, not merged on face
+plausibility: top-k-by-score vs. k-by-current-bucket-order, both A/B
+simmed through `compare_versions`. **Explicitly not** validated by
+regression on margin — FP-002 already shows nothing clears |t| >= 2 at
+n=45, and a card scorer would fail that bar uninformatively. Framed
+throughout as a **ranking prior that shrinks the space Forge validates**,
+not a power rating (FP-014's "Forge-VALIDATED, not just heuristically
+scored" stance is preserved, not contradicted); it also gives FP-012's
+bandit a warm prior instead of a uniform one.
+
+**Small independently-shippable prerequisites**, each worth doing alone:
+Scryfall-backed legality (`_CORE_BANS` at `web/routes_decks.py:885` is
+wrong in **both** directions post-2026-02-09 — it flags Coalition Victory
+and Panoptic Mirror as banned when both are on the *Game Changers* list,
+and misses 10 actually-banned cards incl. Fastbond, Flash, Griselbrand,
+Karakas, Tolarian Academy, with no handling for Lutri's new "banned as a
+companion" status); passing `avg_cmc` + `archetype` to **all three**
+`estimate_bracket` callers (only the dashboard does today, so 1.5 points
+of weight can never fire during `commander-build` bracket steering);
+`manabase_report()` to run the existing Karsten math on existing decks;
+an MV histogram; `finisher` in `ROLE_TARGETS`; and
+`combo_detection.one_piece_away()`. Full spec in
+[docs/future-plans.md](future-plans.md).
 
 ### Sister projects
 

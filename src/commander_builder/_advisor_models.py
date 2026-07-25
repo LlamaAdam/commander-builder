@@ -110,6 +110,15 @@ class AdviceReport:
     # ...) so the UI can group the preview list. Empty dict when no
     # commander page was fetched or no categories were parsed.
     edhrec_categories: dict[str, str] = field(default_factory=dict)
+    # Whole-deck verdict from bubble_analysis.score_deck (FP-015 bubble
+    # slice): {total, verdict, change_budget, components, ...}. None
+    # unless the card-score flag is on and the verdict pass ran — the
+    # report is unchanged (and this stays None) on the default path.
+    deck_score: Optional[dict] = None
+    # bubble_analysis.find_bubble_cards output (each entry a
+    # BubbleCard.to_dict()): the deck's easiest replacements, best
+    # first. Empty unless the verdict pass ran.
+    bubble_cards: list[dict] = field(default_factory=list)
 
     def to_manifest(self) -> dict:
         """Render as an audit_manifest.json-compatible dict so this feeds

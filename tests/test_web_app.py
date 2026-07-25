@@ -6386,3 +6386,105 @@ def test_log_error_stops_writing_past_cap(client, deck_dir, monkeypatch):
     assert body["logged"] is False
     assert body["reason"] == "log full"
     assert log_path.stat().st_size == size_after_first
+
+
+# ---------------------------------------------------------------------------
+# /api/audit — FP-015 deck verdict passthrough (flag-gated)
+# ---------------------------------------------------------------------------
+
+def _stub_advise_report():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        recommendations=[
+            SimpleNamespace(card="Lotus Cobra", action="add",
+                            reason="ramp", evidence={}),
+        ],
+        diagnosis=SimpleNamespace(pattern_summary="x",
+                                  weakness_signals=[]),
+        source="heuristic",
+        commander_names=["Test Cmdr"],
+    )
+
+
+def test_audit_payload_has_null_verdict_when_flag_off(client, monkeypatch):
+    monkeypatch.delenv("COMMANDER_BUILDER_CARD_SCORE", raising=False)
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda *a, **k: _stub_advise_report(),
+    )
+    body = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
+    assert body["deck_score"] is None
+    assert body["bubble_cards"] == []
+
+
+def test_audit_payload_carries_verdict_when_flag_on(client, monkeypatch):
+    monkeypatch.setenv("COMMANDER_BUILDER_CARD_SCORE", "1")
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise",
+        lambda *a, **k: _stub_advise_report(),
+    )
+    ds = {"total": 80.0, "verdict": "keep", "change_budget": [0, 2],
+          "components": {}, "n_reference_decks": 12, "explanations": []}
+    bubbles = [{"card": "Storm Crow", "cut_score": 90.0, "support": 0.0,
+                "salt": 0.0, "replacement": None, "ease": 0.0,
+                "reasons": []}]
+
+    def fake_apply(report, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            recommendations=report.recommendations,
+            diagnosis=report.diagnosis,
+            source=report.source,
+            commander_names=report.commander_names,
+            deck_score=ds,
+            bubble_cards=bubbles,
+        )
+
+    monkeypatch.setattr(
+        "commander_builder.bubble_analysis.build_reference_corpus",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "commander_builder.bubble_analysis.apply_verdict_to_report",
+        fake_apply,
+    )
+    body = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
+    assert body["deck_score"]["verdict"] == "keep"
+    assert body["bubble_cards"][0]["card"] == "Storm Crow"
+
+
+def test_done_status_never_precedes_sidecar_persist(client, monkeypatch):
+    """Regression for the reattach flake: _finish_job must write the
+    sidecar BEFORE status='done' becomes observable in the registry —
+    otherwise a restart (or eviction) in that window loses a FINISHED
+    job's report, the exact thing the sidecar exists to prevent."""
+    from commander_builder.web import routes_sim
+    _install_forge_stub(monkeypatch)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare",
+        lambda **kw: _fake_report(kw["old_deck"], kw["new_deck"],
+                                  kw["games_per_pod"], kw["mode"]),
+    )
+    events = []
+    real_persist = routes_sim._persist_record
+    real_set = routes_sim._set_job
+
+    def spy_persist(deck_dir, job_id, record):
+        events.append(("persist", record.get("status")))
+        return real_persist(deck_dir, job_id, record)
+
+    def spy_set(job_id, **fields):
+        if fields.get("status") in ("done", "failed"):
+            events.append(("set", fields["status"]))
+        return real_set(job_id, **fields)
+
+    monkeypatch.setattr(routes_sim, "_persist_record", spy_persist)
+    monkeypatch.setattr(routes_sim, "_set_job", spy_set)
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    _wait_for(client, job_id, {"done"})
+    assert ("persist", "done") in events
+    assert ("set", "done") in events
+    assert events.index(("persist", "done")) < events.index(("set", "done"))

@@ -185,8 +185,10 @@ function renderDeckHealthTiles(health, grade) {
     tooltip: roleLines.length
       ? `Core roles vs deck-template minimums:\n${roleLines.join("\n")}\n\n`
         + `Roles below target are under-built — the advisor's saturation `
-        + `guard flags the opposite (excess). Targets: ramp 10, draw 10, `
-        + `removal 8, wipe 3, protection 4.`
+        + `guard flags the opposite (excess). Base targets: ramp 10, draw 10, `
+        + `removal 8, wipe 3, protection 4, finisher 3. A role your commander `
+        + `itself fills has its target reduced (commander credit), so the `
+        + `target shown per role may be lower than the base.`
       : "Role-target signal unavailable (Scryfall lookup failed).",
     flavor: roleLines.length === 0 ? "muted"
           : (under.length === 0 ? "good"

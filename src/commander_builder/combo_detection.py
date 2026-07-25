@@ -13,7 +13,9 @@ compact ``data/combos.json``. Mirrors the game_changers.py pattern
 (fallback set + cached/refreshable list).
 
 A "combo present" = the deck's cards (Commander + Main) is a superset of
-every card a combo uses (case-insensitive).
+every card a combo uses (case-insensitive). ``one_piece_away`` answers the
+complementary and more actionable question: which combos is this deck
+exactly ONE card short of?
 """
 from __future__ import annotations
 
@@ -22,6 +24,11 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable, Optional
+
+# Resolves a card name to its Scryfall dict (or None when unknown) — the
+# injectable seam the mana-value/speed rule reads through.
+CardLookup = Callable[[str], Optional[dict]]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMBO_DATA_PATH = REPO_ROOT / "data" / "combos.json"
@@ -89,21 +96,50 @@ def detect_combos_in_deck(deck_text: str, combos: list[dict] | None = None) -> l
 # --------------------------------------------------------------------------- #
 # Bracket awareness — combos push a deck up the WotC bracket ladder.
 # --------------------------------------------------------------------------- #
-# WotC's Commander bracket guidelines single out **two-card infinite combos**
-# as the gating category: Brackets 1–2 (Exhibition / Core) and 3 (Upgraded)
-# all say no *early-game two-card infinite combos*; Bracket 4 (Optimized) and 5
-# (cEDH) are unrestricted. We can't measure "early game" from a static card
-# list, so we treat every game-ending two-card combo as the restricted case
-# (conservative — it can only over-flag, never silently pass an illegal deck).
+# WotC's Commander bracket guidelines single out **early-game two-card
+# infinite combos** as the gating category: Brackets 1–2 (Exhibition / Core)
+# and 3 (Upgraded) all say no *early-game* two-card infinite combos;
+# Bracket 4 (Optimized) and 5 (cEDH) are unrestricted.
 #
-# A combo is "game-ending" if it produces a win or an infinite loop. We map
-# each detected combo to the lowest bracket that permits it:
-#   * game-ending, exactly 2 cards -> floor 4  (the WotC-restricted case)
+# READ THE RULE EXACTLY: "early-game" is part of it, not decoration. A B3
+# "Upgraded" deck is explicitly ALLOWED to run a late-game two-card infinite
+# — the restriction is on combos that end the game before the table has had
+# a game. Flooring every two-card combo at B4 (what this module used to do)
+# is not "conservative", it is a different, stricter rule: it slammed
+# ordinary upgraded decks — an Exquisite Blood + Sanguine Bond deck is the
+# canonical B3 list — all the way to Optimized.
+#
+# So we gate on combo SPEED, proxied by the summed mana value of its pieces.
+# MV is the only speed measure available from a static list, and it is a
+# decent one: a combo you must pay 12 total mana for cannot be assembled in
+# the early game, while a 4-mana pair can. See _LATE_GAME_COMBO_MV.
+#
+# The mapping from a detected combo to the lowest bracket that permits it:
+#   * game-ending, <=2 cards, combined MV >= _LATE_GAME_COMBO_MV -> floor 3
+#     (late-game two-card combo: B3-legal by rule)
+#   * game-ending, <=2 cards, combined MV below that              -> floor 4
+#     (the WotC-restricted early-game case)
+#   * game-ending, <=2 cards, MV UNKNOWN                          -> floor 4
+#     (conservative on missing data — see combo_bracket_floor)
 #   * game-ending, 3+ cards        -> floor 3  (heuristic: more setup = later;
 #                                               still a deliberate combo finish)
 #   * not game-ending (value loop) -> floor 1  (no bracket pressure)
 _GAME_ENDING_TOKENS = ("win the game", "win ", "infinite", "mill out", "lose the game")
 _COMBO_BRACKET_CEILING = 5  # B5/cEDH: unrestricted
+
+# Combined mana value at or above which a two-card combo counts as
+# "late-game" and therefore B3-legal.
+#
+# WHY 7: seven total mana is two full turns of Commander ramp past the
+# curve — you are not assembling it on turn 3, and in practice you cast the
+# halves across two turns, giving the table a window to answer the first
+# piece. It also lands cleanly between the archetypes: the combos WotC's
+# rule is aimed at (Thassa's Oracle + Demonic Consultation = 3, Devoted
+# Druid + Vizier of Remedies = 4, Kiki-Jiki + Restoration Angel = 9 —
+# arguably the edge case) sit below it, while the durdly upgraded-deck pairs
+# (Sanguine Bond + Exquisite Blood = 11, Mikaeus + Triskelion = 12) sit
+# above. Tunable: raising it makes the estimator stricter, never unsafe.
+_LATE_GAME_COMBO_MV = 7
 
 
 def is_game_ending(combo: dict) -> bool:
@@ -113,17 +149,154 @@ def is_game_ending(combo: dict) -> bool:
     return any(tok in produces for tok in _GAME_ENDING_TOKENS)
 
 
-def combo_bracket_floor(combo: dict) -> int:
+def _cached_scryfall(card_name: str) -> Optional[dict]:
+    """On-disk Scryfall snapshot for ``card_name``, or None. NEVER fetches.
+
+    Mirrors ``_advisor_heuristic._cached_scryfall``. Cache-only is a hard
+    requirement here, not an optimization: ``combo_bracket_floor`` runs once
+    per detected combo inside ``bracket_estimator`` — which itself runs per
+    deck inside pool_curator/meta_test loops and per iteration inside
+    deck_builder's steering loop — and the estimator's contract is that it
+    is OFFLINE-SAFE and never blocks on the network. A cold cache therefore
+    reads as "speed unknown", which floors conservatively at 4; the cache is
+    populated as a side effect of the ordinary ``lookup_card`` traffic the
+    dashboard and advisor already generate.
+    """
+    try:
+        from .scryfall_client import _cache_path
+        p = _cache_path(card_name)
+    except Exception:  # noqa: BLE001 — bracket floors must not raise
+        return None
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _combined_mana_value(combo: dict, lookup: CardLookup) -> Optional[float]:
+    """Summed mana value of every piece of ``combo``, or None if ANY piece
+    can't be resolved.
+
+    All-or-nothing on purpose: a partial sum understates the combo's cost,
+    which would push it below the late-game threshold and produce the
+    *stricter* floor for the wrong reason. "I don't know" must be a distinct
+    answer from "it's cheap" so the caller can apply its own conservative
+    default deliberately.
+    """
+    cards = combo.get("cards") or []
+    if not cards:
+        return None
+    total = 0.0
+    for name in cards:
+        try:
+            data = lookup(name)
+        except Exception:  # noqa: BLE001 — an injected lookup may raise
+            return None
+        if not data:
+            return None
+        cmc = data.get("cmc")
+        if cmc is None:
+            return None
+        try:
+            total += float(cmc)
+        except (TypeError, ValueError):
+            return None
+    return total
+
+
+def combo_bracket_floor(
+    combo: dict, lookup: Optional[CardLookup] = None,
+) -> int:
     """Lowest WotC bracket that permits a deck containing this combo.
 
     See the module comment for the mapping rationale. Non-game-ending combos
-    return 1 (no pressure); two-card infinite/win combos return 4."""
+    return 1 (no pressure); a game-ending two-card combo returns 3 when its
+    pieces are collectively expensive enough to be a late-game line and 4
+    otherwise.
+
+    ``lookup`` resolves a card name to its Scryfall dict (needs only
+    ``cmc``); it defaults to the cache-only reader :func:`_cached_scryfall`
+    and is injectable for tests. WHEN THE LOOKUP CAN'T ANSWER — cold cache,
+    unknown card, injected stub returning None — we return the STRICT floor
+    of 4. Over-flagging a late-game combo as B4 costs a deck one bracket of
+    headroom; under-flagging an early-game combo silently passes a deck that
+    breaks the B3 rule, which is the failure this whole module exists to
+    prevent. Conservative on missing data.
+
+    Backward-compatible: ``combo_bracket_floor(combo)`` still works.
+    """
     if not is_game_ending(combo):
         return 1
     n_cards = len(combo.get("cards") or [])
-    if n_cards <= 2:
+    if n_cards > 2:
+        return 3
+    total_mv = _combined_mana_value(combo, lookup or _cached_scryfall)
+    if total_mv is None:
         return 4
-    return 3
+    return 3 if total_mv >= _LATE_GAME_COMBO_MV else 4
+
+
+def one_piece_away(deck_text: str, combos: list[dict] | None = None,
+                   *, lookup: Optional[CardLookup] = None) -> list[dict]:
+    """Combos the deck is EXACTLY one card short of, most popular first.
+
+    WHY THIS EXISTS: ``detect_combos_in_deck`` answers "do I have this
+    combo" — a fact about a deck that is already built. The actionable
+    question for an advisor is "am I ONE CARD away", because that names a
+    specific card to add (or, for a low-bracket deck, a specific card to
+    keep OUT). Exactly-one-missing is the only useful cut: zero missing is
+    already reported by ``detect_combos_in_deck``, and two-plus missing is a
+    suggestion to rebuild, not a card recommendation.
+
+    Each row is machine-readable and self-contained so a card-scoring
+    formula can consume it without re-deriving anything::
+
+        {
+          "missing": "Demonic Consultation",   # the single card to add
+          "have": ["Thassa's Oracle"],         # pieces already in the deck
+          "cards": [...],                      # the full combo, as listed
+          "produces": "Win the game",
+          "popularity": 314670,                # 0 when the DB has none
+          "bracket_floor": 4,                  # floor IF completed
+        }
+
+    ``bracket_floor`` is the floor the deck WOULD take on by adding
+    ``missing`` — carried so a B2 deck gets warned ("this would floor you at
+    B4") off the same row a B4 deck gets tempted by. It is computed with the
+    same ``lookup``-backed speed rule as :func:`combo_bracket_floor`,
+    including its conservative missing-data default.
+
+    Sorted by popularity descending (matching ``detect_combos_in_deck``) so
+    the most-played, most-likely-intended lines surface first. Pure-offline;
+    never raises on a weird decklist beyond what the deck parser does.
+    """
+    from .deck_library_analyzer import iter_deck_cards
+    have = {name.lower() for _qty, name in iter_deck_cards(deck_text)}
+    pool = combos if combos is not None else load_combos()
+    resolver = lookup or _cached_scryfall
+    out: list[dict] = []
+    for combo in pool:
+        cards = combo.get("cards") or []
+        # Same >= 2 guard detect_combos_in_deck applies: a 1-card "combo" is
+        # a data artifact, and "one piece away" from it is just "you don't
+        # own a card", which is not a combo suggestion.
+        if len(cards) < 2:
+            continue
+        missing = [c for c in cards if c.lower() not in have]
+        if len(missing) != 1:
+            continue
+        out.append({
+            "missing": missing[0],
+            "have": [c for c in cards if c.lower() in have],
+            "cards": list(cards),
+            "produces": combo.get("produces", "combo"),
+            "popularity": combo.get("popularity", 0) or 0,
+            "bracket_floor": combo_bracket_floor(combo, lookup=resolver),
+        })
+    out.sort(key=lambda r: r["popularity"], reverse=True)
+    return out
 
 
 def assess_deck_brackets(deck_text: str, bracket: int,

@@ -1384,6 +1384,56 @@ function renderAuditBackendRow(body) {
   return row;
 }
 
+
+// FP-015 whole-deck verdict + bubble cards. Renders only when the
+// server shipped deck_score (COMMANDER_BUILDER_CARD_SCORE on). The
+// verdict answers "should you change anything at all" BEFORE the rec
+// lists below push swaps: keep = 0-2 changes, polish = 2-5,
+// overhaul = fix structure first (FP-002's finding). Bubble cards are
+// the deck's easiest replacements, best-first, capped at 5 here.
+function renderDeckVerdict(ds, bubbles) {
+  const wrap = el("div", { class: "deck-verdict" });
+  const cls = ds.verdict === "keep" ? "dv-keep"
+    : ds.verdict === "overhaul" ? "dv-overhaul" : "dv-polish";
+  const label = (ds.verdict || "polish").toUpperCase();
+  wrap.appendChild(el("span", { class: `pill ${cls}` },
+    `${label} \u2014 ${Math.round(ds.total)}/100`));
+  const budget = ds.change_budget || [0, 0];
+  wrap.appendChild(el("span", { class: "muted", style: "margin-left: 8px;" },
+    ds.verdict === "overhaul"
+      ? "fix structure (roles / manabase) before swapping cards"
+      : `worth proposing ${budget[0]}\u2013${budget[1]} changes`));
+  if (ds.explanations && ds.explanations.length) {
+    const det = el("details", { class: "dv-details" });
+    det.appendChild(el("summary", { class: "muted" }, "why this verdict"));
+    const ul = el("ul", { class: "muted", style: "font-size: 12px;" });
+    for (const line of ds.explanations) ul.appendChild(el("li", {}, line));
+    det.appendChild(ul);
+    wrap.appendChild(det);
+  }
+  if (bubbles && bubbles.length) {
+    wrap.appendChild(el("p", { class: "muted dv-bubble-head" },
+      "On the bubble (easiest swaps first):"));
+    const ul = el("ul", { class: "dv-bubbles" });
+    for (const b of bubbles.slice(0, 5)) {
+      let text = b.card;
+      if (b.replacement && b.replacement.card)
+        text += ` \u2192 ${b.replacement.card}`;
+      const meta = [];
+      if (typeof b.cut_score === "number")
+        meta.push(`cut ${Math.round(b.cut_score)}`);
+      if (typeof b.support === "number")
+        meta.push(`${Math.round(b.support * 100)}% of top decks`);
+      ul.appendChild(el("li", {}, text, el(
+        "span", { class: "muted", style: "margin-left: 6px; font-size: 12px;" },
+        meta.length ? `(${meta.join(" \u00b7 ")})` : "",
+      )));
+    }
+    wrap.appendChild(ul);
+  }
+  return wrap;
+}
+
 function renderAuditResult(container, body) {
   // Rebuild the panel — header + LLM toggle + source pill +
   // diagnosis + diff lists + "Use this list" + collapsible preview.
@@ -1410,6 +1460,15 @@ function renderAuditResult(container, body) {
   // the field (legacy clients / no salt data).
   if (body.salt_warning) {
     container.appendChild(renderSaltWarningBanner(body.salt_warning));
+  }
+
+  // FP-015 whole-deck verdict — rendered above the health tiles and
+  // rec lists it qualifies. Absent (null) unless the server ran the
+  // verdict pass.
+  if (body.deck_score) {
+    container.appendChild(
+      renderDeckVerdict(body.deck_score, body.bubble_cards || []),
+    );
   }
 
   // Deck-health tile row -- compact at-a-glance signals the advisor's
