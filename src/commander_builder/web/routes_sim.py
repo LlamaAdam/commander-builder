@@ -147,22 +147,19 @@ def _job_file(deck_dir: Path, job_id: str) -> Path:
     return deck_dir / _SIM_JOBS_SUBDIR / f"{job_id}.json"
 
 
-def _persist_job(deck_dir: Path, job_id: str) -> None:
-    """Write a finished job's record to ``_sim_jobs/<job_id>.json``.
+def _persist_record(deck_dir: Path, job_id: str, record: dict) -> None:
+    """Write a job record to ``_sim_jobs/<job_id>.json``.
 
-    Called once, when the job reaches done/failed. This is what makes a
-    done report survive a page reload OR a server restart: the in-memory
-    registry is gone after a restart, but _get_job_persisted can rebuild
-    the record from this file. Best-effort — a failure to persist must not
-    turn a successful sim into a failed one, so it only warns."""
-    rec = _get_job(job_id)
-    if rec is None:
-        return
+    This is what makes a done report survive a page reload OR a server
+    restart: the in-memory registry is gone after a restart, but
+    _get_job_persisted can rebuild the record from this file.
+    Best-effort — a failure to persist must not turn a successful sim
+    into a failed one, so it only warns."""
     try:
         path = _job_file(deck_dir, job_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Stamp the id INTO the file too so a bare read is self-describing.
-        payload = dict(rec)
+        payload = dict(record)
         payload["job_id"] = job_id
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
@@ -170,6 +167,29 @@ def _persist_job(deck_dir: Path, job_id: str) -> None:
             f"WARN: could not persist sim job {job_id}: {exc}",
             flush=True,
         )
+
+
+def _finish_job(deck_dir: Path, job_id: str, **fields) -> None:
+    """Move a job to a terminal status with the sidecar ALREADY on disk
+    by the time that status is observable in memory.
+
+    Order matters. The old sequence — ``_set_job(status="done")`` then
+    persist in a ``finally`` — left a window where a poller sees
+    ``done`` while the sidecar doesn't exist yet; lose the registry in
+    that window (server restart — or the reattach test evicting the
+    entry) and a *finished* job's report is gone, which is precisely
+    what the sidecar exists to prevent. (Caught as a rare full-suite
+    flake in test_sim_job_reattach_from_persisted_sidecar.) So: build
+    the terminal record, persist it, THEN flip the in-memory status.
+    A persist failure still flips the status — same best-effort
+    contract as before, it only costs restart-recovery and has already
+    warned."""
+    with _SIM_JOBS_LOCK:
+        rec = _SIM_JOBS.get(job_id)
+        terminal = dict(rec) if rec is not None else {}
+    terminal.update(fields)
+    _persist_record(deck_dir, job_id, terminal)
+    _set_job(job_id, **fields)
 
 
 def _get_job_persisted(deck_dir: Path, job_id: str) -> Optional[dict]:
@@ -689,11 +709,12 @@ def make_sim_blueprint(
 
             try:
                 result = _execute_swap(ctx, progress_cb=_progress)
-                _set_job(job_id, status="done", report=result)
+                _finish_job(deck_dir, job_id, status="done", report=result)
             except SimExecutionError as exc:
                 # compare() failed — staged files already cleaned up inside
                 # _execute_swap. Record the message; no 500, no dead thread.
-                _set_job(job_id, status="failed", error=str(exc))
+                _finish_job(deck_dir, job_id, status="failed",
+                            error=str(exc))
             except Exception as exc:  # noqa: BLE001 - never die silently
                 # Any other unexpected error (staging race, disk, a bug).
                 # Best-effort cleanup so we don't leak staged decks, then
@@ -702,14 +723,12 @@ def make_sim_blueprint(
                     _cleanup_staged(ctx)
                 except Exception:  # pragma: no cover - defensive
                     pass
-                _set_job(
-                    job_id, status="failed",
+                _finish_job(
+                    deck_dir, job_id, status="failed",
                     error=f"{type(exc).__name__}: {exc}",
                 )
-            finally:
-                # Persist the terminal record so a reloaded page (or a
-                # restarted server) can still GET this job's result.
-                _persist_job(deck_dir, job_id)
+            # No finally-persist: _finish_job persisted BEFORE each
+            # terminal status became observable (see its docstring).
 
         # daemon=True: a background sim must never keep the process alive at
         # shutdown. Losing an in-flight job on server restart is acceptable

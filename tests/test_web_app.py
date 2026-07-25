@@ -6451,3 +6451,40 @@ def test_audit_payload_carries_verdict_when_flag_on(client, monkeypatch):
     body = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
     assert body["deck_score"]["verdict"] == "keep"
     assert body["bubble_cards"][0]["card"] == "Storm Crow"
+
+
+def test_done_status_never_precedes_sidecar_persist(client, monkeypatch):
+    """Regression for the reattach flake: _finish_job must write the
+    sidecar BEFORE status='done' becomes observable in the registry —
+    otherwise a restart (or eviction) in that window loses a FINISHED
+    job's report, the exact thing the sidecar exists to prevent."""
+    from commander_builder.web import routes_sim
+    _install_forge_stub(monkeypatch)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions.compare",
+        lambda **kw: _fake_report(kw["old_deck"], kw["new_deck"],
+                                  kw["games_per_pod"], kw["mode"]),
+    )
+    events = []
+    real_persist = routes_sim._persist_record
+    real_set = routes_sim._set_job
+
+    def spy_persist(deck_dir, job_id, record):
+        events.append(("persist", record.get("status")))
+        return real_persist(deck_dir, job_id, record)
+
+    def spy_set(job_id, **fields):
+        if fields.get("status") in ("done", "failed"):
+            events.append(("set", fields["status"]))
+        return real_set(job_id, **fields)
+
+    monkeypatch.setattr(routes_sim, "_persist_record", spy_persist)
+    monkeypatch.setattr(routes_sim, "_set_job", spy_set)
+    resp = client.post("/api/propose_swap_async", json={
+        "deck": "Alpha", "new_text": _ASYNC_NEW_TEXT, "games": 10,
+    })
+    job_id = resp.get_json()["job_id"]
+    _wait_for(client, job_id, {"done"})
+    assert ("persist", "done") in events
+    assert ("set", "done") in events
+    assert events.index(("persist", "done")) < events.index(("set", "done"))
