@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from commander_builder import deck_builder
 from commander_builder.deck_builder import _assemble
 from commander_builder.deck_builder_manabase import (
+    manabase_report,
     DOUBLE_PIP_SOURCES,
     KARSTEN_99_SOURCES,
     SINGLE_PIP_SOURCES,
@@ -455,3 +456,175 @@ def test_assemble_cli_prints_manabase_summary(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "manabase:" in out
     assert "sources (have/target):" in out
+
+
+# ===========================================================================
+# EVALUATION — manabase_report over an EXISTING deck (the same three
+# models, pointed the other way). Every lookup is injected; nothing here
+# reaches Scryfall.
+# ===========================================================================
+
+# A Golgari (BG) deck whose black requirement is set by a {2}{B}{B}
+# four-drop (Karsten 2CC row -> 26 sources) and whose green requirement is
+# set by a {1}{G} two-drop (1C row -> 19). The land base is deliberately
+# green-heavy so black comes back UNDER target and green comfortably over.
+_EVAL_CARDS = {
+    "Golgari Boss": {
+        "type_line": "Legendary Creature — Elf", "color_identity": ["B", "G"],
+        "mana_cost": "{2}{B}{G}", "cmc": 4.0,
+    },
+    "Black Praetor": {
+        "type_line": "Creature — Praetor", "color_identity": ["B"],
+        "mana_cost": "{2}{B}{B}", "cmc": 4.0,
+    },
+    "Green Two Drop": {
+        "type_line": "Creature — Bear", "color_identity": ["G"],
+        "mana_cost": "{1}{G}", "cmc": 2.0,
+    },
+    "Swamp": {
+        "type_line": "Basic Land — Swamp", "produced_mana": ["B"],
+        "color_identity": [], "mana_cost": "",
+    },
+    "Forest": {
+        "type_line": "Basic Land — Forest", "produced_mana": ["G"],
+        "color_identity": [], "mana_cost": "",
+    },
+    "Overgrown Tomb": {
+        "type_line": "Land — Swamp Forest", "color_identity": ["B", "G"],
+        "mana_cost": "",
+    },
+    # A land in NO curated tier — its colors are only knowable from the
+    # structured produced_mana field Scryfall ships on every snapshot.
+    "Nameless Golgari Land": {
+        "type_line": "Land", "produced_mana": ["B", "G"],
+        "color_identity": ["B", "G"], "mana_cost": "",
+    },
+    # A NONLAND source: Karsten counts sources, not lands.
+    "Llanowar Elves": {
+        "type_line": "Creature — Elf Druid", "mana_cost": "{G}", "cmc": 1.0,
+        "color_identity": ["G"], "produced_mana": ["G"],
+    },
+}
+
+
+def _eval_lookup(name):
+    return _EVAL_CARDS.get(name.strip())
+
+
+def _eval_deck(swamps: int = 8, forests: int = 20, extra: str = "") -> str:
+    return (
+        "[metadata]\nName=Eval\n"
+        "[Commander]\n1 Golgari Boss\n"
+        "[Main]\n"
+        f"{swamps} Swamp\n{forests} Forest\n"
+        "1 Black Praetor\n"
+        "1 Green Two Drop\n"
+        + extra
+    )
+
+
+def test_manabase_report_flags_a_color_below_its_karsten_target():
+    report = manabase_report(_eval_deck(), lookup=_eval_lookup)
+    black = report["per_color"]["B"]
+    # {2}{B}{B} at CMC 4 is the 2CC row: 26 sources. 8 Swamps is 18 short.
+    assert black["target"] == 26
+    assert black["sources"] == 8
+    assert black["deficit"] == 18
+    assert report["under_served"][0] == "B"
+    # The rule is applied, not re-implemented: the same number comes out of
+    # the shared table helper.
+    assert black["target"] == karsten_sources(4, 2)
+
+
+def test_manabase_report_names_the_most_demanding_card():
+    """Karsten's most-demanding-card rule, made inspectable: 'add black
+    sources' is advice; 'your BB four-drop wants 26' is a reason."""
+    report = manabase_report(_eval_deck(), lookup=_eval_lookup)
+    assert report["per_color"]["B"]["most_demanding"] == {
+        "card": "Black Praetor", "cmc": 4, "pips": 2,
+    }
+    assert report["per_color"]["B"]["basis"] == "karsten_table"
+
+
+def test_manabase_report_counts_duals_for_both_colors():
+    report = manabase_report(
+        _eval_deck(extra="1 Overgrown Tomb\n"), lookup=_eval_lookup,
+    )
+    assert report["per_color"]["B"]["land_sources"] == 9   # 8 Swamps + shock
+    assert report["per_color"]["G"]["land_sources"] == 21  # 20 Forests + shock
+
+
+def test_manabase_report_reads_produced_mana_for_untiered_lands():
+    """A land in none of the curated tiers resolves through Scryfall's
+    ``produced_mana`` — the structured field that was previously read by
+    exactly one fallback branch and never exercised by an evaluator."""
+    report = manabase_report(
+        _eval_deck(extra="1 Nameless Golgari Land\n"), lookup=_eval_lookup,
+    )
+    assert report["per_color"]["B"]["land_sources"] == 9
+    assert report["per_color"]["G"]["land_sources"] == 21
+
+
+def test_manabase_report_counts_nonland_sources_separately():
+    """A mana dork casts your double-pip four-drop exactly like a Forest
+    does, so it counts — but the split stays visible in the report."""
+    report = manabase_report(
+        _eval_deck(extra="1 Llanowar Elves\n"), lookup=_eval_lookup,
+    )
+    green = report["per_color"]["G"]
+    assert green["land_sources"] == 20
+    assert green["other_sources"] == 1
+    assert green["sources"] == 21
+
+
+def test_manabase_report_includes_the_commander_in_the_pip_math():
+    """The commander is cast from the command zone EVERY game, so its
+    pips set requirements like any spell's — more reliably, in fact.
+    ``iter_deck_cards`` reads [Commander] + [Main] for exactly this."""
+    # Deck with no expensive black spell in [Main]: black's target must
+    # still come from the {2}{B}{G} commander (1C-with-2-colors -> the
+    # single-pip CMC-4 row, 16).
+    deck = (
+        "[Commander]\n1 Golgari Boss\n"
+        "[Main]\n8 Swamp\n20 Forest\n1 Green Two Drop\n"
+    )
+    report = manabase_report(deck, lookup=_eval_lookup)
+    assert report["per_color"]["B"]["most_demanding"]["card"] == "Golgari Boss"
+    assert report["per_color"]["B"]["target"] == karsten_sources(4, 1)
+
+
+def test_manabase_report_returns_none_when_lookups_mostly_fail():
+    """Outage contract, matching the deck_health signals: 'Scryfall is
+    down' must not render as 'your mana is broken'. None, never a
+    fabricated all-zero report."""
+    assert manabase_report(_eval_deck(), lookup=lambda name: None) is None
+
+    def boom(name):
+        raise ConnectionError("Scryfall down")
+    assert manabase_report(_eval_deck(), lookup=boom) is None
+
+
+def test_manabase_report_returns_none_for_an_empty_deck():
+    assert manabase_report("", lookup=_eval_lookup) is None
+    assert manabase_report("[Main]\n", lookup=_eval_lookup) is None
+
+
+def test_manabase_report_colorless_deck_has_no_color_demands():
+    """A colorless commander has no Karsten target to miss. The report
+    resolves (it is not an outage) but carries no per-color rows, which
+    callers grade as 'not applicable' rather than as perfect."""
+    cards = {
+        "Colorless Boss": {
+            "type_line": "Legendary Creature — Construct",
+            "color_identity": [], "mana_cost": "{4}", "cmc": 4.0,
+        },
+        "Wastes": {
+            "type_line": "Basic Land", "color_identity": [], "mana_cost": "",
+        },
+    }
+    deck = "[Commander]\n1 Colorless Boss\n[Main]\n38 Wastes\n"
+    report = manabase_report(deck, lookup=lambda n: cards.get(n.strip()))
+    assert report is not None
+    assert report["colors"] == []
+    assert report["per_color"] == {}
+    assert report["land_count"] == 38

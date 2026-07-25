@@ -250,6 +250,34 @@ def _iter_main_cards(deck_text: str) -> Iterable[tuple[int, str]]:
     return dck_utils.iter_main_cards(deck_text)
 
 
+def _iter_commander_cards(deck_text: str) -> Iterable[tuple[int, str]]:
+    """Yield ``(qty, card_name)`` tuples from the [Commander] section.
+
+    WHY THIS EXISTS AT ALL: until 2026-07 this module read ``[Main]`` and
+    nothing else — every signal, every grade component, every reason
+    string. In Commander that is a structural blind spot, because the
+    commander is the one card you are guaranteed to have in every game:
+    a 5-mana commander with 8 ramp graded identically to a 2-mana one,
+    and a deck whose commander IS the draw engine (Edric, Tatyova) was
+    still scolded for a ``draw`` deficit it did not have.
+
+    WHY NOT ``deck_library_analyzer.iter_deck_cards``: that walker is the
+    canonical ``[Commander]`` + ``[Main]`` reader and the manabase report
+    uses it precisely because pip math wants both sections merged. The
+    health module needs them SEPARATED — the commander is credited
+    differently from a mainboard card, so merging would destroy exactly
+    the distinction being added. Same ``dck_utils`` primitives, one
+    section over.
+    """
+    for line in dck_utils.iter_section_lines(deck_text, "Commander"):
+        parsed = dck_utils.parse_card_line(line)
+        if parsed is None:
+            continue
+        qty, name = parsed
+        if name:
+            yield qty, name
+
+
 # ---------------------------------------------------------------------------
 # Named-card signals (MDFC / wincon protection / self-mill)
 # ---------------------------------------------------------------------------
@@ -556,11 +584,20 @@ def compute_deck_health(deck_text: str) -> dict:
 
 def _role_targets_signal(deck_text: str) -> dict:
     """Deck-health signal: role counts vs ROLE_TARGETS minimums. Degrades
-    to an empty shape on any failure so the rest of the panel renders."""
+    to an empty shape on any failure so the rest of the panel renders.
+
+    The ``[Commander]`` section is threaded through so a commander that
+    FILLS a role shrinks that role's effective target (see
+    ``staples.COMMANDER_ROLE_CREDIT`` for the reasoning and the size of
+    the credit). A deck file with no readable command zone passes an
+    empty list and gets the unmodified targets — the pre-2026-07
+    behavior, unchanged.
+    """
     try:
         from .staples import role_target_report
         names = [name for _qty, name in _iter_main_cards(deck_text)]
-        return role_target_report(names)
+        commanders = [name for _qty, name in _iter_commander_cards(deck_text)]
+        return role_target_report(names, commanders)
     except Exception:  # noqa: BLE001
         return {"roles": {}, "under_built": []}
 
@@ -578,15 +615,22 @@ def _role_targets_signal(deck_text: str) -> dict:
 # component contributes to the 0-100 score. Why these numbers:
 #
 #   role_deficits (0.40)        -- the broadest construction measure we
-#       have: ramp/draw/removal/wipe/protection counts vs the
+#       have: ramp/draw/removal/wipe/protection/finisher counts vs the
 #       gold-standard template minimums (staples.ROLE_TARGETS). A deck
 #       missing its engine roles misfires every game, so this is the
-#       heaviest component.
-#   mana_health (0.25)          -- land count vs the healthy Commander
-#       band (MDFC-adjusted). Wrong land counts cause mana screw/flood,
-#       but the failure is probabilistic per game rather than
-#       structural, so it weighs less than role deficits.
-#   construction_signals (0.35) -- the tile row's objectively
+#       heaviest component. UNCHANGED at 0.40 across the 2026-07
+#       rebalance: the two new components were funded out of the other
+#       two so this one's calibration (a deck missing ramp AND draw
+#       lands in C, see _GRADE_BANDS) survives intact.
+#   mana_health (0.22)          -- mana quality, now TWO halves averaged
+#       (see _score_mana_health): the land COUNT vs the healthy
+#       Commander band (MDFC-adjusted), and the per-color SOURCE counts
+#       vs Frank Karsten's targets. Before 2026-07 only the count half
+#       existed, so a Command Tower and a Wastes scored identically and
+#       a three-color deck with 37 Mountains graded a perfect 100 on
+#       mana. Trimmed 0.25 -> 0.22 to help fund commander_alignment;
+#       the component now measures strictly more than it used to.
+#   construction_signals (0.28) -- the tile row's objectively
 #       "warn"-able signals: mana sinks + wincon protection. These are
 #       the two tiles deck_health_ui.js is willing to paint warn-red
 #       when absent. The other tiles (MDFC, spell density, self-mill)
@@ -595,7 +639,18 @@ def _role_targets_signal(deck_text: str) -> dict:
 #       archetype-dependent (a stax deck doesn't want self-mill; a
 #       creature deck doesn't want 25% instants), so counting them
 #       would punish healthy decks for not being spellslinger/
-#       graveyard decks.
+#       graveyard decks. Trimmed 0.35 -> 0.28: these are two curated
+#       name-list counts, and it was hard to defend them outweighing
+#       all of mana quality once mana quality became real.
+#   commander_alignment (0.10)  -- does the deck's ramp match what its
+#       COMMANDER costs. New in 2026-07 and deliberately the smallest
+#       weight: it is one focused question (an expensive commander you
+#       cast on turn 8 loses to one you cast on turn 4), not a broad
+#       survey, and it is the newest / least-validated model here. It
+#       is a separate component rather than a role_deficits tweak
+#       because it must be able to go UNAVAILABLE on its own -- a deck
+#       file with no readable [Commander] section still deserves a
+#       grade for everything else.
 #
 # Weights sum to 1.0 (pinned by a test). When a component's underlying
 # signal is unavailable (the Scryfall-outage None contract), that
@@ -603,8 +658,9 @@ def _role_targets_signal(deck_text: str) -> dict:
 # an outage must never read as an unhealthy deck.
 _GRADE_WEIGHTS: dict[str, float] = {
     "role_deficits": 0.40,
-    "mana_health": 0.25,
-    "construction_signals": 0.35,
+    "mana_health": 0.22,
+    "construction_signals": 0.28,
+    "commander_alignment": 0.10,
 }
 
 # Flavor -> sub-score mapping for the construction signals. These reuse
@@ -625,6 +681,31 @@ _FLAVOR_SCORES: dict[str, int] = {"good": 100, "neutral": 70, "warn": 30}
 # that a 27-land greed manabase scores under 30.
 _LAND_BAND: tuple[int, int] = (33, 38)
 _LAND_BAND_PENALTY: float = 12.0
+
+# Commander-cost -> ramp expectation (the ``commander_alignment``
+# component's whole model).
+#
+# The pivot is 3.5 mana, the same pivot deck_builder_manabase's curve
+# model uses for land counts, and the baseline expectation at the pivot
+# is exactly staples.ROLE_TARGETS["ramp"] (10) -- a 3.5-MV commander is
+# the "normal" deck the published template ratios describe, so at the
+# pivot this component agrees with role_deficits by construction and
+# only adds information away from it. The slope (1.5 ramp pieces per
+# mana) is gentler than the land model's 2-per-mana because ramp
+# competes with spells for the same 99 slots while lands have their own
+# budget.
+#
+# The band caps the demand at 12. Past that the marginal ramp piece is
+# worse than a spell, and the advisor's redundancy guard
+# (ROLE_SATURATION_THRESHOLDS["ramp"] == 10) already refuses adds well
+# before then -- the two numbers answer different questions (how much
+# does this commander DEMAND vs is one MORE piece worth a slot), and 12
+# keeps the gap between them to the couple of pieces a genuine 7-drop
+# deck really does run. The 6 floor stops a 1-MV commander from making
+# ramp look optional.
+_COMMANDER_RAMP_PIVOT_MV: float = 3.5
+_COMMANDER_RAMP_PER_MV: float = 1.5
+_COMMANDER_RAMP_BAND: tuple[float, float] = (6.0, 12.0)
 
 # Letter bands over the weighted 0-100 score. Tuned so that a deck
 # missing BOTH engine roles (ramp and draw at zero) with everything
@@ -691,6 +772,135 @@ def _mana_health_signal(deck_text: str) -> Optional[dict]:
     }
 
 
+def _manabase_signal(deck_text: str) -> Optional[dict]:
+    """Karsten color-source signal feeding the ``mana_health`` component.
+
+    Delegates wholesale to ``deck_builder_manabase.manabase_report``,
+    which runs the assembler's own ``pip_stats`` ->
+    ``color_source_targets`` -> ``land_color_sources`` pipeline over the
+    existing deck. No mana math lives here; this is a fail-quiet adapter
+    (an unexpected exception inside the report must not cost the deck its
+    whole grade, same contract as every other signal in this module).
+
+    ``None`` when the report is unavailable (outage / unparseable deck)
+    OR when the deck has no colored requirements at all -- a colorless
+    Karn deck has no Karsten target to miss, and scoring "no
+    requirements" as a perfect 100 would hand every colorless deck free
+    points it did not earn.
+    """
+    try:
+        from .deck_builder_manabase import manabase_report
+        report = manabase_report(deck_text, lookup=_lookup_card_safe)
+    except Exception:  # noqa: BLE001
+        return None
+    if not report or not report.get("per_color"):
+        return None
+    return report
+
+
+def _score_manabase(manabase: Optional[dict]) -> Optional[float]:
+    """0-100 score from the ``manabase_report`` shape (None -> None).
+
+    Target-weighted exactly like ``_score_role_deficits``: one source
+    short of a 30-source triple-pip requirement is a smaller failure
+    than one short of a 14-source splash, and dividing summed deficits
+    by summed targets says so without a second tuning knob.
+    """
+    if not manabase:
+        return None
+    total_target = int(manabase.get("total_target") or 0)
+    if total_target <= 0:
+        return None  # colors with no demand -> nothing measured.
+    total_deficit = int(manabase.get("total_deficit") or 0)
+    return 100.0 * (1.0 - min(1.0, total_deficit / total_target))
+
+
+def _commander_mana_value(deck_text: str) -> Optional[float]:
+    """Mana value of the most expensive commander, or None.
+
+    PARTNERS: the MAX rather than the sum. Each half of a partner pair
+    is cast on its own, so the deck's hardest cast is what its ramp has
+    to reach; summing would demand a manabase for a card that does not
+    exist.
+
+    Prefers Scryfall's structured ``cmc``; falls back to parsing
+    ``mana_cost`` through the manabase module's existing cost parser
+    rather than adding a second mana-cost regex to this file. Returns
+    None when no commander line resolves -- the component then reads as
+    unavailable rather than assuming a cheap commander.
+    """
+    best: Optional[float] = None
+    for _qty, name in _iter_commander_cards(deck_text):
+        card = _lookup_card_safe(name)
+        if not card:
+            continue
+        mv = card.get("cmc")
+        if not isinstance(mv, (int, float)):
+            cost = card.get("mana_cost") or ""
+            if not cost.strip():
+                # No cmc AND no printed cost: the card resolved but its
+                # cost didn't. Skip rather than read it as a free
+                # commander -- a fabricated 0 would hand the deck a
+                # perfect alignment score it never earned.
+                continue
+            try:
+                from .deck_builder_manabase import _parse_cost
+                _pips, mv = _parse_cost(cost)
+            except Exception:  # noqa: BLE001
+                continue
+        mv = float(mv)
+        if best is None or mv > best:
+            best = mv
+    return best
+
+
+def _expected_ramp_for_commander(commander_mv: float) -> float:
+    """Ramp pieces a ``commander_mv``-cost commander wants. See the
+    ``_COMMANDER_RAMP_*`` constants for the model and its bounds."""
+    modelled = (
+        _COMMANDER_RAMP_PER_MV * (commander_mv - _COMMANDER_RAMP_PIVOT_MV)
+    )
+    from .staples import ROLE_TARGETS
+    lo, hi = _COMMANDER_RAMP_BAND
+    return max(lo, min(hi, ROLE_TARGETS.get("ramp", 10) + modelled))
+
+
+def _score_commander_alignment(
+    commander_mv: Optional[float], role_targets: Optional[dict],
+) -> tuple[Optional[float], Optional[dict]]:
+    """0-100 commander-cost-vs-ramp alignment + the detail for reasons.
+
+    Returns ``(score, detail)`` where detail carries ``commander_mv`` /
+    ``ramp`` / ``expected_ramp`` for the reason string, or
+    ``(None, None)`` when either input is unavailable: no resolvable
+    commander (headless deck file, Scryfall outage) or a degraded
+    role-target signal with no ramp count. Never a fabricated zero --
+    "we could not read your commander" is not "your ramp is broken".
+
+    The ramp count is READ FROM the role-target signal rather than
+    recomputed, so the two components can never disagree about how much
+    ramp the deck has. Note the count is the deck's own ramp only: the
+    commander's role credit adjusts TARGETS, not counts, so a ramp
+    commander cannot pay for its own ramp requirement here.
+    """
+    if commander_mv is None:
+        return None, None
+    roles = (role_targets or {}).get("roles") or {}
+    ramp = roles.get("ramp")
+    if not isinstance(ramp, dict):
+        return None, None
+    count = int(ramp.get("count", 0) or 0)
+    expected = _expected_ramp_for_commander(commander_mv)
+    if expected <= 0:  # pragma: no cover - band floor is 6
+        return None, None
+    detail = {
+        "commander_mv": commander_mv,
+        "ramp": count,
+        "expected_ramp": expected,
+    }
+    return 100.0 * min(1.0, count / expected), detail
+
+
 def _score_role_deficits(role_targets: Optional[dict]) -> Optional[float]:
     """0-100 score from the role_target_report shape.
 
@@ -711,7 +921,7 @@ def _score_role_deficits(role_targets: Optional[dict]) -> Optional[float]:
     return 100.0 * (1.0 - min(1.0, total_deficit / total_target))
 
 
-def _score_mana_health(mana: Optional[dict]) -> Optional[float]:
+def _score_land_band(mana: Optional[dict]) -> Optional[float]:
     """0-100 score from the ``_mana_health_signal`` shape (None -> None).
 
     100 inside the ``_LAND_BAND`` effective-land band; linear penalty
@@ -725,6 +935,41 @@ def _score_mana_health(mana: Optional[dict]) -> Optional[float]:
         return 100.0
     distance = (lo - eff) if eff < lo else (eff - hi)
     return max(0.0, 100.0 - _LAND_BAND_PENALTY * distance)
+
+
+def _score_mana_health(
+    mana: Optional[dict], manabase: Optional[dict] = None,
+) -> Optional[float]:
+    """The ``mana_health`` component: how many lands, and are they the
+    RIGHT lands.
+
+    Two independent halves, averaged over whichever are available:
+
+      * land count  -- ``_score_land_band`` over the MDFC-adjusted
+        effective land count;
+      * color sources -- ``_score_manabase`` over the Karsten per-color
+        targets (``manabase_report``).
+
+    Equal weight, and no new tuning constants: this is the same
+    mean-of-available-sub-scores shape ``construction_signals`` already
+    uses, and there is no evidence that would justify calling one half
+    more important than the other. Averaging (rather than adding a third
+    top-level component) keeps mana ONE line in the grade breakdown,
+    which is how the UI and every reader think about it.
+
+    Either half may be missing without costing the deck the component:
+    a colorless deck has no color targets, and a deck whose land types
+    can't be resolved still has a Karsten reading if its spells resolve.
+    ``None`` only when BOTH halves are unavailable -- never a fabricated
+    zero.
+    """
+    subs = [
+        s for s in (_score_land_band(mana), _score_manabase(manabase))
+        if s is not None
+    ]
+    if not subs:
+        return None
+    return sum(subs) / len(subs)
 
 
 def _count_flavor_score(count: int) -> int:
@@ -757,6 +1002,14 @@ def compute_health_grade(
     ``health`` is an optional precomputed ``compute_deck_health`` dict
     (the audit route already has one -- passing it avoids a second
     Scryfall walk for those signals). When omitted it is computed here.
+
+    THE COMMANDER-AWARE SIGNALS (2026-07) are computed HERE rather than
+    in ``compute_deck_health``: that function's return shape is the
+    ``/api/audit`` tile-row contract (one tile per key, pinned by tests
+    in both layers), and the commander/Karsten readings are grade
+    inputs, not tiles. They walk the deck a second time through the
+    same disk-cached ``lookup_card``, which is the same trade
+    ``_mana_health_signal`` has always made.
 
     Unavailability rules (MUST stay consistent with the Scryfall-outage
     None contract established in 6f89c6c):
@@ -800,8 +1053,20 @@ def compute_health_grade(
     role_score = _score_role_deficits(role_targets)
 
     # --- component: mana_health --------------------------------------
+    # Two halves: the land-count walk (this module) and the Karsten
+    # per-color source report (the assembler's own math, pointed at an
+    # existing deck). Each carries its own availability.
     mana = _mana_health_signal(deck_text)
-    mana_score = _score_mana_health(mana)
+    manabase = _manabase_signal(deck_text)
+    land_score = _score_land_band(mana)
+    manabase_score = _score_manabase(manabase)
+    mana_score = _score_mana_health(mana, manabase)
+
+    # --- component: commander_alignment ------------------------------
+    commander_mv = _commander_mana_value(deck_text)
+    commander_score, commander_detail = _score_commander_alignment(
+        commander_mv, role_targets,
+    )
 
     # --- component: construction_signals -----------------------------
     # Sub-signals scored via the UI's flavor cutoffs. mana_sinks can be
@@ -824,6 +1089,7 @@ def compute_health_grade(
         "role_deficits": role_score,
         "mana_health": mana_score,
         "construction_signals": construction_score,
+        "commander_alignment": commander_score,
     }
 
     # Reweight over the AVAILABLE components only (outage exclusion).
@@ -868,14 +1134,49 @@ def compute_health_grade(
                 f"{role.capitalize()} {v.get('count', 0)}/{v.get('target', 0)}"
                 f" — {deficit} below target",
             ))
-    if mana_score is not None and mana_score < 100.0 and mana:
+    # mana_health decomposes into its two halves, each charged the share
+    # of the component it actually dragged down (same shape as the
+    # construction sub-signals below) -- a deck that is short on lands
+    # AND short on blue sources should see both, not one merged line.
+    mana_halves = sum(
+        1 for s in (land_score, manabase_score) if s is not None
+    )
+    if land_score is not None and land_score < 100.0 and mana:
         lo, hi = _LAND_BAND
         eff = mana["effective_lands"]
         side = "below" if eff < lo else "above"
         candidates.append((
-            eff_w["mana_health"] * (100.0 - mana_score),
+            eff_w["mana_health"] * (100.0 - land_score) / mana_halves,
             f"{mana['lands']} lands ({eff:g} effective with MDFCs) — "
             f"{side} the {lo}-{hi} healthy band",
+        ))
+    if manabase_score is not None and manabase_score < 100.0 and manabase:
+        under = manabase.get("under_served") or []
+        worst = under[0] if under else None
+        entry = (manabase.get("per_color") or {}).get(worst) or {}
+        demanding = entry.get("most_demanding") or {}
+        # Name the card that SET the target (Karsten's most-demanding-card
+        # rule made legible) so the fix is obvious: "add black sources" is
+        # advice, "your BB four-drop wants 26" is a reason.
+        driver = (
+            f", set by {demanding['card']} "
+            f"({worst * int(demanding.get('pips') or 1)} at "
+            f"{demanding.get('cmc')} mana)"
+            if demanding.get("card") else ""
+        )
+        candidates.append((
+            eff_w["mana_health"] * (100.0 - manabase_score) / mana_halves,
+            f"{worst} sources {entry.get('sources', 0)}/"
+            f"{entry.get('target', 0)} — {entry.get('deficit', 0)} short of "
+            f"the Karsten target{driver}",
+        ))
+    if (commander_score is not None and commander_score < 100.0
+            and commander_detail):
+        candidates.append((
+            eff_w["commander_alignment"] * (100.0 - commander_score),
+            f"{commander_detail['commander_mv']:g}-mana commander with "
+            f"{commander_detail['ramp']} ramp — an expensive commander "
+            f"wants ~{commander_detail['expected_ramp']:g}",
         ))
     if construction_score is not None and subs:
         sub_reason = {

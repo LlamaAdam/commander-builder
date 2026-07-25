@@ -27,6 +27,18 @@ THE THREE MODELS (all documented inline, all cite their source).
 3. Fill order                 — ``build_manabase`` (keep seed → top-up
                                 fixing from the advisor's land tiers → basics).
 
+BUILD-TIME MATH, EVALUATION-TIME REPORT.
+========================================
+Models 1-3 above run when we ASSEMBLE a deck. ``manabase_report`` (bottom of
+this module) runs the SAME pipeline — ``pip_stats`` → ``color_source_targets``
+→ ``land_color_sources`` — over an EXISTING deck file and reports per-color
+``sources vs target`` with the card that set each target. It reimplements
+none of the math; it only changes where the inputs come from. That is what
+turns the Karsten table from write-only build-time knowledge into a signal
+``deck_health`` can grade a finished deck with (previously mana quality was
+"is the land COUNT in the 33-38 band?", under which a Command Tower and a
+Wastes were worth exactly the same).
+
 Everything routes through an injected ``lookup`` so tests run fully offline,
 and the whole thing degrades to FP-014.1 basics-only behavior (with a
 warning) when card/land data can't be resolved.
@@ -733,3 +745,214 @@ def build_manabase(
         fallback_colors=fallback_colors,
     )
     return Manabase(lands=lands, basics=basics, summary=summary)
+
+
+# ===========================================================================
+# EVALUATION — the same three models pointed at an EXISTING deck.
+# ===========================================================================
+
+
+def _default_lookup(name: str) -> Optional[dict]:
+    """Scryfall lookup, fail-quiet, imported at call time.
+
+    Deferred import so this module stays importable (and testable) with no
+    network-capable dependency loaded — every other entry point here takes an
+    injected ``lookup`` and the whole module is exercised offline.
+    """
+    try:
+        from .scryfall_client import lookup_card
+        return lookup_card(name)
+    except Exception:  # noqa: BLE001 — a lookup blip must not crash a report.
+        return None
+
+
+def manabase_report(deck_text: str, *, lookup=None) -> Optional[dict]:
+    """Per-color ``sources vs Karsten target`` for an EXISTING deck.
+
+    Runs the module's own pipeline over a parsed ``.dck``:
+    ``pip_stats`` (per-color pip + per-CMC demand) → ``color_source_targets``
+    (the most-demanding-card rule) → ``land_color_sources`` (what each land
+    actually taps for). None of that math is duplicated here — this function
+    only supplies the inputs and shapes the output.
+
+    WHAT COUNTS AS A SOURCE. Karsten counts *sources*, not lands: a Birds of
+    Paradise or an Arcane Signet casts your double-pip four-drop exactly as a
+    Forest does. So the tally has two halves, reported separately so a reader
+    can see the split:
+
+      * ``land_sources``  — every ``[Main]`` land, via ``land_color_sources``
+        (basics → any-color fixers → the advisor's color-gated tiers →
+        ``produced_mana`` → the land's own color identity);
+      * ``other_sources`` — nonland cards whose Scryfall ``produced_mana``
+        names a color in the identity (rocks, dorks, rituals).
+
+    ``produced_mana`` is the structured field Scryfall ships on every
+    snapshot; before this function it was read by exactly one code path
+    (``land_color_sources``' fourth fallback) and never for nonlands, so a
+    deck's mana dorks were invisible to every source count in the repo.
+
+    THE COMMANDER IS IN THE PIP MATH. ``iter_deck_cards`` reads
+    ``[Commander]`` + ``[Main]``, so a {2}{B}{B}{B} commander sets the black
+    requirement it deserves to set — it is cast from the command zone every
+    single game, which makes it the most demanding card in most decks by
+    definition. The deck's color identity is likewise read off the commander
+    when one resolves (that IS the rules definition), falling back to the
+    union of the resolvable cards' identities for a headless deck file.
+
+    Returns ``None`` — never a fabricated all-zero report — when the deck has
+    no parseable cards or when MORE than half of the card lines fail to
+    resolve. Same outage contract as the ``deck_health`` signals: "Scryfall
+    unavailable" and "your mana is broken" must not render identically. A
+    colorless deck resolves fine and returns an empty ``per_color`` (there is
+    no colored requirement to miss), which callers grade as "not applicable"
+    rather than perfect.
+
+    Shape::
+
+        {
+          "colors": ["B", "G"],
+          "per_color": {
+            "B": {"sources": 14, "land_sources": 12, "other_sources": 2,
+                  "target": 18, "deficit": 4, "basis": "karsten_table",
+                  "most_demanding": {"card": "Sheoldred", "cmc": 4,
+                                     "pips": 2}},
+            ...
+          },
+          "under_served": ["B"],          # deficit > 0, worst first
+          "total_deficit": 4, "total_target": 36,
+          "land_count": 37, "lookup_failures": 1,
+          "spells_table_scored": 60, "spells_fallback_scored": 2,
+        }
+    """
+    # Lazy import: ``deck_library_analyzer`` is the canonical
+    # ``[Commander]`` + ``[Main]`` walker, but it drags in the Forge script
+    # loader, and the assembler path (``build_manabase``) has no business
+    # paying for that at import time.
+    from .deck_library_analyzer import iter_deck_cards
+    from .dck_utils import iter_section_lines, parse_card_line
+
+    resolve = lookup or _default_lookup
+    cache: dict[str, Optional[dict]] = {}
+
+    def _cached(name: str) -> Optional[dict]:
+        """One lookup per distinct name; exceptions read as a miss."""
+        key = name.strip().lower()
+        if key not in cache:
+            try:
+                cache[key] = resolve(name)
+            except Exception:  # noqa: BLE001
+                cache[key] = None
+        return cache[key]
+
+    entries = [(qty, name) for qty, name in iter_deck_cards(deck_text) if name]
+    if not entries:
+        return None  # nothing parseable -> nothing to measure.
+
+    failed = sum(1 for _qty, name in entries if _cached(name) is None)
+    if failed * 2 > len(entries):
+        return None  # outage contract: majority of lookups failed.
+
+    commander_names = [
+        parsed[1]
+        for line in iter_section_lines(deck_text, "Commander")
+        for parsed in [parse_card_line(line)]
+        if parsed and parsed[1]
+    ]
+
+    def _identity_of(names) -> set[str]:
+        out: set[str] = set()
+        for nm in names:
+            card = _cached(nm) or {}
+            out |= {
+                c.upper() for c in (card.get("color_identity") or [])
+                if isinstance(c, str) and c.upper() in _WUBRG
+            }
+        return out
+
+    identity = _identity_of(commander_names)
+    if not identity:
+        # Headless / unresolvable command zone: fall back to what the deck
+        # itself is made of. Coarser (a lone off-color card widens the
+        # identity) but honest, and it keeps a report available for the
+        # [Main]-only fixtures the audit layer sometimes hands us.
+        identity = _identity_of(nm for _qty, nm in entries)
+
+    lands: list[tuple[int, str]] = []
+    nonlands: list[tuple[int, str]] = []
+    for qty, name in entries:
+        card = _cached(name) or {}
+        type_line = card.get("type_line") or ""
+        if not type_line:
+            faces = card.get("card_faces") or []
+            if faces:
+                type_line = " // ".join(
+                    (f or {}).get("type_line") or "" for f in faces
+                )
+        # FRONT face decides, matching deck_health's land walk: a
+        # "Sorcery // Land" MDFC is a spell you sometimes play as a land.
+        front = type_line.split("//")[0].lower()
+        (lands if "land" in front else nonlands).append((qty, name))
+
+    # MODEL 2, unchanged: pip + per-CMC demand over the nonland spells. One
+    # entry per LINE, not per copy — the most-demanding-card rule is a max,
+    # so quantities can't move a target (and a singleton format has none).
+    stats = pip_stats([nm for _qty, nm in nonlands], _cached)
+    colors = [c for c in _WUBRG if c in identity]
+    targets = color_source_targets(colors, stats)
+
+    land_sources = {c: 0 for c in colors}
+    for qty, name in lands:
+        for c in land_color_sources(name, identity, _cached):
+            if c in land_sources:
+                land_sources[c] += qty
+    other_sources = {c: 0 for c in colors}
+    for qty, name in nonlands:
+        card = _cached(name) or {}
+        produced = {
+            p.upper() for p in (card.get("produced_mana") or [])
+            if isinstance(p, str) and p.upper() in _WUBRG
+        }
+        for c in produced & identity:
+            if c in other_sources:
+                other_sources[c] += qty
+
+    per_color: dict[str, dict] = {}
+    for c in colors:
+        target = int(targets.get(c, 0))
+        sources = land_sources[c] + other_sources[c]
+        demand = stats.table_demands.get(c)
+        per_color[c] = {
+            "sources": sources,
+            "land_sources": land_sources[c],
+            "other_sources": other_sources[c],
+            "target": target,
+            "deficit": max(0, target - sources),
+            # WHICH MODEL produced this target — a two-anchor number is a
+            # coarser estimate and the reader deserves to know which they
+            # are looking at (same honesty the build summary carries).
+            "basis": (
+                "karsten_table" if demand is not None
+                else ("two_anchor_fallback"
+                      if stats.cards_with.get(c, 0) > 0 else "no_demand")
+            ),
+            "most_demanding": (
+                {"card": demand[1], "cmc": demand[2], "pips": demand[3]}
+                if demand is not None else None
+            ),
+        }
+
+    under = sorted(
+        (c for c, v in per_color.items() if v["deficit"] > 0),
+        key=lambda c: per_color[c]["deficit"], reverse=True,
+    )
+    return {
+        "colors": colors,
+        "per_color": per_color,
+        "under_served": under,
+        "total_deficit": sum(v["deficit"] for v in per_color.values()),
+        "total_target": sum(v["target"] for v in per_color.values()),
+        "land_count": sum(qty for qty, _nm in lands),
+        "lookup_failures": failed,
+        "spells_table_scored": stats.table_scored,
+        "spells_fallback_scored": stats.fallback_scored,
+    }

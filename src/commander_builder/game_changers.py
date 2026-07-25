@@ -10,6 +10,10 @@ API — it's an HTML list — so we parse the page and extract card names.
 Cache: 7-day TTL since WotC updates are infrequent. On fetch failure, return
 the bundled fallback so audits keep running.
 
+MERGE POLICY: a scrape that passes the sanity check REPLACES the bundled
+fallback rather than being union'd with it — WotC removes cards from the
+list, and a union can only ever grow. See :func:`fetch_game_changers`.
+
 Public API:
 
     from commander_builder.game_changers import load_game_changers
@@ -38,11 +42,40 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # just orphaned. Bump again whenever the schema or parser changes shape.
 CACHE_PATH = REPO_ROOT / ".cache" / "game_changers.v2.json"
 USER_AGENT = "commander-builder/0.2"
-# WotC's Commander Brackets official page. May 404 / redirect over time;
-# the fetch path is wrapped in a broad try/except so failures fall back to
-# the hardcoded list rather than crashing the audit prompt.
-WOTC_URL = "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta"
+# WotC's MAINTAINED Commander format page — the living Game Changers list.
+#
+# WHY NOT THE ANNOUNCEMENT PAGE: this used to point at
+# ``/en/news/announcements/introducing-commander-brackets-beta``, the
+# original beta announcement. That is a frozen news post: it still carries
+# the launch-era ~40-card list and will never be edited again, so every
+# subsequent WotC revision (additions AND removals) was invisible to us.
+# The format page is the one WotC actually updates. May 404 / redirect over
+# time; the fetch path is wrapped in a broad try/except so failures fall
+# back to the hardcoded list rather than crashing the audit prompt.
+WOTC_URL = "https://magic.wizards.com/en/formats/commander"
 CACHE_TTL_DAYS = 7
+
+# --- Scrape trust thresholds ------------------------------------------------
+# A scrape REPLACES the bundled fallback (see fetch_game_changers), which is
+# the only way a card WotC removed can ever leave our list. Replacement is
+# also the only way a parser regression can silently gut the list, so the
+# scrape has to earn it by looking like the real thing:
+#
+#   * ``_MIN_SCRAPED_NAMES`` — the official list has been in the 40-55 card
+#     range since launch (the bundled fallback is 53). A parse that yields
+#     fewer than 40 plausible names found a redesigned page, a cookie wall,
+#     or an error page — not the list.
+#   * ``_MIN_FALLBACK_OVERLAP`` — the list changes by a handful of cards per
+#     revision, never wholesale. A trustworthy scrape must still contain at
+#     least 80% of the bundled fallback; below that we are looking at a
+#     different page, not a WotC update.
+#
+# Both are deliberately loose enough to let a real revision through (WotC
+# could drop ~10 of 53 cards and still clear 80%) and tight enough that
+# garbage never replaces a known-good list. When the checks fail we use the
+# fallback WHOLESALE and do not cache — conservative on missing data.
+_MIN_SCRAPED_NAMES = 40
+_MIN_FALLBACK_OVERLAP = 0.80
 
 # Fallback list — keep in sync with prompts/moxfield_audit_v3.md "Hardcoded
 # fallback" section. Update when the prompt updates (or when this module's
@@ -130,8 +163,10 @@ def _parse_card_names_from_html(html: str) -> set[str]:
     2. Decode HTML entities first (``&amp;`` -> ``&``) so the ``&``
        reject-char in :func:`_looks_like_card_name` actually fires.
 
-    Inevitably still noisy; the caller should union with the bundled
-    ``_FALLBACK`` rather than treat this as authoritative.
+    Inevitably still noisy. The caller does NOT union the result with the
+    bundled ``_FALLBACK`` (that made removals impossible); instead it
+    sanity-checks the parse via :func:`_scrape_is_trustworthy` and either
+    takes it wholesale or discards it wholesale.
     """
     import html as _html_mod
     decoded = _html_mod.unescape(html)
@@ -146,15 +181,82 @@ def _parse_card_names_from_html(html: str) -> set[str]:
     return candidates
 
 
-def fetch_game_changers(use_cache: bool = True) -> set[str]:
-    """Fetch the Game Changers list from WotC. Returns the parsed names
-    union'd with the bundled fallback (so a parser regression can't shrink
-    the list). Caches to `.cache/game_changers.json`.
+def _scrape_is_trustworthy(names: set[str]) -> tuple[bool, float]:
+    """``(trusted, fallback_overlap)`` for a candidate Game Changers list.
 
-    The cache is persisted ONLY when the scrape actually produced names. A
-    failed/empty scrape degrades to the fallback WITHOUT writing the cache,
-    so the fallback-only result doesn't masquerade as "fresh" for the whole
-    TTL and block a retry on the next call."""
+    Gatekeeper for the replace-not-union merge. Returns the overlap ratio
+    alongside the verdict so callers can log HOW far off a rejected parse
+    was — "0 of 53 bundled names present" and "44 of 53" are very different
+    failures (dead page vs. a real WotC revision we should hand-review).
+
+    Overlap is measured as *the share of the bundled fallback the candidate
+    still contains*, not Jaccard: additions are expected and must not count
+    against a scrape, only unexplained disappearances should. Case-folded
+    for the same reason every other name comparison in this repo is.
+    """
+    fallback_folded = {c.casefold() for c in _FALLBACK}
+    if not fallback_folded:  # defensive; _FALLBACK is never empty
+        return len(names) >= _MIN_SCRAPED_NAMES, 1.0
+    folded = {c.casefold() for c in names}
+    # Computed even when the count bar already failed, so the rejection log
+    # can tell "dead page, nothing recognizable" apart from "the real list,
+    # truncated" — different bugs, different fixes.
+    overlap = len(fallback_folded & folded) / len(fallback_folded)
+    trusted = (
+        len(names) >= _MIN_SCRAPED_NAMES
+        and overlap >= _MIN_FALLBACK_OVERLAP
+    )
+    return trusted, overlap
+
+
+def _log_divergence(names: set[str]) -> None:
+    """Print what a trusted scrape changed relative to the bundled list.
+
+    THE STALENESS ALARM. ``_FALLBACK`` is hand-synced with
+    ``prompts/moxfield_audit_v3.md``; once a scrape is trusted enough to
+    replace it, any disagreement means the bundled list (and the prompt) are
+    out of date. Loud on purpose — this is the only signal a maintainer gets
+    that WotC moved. Print-only: divergence is news, never an error.
+    """
+    folded_fallback = {c.casefold(): c for c in _FALLBACK}
+    folded_scraped = {c.casefold(): c for c in names}
+    added = sorted(folded_scraped[k] for k in folded_scraped.keys() - folded_fallback.keys())
+    removed = sorted(folded_fallback[k] for k in folded_fallback.keys() - folded_scraped.keys())
+    if not added and not removed:
+        return
+    print(
+        f"[game_changers] scraped list diverges from bundled _FALLBACK "
+        f"({len(names)} scraped vs {len(_FALLBACK)} bundled) — "
+        f"update _FALLBACK + prompts/moxfield_audit_v3.md. "
+        f"ADDED: {', '.join(added) or 'none'}. "
+        f"REMOVED: {', '.join(removed) or 'none'}.",
+        flush=True,
+    )
+
+
+def fetch_game_changers(use_cache: bool = True) -> set[str]:
+    """Fetch the Game Changers list from WotC. Caches to
+    ``.cache/game_changers.v2.json``.
+
+    MERGE POLICY — a trusted scrape REPLACES the bundled fallback; it is not
+    union'd with it. The union was a one-way ratchet: WotC has removed cards
+    from the Game Changers list before, and a union can only ever grow, so a
+    removed card stayed on our list forever and kept flooring innocent decks
+    to B3. Replacement is the only merge that can shrink.
+
+    Replacement is gated on :func:`_scrape_is_trustworthy` precisely because
+    it is destructive — a parser regression that returns junk must not be
+    able to gut the list. A rejected scrape degrades to the bundled fallback
+    WHOLESALE (conservative on missing data), and divergence between a
+    trusted scrape and the bundled list is logged loudly as the staleness
+    alarm.
+
+    The cache is persisted ONLY when the scrape was trusted. A failed /
+    empty / rejected scrape degrades to the fallback WITHOUT writing the
+    cache, so a fallback-only result never masquerades as "fresh" for the
+    whole TTL and never blocks a retry on the next call — and a bad parse
+    never poisons the cache for a week.
+    """
     if use_cache and _cache_is_fresh(CACHE_PATH):
         try:
             data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
@@ -162,7 +264,16 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
             # before the stricter parser self-heal on next read (the prior
             # parser persisted site-chrome strings like "Privacy Policy").
             cached = {c for c in data.get("cards", []) if _looks_like_card_name(c)}
-            return cached | set(_FALLBACK)
+            # A cache entry is just a persisted scrape, so it faces the same
+            # trust bar — and for the same reason. We return it INSTEAD of the
+            # fallback (that's what makes removals stick across process
+            # restarts), so a cache that was hand-edited, truncated, or
+            # written by an older/looser parser must not be honored. An
+            # untrusted cache falls through to a live re-fetch rather than
+            # being served for the rest of its TTL.
+            trusted, _overlap = _scrape_is_trustworthy(cached)
+            if trusted:
+                return cached
         except (OSError, ValueError):
             pass  # Re-fetch on cache corruption.
 
@@ -172,13 +283,27 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
         scraped = set()
 
-    merged = set(scraped) | set(_FALLBACK)
+    trusted, overlap = _scrape_is_trustworthy(scraped)
+    if not trusted:
+        if scraped:
+            # Distinguish "we got nothing" (network down — silent, normal)
+            # from "we got something that doesn't look like the list", which
+            # means the page moved or the parser broke and needs a human.
+            print(
+                f"[game_changers] rejecting scrape of {WOTC_URL}: "
+                f"{len(scraped)} plausible name(s), "
+                f"{overlap:.0%} of the bundled list present "
+                f"(need >= {_MIN_SCRAPED_NAMES} names and "
+                f">= {_MIN_FALLBACK_OVERLAP:.0%} overlap) — "
+                f"using bundled fallback, not caching.",
+                flush=True,
+            )
+        return set(_FALLBACK)
 
-    # Only persist when the scrape produced names. On a failed/empty scrape
-    # we return the fallback but do NOT write the cache — otherwise the
-    # fallback-only list would be cached "fresh" for the full TTL and never
-    # retried.
-    if use_cache and scraped:
+    _log_divergence(scraped)
+    merged = set(scraped)
+
+    if use_cache:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         CACHE_PATH.write_text(
             json.dumps({
@@ -187,6 +312,7 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
                 "cards": sorted(merged),
                 "scraped_count": len(scraped),
                 "fallback_count": len(_FALLBACK),
+                "fallback_overlap": round(overlap, 4),
             }, indent=2),
             encoding="utf-8",
         )

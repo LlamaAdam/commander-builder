@@ -798,9 +798,18 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
               "deck_id": "...",
               "bracket": 3,
               "in_deck_game_changers": [...],
-              "illegal_cards": [...],   # banned in Commander
+              "illegal_cards": [...],     # banned in Commander
+              "unverified_cards": [...],  # ban status unknown
               "warnings": [...],
             }
+
+        ``illegal_cards`` is Scryfall-backed (see
+        ``deck_legality.scan_banned``) and carries only cards whose
+        ``legalities.commander`` actually reads ``banned``.
+        ``unverified_cards`` holds the names Scryfall couldn't answer
+        for. The two lists are never merged: a Scryfall outage
+        rendering as "your deck contains 41 banned cards" is far worse
+        than the endpoint admitting it doesn't know.
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
@@ -830,7 +839,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             bracket = _bracket_from_filename(deck_id)
 
         from ..game_changers import load_game_changers
-        from .. import doctor
+        from ..deck_legality import scan_banned
         gc_set = load_game_changers()
 
         # Read deck card names.
@@ -871,33 +880,35 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         gc_lc = {g.lower() for g in gc_set}
         present_gc = sorted({n for n in names if n.lower() in gc_lc})
 
-        # Banned-in-Commander list. We use commander_builder.doctor's
-        # check if available, else hand-roll a small core list.
-        banned: list[str] = []
-        try:
-            doctor_banned = getattr(doctor, "BANNED_IN_COMMANDER", None)
-            if doctor_banned:
-                banned = sorted(set(names) & set(doctor_banned))
-        except Exception:
-            banned = []
-        if not banned:
-            # Minimal fallback list of high-profile bans.
-            _CORE_BANS = {
-                "Ancestral Recall", "Black Lotus", "Mox Ruby", "Mox Pearl",
-                "Mox Sapphire", "Mox Emerald", "Mox Jet", "Time Walk",
-                "Time Vault", "Library of Alexandria", "Channel",
-                "Falling Star", "Shahrazad", "Chaos Orb", "Iona, Shield of Emeria",
-                "Limited Resources", "Painter's Servant", "Panoptic Mirror",
-                "Primeval Titan", "Recurring Nightmare", "Sundering Titan",
-                "Sway of the Stars", "Tempest Efreet", "Time Vault",
-                "Tinker", "Trade Secrets", "Upheaval", "Worldfire",
-                "Yawgmoth's Bargain", "Coalition Victory",
-                "Emrakul, the Aeons Torn", "Erayo, Soratami Ascendant",
-                "Hullbreacher", "Sylvan Primordial", "Prophet of Kruphix",
-                "Mana Crypt", "Jeweled Lotus", "Dockside Extortionist",
-                "Nadu, Winged Wisdom",
-            }
-            banned = sorted(set(names) & _CORE_BANS)
+        # Banned-in-Commander list, read from Scryfall's
+        # ``legalities.commander`` (disk-cached per card by
+        # scryfall_client) rather than from a hand-typed set.
+        #
+        # This used to be a ~40-name ``_CORE_BANS`` frozenset, and it
+        # was wrong in BOTH directions as of the 2026-02-09 B&R
+        # update: it flagged Coalition Victory and Panoptic Mirror
+        # (which are on the official *Game Changers* list, i.e.
+        # LEGAL), along with Painter's Servant, Worldfire, Sway of
+        # the Stars and Tempest Efreet, while missing Balance,
+        # Fastbond, Flash, Golos, Griselbrand, Karakas, Leovold,
+        # Paradox Engine, Rofellos and Tolarian Academy. It also
+        # listed Time Vault twice. A list maintained by hand cannot
+        # track a quarterly B&R; the cached Scryfall field can, and
+        # already ships with every card we look up.
+        #
+        # ``scan_banned`` returns None when MORE than half the names
+        # couldn't be resolved (deck_health's majority-failure outage
+        # contract). In that case we report NOTHING as banned and put
+        # every name under ``unverified_cards`` — an outage must never
+        # render as a false accusation, and it must never render as a
+        # reassuring empty list either.
+        scan = scan_banned(names)
+        if scan is None:
+            banned: list[str] = []
+            unverified: list[str] = sorted(set(names))
+        else:
+            banned = list(scan.banned)
+            unverified = list(scan.unverified)
 
         warnings = []
         if bracket and bracket <= 3 and present_gc:
@@ -910,12 +921,18 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             warnings.append(
                 f"{len(banned)} card(s) are banned in Commander."
             )
+        if unverified:
+            warnings.append(
+                f"Ban status could not be verified for {len(unverified)} "
+                f"card(s) (Scryfall legality unavailable)."
+            )
 
         return jsonify({
             "deck_id": deck_id,
             "bracket": bracket,
             "in_deck_game_changers": present_gc,
             "illegal_cards": banned,
+            "unverified_cards": unverified,
             "warnings": warnings,
         })
 

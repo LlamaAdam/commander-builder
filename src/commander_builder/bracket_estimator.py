@@ -21,7 +21,11 @@ official bracket rules already in this repo:
   * ``combo_detection.py`` — ``combo_bracket_floor``: a game-ending
     TWO-card combo floors a deck at B4 (WotC: B1-B3 prohibit
     early-game two-card infinite combos), a 3+-card game-ending combo
-    floors at B3.
+    floors at B3. NOTE combo_detection now refines the two-card case
+    by combo SPEED (summed mana value) and returns B3 for a provably
+    late-game pair; this module deliberately keeps the stricter
+    count-only reading for its own floor — see the two-card floor
+    comment in ``_estimate_bracket_inner``.
   * ``deck_dashboard._power_bracket`` — the pre-existing nudge
     heuristic whose curve bands (<=2.6 tight / >3.4 high) and
     combo/stax archetype nudges the weighted signals mirror.
@@ -55,10 +59,12 @@ layering (web imports core, never the reverse).
 Public API:
 
     from commander_builder.bracket_estimator import (
-        estimate_bracket, mismatch_warning,
+        derive_signals, estimate_bracket, mismatch_warning,
     )
 
-    result = estimate_bracket(deck_text, declared=3)
+    avg_cmc, archetype = derive_signals(deck_text, deck_path)
+    result = estimate_bracket(deck_text, declared=3,
+                              avg_cmc=avg_cmc, archetype=archetype)
     # -> {"estimate": 3, "floor": 3, "confidence": "high",
     #     "reasons": [...], "signals": {...}, "declared": 3,
     #     "mismatch": False, "mismatch_level": None}
@@ -67,7 +73,13 @@ Public API:
 from __future__ import annotations
 
 import json
-from typing import Optional
+from pathlib import Path
+from typing import Callable, Optional
+
+# Resolves a card name to its Scryfall dict (or None when unknown). The
+# injectable seam every derivation here routes through, so callers with an
+# existing cached lookup reuse it and tests stay offline.
+CardLookup = Callable[[str], Optional[dict]]
 
 # ---------------------------------------------------------------------------
 # Rule data — name-based card lists, each citing its repo source
@@ -292,6 +304,132 @@ def _offline_salt_count(names_lc: set[str]) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+# Context derivation — the shared entry point for callers WITHOUT context
+# ---------------------------------------------------------------------------
+
+def derive_signals(
+    deck_text: str,
+    deck_path: Optional[Path] = None,
+    lookup: Optional[CardLookup] = None,
+) -> tuple[Optional[float], Optional[str]]:
+    """Derive ``(avg_cmc, archetype)`` for a deck — the two context signals
+    :func:`estimate_bracket` cannot compute for itself.
+
+    WHY THIS EXISTS: ``estimate_bracket`` takes ``avg_cmc`` / ``archetype``
+    as OPTIONAL pre-computed context because deriving them costs a Scryfall
+    lookup per card, which the estimator's offline/never-blocks contract
+    forbids it from doing implicitly. The consequence was that only the
+    dashboard — which happens to compute both for its own stat tiles — ever
+    passed them; ``commander-advise`` and ``commander-build``'s bracket
+    STEERING LOOP passed nothing, so ``curve_tight`` (+0.5),
+    ``curve_high`` (-0.5), ``archetype_combo`` (+1.0) and
+    ``archetype_stax`` (+0.5) could never fire in the very code path whose
+    job is to steer a deck to a target bracket. Up to 1.5 points of signal
+    silently missing is a whole bracket. This helper is the one place that
+    derivation lives so all three call sites get identical treatment.
+
+    ``deck_path`` is optional. When given, archetype comes from the repo's
+    canonical ``archetype.classify`` (filename hint first — a deck the user
+    named "Storm Combo" is telling us the strategy outright). When absent —
+    the steering loop scores rendered text that has no file yet — we fall
+    back to the same module's card-NAME content scan.
+
+    ``lookup`` resolves a card name to its Scryfall dict (needs ``cmc`` and
+    ``type_line``); defaults to ``scryfall_client.lookup_card`` for parity
+    with the dashboard's own avg-CMC computation, and is injectable both for
+    tests and so callers that already have a cached/instrumented lookup
+    (deck_builder does) reuse it instead of doubling the traffic.
+
+    FAIL-QUIET, AND NEVER FABRICATE. Either element is ``None`` when it
+    could not be derived — an unreadable deck, a Scryfall outage, an
+    all-lands list, an archetype scan with no winner. ``None`` means "signal
+    unavailable" and leaves the corresponding weight silent. In particular
+    avg_cmc is NEVER returned as ``0.0`` on failure: ``0.0`` is a real curve
+    value that would look like the tightest possible deck. (The weight logic
+    also guards with ``avg_cmc > 0``; this helper keeps that guard
+    redundant rather than load-bearing.) This function never raises.
+
+    HOT LOOPS: derivation is O(deck) Scryfall lookups. Callers that
+    re-estimate repeatedly over near-identical lists (the steering loop)
+    should derive ONCE and reuse — a handful of swapped cards moves avg CMC
+    by hundredths, far less than the 2.6/3.8 band edges.
+    """
+    avg_cmc: Optional[float] = None
+    archetype: Optional[str] = None
+    try:
+        avg_cmc = _derive_avg_cmc(deck_text, lookup)
+    except Exception:  # noqa: BLE001 — context is a bonus, never a blocker
+        avg_cmc = None
+    try:
+        archetype = _derive_archetype(deck_text, deck_path)
+    except Exception:  # noqa: BLE001
+        archetype = None
+    return avg_cmc, archetype
+
+
+def _derive_avg_cmc(
+    deck_text: str, lookup: Optional[CardLookup] = None,
+) -> Optional[float]:
+    """Average mana value of the deck's NON-LAND cards, or None.
+
+    Mirrors ``deck_dashboard``'s stat-tile computation (``round(sum/len,
+    2)``, quantity-weighted, lands excluded) so the same deck produces the
+    same number on both surfaces and the shared 2.6/3.8 curve bands mean the
+    same thing. Cards Scryfall can't resolve are SKIPPED, not counted as 0 —
+    a partial resolve yields the average of what we know, and a total
+    failure yields None rather than a fabricated 0.0.
+    """
+    from .deck_library_analyzer import iter_deck_cards
+    if lookup is None:
+        from .scryfall_client import lookup_card as lookup
+    cmcs: list[float] = []
+    for qty, name in iter_deck_cards(deck_text or ""):
+        try:
+            data = lookup(name)
+        except Exception:  # noqa: BLE001 — one bad card must not sink the lot
+            continue
+        if not data:
+            continue
+        if "land" in str(data.get("type_line") or "").lower():
+            continue
+        cmc = data.get("cmc")
+        if cmc is None:
+            continue
+        try:
+            cmc_val = float(cmc)
+        except (TypeError, ValueError):
+            continue
+        cmcs.extend([cmc_val] * max(1, qty))
+    if not cmcs:
+        return None
+    return round(sum(cmcs) / len(cmcs), 2)
+
+
+def _derive_archetype(
+    deck_text: str, deck_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Archetype label for the deck, or None when unclassifiable.
+
+    Path present -> ``archetype.classify`` (the canonical ladder: filename
+    hint, then content scan, then its ``"midrange"`` default). Path absent
+    or missing on disk -> the content scan alone, and NO default: a scan
+    with no winner returns None ("unavailable") rather than inventing
+    ``"midrange"``. Only ``combo`` / ``stax`` carry weight in the estimator,
+    so a missing label costs nothing while a fabricated one would be a lie
+    in the ``signals`` payload the UI renders.
+    """
+    if deck_path is not None:
+        p = Path(deck_path)
+        if p.exists():
+            from .archetype import classify
+            return classify(p)
+    from . import dck_utils
+    from .archetype import _content_scan
+    winner, _score = _content_scan(dck_utils.main_card_names(deck_text or ""))
+    return winner
+
+
+# ---------------------------------------------------------------------------
 # The estimator
 # ---------------------------------------------------------------------------
 
@@ -307,10 +445,12 @@ def estimate_bracket(
 
     ``declared`` is the user's declared bracket (the ``[Bn]`` filename
     tag / dashboard query param); pass None when unknown. ``avg_cmc``
-    and ``archetype`` are optional pre-computed context (the dashboard
-    already has both; CLI callers usually don't — the corresponding
-    signals simply stay silent when absent, they are never recomputed
-    here because that would need per-card Scryfall lookups).
+    and ``archetype`` are optional pre-computed context; the
+    corresponding signals simply stay silent when absent. They are never
+    recomputed HERE because that would need per-card Scryfall lookups,
+    which would break this function's offline/never-blocks contract —
+    callers that don't already have them should derive them once via
+    :func:`derive_signals` and pass the result in.
 
     Returns (always — this function NEVER raises)::
 
@@ -406,10 +546,19 @@ def _estimate_bracket_inner(
             f"(bracket rules table)"
         )
     if n_two_card_combos:
-        # combo_detection.combo_bracket_floor: a game-ending TWO-card
-        # combo floors at B4 (WotC: B1-B3 prohibit early-game two-card
-        # infinite combos; "early" is unmeasurable from a list so the
-        # conservative reading applies).
+        # A game-ending TWO-card combo floors at B4 (WotC: B1-B3
+        # prohibit early-game two-card infinite combos).
+        #
+        # DELIBERATELY STRICTER THAN combo_bracket_floor. That function
+        # now measures "early" via the combo's summed mana value and
+        # returns B3 for a provably late-game pair. We keep the
+        # count-only reading here because its speed proxy depends on a
+        # WARM Scryfall cache: the same deck would estimate B4 cold and
+        # B3 warm, and a floor that moves with cache state is worse than
+        # one that is uniformly conservative — this estimator's output
+        # gates sim-pool hygiene and the build steering loop. Revisit
+        # once combo speed can be resolved offline for every combo in
+        # the bundled DB.
         floor = max(floor, 4)
         reasons.append(
             f"floor B4: {n_two_card_combos} game-ending two-card "

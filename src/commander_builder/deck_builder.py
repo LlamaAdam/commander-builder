@@ -60,7 +60,7 @@ from typing import Callable, Optional
 
 from . import dck_meta, deck_builder_personalize as personalize, lift_analysis
 from ._proposer_filters import enforce_color_identity
-from .bracket_estimator import estimate_bracket
+from .bracket_estimator import derive_signals, estimate_bracket
 from .collection import load_collection, name_key, owns, parse_collection_lines
 from .dck_utils import COMMANDER_DECK_SIZE, count_main_cards, main_target
 from .edhrec_client import commander_slug
@@ -990,9 +990,34 @@ def _personalize(
     # --- STAGE 2: BRACKET STEERING ----------------------------------------
     if enable_steer:
         try:
-            _estimate = estimate_fn or (
-                lambda t: estimate_bracket(t, declared=bracket)
-            )
+            # The steering loop re-estimates after every swap, so it is THE
+            # code path where the estimator's curve/archetype weights matter
+            # most — and it was the one passing neither, leaving
+            # curve_tight/curve_high (+/-0.5) and archetype_combo/stax
+            # (+1.0/+0.5) permanently silent while steering. derive_signals
+            # supplies both, routed through the injected ``lookup`` so we
+            # reuse this build's Scryfall traffic instead of doubling it.
+            #
+            # Derived ONCE, lazily, from the first list the loop renders,
+            # then reused: a steer swaps a handful of the 99, which moves
+            # avg CMC by hundredths — nowhere near the 2.6/3.8 band edges —
+            # and cannot change the name-based archetype scan's winner.
+            # Re-deriving per iteration would cost a deck of lookups per
+            # swap for no decision change. No deck_path exists yet (the file
+            # is written after the build), so archetype comes from the
+            # content scan.
+            _steer_signals: list = []
+
+            def _estimate_with_context(t: str) -> dict:
+                if not _steer_signals:
+                    _steer_signals.append(derive_signals(t, lookup=lookup))
+                _avg_cmc, _archetype = _steer_signals[0]
+                return estimate_bracket(
+                    t, declared=bracket,
+                    avg_cmc=_avg_cmc, archetype=_archetype,
+                )
+
+            _estimate = estimate_fn or _estimate_with_context
             _is_gc = is_game_changer or _default_is_game_changer()
             _is_fm = is_fast_mana or _default_is_fast_mana()
             pool = power_pool

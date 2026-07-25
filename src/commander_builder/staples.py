@@ -880,6 +880,17 @@ def confidence_tier(count: int, total: int) -> int:
 #     never saturates — wincon cards are too heterogeneous to
 #     pattern-match a saturation curve.  → threshold 3
 #
+# COHERENCE WITH ROLE_TARGETS["finisher"] = 3 (added 2026-07): the two
+# numbers match, so the floor <= ceiling invariant holds, but they are
+# measured over different pools ON PURPOSE. The TARGET asks "can this
+# deck win?" and counts ``finisher`` + ``win_condition`` together; the
+# SATURATION ceiling asks "would one more of this specific effect be
+# redundant?" and stays on the narrow ``finisher`` bucket, because
+# "3 Craterhoof-alikes is too many" is exactly the judgement the comment
+# above says wincon cards are too heterogeneous to support. Net effect: a
+# deck can be told to add a win condition it doesn't have, and can never
+# be told it has too many.
+#
 # Roles not listed here NEVER saturate — see ``is_role_saturated``.
 # ``threat``/``land``/``other``/``win_condition``/``land_payoff``
 # are deliberately excluded because they don't pattern-match the
@@ -914,6 +925,29 @@ def is_role_saturated(role: str, count: int) -> bool:
 # top-level module dependency graph small.
 
 
+# Base roles a card may be PROMOTED out of when the extended taxonomy
+# recognizes it as a ``win_condition`` (see ``count_deck_roles``).
+#
+# WHY ONLY THE JUNK BUCKETS: ``classify_role`` and
+# ``classify_role_extended`` disagree by construction — Craterhoof
+# Behemoth is ``threat`` in the base taxonomy and ``win_condition`` in
+# the extended one, Coalition Victory is ``other`` / ``win_condition``.
+# The deck-target report needs the extended reading (a deck's ability to
+# WIN is exactly what ``ROLE_TARGETS["finisher"]`` measures), but a blind
+# switch to ``classify_role_extended`` would also move ``land_payoff``
+# cards out of the base bucket they legitimately fill — Tatyova's
+# "whenever a land enters, draw a card" is real card draw, and reading it
+# as ``land_payoff`` would silently delete draw credit from every
+# landfall deck.
+#
+# So the promotion is one-directional and narrow: a card only leaves
+# ``threat`` / ``other`` (the two buckets no target and no saturation
+# threshold reads) to become ``win_condition``. A card already filling a
+# TARGETED role keeps it — a removal spell that happens to grant infect
+# is still removal.
+_WINCON_PROMOTABLE_ROLES: frozenset[str] = frozenset({"threat", "other"})
+
+
 def count_deck_roles(card_names) -> "dict[str, int]":
     """Resolve each card name via Scryfall + ``classify_role`` and return
     a Counter of role → count.
@@ -922,6 +956,16 @@ def count_deck_roles(card_names) -> "dict[str, int]":
     cards bucket into ``"other"`` rather than crashing the count. The
     advisor reads this to decide whether a role bucket is already
     saturated.
+
+    TAXONOMY: the base ``classify_role`` decides every bucket, with ONE
+    documented exception — a card the base classifier dropped into
+    ``threat`` / ``other`` that ``classify_role_extended`` recognizes as
+    a ``win_condition`` is counted as ``win_condition`` (see
+    ``_WINCON_PROMOTABLE_ROLES`` for why that promotion is deliberately
+    one-directional). Keeping the base taxonomy everywhere else is what
+    lets ``ROLE_SATURATION_THRESHOLDS`` keep its meaning: its buckets are
+    base-taxonomy buckets, and ``win_condition`` is documented there as a
+    bucket that never saturates.
 
     Cache pressure: each unique card name triggers at most one
     ``lookup_card`` call (which is itself disk-cached). On a 99-card
@@ -938,10 +982,12 @@ def count_deck_roles(card_names) -> "dict[str, int]":
         if not card:
             out["other"] += 1
             continue
-        role = classify_role(
-            card.get("oracle_text", "") or "",
-            card.get("type_line", "") or "",
-        )
+        oracle_text = card.get("oracle_text", "") or ""
+        type_line = card.get("type_line", "") or ""
+        role = classify_role(oracle_text, type_line)
+        if role in _WINCON_PROMOTABLE_ROLES:
+            if classify_role_extended(oracle_text, type_line) == "win_condition":
+                role = "win_condition"
         out[role] += 1
     return out
 
@@ -952,31 +998,133 @@ def count_deck_roles(card_names) -> "dict[str, int]":
 # clear, mirroring ROLE_SATURATION_THRESHOLDS (the ceiling): a deck below
 # target for a role is under-built there.
 #   ramp 10 · card draw 10 · targeted removal 8 · board wipes 3 ·
-#   protection 4 (situational but recommended).
+#   protection 4 (situational but recommended) · finisher 3.
+#
+# WHY ``finisher`` EXISTS (added 2026-07): without it a deck of 99 ramp
+# and card draw cleared every target and graded an A. Nothing in the
+# health module asked the one question that decides games — "can this
+# deck actually close?" 3 is the defensible floor rather than 1: EDH is
+# singleton, so a single win condition is a card you may never draw and
+# opponents only have to answer once; 3 gives the deck a real chance to
+# find one and to survive the first two being removed. It also matches
+# ROLE_SATURATION_THRESHOLDS["finisher"] (3), keeping the floor <=
+# ceiling invariant that stops the advisor demanding more finishers
+# while the redundancy guard refuses every finisher add.
+#
+# WHAT COUNTS AS A FINISHER (the taxonomy reconciliation): the base
+# ``classify_role`` emits ``finisher`` and the extended
+# ``classify_role_extended`` emits ``win_condition`` for an overlapping
+# but different card pool — Coalition Victory and Craterhoof are
+# ``win_condition``, Exsanguinate-style "each opponent loses N life" is
+# ``finisher``. Both mean "this card wins the game", so
+# ``role_target_report`` counts BOTH toward the single ``finisher``
+# target; ``count_deck_roles`` supplies the ``win_condition`` bucket via
+# its documented one-directional promotion. There is deliberately no
+# separate ``win_condition`` target: two targets over one concept would
+# let a Craterhoof deck be told it needs "3 more finishers".
 ROLE_TARGETS: dict[str, int] = {
     "ramp": 10,
     "draw": 10,
     "removal": 8,
     "wipe": 3,
     "protection": 4,
+    "finisher": 3,
 }
 
+# How much of a role's target ONE commander filling that role absorbs.
+#
+# WHY 2, and why a target reduction rather than a +1 to the count: the
+# commander is not a card you hope to draw — it starts in the command
+# zone, is available every single game, and comes back after removal.
+# Counting it as one more spell (+1) understates that; treating it as
+# free (today's behavior) overstates the deficit badly enough to produce
+# nonsense advice — an Edric, Spymaster of Trest deck was told to add 10
+# card-draw spells when its commander IS the draw engine. 2 is the
+# deliberate middle: the commander is worth about two copies of a
+# drawn-once 1-of, which for the 10-target engine roles trims a fifth of
+# the requirement and for the 3-target finisher role (Voltron: the
+# commander IS the win condition) trims a third.
+#
+# Applied per commander line, so a partner pair that BOTH draw cards
+# absorbs 4. The reduction floors at 0 via ``max`` and can never make a
+# target negative.
+COMMANDER_ROLE_CREDIT: int = 2
 
-def role_target_report(card_names) -> dict:
+
+def commander_role_credits(commander_names) -> dict[str, int]:
+    """Roles the COMMANDER(s) themselves fill → target reduction per role.
+
+    Classifies each commander with ``classify_role_extended`` (the
+    canonical entry point — the advisor's evidence pill and the
+    dashboard's Categories panel both read it, so the commander's role
+    must not disagree with what those surfaces show) and folds
+    ``win_condition`` into ``finisher``, matching how
+    ``role_target_report`` counts the deck's own cards.
+
+    Roles outside ``ROLE_TARGETS`` (``threat``, ``tutor``,
+    ``land_payoff``, ``other`` …) produce no credit: there is no target
+    to reduce, and inventing one would be a fabricated signal.
+
+    Fail-quiet: a lookup that raises or misses contributes nothing, so a
+    Scryfall outage degrades to today's behavior (no commander credit,
+    full targets) rather than to a wrong one.
+    """
+    out: Counter = Counter()
+    for name in commander_names or []:
+        try:
+            card = lookup_card(name)
+        except Exception:
+            continue
+        if not card:
+            continue
+        role = classify_role_extended(
+            card.get("oracle_text", "") or "",
+            card.get("type_line", "") or "",
+        )
+        if role == "win_condition":
+            role = "finisher"
+        if role in ROLE_TARGETS:
+            out[role] += COMMANDER_ROLE_CREDIT
+    return dict(out)
+
+
+def role_target_report(card_names, commander_names=None) -> dict:
     """Compare a deck's role counts against ROLE_TARGETS.
 
-    Returns ``{"roles": {role: {count, target, deficit}}, "under_built":
-    [role, …]}`` — ``deficit`` is ``max(0, target - count)`` and
-    ``under_built`` lists roles below target, worst-deficit first. The
-    audit surfaces this so a deck light on (say) ramp or removal gets a
-    "needs more X" nudge — the complement of the saturation guard, which
-    only flags *excess*.
+    Returns ``{"roles": {role: {count, target, base_target,
+    commander_credit, deficit}}, "under_built": [role, …]}``.
+    ``target`` is the EFFECTIVE target after commander credit,
+    ``base_target`` the unmodified ``ROLE_TARGETS`` entry, ``deficit`` is
+    ``max(0, target - count)``, and ``under_built`` lists roles below
+    target, worst-deficit first. The audit surfaces this so a deck light
+    on (say) ramp or removal gets a "needs more X" nudge — the
+    complement of the saturation guard, which only flags *excess*.
+    (``target`` stays the key consumers read — the UI tile and the
+    health grade both want the number the deck is actually held to.)
+
+    ``commander_names`` is the ``[Commander]`` section. Passing it lets a
+    commander that FILLS a role reduce that role's target by
+    ``COMMANDER_ROLE_CREDIT`` — see that constant for why the commander
+    can't be treated as just another card. Omitting it reproduces the
+    pre-2026-07 behavior exactly (full targets, zero credit), which is
+    what every caller that only has a card-name list still gets.
+
+    The ``finisher`` count sums the base ``finisher`` bucket and the
+    extended ``win_condition`` bucket; see ROLE_TARGETS' comment for why
+    those two labels share one target.
     """
     counts = count_deck_roles(card_names)
+    credits = commander_role_credits(commander_names)
     roles: dict[str, dict] = {}
-    for role, target in ROLE_TARGETS.items():
+    for role, base_target in ROLE_TARGETS.items():
         count = int(counts.get(role, 0))
+        if role == "finisher":
+            count += int(counts.get("win_condition", 0))
+        credit = int(credits.get(role, 0))
+        target = max(0, base_target - credit)
         roles[role] = {"count": count, "target": target,
+                       "base_target": base_target,
+                       "commander_credit": credit,
                        "deficit": max(0, target - count)}
     under = sorted((r for r, v in roles.items() if v["deficit"] > 0),
                    key=lambda r: roles[r]["deficit"], reverse=True)

@@ -45,6 +45,25 @@ def _isolate_supplemental_edhrec_fetchers(monkeypatch):
         lambda *a, **kw: None,
     )
 
+
+@pytest.fixture(autouse=True)
+def _pin_default_ranking_path(monkeypatch):
+    """Pin these tests to the DEFAULT (bucket-order) ranking path.
+
+    Several tests here assert an exact add ordering that is a property
+    of the default path — ``test_heuristic_recommends_high_synergy_first``
+    and ``test_heuristic_reranks_by_diagnosis_priority`` most directly.
+    FP-015's ``CardScore`` ranking is opt-in via
+    ``COMMANDER_BUILDER_CARD_SCORE`` and deliberately produces a
+    DIFFERENT order, so an operator with that variable exported in their
+    shell would otherwise see those pins fail for the wrong reason.
+    Clearing it makes this module's subject explicit (the default path)
+    instead of ambient. The flag-on ordering has its own coverage in
+    tests/test_card_score.py.
+    """
+    monkeypatch.delenv("COMMANDER_BUILDER_CARD_SCORE", raising=False)
+
+
 from commander_builder.edhrec_client import CardEntry, CommanderPage
 from commander_builder.improvement_advisor import (
     AdviceReport,

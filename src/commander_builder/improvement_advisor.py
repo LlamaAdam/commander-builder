@@ -1274,15 +1274,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             advise_kwargs["owned_only"] = True
     report = advise(Path(args.user), args.bracket, **advise_kwargs)
     # Bracket estimate for the report header. Fail-quiet: the deck
-    # read is the only thing that can raise (estimate_bracket never
-    # does by contract), and a missing estimate must not sink the
-    # advice output the user actually asked for.
+    # read is the only thing that can raise (estimate_bracket and
+    # derive_signals never do by contract), and a missing estimate must
+    # not sink the advice output the user actually asked for.
+    #
+    # derive_signals supplies avg CMC + archetype — the context the
+    # dashboard already had and this CLI did not, which left the curve
+    # and archetype weights permanently silent here. We pass the deck
+    # PATH as well as the text so the archetype classifier gets its
+    # filename hint (a user-named "Storm Combo" deck is high signal).
     bracket_estimate = None
     try:
-        from .bracket_estimator import estimate_bracket
+        from .bracket_estimator import derive_signals, estimate_bracket
+        _deck_text = Path(args.user).read_text(encoding="utf-8")
+        _avg_cmc, _archetype = derive_signals(
+            _deck_text, deck_path=Path(args.user),
+        )
         bracket_estimate = estimate_bracket(
-            Path(args.user).read_text(encoding="utf-8"),
+            _deck_text,
             declared=args.bracket,
+            avg_cmc=_avg_cmc,
+            archetype=_archetype,
         )
     except Exception:  # noqa: BLE001 — advice must print regardless
         bracket_estimate = None
