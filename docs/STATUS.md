@@ -8,7 +8,36 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-25 — ⚡ **work RESUMED after two usage-limit
+**Tier-3 pilot RESULT (finished 2026-07-25 21:36 local):** score 2 /
+bucket 1 / 0 ties over 3 decks — **inconclusive; the CardScore flag
+stays default-off.** The Hash row turned out to be an accidental null
+replicate (both arms staged card-for-card identical decklists) and
+still swung 0.348 in margin, a noise floor larger than every real
+effect the pilot measured — so the 2-1 tally is not a signal. Full
+numbers and the required design fixes are in the FP-015 addendum of
+[future-plans.md](future-plans.md).
+
+**Last updated:** 2026-07-25 ~19:15 local (scheduled token-check run) —
+⚡ **TOKEN RESET DETECTED — resuming work after a 7.8-hour usage-limit
+gap.** Nothing was lost. `master` @ `c53a31b` retested clean on this
+box (**2610 passed / 0 failed** — the `test_compare_versions`
+hermeticity gap is GONE, fixed by `b4b5492` in the merge) and CI has no
+failure on the tip (the `b529392` run was cancelled by the newer push,
+not broken). With no in-flight branch and no CI failure, this run took
+the next FP-015 slice: **the tier-3 harness gained a `bubble` arm** —
+`scripts/validate_card_score.py --arms bucket,score,bubble`, where the
+bubble arm runs the flag-on ranking through `apply_verdict_to_report`
+and its change budget then caps every other arm (equal swap counts, so
+the comparison measures ORDERING, not budget size); a 0-swap verdict
+skips the deck instead of simming it against itself. +10 offline tests
+(**2620 passed / 0 failed**), on branch `feature/tier3-bubble-arm` (not
+pushed). Also verified and marked done: all five FP-015 "prerequisites"
+in future-plans.md are shipped (legality, `finisher`/curve,
+`manabase_report`, `one_piece_away`, `estimate_bracket` context) — that
+list was stale. **The CardScore tier-3 pilot is STILL RUNNING** (deck
+2/3, Hash pods dispatched 18:41); no Forge work was started by this
+run, and the bubble arm must not be run until the pilot finishes.
+Prior update: 2026-07-25 — ⚡ **work RESUMED after two usage-limit
 (rate-limit) interruptions on 2026-07-24/25; nothing was lost.** The
 in-flight work is `feature/eval-fixes`: the REVIEW.md evaluation
 (verified defects + rules-coverage gaps + the CardScore spec, repo

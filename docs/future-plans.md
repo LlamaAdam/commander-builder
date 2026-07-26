@@ -102,10 +102,87 @@ commander-page fallback pool is now corpus-augmented and
 CardScore-ordered when the flag is on (`_score_ordered_fallback` —
 flag off / any failure = byte-identical legacy pile).
 
-**Open (next slices):**
-validate the bubble ranking the same tier-3 way (bubble-swaps vs
-bucket-order swaps, both A/B simmed). Same honesty contract as
-CardScore: heuristic prior, Forge stays the arbiter.
+**Also shipped (2026-07-25, post-merge):** the bubble arm of the tier-3
+harness. `scripts/validate_card_score.py` now takes `--arms` (any two
+or more of `bucket` / `score` / `bubble`); the `bubble` arm runs the
+flag-on ranking through `apply_verdict_to_report`, so the deck's own
+change budget decides how many swaps and cuts arrive bubble-first.
+**When `bubble` is present its budget caps every other arm** — same
+number of adds and cuts everywhere — because otherwise the comparison
+would conflate "fewer swaps" with "better-chosen swaps" and only the
+second is a claim about ranking. A 0-swap verdict skips the deck
+rather than simming it against itself. 10 more tests (19 in
+`tests/test_validate_card_score.py`), all offline via injected
+`advise` / `verdict` / `corpus` / `compare` fns.
+
+### Tier-3 pilot RESULT — 2026-07-26 (inconclusive; flag stays default-off)
+
+The 3-deck pilot launched 2026-07-25 17:21 local finished 21:36 local
+(`_tier3_pilot_result.json`). Config: `--bracket 3 --k 5 --games 40`,
+arms `bucket` (current insertion order) vs `score` (CardScore ranking),
+each arm A/B simmed against the unmodified deck.
+
+| Deck | `bucket_margin` | `score_margin` | winner |
+|---|---:|---:|---|
+| BlackPanther [B3] | −0.347 (16-33, 66 g) | −0.148 (26-35, 73 g) | score |
+| Hash [B3] | +0.130 (26-20, 71 g) | −0.217 (18-28, 70 g) | bucket |
+| Mothy [B3] | +0.094 (29-24, 77 g) | +0.186 (35-24, 73 g) | score |
+
+Tally: **score 2 / bucket 1 / ties 0 / skipped 0** over 3 decks.
+
+**This does not support flipping the flag, and the headline tally is
+the least informative number in the table.** Four findings, in
+descending order of how much they should change your mind:
+
+1. **The Hash row is an accidental null replicate, and it blew up.**
+   Both Hash arms selected the *same five adds* and the *same three
+   cuts* — only the cut ordering differed, so the two staged decklists
+   are card-for-card identical (diffed: the sole differences are
+   printing annotations on two lands and the `Name=` line). Two
+   identical decks scored **+0.130 and −0.217** — a **0.348 margin
+   swing from simulation noise alone**. That noise floor is *larger*
+   than the bucket-vs-score separation on BlackPanther (0.199) and
+   Mothy (0.092), i.e. larger than every real effect the pilot
+   measured. At 40 games/pod this design cannot distinguish the arms;
+   "score 2 / bucket 1" is consistent with three coin flips.
+2. **Win-count and mean margin disagree.** Mean margin is **−0.041
+   bucket vs −0.060 score** — by that statistic bucket is very slightly
+   *ahead*, the opposite of the 2-1 tally. When two summaries of n=3
+   point opposite ways, neither is a signal.
+3. **Both rankings mostly made decks worse.** Four of six arms are
+   negative; only Mothy improved under both. The open question this
+   pilot actually raises is not "which ranking is better" but "why does
+   k=5 swapping at B3 lose to the original deck at all" — the same
+   direction the curator-vs-original A/B found in May.
+4. **The arms barely differ where it counts.** All three decks drew
+   *identical adds* in both arms (lands and fixing, every time);
+   only the cuts differed, and for Hash not even those. Whatever
+   CardScore changes about ranking, it is currently near-invisible on
+   the add side, which is the side the harness was built to test.
+
+Also: 5 of 12 pods hit intra-pod aborts, landing 29–37 of the requested
+40 games, so effective n is below the nominal 40/pod.
+
+**Verdict — per the FP-015 contract, `COMMANDER_BUILDER_CARD_SCORE`
+stays default-off.** The contract says the flag flips when the score
+arm *clearly wins across a larger run*; it did not clearly win, and
+this was not a larger run. Nothing here argues CardScore is *worse* —
+it argues the pilot has no discriminating power.
+
+**Before re-running, fix the design, not just the sample size:**
+(a) **skip decks whose arms stage identical decklists** — the harness
+already has an `arms_identical` field but it compares ordered lists, so
+the Hash null slipped through as a real row; compare card *multisets*;
+(b) **run explicit null replicates** (same deck vs itself) to publish a
+measured noise floor rather than discovering one by accident;
+(c) raise games/pod substantially and widen the deck set — at a 0.35
+noise floor, 3 decks × 40 games was never going to resolve anything;
+(d) consider gating on **mean margin with a CI**, not a 2-of-3 tally.
+
+**Open (next slices):** RUN the bubble arm
+(`--arms bucket,bubble`) — the tier-3 pilot has finished, so Forge is
+free. Same honesty contract as CardScore: heuristic prior, Forge stays
+the arbiter. Fold the design fixes above into that run.
 
 ## The gap
 
@@ -315,6 +392,23 @@ constraint enforced at `deck_builder_personalize.lift_swaps:217-224`.
 Overloading it would silently change role labels project-wide.
 
 ## Prerequisites (small, independently shippable, each valuable alone)
+
+**ALL FIVE SHIPPED — verified 2026-07-25 against `master` @ `c53a31b`.**
+Kept below for the rationale (each bullet explains *why* the thing was
+needed); none of them is open work any more:
+
+1. Scryfall-backed legality → `deck_legality.py` (the hand-typed
+   `_CORE_BANS` set is gone from `web/routes_decks.py`; the module
+   docstring records the same both-directions-wrong finding).
+2. `finisher` in `ROLE_TARGETS` → `staples.py` (`"finisher": 3`, with
+   the `win_condition` coherence note beside it); the MV curve lives on
+   `DeckContext.curve` and feeds `_f_curve_fit`.
+3. `manabase_report()` → `deck_builder_manabase.py:769`.
+4. `combo_detection.one_piece_away()` → `combo_detection.py:241`,
+   surfaced on `DeckContext.one_piece_away`.
+5. `avg_cmc` + `archetype` at every `estimate_bracket` caller →
+   `deck_dashboard.py`, `improvement_advisor.py` and `deck_builder.py`
+   all pass both now (the latter two via `derive_signals`).
 
 - **Scryfall-backed legality.** `web/routes_decks.py:885` `_CORE_BANS` is
   a hand-typed set inside a route function and is wrong in both
