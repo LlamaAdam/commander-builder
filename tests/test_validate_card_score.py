@@ -315,6 +315,46 @@ def test_run_deck_three_arms_all_identical_skips(tmp_path):
     assert "identical" in row["skipped"]
 
 
+def test_run_deck_reordered_arms_are_identical_and_skip(tmp_path):
+    """The 2026-07-25 pilot's Hash row: same cards, different cut order.
+
+    Ordered-list comparison called this a real row and simmed two
+    card-for-card identical decks against the original, producing a
+    +0.130 / -0.217 split from noise alone. Multiset comparison skips
+    it.
+    """
+    deck = tmp_path / "t.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    advise = make_advise({False: (["A1", "A2"], ["Cut Me", "Keep Me"]),
+                          True: (["A2", "A1"], ["Keep Me", "Cut Me"])})
+
+    def compare_fn(**kw):  # pragma: no cover - must not be called
+        raise AssertionError("identical decklists must not be simmed")
+
+    row = vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage",
+                       advise_fn=advise, compare_fn=compare_fn)
+    assert row["arms_identical"] is True
+    assert "identical" in row["skipped"]
+
+
+def test_run_deck_repeated_card_is_a_real_difference(tmp_path):
+    """Multiset, not set: staging two Forests differs from staging one."""
+    deck = tmp_path / "t.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    advise = make_advise({False: (["Forest", "Forest"], ["Cut Me"]),
+                          True: (["Forest"], ["Cut Me"])})
+    row = vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage", dry_run=True,
+                       advise_fn=advise)
+    assert row["arms_identical"] is False
+
+
+def test_swap_signature_ignores_order_within_adds_and_cuts():
+    same = vcs._swap_signature((["A", "B"], ["C", "D"]))
+    assert vcs._swap_signature((["B", "A"], ["D", "C"])) == same
+    # An add moved to the cut side is NOT the same swap set.
+    assert vcs._swap_signature((["A", "B", "C"], ["D"])) != same
+
+
 def test_main_rejects_unknown_arm(tmp_path, capsys):
     deck = tmp_path / "t.dck"
     deck.write_text(DECK_TEXT, encoding="utf-8")

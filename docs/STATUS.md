@@ -17,7 +17,26 @@ effect the pilot measured — so the 2-1 tally is not a signal. Full
 numbers and the required design fixes are in the FP-015 addendum of
 [future-plans.md](future-plans.md).
 
-**Last updated:** 2026-07-25 ~19:15 local (scheduled token-check run) —
+**Last updated:** 2026-07-26 ~00:40 local (scheduled token-check run) —
+**Tokens OK, no reset gap** (5.3 h since the prior beat). `master` @
+`4ad8b97` retested clean on this box (**2623 passed / 0 failed**),
+covering the bubble-arm and perf merges that landed tonight; CI has no
+failure on a current tip (the `#31` run shows `cancelled` only because
+`#30` superseded it). This run took design fix **(a)** from the tier-3
+pilot post-mortem: `arms_identical` in
+`scripts/validate_card_score.py` now compares card **multisets**
+instead of ordered lists, so an arm pair that picks the same cards in a
+different order is skipped as a null replicate instead of being simmed.
+Replayed against the real `_tier3_pilot_result.json`, the guard skips
+the Hash row and leaves BlackPanther and Mothy simming — exactly the
+row that produced the 0.348 noise swing. +3 offline tests (22 in
+`tests/test_validate_card_score.py`), on branch
+`fix/tier3-null-replicate-guard` (not pushed). Design fixes (b) null
+replicates, (c) larger n, and (d) CI-based gating remain open, and the
+bubble arm still has not been RUN (no Forge work started by this run).
+Note: a concurrent agent session was active in this repo tonight and
+authored the pilot post-mortem plus the `#30`/`#31` merges.
+Prior update: 2026-07-25 ~19:15 local (scheduled token-check run) —
 ⚡ **TOKEN RESET DETECTED — resuming work after a 7.8-hour usage-limit
 gap.** Nothing was lost. `master` @ `c53a31b` retested clean on this
 box (**2610 passed / 0 failed** — the `test_compare_versions`

@@ -170,9 +170,14 @@ this was not a larger run. Nothing here argues CardScore is *worse* —
 it argues the pilot has no discriminating power.
 
 **Before re-running, fix the design, not just the sample size:**
-(a) **skip decks whose arms stage identical decklists** — the harness
-already has an `arms_identical` field but it compares ordered lists, so
-the Hash null slipped through as a real row; compare card *multisets*;
+(a) ~~**skip decks whose arms stage identical decklists**~~ — **DONE
+2026-07-26** (`fix/tier3-null-replicate-guard`). `arms_identical` now
+compares card *multisets* via `_swap_signature`, not ordered lists, so
+an arm pair that picks the same cards in a different order is skipped
+instead of simmed. Replayed against the pilot's own
+`_tier3_pilot_result.json` the guard skips Hash and leaves BlackPanther
+and Mothy simming. (Multisets, not sets: a repeated card is a real
+staging difference.) +3 offline tests;
 (b) **run explicit null replicates** (same deck vs itself) to publish a
 measured noise floor rather than discovering one by accident;
 (c) raise games/pod substantially and widen the deck set — at a 0.35
