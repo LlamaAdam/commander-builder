@@ -426,29 +426,47 @@ def apply_collection_bias(
     notes: list[str] = []
     live = {name_key(n) for n in working}
 
+    # P4 (OPTIMIZATION_AUDIT 2026-07-25): screen each owned-pool card
+    # ONCE. Ownership, colour identity, role, mana value, and quality are
+    # constant across the outer loop, yet the old shape re-derived them
+    # per (deck card × pool card) pair — with a lookup inside ``ci_ok``
+    # that measured 9.6 s / 38,744 lookups on a 5,000-card collection.
+    # Bucketing by role preserves first-match semantics exactly: entries
+    # of any other role could never have matched, so scanning the
+    # same-role sublist in pool order is order-identical to scanning the
+    # whole pool. Only the ``live`` / ``used_owned`` exclusions are
+    # dynamic and stay in the inner loop.
+    by_role: dict = {}
+    for owned in owned_pool:
+        ok = name_key(owned)
+        if ok in reserved_keys:
+            continue
+        if not owns(collection, owned):
+            continue  # pool entry the user doesn't actually own.
+        role_owned = role_of(owned)
+        if not ci_ok(owned):
+            continue
+        by_role.setdefault(role_owned, []).append(
+            (owned, ok, mv_of(owned), quality_of(owned)))
+
     for idx, current in enumerate(working):
         if owns(collection, current):
             continue  # already owned — nothing to bias.
         if protect and protect(current):
             continue  # a deliberately-placed power card; hands off.
         role = role_of(current)
+        candidates = by_role.get(role)
+        if not candidates:
+            continue  # no owned card fills this slot.
         q_cur = quality_of(current)
         mv_cur = mv_of(current)
-        for owned in owned_pool:
-            ok = name_key(owned)
-            if ok in reserved_keys or ok in live or ok in used_owned:
+        for owned, ok, mv_owned, q_owned in candidates:
+            if ok in live or ok in used_owned:
                 continue
-            if not owns(collection, owned):
-                continue  # pool entry the user doesn't actually own.
-            if not ci_ok(owned):
-                continue
-            if role_of(owned) != role:
-                continue  # not the same slot.
-            mv_owned = mv_of(owned)
             if (mv_cur is not None and mv_owned is not None
                     and abs(mv_owned - mv_cur) > max_cost_gap):
                 continue  # cost gap too wide to call them interchangeable.
-            if quality_of(owned) < q_cur - tolerance:
+            if q_owned < q_cur - tolerance:
                 continue  # strictly worse — refuse the downgrade.
             # Swap the owned near-equivalent in.
             working[idx] = owned
