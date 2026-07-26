@@ -391,3 +391,89 @@ def test_main_summary_counts_wins_per_arm(tmp_path, capsys, monkeypatch):
     summary = json.loads(capsys.readouterr().out)
     assert summary["wins_by_arm"]["bubble"] == 1
     assert summary["wins_by_arm"]["bucket"] == 0
+
+
+# ── (b) null replicates + (d) CI-based gating ──
+
+
+def test_paired_ci_math_hand_checked():
+    # diffs [1, 2, 3]: mean 2, sd 1, se 1/sqrt(3), t(2)=4.303
+    ci = vcs.paired_ci([1.0, 2.0, 3.0])
+    assert ci["n"] == 3 and ci["mean"] == 2.0
+    assert abs(ci["ci_high"] - (2.0 + 4.303 / (3 ** 0.5))) < 1e-9
+    assert ci["excludes_zero"] is False  # interval spans zero? low<0
+    tight = vcs.paired_ci([0.10, 0.12, 0.11, 0.09, 0.10, 0.11])
+    assert tight["excludes_zero"] is True and tight["mean"] > 0
+
+
+def test_paired_ci_needs_two_points():
+    assert vcs.paired_ci([]) is None
+    assert vcs.paired_ci([0.5]) is None
+
+
+def row(deck, bucket=None, bubble=None, winner=None):
+    r = {"deck": deck, "bucket_margin": bucket, "bubble_margin": bubble}
+    if winner:
+        r["winner"] = winner
+    return r
+
+
+ARMS2 = ("bucket", "bubble")
+
+
+def test_gate_insufficient_n():
+    rows = [row(f"d{i}", bucket=0.0, bubble=0.2) for i in range(3)]
+    s = vcs.build_summary(rows, ARMS2, [])
+    assert s["gate"]["bubble"].startswith("insufficient-n")
+
+
+def test_gate_fail_when_ci_spans_zero():
+    rows = [row(f"d{i}", bucket=0.0, bubble=m)
+            for i, m in enumerate([0.3, -0.3, 0.2, -0.2, 0.1, -0.1])]
+    s = vcs.build_summary(rows, ARMS2, [])
+    assert s["gate"]["bubble"].startswith("fail (95% CI")
+
+
+def test_gate_requires_measured_noise_floor():
+    rows = [row(f"d{i}", bucket=0.0, bubble=0.2 + i * 0.001)
+            for i in range(6)]
+    s = vcs.build_summary(rows, ARMS2, [])
+    assert s["gate"]["bubble"].startswith("insufficient-null-floor")
+
+
+def test_gate_fail_below_noise_floor_and_pass_above():
+    rows = [row(f"d{i}", bucket=0.0, bubble=0.2 + i * 0.001)
+            for i in range(6)]
+    noisy = [{"deck": "n", "null": True, "margin": 0.5}]
+    s = vcs.build_summary(rows, ARMS2, noisy)
+    assert s["gate"]["bubble"].startswith("fail (advantage below")
+    quiet = [{"deck": "n", "null": True, "margin": 0.05},
+             {"deck": "n2", "null": True, "margin": -0.03}]
+    s2 = vcs.build_summary(rows, ARMS2, quiet)
+    assert s2["gate"]["bubble"] == "pass"
+    assert s2["noise_floor"]["n"] == 2
+    assert abs(s2["noise_floor"]["mean_abs_margin"] - 0.04) < 1e-9
+
+
+def test_run_null_replicate_stages_two_copies_and_cleans_up(tmp_path):
+    deck = tmp_path / "t.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    seen = {}
+
+    def compare_fn(old_deck, new_deck, bracket, games_per_pod, deck_dir):
+        seen["names"] = (old_deck, new_deck)
+        a = (deck_dir / old_deck).read_text(encoding="utf-8")
+        b = (deck_dir / new_deck).read_text(encoding="utf-8")
+        seen["names_differ_in_meta_only"] = (
+            a.replace(old_deck[:-4], "X") == b.replace(new_deck[:-4], "X"))
+        return SimpleNamespace(
+            old_stats=SimpleNamespace(wins=4, games=games_per_pod),
+            new_stats=SimpleNamespace(wins=6, games=games_per_pod))
+
+    out = vcs.run_null_replicate(deck, 3, 10, tmp_path / "stage",
+                                 compare_fn=compare_fn)
+    assert out["null"] is True
+    assert abs(out["margin"] - 0.2) < 1e-9
+    assert "nullA" in seen["names"][0] and "nullB" in seen["names"][1]
+    assert seen["names_differ_in_meta_only"]
+    assert not list((tmp_path / "stage").glob("*__tier3_null*.dck"))
