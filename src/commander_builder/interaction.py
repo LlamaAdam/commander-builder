@@ -400,19 +400,23 @@ def oracle_categories(oracle_text: str, type_line: str = "") -> set[str]:
     if not text:
         return set()
     types = (type_line or "").lower()
-    cats = {
-        category
-        for category, patterns in _COMPILED.items()
-        if any(p.search(text) for p in patterns)
-    }
     # A land whose text mentions graveyard exile (Bojuka Bog, Scavenger
     # Grounds) is real graveyard hate; nothing else about a land's text
     # should read as spot removal, so the other rows stay off. Lands are
     # the one type where oracle text routinely describes an ability of a
-    # permanent rather than a spell's effect.
+    # permanent rather than a spell's effect. Branching early skips the
+    # other four categories' patterns entirely (~30 wasted searches per
+    # land per report) — the result is identical to computing all five
+    # and intersecting with {"graveyard_hate"}.
     if "land" in types:
-        cats &= {"graveyard_hate"}
-    return cats
+        if any(p.search(text) for p in _COMPILED["graveyard_hate"]):
+            return {"graveyard_hate"}
+        return set()
+    return {
+        category
+        for category, patterns in _COMPILED.items()
+        if any(p.search(text) for p in patterns)
+    }
 
 
 def classify_interaction(

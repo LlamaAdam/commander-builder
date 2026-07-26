@@ -697,6 +697,20 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
     ]),
 ]
 
+# Precompiled mirror of ``_ROLE_PATTERNS`` for the classify_role hot loop.
+# The raw-string table above stays public: ``interaction.py`` imports it to
+# derive its wipe patterns from the pattern STRINGS, so the strings remain
+# the contract and this is purely the compiled view. Compiling here (like
+# ``_LAND_PAYOFF_PATTERNS`` / ``_WIN_CONDITION_PATTERNS`` below already do)
+# skips ~42 trips through ``re._compile``'s cache per classified card.
+_ROLE_PATTERNS_COMPILED: list[
+    tuple[str, list[tuple[re.Pattern[str], str | None, int]]]
+] = [
+    (role, [(re.compile(pattern), type_req, score)
+            for pattern, type_req, score in patterns])
+    for role, patterns in _ROLE_PATTERNS
+]
+
 
 # --- Extended taxonomy (land_payoff / win_condition) ----------------------
 #
@@ -799,16 +813,19 @@ def classify_role(oracle_text: str, type_line: str = "") -> str:
 
     best_role = "other"
     best_score = 0
-    for role, patterns in _ROLE_PATTERNS:
+    for role, patterns in _ROLE_PATTERNS_COMPILED:
         if role == "land":  # already handled above
             continue
         for pattern, type_req, score in patterns:
+            # Skip the regex when it can't beat the current best — a
+            # lower-or-equal score can never change the result.
+            if score <= best_score:
+                continue
             if type_req and type_req not in types:
                 continue
-            if re.search(pattern, text):
-                if score > best_score:
-                    best_score = score
-                    best_role = role
+            if pattern.search(text):
+                best_score = score
+                best_role = role
 
     if best_role == "other" and has_creature_type:
         return "threat"

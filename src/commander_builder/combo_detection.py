@@ -62,16 +62,30 @@ _FALLBACK: list[dict] = [
 ]
 
 
+# Cache of the parsed combos file, keyed on (path, mtime_ns, size) so a
+# --refresh (or a test pointing COMBO_DATA_PATH elsewhere) is picked up
+# without a process restart. estimate_bracket() loads the pool on every
+# call — 4x per bracket-steer loop — and a refreshed combos.json runs to
+# ~1,500 entries, so the re-parse is worth skipping.
+_COMBOS_CACHE: tuple[tuple[str, int, int], list[dict]] | None = None
+
+
 def load_combos(force_fallback: bool = False) -> list[dict]:
     """Load the combo list: the refreshed ``data/combos.json`` if present,
     else the hand-curated fallback. Each combo is ``{cards, produces,
     [popularity], [identity]}``."""
+    global _COMBOS_CACHE
     if not force_fallback and COMBO_DATA_PATH.exists():
         try:
+            stat = COMBO_DATA_PATH.stat()
+            key = (str(COMBO_DATA_PATH), stat.st_mtime_ns, stat.st_size)
+            if _COMBOS_CACHE is not None and _COMBOS_CACHE[0] == key:
+                return list(_COMBOS_CACHE[1])
             data = json.loads(COMBO_DATA_PATH.read_text(encoding="utf-8"))
             combos = data.get("combos") if isinstance(data, dict) else data
             if combos:
-                return combos
+                _COMBOS_CACHE = (key, combos)
+                return list(combos)
         except (OSError, ValueError):
             pass
     return list(_FALLBACK)
