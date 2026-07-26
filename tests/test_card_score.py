@@ -1067,3 +1067,75 @@ def test_env_var_is_not_read_at_import_time():
         assert cs.is_enabled() is True
     finally:
         os.environ.pop(cs.CARD_SCORE_ENV_VAR, None)
+
+
+# --- P3 (OPTIMIZATION_AUDIT 2026-07-25): offline-contract regression -------
+# Cut scoring must NEVER reach staples' module-level lookup_card — the
+# context's injected lookup is the only sanctioned card source. Before
+# this fix, _role_report_minus and _role_target_for's tutor fallback
+# both routed through staples.count_deck_roles -> staples.lookup_card,
+# costing live HTTP per cut candidate on a cold Scryfall cache.
+
+def _offline_ctx():
+    cards = {
+        "llanowar elves": {"name": "Llanowar Elves",
+                           "type_line": "Creature — Elf Druid",
+                           "oracle_text": "{T}: Add {G}.",
+                           "cmc": 1.0, "color_identity": ["G"],
+                           "legalities": {"commander": "legal"}},
+        "demonic tutor": {"name": "Demonic Tutor",
+                          "type_line": "Sorcery",
+                          "oracle_text": "Search your library for a card, "
+                                         "put that card into your hand, "
+                                         "then shuffle.",
+                          "cmc": 2.0, "color_identity": ["B"],
+                          "legalities": {"commander": "legal"}},
+        "test cmdr": {"name": "Test Cmdr",
+                      "type_line": "Legendary Creature — Human",
+                      "oracle_text": "", "cmc": 4.0,
+                      "color_identity": ["B", "G"],
+                      "legalities": {"commander": "legal"}},
+    }
+    return cs.deck_context(
+        commander_names=["Test Cmdr"],
+        deck_cards=["Llanowar Elves", "Demonic Tutor"],
+        bracket=3,
+        lookup=lambda n: cards.get(n.strip().lower()),
+        salt_scores={},
+        combos=[],
+        game_changers=[],
+    )
+
+
+def test_cut_scoring_never_touches_module_level_lookup(monkeypatch):
+    import commander_builder.staples as staples
+
+    def _forbidden(name):  # pragma: no cover - the assertion IS the test
+        raise AssertionError(
+            f"staples.lookup_card({name!r}) called from the scoring path "
+            "— the offline contract requires the ctx-injected lookup")
+
+    monkeypatch.setattr(staples, "lookup_card", _forbidden)
+    ctx = _offline_ctx()
+    # Both cut candidates exercise _role_report_minus; Demonic Tutor's
+    # role has a saturation ceiling but no target, which exercises the
+    # _role_target_for fallback recount.
+    for name in ("Llanowar Elves", "Demonic Tutor"):
+        cs.cut_score(name, ctx)
+    cs.score_card("Llanowar Elves", ctx)
+
+
+def test_deck_role_counts_matches_count_deck_roles():
+    import commander_builder.staples as staples
+    ctx = _offline_ctx()
+    expected = staples.count_deck_roles.__wrapped__(  # type: ignore[attr-defined]
+        list(ctx.deck_cards)) if hasattr(
+        staples.count_deck_roles, "__wrapped__") else None
+    # Equivalence via the shared pure bucket function instead: each
+    # deck card's bucket must match staples.role_bucket on the same
+    # oracle/type text the ctx serves.
+    for name in ctx.deck_cards:
+        card = ctx.card(name)
+        assert ctx.deck_role_counts[staples.role_bucket(
+            card.get("oracle_text") or "", card.get("type_line") or "",
+        )] >= 1

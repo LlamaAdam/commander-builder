@@ -796,7 +796,7 @@ class DeckContext:
         def _compute():
             if self._parent_report is not None and self._removed_card:
                 derived = _role_report_minus(
-                    self._parent_report, self._removed_card,
+                    self._parent_report, self._removed_card, self,
                     copies=self._removed_copies,
                 )
                 if derived is not None:
@@ -976,13 +976,42 @@ class DeckContext:
             return "unknown"
         return classify_role_extended(_oracle_text(card), _type_line(card))
 
+    def role_bucket_of(self, name: str) -> str:
+        """``staples.role_bucket`` via THIS context's injected lookup.
 
-def _role_report_minus(report: dict, card_name: str,
+        The count_deck_roles taxonomy (base roles + the one-way wincon
+        promotion) without count_deck_roles' module-level
+        ``staples.lookup_card`` — the seam violation OPTIMIZATION_AUDIT
+        P3 documents. Unknown cards bucket into ``"other"``, matching
+        count_deck_roles' defensive contract.
+        """
+        card = self.card(name)
+        if not card:
+            return "other"
+        from .staples import role_bucket
+        return role_bucket(_oracle_text(card), _type_line(card))
+
+    @property
+    def deck_role_counts(self) -> "Counter":
+        """Per-role bucket counts over the mainboard, derived once.
+
+        Replaces the full 99-name ``count_deck_roles`` recount that
+        ``_role_target_for``'s tutor fallback used to run PER SCORED
+        CANDIDATE (and which routed through the module-level lookup).
+        """
+        def _compute():
+            from collections import Counter
+            return Counter(self.role_bucket_of(n) for n in self.deck_cards)
+        return self._lazy("deck_role_counts", _compute)
+
+
+def _role_report_minus(report: dict, card_name: str, ctx: "DeckContext",
                        *, copies: int = 1) -> Optional[dict]:
     """``report`` recomputed as if ``card_name`` were not in the deck.
 
-    Classifies the one removed card with ``staples.count_deck_roles`` —
-    the same function that built the report — and decrements its bucket,
+    Classifies the one removed card via ``ctx.role_bucket_of`` — the
+    count_deck_roles taxonomy through the context's INJECTED lookup
+    (OPTIMIZATION_AUDIT P3) — and decrements its bucket,
     folding ``win_condition`` into ``finisher`` exactly as
     ``role_target_report`` does. Returns None if the shape is not what
     we expect, so the caller falls back to a full recount.
@@ -990,12 +1019,13 @@ def _role_report_minus(report: dict, card_name: str,
     roles = report.get("roles")
     if not isinstance(roles, dict):
         return None
-    from .staples import count_deck_roles
+    # ctx-injected lookup ONLY — count_deck_roles would route through
+    # staples.lookup_card (live HTTP on a cold cache, per cut candidate;
+    # OPTIMIZATION_AUDIT P3). Same taxonomy via staples.role_bucket.
     try:
-        counted = count_deck_roles([card_name])
+        bucket = ctx.role_bucket_of(card_name)
     except Exception:  # noqa: BLE001
         return None
-    bucket = next(iter(counted), None)
     if bucket == "win_condition":
         bucket = "finisher"
     out: dict[str, dict] = {}
@@ -1208,9 +1238,8 @@ def _role_target_for(
     # target 0 means "the deck does not need any", so the score decays
     # from the first copy toward the ceiling instead of rewarding a
     # deficit that does not exist.
-    from .staples import count_deck_roles
     try:
-        counts = count_deck_roles(list(ctx.deck_cards))
+        counts = ctx.deck_role_counts  # memoized; ctx-injected lookup only
     except Exception:  # noqa: BLE001
         return None
     return int(counts.get(role, 0)), 0, int(sat)
