@@ -51,6 +51,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -87,6 +88,23 @@ def _advise_under_flag(
             os.environ.pop(CARD_SCORE_ENV_VAR, None)
         else:
             os.environ[CARD_SCORE_ENV_VAR] = prior
+
+
+def _swap_signature(swaps: tuple[list[str], list[str]]) -> tuple:
+    """Order-insensitive identity of one arm's swap set.
+
+    Two arms that pick the SAME cards in a different order stage
+    card-for-card identical decklists, so simming them measures the
+    harness' noise floor, not ranking. Comparing the ordered lists let
+    such a null replicate through as a real row: the 2026-07-25 tier-3
+    pilot's Hash deck differed only in cut ORDER, and its two identical
+    decks scored +0.130 and -0.217 — a 0.348 swing wider than every
+    real effect the pilot measured (docs/future-plans.md, "Tier-3 pilot
+    RESULT"). Multisets, not sets: a repeated card (basic lands) is a
+    real difference in what gets staged.
+    """
+    adds, cuts = swaps
+    return Counter(adds), Counter(cuts)
 
 
 def _swaps_from(report, k: int) -> tuple[list[str], list[str]]:
@@ -247,7 +265,8 @@ def run_deck(
         "bracket": bracket,
         "k": k,
         "arms": list(arms),
-        "arms_identical": all(s == swap_sets[0] for s in swap_sets),
+        "arms_identical": all(_swap_signature(s) == _swap_signature(swap_sets[0])
+                              for s in swap_sets),
     }
     for arm, (adds, cuts) in built.items():
         row[f"{arm}_arm"] = {"adds": adds, "cuts": cuts}
@@ -262,7 +281,8 @@ def run_deck(
             row["skipped"] = "verdict allowed a 0-swap budget"
             return row
     if row["arms_identical"]:
-        row["skipped"] = "arms identical — no signal to measure"
+        row["skipped"] = ("arms identical (same cards, any order) — "
+                          "no signal to measure")
         return row
     if dry_run:
         row["skipped"] = "dry run"
