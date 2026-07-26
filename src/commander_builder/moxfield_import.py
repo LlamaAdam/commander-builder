@@ -25,6 +25,7 @@ import argparse
 import json
 import re
 import time
+import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -145,7 +146,7 @@ def lookup_moxfield_card_id(card_name: str) -> Optional[str]:
         print(
             f"WARN: Moxfield card-search failed for {card_name!r} "
             f"({type(exc).__name__}: {exc}); skipping peer lookup.",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
         return None
     target = card_name.lower().strip()
@@ -178,10 +179,10 @@ def find_top_liked_deck_for_commander(
     if not card_id:
         if verbose:
             print(f"  [moxfield] could not resolve card ID for {commander_name!r}.",
-                  flush=True)
+                  file=sys.stderr, flush=True)
         return None
     if verbose:
-        print(f"  [moxfield] commander card ID: {card_id}", flush=True)
+        print(f"  [moxfield] commander card ID: {card_id}", file=sys.stderr, flush=True)
 
     params = {
         "pageNumber": "1",
@@ -199,11 +200,11 @@ def find_top_liked_deck_for_commander(
     except Exception as exc:
         if verbose:
             print(f"  [moxfield] search HTTP failed: {type(exc).__name__}: {exc}",
-                  flush=True)
+                  file=sys.stderr, flush=True)
         return None
     results = payload.get("data", []) or []
     if verbose:
-        print(f"  [moxfield] search returned {len(results)} deck(s).", flush=True)
+        print(f"  [moxfield] search returned {len(results)} deck(s).", file=sys.stderr, flush=True)
 
     target_lower = commander_name.lower()
     for entry in results:
@@ -217,7 +218,7 @@ def find_top_liked_deck_for_commander(
                 return fetch_deck(pid)
             except Exception as exc:
                 if verbose:
-                    print(f"  [moxfield] fetch_deck({pid}) failed: {exc}", flush=True)
+                    print(f"  [moxfield] fetch_deck({pid}) failed: {exc}", file=sys.stderr, flush=True)
                 continue
 
     # Even without a strict commander-name match, the top result by likes
@@ -236,7 +237,7 @@ def find_top_liked_deck_for_commander(
                     print(
                         f"  [moxfield] fallback fetch_deck({pid}) failed: "
                         f"{type(exc).__name__}: {exc}",
-                        flush=True,
+                        file=sys.stderr, flush=True,
                     )
     return None
 
@@ -271,7 +272,7 @@ def find_top_liked_decks_for_commander(
     if not card_id:
         if verbose:
             print(f"  [moxfield] could not resolve card ID for {commander_name!r}.",
-                  flush=True)
+                  file=sys.stderr, flush=True)
         return []
 
     params = {
@@ -292,12 +293,12 @@ def find_top_liked_decks_for_commander(
     except Exception as exc:
         if verbose:
             print(f"  [moxfield] search HTTP failed: {type(exc).__name__}: {exc}",
-                  flush=True)
+                  file=sys.stderr, flush=True)
         return []
     results = payload.get("data", []) or []
     if verbose:
         print(f"  [moxfield] search returned {len(results)} candidate(s).",
-              flush=True)
+              file=sys.stderr, flush=True)
 
     decks: list[dict] = []
     seen_ids: set[str] = set()
@@ -322,7 +323,7 @@ def find_top_liked_decks_for_commander(
         except Exception as exc:
             if verbose:
                 print(f"  [moxfield] fetch_deck({pid}) failed: {exc}",
-                      flush=True)
+                      file=sys.stderr, flush=True)
             continue
         # Bracket re-verification. Moxfield's search-side `bracket`
         # filter is documented as loose — it surfaces near-bracket
@@ -339,7 +340,7 @@ def find_top_liked_decks_for_commander(
                     print(
                         f"  [moxfield] {pid} bracket={actual} mismatched "
                         f"requested {bracket}; dropping.",
-                        flush=True,
+                        file=sys.stderr, flush=True,
                     )
                 continue
         seen_ids.add(pid)
