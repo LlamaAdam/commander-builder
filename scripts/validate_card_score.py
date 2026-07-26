@@ -240,6 +240,148 @@ def _build_arms(
     return built, info
 
 
+# --- (d) CI-based gating + (b) null-replicate noise floor -------------------
+# Policy (set 2026-07-26): the CardScore/bubble flag earns default-on
+# ONLY if the challenger arm's PAIRED per-deck margin advantage over the
+# baseline arm has a 95% CI excluding zero across >= GATE_MIN_DECKS
+# decks AND a mean advantage above the MEASURED null-replicate noise
+# floor. A 2-of-3 winner tally (the pilot's headline) gates nothing.
+
+GATE_MIN_DECKS = 6
+
+#: Two-sided 95% t critical values by degrees of freedom; the sparse
+#: tail uses the next-lower entry (conservative), >30 ~ normal.
+_T_CRIT_95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+              6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+              11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
+              20: 2.086, 25: 2.060, 30: 2.042}
+
+
+def _t_crit(df: int) -> float:
+    if df <= 0:
+        return float("inf")
+    if df in _T_CRIT_95:
+        return _T_CRIT_95[df]
+    lower = [k for k in _T_CRIT_95 if k <= df]
+    if lower:
+        return _T_CRIT_95[max(lower)]
+    return 1.96 if df > 30 else 12.706
+
+
+def paired_ci(diffs: list) -> Optional[dict]:
+    """Mean of paired differences with a 95% t-interval (pure stdlib)."""
+    n = len(diffs)
+    if n < 2:
+        return None
+    mean = sum(diffs) / n
+    var = sum((d - mean) ** 2 for d in diffs) / (n - 1)
+    se = (var / n) ** 0.5
+    half = _t_crit(n - 1) * se
+    return {"n": n, "mean": mean, "se": se,
+            "ci_low": mean - half, "ci_high": mean + half,
+            "excludes_zero": (mean - half) > 0 or (mean + half) < 0}
+
+
+def run_null_replicate(
+    deck_path: Path,
+    bracket: int,
+    games: int,
+    stage_dir: Path,
+    compare_fn: Optional[Callable] = None,
+) -> dict:
+    """(b): sim an UNMODIFIED copy of the deck against itself.
+
+    Any non-zero margin here is pure simulation noise at this games/pod
+    setting — the published floor real arm differences must clear. The
+    two copies get distinct staged names + Name= stamps (attribution
+    invariant), and are removed afterwards like the real arms.
+    """
+    from commander_builder.dck_meta import rewrite_name
+    original_text = deck_path.read_text(encoding="utf-8")
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    stem = deck_path.stem
+    a = stage_dir / f"{stem}__tier3_nullA.dck"
+    b = stage_dir / f"{stem}__tier3_nullB.dck"
+    a.write_text(rewrite_name(original_text, a.stem), encoding="utf-8")
+    b.write_text(rewrite_name(original_text, b.stem), encoding="utf-8")
+    if compare_fn is None:
+        from commander_builder.compare_versions import compare as compare_fn
+    try:
+        report = compare_fn(old_deck=a.name, new_deck=b.name,
+                            bracket=bracket, games_per_pod=games,
+                            deck_dir=stage_dir)
+    finally:
+        for leftover in stage_dir.glob(f"{stem}__tier3_null*.dck"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+    old_w, new_w = report.old_stats.wins, report.new_stats.wins
+    decisive = old_w + new_w
+    return {"deck": deck_path.name, "null": True,
+            "games": report.old_stats.games,
+            "margin": ((new_w - old_w) / decisive) if decisive else None}
+
+
+def build_summary(rows: list, arms: tuple, null_rows: list) -> dict:
+    """Aggregate rows into the CI-gated summary (pure; unit-tested)."""
+    wins_by_arm = {arm: sum(1 for r in rows if r.get("winner") == arm)
+                   for arm in arms}
+    margins = {arm: [r[f"{arm}_margin"] for r in rows
+                     if r.get(f"{arm}_margin") is not None]
+               for arm in arms}
+    null_margins = [r["margin"] for r in null_rows
+                    if r.get("margin") is not None]
+    noise_floor = None
+    if null_margins:
+        abs_m = [abs(m) for m in null_margins]
+        noise_floor = {"n": len(abs_m),
+                       "mean_abs_margin": sum(abs_m) / len(abs_m),
+                       "max_abs_margin": max(abs_m)}
+    baseline = arms[0]
+    paired: dict = {}
+    gate: dict = {}
+    for arm in arms[1:]:
+        diffs = [r[f"{arm}_margin"] - r[f"{baseline}_margin"]
+                 for r in rows
+                 if r.get(f"{arm}_margin") is not None
+                 and r.get(f"{baseline}_margin") is not None]
+        ci = paired_ci(diffs)
+        paired[arm] = ci
+        if ci is None or ci["n"] < GATE_MIN_DECKS:
+            gate[arm] = (f"insufficient-n (need >= {GATE_MIN_DECKS} "
+                         "paired decks)")
+        elif not (ci["mean"] > 0 and ci["excludes_zero"]):
+            gate[arm] = "fail (95% CI does not show a positive advantage)"
+        elif noise_floor is None:
+            gate[arm] = "insufficient-null-floor (run --null-replicates)"
+        elif ci["mean"] <= noise_floor["mean_abs_margin"]:
+            gate[arm] = "fail (advantage below the measured noise floor)"
+        else:
+            gate[arm] = "pass"
+    return {
+        "rows": rows,
+        "null_rows": null_rows,
+        "decks": len(rows),
+        "arms": list(arms),
+        "wins_by_arm": wins_by_arm,
+        # Kept for the readers already parsing the two-arm shape.
+        "score_wins": wins_by_arm.get("score", 0),
+        "bucket_wins": wins_by_arm.get("bucket", 0),
+        "ties": sum(1 for r in rows if r.get("winner") == "tie"),
+        "skipped": sum(1 for r in rows if r.get("skipped")),
+        "mean_margin_by_arm": {a: (sum(v) / len(v) if v else None)
+                               for a, v in margins.items()},
+        "paired_vs_" + baseline: paired,
+        "noise_floor": noise_floor,
+        "gate": gate,
+        "gate_policy": (
+            f"default-on requires >= {GATE_MIN_DECKS} paired decks, a 95% "
+            "paired-CI excluding zero, AND a mean advantage above the "
+            "measured null-replicate noise floor"),
+    }
+
+
 def run_deck(
     deck_path: Path,
     bracket: int,
@@ -361,6 +503,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                              "'bubble' runs the flag-on ranking through "
                              "the whole-deck verdict and its budget then "
                              "caps every other arm.")
+    parser.add_argument("--null-replicates", type=int, default=0,
+                        help="(b) also sim the first N decks unmodified "
+                             "against themselves to publish a measured "
+                             "noise floor (default %(default)s)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--out", default=None,
@@ -400,19 +546,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         rows.append(run_deck(p, args.bracket, args.k, args.games,
                              stage_dir, dry_run=args.dry_run, arms=arms))
 
-    wins_by_arm = {arm: sum(1 for r in rows if r.get("winner") == arm)
-                   for arm in arms}
-    summary = {
-        "rows": rows,
-        "decks": len(rows),
-        "arms": list(arms),
-        "wins_by_arm": wins_by_arm,
-        # Kept for the readers already parsing the two-arm shape.
-        "score_wins": wins_by_arm.get("score", 0),
-        "bucket_wins": wins_by_arm.get("bucket", 0),
-        "ties": sum(1 for r in rows if r.get("winner") == "tie"),
-        "skipped": sum(1 for r in rows if r.get("skipped")),
-    }
+    null_rows: list = []
+    if args.null_replicates and not args.dry_run:
+        for p in deck_paths[:args.null_replicates]:
+            print(f"[tier3] null replicate: {p.name} ...",
+                  file=sys.stderr, flush=True)
+            null_rows.append(run_null_replicate(
+                p, args.bracket, args.games, stage_dir))
+
+    summary = build_summary(rows, arms, null_rows)
     if args.out:
         Path(args.out).write_text(json.dumps(summary, indent=2),
                                   encoding="utf-8")
@@ -431,7 +573,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                 margins = " vs ".join(
                     f"{arm} {r.get(f'{arm}_margin')}" for arm in arms)
                 print(f"  {r['deck']}: {margins} -> {r.get('winner')}")
-        tally = " / ".join(f"{arm} {wins_by_arm[arm]}" for arm in arms)
+        if summary.get("noise_floor"):
+            nf = summary["noise_floor"]
+            print(f"noise floor ({nf['n']} null replicate(s)): "
+                  f"mean |margin| {nf['mean_abs_margin']:.3f}, "
+                  f"max {nf['max_abs_margin']:.3f}")
+        for arm, verdict in (summary.get("gate") or {}).items():
+            ci = summary[f"paired_vs_{arms[0]}"].get(arm)
+            ci_txt = (f"mean {ci['mean']:+.3f} "
+                      f"[{ci['ci_low']:+.3f}, {ci['ci_high']:+.3f}]"
+                      if ci else "no paired data")
+            print(f"gate[{arm} vs {arms[0]}]: {verdict} ({ci_txt})")
+        tally = " / ".join(
+            f"{arm} {summary['wins_by_arm'][arm]}" for arm in arms)
         print(f"{tally} / tie {summary['ties']} / "
               f"skipped {summary['skipped']} over {summary['decks']} decks")
     return 0
