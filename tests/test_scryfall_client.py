@@ -455,3 +455,94 @@ def test_diff_oracle_text_returns_none_when_unknown(monkeypatch):
         lambda name, **_: None,
     )
     assert diff_oracle_text("Mystery", "anything") is None
+
+
+# --- P1: process-level lookup memo + negative caching -----------------------
+# (OPTIMIZATION_AUDIT_2026-07-25 P1. The autouse conftest fixture clears
+# the memo between tests, so each test starts cold.)
+
+import urllib.error
+
+from commander_builder import scryfall_client as sc
+
+
+@pytest.fixture
+def cache_dir(tmp_path, monkeypatch):
+    d = tmp_path / "snaps"
+    d.mkdir()
+    monkeypatch.setattr(sc, "CACHE_DIR", d)
+    return d
+
+
+def _snapshot(cache_dir, name, payload):
+    p = cache_dir / f"{sc._slug(name)}.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def _http_counter(monkeypatch, payload=None, status=None):
+    calls = {"n": 0}
+
+    def fake(url):
+        calls["n"] += 1
+        if status is not None:
+            raise urllib.error.HTTPError(url, status, "err", None, None)
+        return payload
+
+    monkeypatch.setattr(sc, "_http_get_json", fake)
+    monkeypatch.setattr(sc, "REQUEST_SLEEP_SEC", 0)
+    return calls
+
+
+def test_lookup_memo_serves_repeat_calls_without_disk(cache_dir, monkeypatch):
+    _http_counter(monkeypatch, status=500)  # any I/O would raise loudly
+    snap = _snapshot(cache_dir, "Sol Ring", {"name": "Sol Ring"})
+    assert lookup_card("Sol Ring")["name"] == "Sol Ring"
+    snap.unlink()  # disk gone — only the memo can answer now
+    assert lookup_card("Sol Ring")["name"] == "Sol Ring"
+
+
+def test_lookup_memo_caches_404_misses(cache_dir, monkeypatch):
+    calls = _http_counter(monkeypatch, status=404)
+    assert lookup_card("Not A Card") is None
+    assert lookup_card("Not A Card") is None
+    assert calls["n"] == 1  # second miss answered from the memo
+
+
+def test_lookup_cache_false_bypasses_memo(cache_dir, monkeypatch):
+    calls = _http_counter(monkeypatch, payload={"name": "Fresh"})
+    _snapshot(cache_dir, "Sol Ring", {"name": "Stale"})
+    assert lookup_card("Sol Ring")["name"] == "Stale"   # memo populated
+    assert lookup_card("Sol Ring", cache=False)["name"] == "Fresh"
+    assert calls["n"] == 1
+    # cache=False never wrote the memo — cached path still serves Stale.
+    assert lookup_card("Sol Ring")["name"] == "Stale"
+
+
+def test_refresh_card_updates_the_memo(cache_dir, monkeypatch):
+    _http_counter(monkeypatch, payload={"name": "Sol Ring", "v": 2})
+    _snapshot(cache_dir, "Sol Ring", {"name": "Sol Ring", "v": 1})
+    assert lookup_card("Sol Ring")["v"] == 1
+    assert sc.refresh_card("Sol Ring")["v"] == 2
+    assert lookup_card("Sol Ring")["v"] == 2  # memo invalidated
+
+
+def test_lookup_memo_keys_on_cache_dir(tmp_path, monkeypatch):
+    _http_counter(monkeypatch, status=500)
+    d1, d2 = tmp_path / "a", tmp_path / "b"
+    d1.mkdir(); d2.mkdir()
+    monkeypatch.setattr(sc, "CACHE_DIR", d1)
+    _snapshot(d1, "Sol Ring", {"name": "From A"})
+    assert lookup_card("Sol Ring")["name"] == "From A"
+    monkeypatch.setattr(sc, "CACHE_DIR", d2)
+    _snapshot(d2, "Sol Ring", {"name": "From B"})
+    # Different dir -> different memo entry, not A's cached answer.
+    assert lookup_card("Sol Ring")["name"] == "From B"
+
+
+def test_lookup_memo_is_bounded(cache_dir, monkeypatch):
+    monkeypatch.setattr(sc, "_LOOKUP_MEMO_MAX", 3)
+    for i in range(5):
+        _snapshot(cache_dir, f"Card {i}", {"name": f"Card {i}"})
+        lookup_card(f"Card {i}")
+    assert len(sc._LOOKUP_MEMO) <= 3

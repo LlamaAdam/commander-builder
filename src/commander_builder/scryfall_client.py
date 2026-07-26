@@ -120,6 +120,8 @@ def refresh_card(name: str) -> Optional[dict]:
     cache_path = _cache_path(name)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(data), encoding="utf-8")
+    # Keep the process memo coherent with the snapshot we just rewrote.
+    _memo_put(_memo_key(name), data)
     return data
 
 
@@ -178,28 +180,78 @@ def diff_oracle_text(name: str, candidate: str) -> Optional[dict]:
     return {"changed": before != after, "before": before, "after": after}
 
 
+# --- Process-level lookup memo (OPTIMIZATION_AUDIT 2026-07-25, P1) ---------
+#
+# Before this memo every ``lookup_card`` call re-stat'ed, re-read, and
+# re-parsed the snapshot JSON (~197 us warm), and a 404 cost a
+# rate-limit sleep plus a live HTTP round-trip on EVERY call, forever.
+# Keyed on (current CACHE_DIR, folded name) because tests monkeypatch
+# ``CACHE_DIR`` per test; the autouse conftest fixture clears the memo
+# between tests. Entries are the parsed snapshot dicts themselves —
+# treat them as READ-ONLY (the same contract DeckContext.card already
+# established for its per-context memo).
+_LOOKUP_MEMO: dict = {}
+_LOOKUP_MEMO_MAX = 8192
+#: Negative-cache sentinel: Scryfall answered 404 for this name. Process
+#: -lifetime only — never written to disk, so a newly printed card is
+#: found again on the next process start (or after clear_lookup_memo).
+_LOOKUP_MISS = object()
+
+
+def clear_lookup_memo() -> None:
+    """Drop every memoized lookup (positive and negative)."""
+    _LOOKUP_MEMO.clear()
+
+
+def _memo_key(name: str) -> tuple:
+    return (str(CACHE_DIR), name.strip().lower())
+
+
+def _memo_put(key: tuple, value) -> None:
+    if len(_LOOKUP_MEMO) >= _LOOKUP_MEMO_MAX:
+        # Whole-clear on overflow: dumb but deterministic, and 8k
+        # entries outlasts any real deck-build or web session.
+        _LOOKUP_MEMO.clear()
+    _LOOKUP_MEMO[key] = value
+
+
 def lookup_card(name: str, cache: bool = True) -> Optional[dict]:
     """Look up `name` via Scryfall's exact-named endpoint. Caches successful
     responses to ``oracle_snapshots/<slug>.json``. Returns None on 404."""
     if not name:
         return None
+    key = _memo_key(name)
+    if cache:
+        hit = _LOOKUP_MEMO.get(key)
+        if hit is _LOOKUP_MISS:
+            return None
+        if hit is not None:
+            return hit
     cache_path = _cache_path(name)
     if cache and cache_path.exists():
         try:
-            return json.loads(cache_path.read_text(encoding="utf-8"))
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass  # Re-fetch on corruption.
+        else:
+            _memo_put(key, data)
+            return data
     url = f"{SCRYFALL_BASE}/cards/named?{urllib.parse.urlencode({'exact': name})}"
     try:
         time.sleep(REQUEST_SLEEP_SEC)
         data = _http_get_json(url)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
+            if cache:
+                # Negative cache: without this an unresolvable name costs
+                # sleep + HTTP on every future call in this process.
+                _memo_put(key, _LOOKUP_MISS)
             return None
         raise
     if cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(data), encoding="utf-8")
+        _memo_put(key, data)
     return data
 
 

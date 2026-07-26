@@ -37,6 +37,22 @@ invalidation-on-rewrite + defensive copy for `load_combos`
 
 ## Proposed — Tier 1 (high impact, needs design or new tests first)
 
+> **P1 + P3 IMPLEMENTED 2026-07-26** (`perf/p1-scryfall-lookup-memo`):
+> process-level `lookup_card` memo keyed on `(CACHE_DIR, folded name)`
+> with negative 404 caching, `cache=False` bypass, `refresh_card`
+> coherence, 8k-entry bound, and an autouse conftest clear; plus the P3
+> seam fix — `staples.role_bucket()` extracted as the one pure
+> per-card taxonomy rule, `ctx.role_bucket_of` / `ctx.deck_role_counts`
+> replace the `count_deck_roles` calls inside cut scoring, and a
+> regression test pins that the scoring path never touches
+> `staples.lookup_card`. Measured: warm lookup 284 µs → 300 ns (~950×);
+> deck-health grade 16.4 s (baseline w/ misses) → 1.05 s first / ~0 s
+> repeat; full 91-card cut ordering 0.51 s. The hand-rolled memos P1
+> planned to delete (`consistency._make_lookup_cache`,
+> `DeckContext.card`, `deck_builder._role_cache`, `deck_legality._Cards`)
+> are still in place — they now sit above the shared memo and can be
+> removed in a later cleanup pass.
+
 ### P1. `scryfall_client.lookup_card`: process-level memo + negative caching
 `scryfall_client.py:181-203`. No in-memory cache — every call re-`stat`s,
 re-reads, and re-parses the snapshot JSON (measured 197 µs/call warm; a dict

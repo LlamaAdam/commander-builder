@@ -965,6 +965,25 @@ def is_role_saturated(role: str, count: int) -> bool:
 _WINCON_PROMOTABLE_ROLES: frozenset[str] = frozenset({"threat", "other"})
 
 
+def role_bucket(oracle_text: str, type_line: str) -> str:
+    """The ONE per-card bucket rule (pure, no lookups).
+
+    Base ``classify_role`` decides the bucket, with the single
+    documented promotion: a card the base classifier dropped into a
+    ``_WINCON_PROMOTABLE_ROLES`` bucket that ``classify_role_extended``
+    recognizes as a ``win_condition`` counts as ``win_condition``.
+    Extracted from ``count_deck_roles`` (OPTIMIZATION_AUDIT P3) so
+    offline callers — ``card_score``'s context, which must never touch
+    this module's ``lookup_card`` — share the exact taxonomy instead of
+    re-implementing it.
+    """
+    role = classify_role(oracle_text, type_line)
+    if role in _WINCON_PROMOTABLE_ROLES:
+        if classify_role_extended(oracle_text, type_line) == "win_condition":
+            role = "win_condition"
+    return role
+
+
 def count_deck_roles(card_names) -> "dict[str, int]":
     """Resolve each card name via Scryfall + ``classify_role`` and return
     a Counter of role → count.
@@ -999,13 +1018,8 @@ def count_deck_roles(card_names) -> "dict[str, int]":
         if not card:
             out["other"] += 1
             continue
-        oracle_text = card.get("oracle_text", "") or ""
-        type_line = card.get("type_line", "") or ""
-        role = classify_role(oracle_text, type_line)
-        if role in _WINCON_PROMOTABLE_ROLES:
-            if classify_role_extended(oracle_text, type_line) == "win_condition":
-                role = "win_condition"
-        out[role] += 1
+        out[role_bucket(card.get("oracle_text", "") or "",
+                        card.get("type_line", "") or "")] += 1
     return out
 
 

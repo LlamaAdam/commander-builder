@@ -114,10 +114,13 @@ def _reset_process_memos():
     """
     from commander_builder import combo_detection as _cd
     from commander_builder import game_changers as _gc
+    from commander_builder import scryfall_client as _sc
     _gc.clear_memo()
+    _sc.clear_lookup_memo()
     _cd._COMBOS_CACHE = None
     yield
     _gc.clear_memo()
+    _sc.clear_lookup_memo()
     _cd._COMBOS_CACHE = None
 
 
