@@ -102,9 +102,22 @@ commander-page fallback pool is now corpus-augmented and
 CardScore-ordered when the flag is on (`_score_ordered_fallback` —
 flag off / any failure = byte-identical legacy pile).
 
-**Open (next slices):**
-validate the bubble ranking the same tier-3 way (bubble-swaps vs
-bucket-order swaps, both A/B simmed). Same honesty contract as
+**Also shipped (2026-07-25, post-merge):** the bubble arm of the tier-3
+harness. `scripts/validate_card_score.py` now takes `--arms` (any two
+or more of `bucket` / `score` / `bubble`); the `bubble` arm runs the
+flag-on ranking through `apply_verdict_to_report`, so the deck's own
+change budget decides how many swaps and cuts arrive bubble-first.
+**When `bubble` is present its budget caps every other arm** — same
+number of adds and cuts everywhere — because otherwise the comparison
+would conflate "fewer swaps" with "better-chosen swaps" and only the
+second is a claim about ranking. A 0-swap verdict skips the deck
+rather than simming it against itself. 10 more tests (19 in
+`tests/test_validate_card_score.py`), all offline via injected
+`advise` / `verdict` / `corpus` / `compare` fns.
+
+**Open (next slices):** RUN the bubble arm
+(`--arms bucket,bubble`) once the CardScore tier-3 pilot finishes —
+the two runs must not compete for Forge. Same honesty contract as
 CardScore: heuristic prior, Forge stays the arbiter.
 
 ## The gap
@@ -315,6 +328,23 @@ constraint enforced at `deck_builder_personalize.lift_swaps:217-224`.
 Overloading it would silently change role labels project-wide.
 
 ## Prerequisites (small, independently shippable, each valuable alone)
+
+**ALL FIVE SHIPPED — verified 2026-07-25 against `master` @ `c53a31b`.**
+Kept below for the rationale (each bullet explains *why* the thing was
+needed); none of them is open work any more:
+
+1. Scryfall-backed legality → `deck_legality.py` (the hand-typed
+   `_CORE_BANS` set is gone from `web/routes_decks.py`; the module
+   docstring records the same both-directions-wrong finding).
+2. `finisher` in `ROLE_TARGETS` → `staples.py` (`"finisher": 3`, with
+   the `win_condition` coherence note beside it); the MV curve lives on
+   `DeckContext.curve` and feeds `_f_curve_fit`.
+3. `manabase_report()` → `deck_builder_manabase.py:769`.
+4. `combo_detection.one_piece_away()` → `combo_detection.py:241`,
+   surfaced on `DeckContext.one_piece_away`.
+5. `avg_cmc` + `archetype` at every `estimate_bracket` caller →
+   `deck_dashboard.py`, `improvement_advisor.py` and `deck_builder.py`
+   all pass both now (the latter two via `derive_signals`).
 
 - **Scryfall-backed legality.** `web/routes_decks.py:885` `_CORE_BANS` is
   a hand-typed set inside a route function and is wrong in both
