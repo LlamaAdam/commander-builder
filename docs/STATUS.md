@@ -8,6 +8,15 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
+**Tier-3 pilot RESULT (finished 2026-07-25 21:36 local):** score 2 /
+bucket 1 / 0 ties over 3 decks — **inconclusive; the CardScore flag
+stays default-off.** The Hash row turned out to be an accidental null
+replicate (both arms staged card-for-card identical decklists) and
+still swung 0.348 in margin, a noise floor larger than every real
+effect the pilot measured — so the 2-1 tally is not a signal. Full
+numbers and the required design fixes are in the FP-015 addendum of
+[future-plans.md](future-plans.md).
+
 **Last updated:** 2026-07-25 ~19:15 local (scheduled token-check run) —
 ⚡ **TOKEN RESET DETECTED — resuming work after a 7.8-hour usage-limit
 gap.** Nothing was lost. `master` @ `c53a31b` retested clean on this
