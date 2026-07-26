@@ -184,10 +184,20 @@ measured noise floor rather than discovering one by accident;
 noise floor, 3 decks × 40 games was never going to resolve anything;
 (d) consider gating on **mean margin with a CI**, not a 2-of-3 tally.
 
-**Open (next slices):** RUN the bubble arm
-(`--arms bucket,bubble`) — the tier-3 pilot has finished, so Forge is
-free. Same honesty contract as CardScore: heuristic prior, Forge stays
-the arbiter. Fold the design fixes above into that run.
+**Design fixes SHIPPED + the gated run LAUNCHED (2026-07-26):**
+(a) multiset null-replicate guard (PR #32); (b) explicit
+`--null-replicates N` sims an unmodified copy vs itself to publish a
+measured noise floor; (d) the gate is now a **paired 95% t-interval vs
+the baseline arm** — default-on requires >= 6 paired decks, CI
+excluding zero, AND mean advantage above the measured floor (winner
+tallies gate nothing). Policy set 2026-07-26; machinery in
+`build_summary`/`run_null_replicate` (PR #35, 29 harness tests).
+(c) The properly-powered run is RUNNING detached since ~13:30 local:
+6 B3 decks, arms bucket vs bubble (bubble budget caps both arms),
+60 games/pod, 2 null replicates (~1,680 games). Verdict lands at
+repo-root `_tier3_gated_result.json`; a scheduled report fires
+2026-07-27 09:30. `master` was tagged `tier3-baseline-2026-07-26`
+before the run as the stable "before" reference.
 
 ## The gap
 
