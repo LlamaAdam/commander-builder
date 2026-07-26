@@ -658,10 +658,14 @@ def build_manabase(
         nm for nm in tribal_essential_lands(tribe, color_identity=identity)
         if nm.strip().lower() not in seen
     ]
+    # Maintain the source tally incrementally: ``lands`` only changes via
+    # the append below, so a full ``_sources_now()`` rescan per candidate
+    # (each one re-resolving every kept land through ``lookup``) is pure
+    # waste — O(candidates x lands) lookups collapse to O(lands).
+    got = _sources_now()
     for cand in fixing_candidates:
         if len(lands) >= land_slots - reserve_for_basics:
             break
-        got = _sources_now()
         # Only add a fixer that helps a color still below its target.
         provides = land_color_sources(cand, identity, lookup)
         if not provides:
@@ -670,6 +674,9 @@ def build_manabase(
             key = cand.strip().lower()
             seen.add(key)
             lands.append(cand)
+            for c in provides:
+                if c in got:
+                    got[c] += 1
 
     # (c) FILL the remainder with basics.
     basic_slots = land_slots - len(lands)

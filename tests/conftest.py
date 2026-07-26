@@ -99,6 +99,29 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _reset_process_memos():
+    """Clear process-level memo caches between tests.
+
+    ``game_changers.load_game_changers`` and ``combo_detection.load_combos``
+    memoize per process (2026-07-25 optimization pass) so hot loops stop
+    paying a disk read — or, on the broken-WotC-scrape path, a live HTTPS
+    round-trip — per call. Tests monkeypatch ``_http_get_text`` /
+    ``CACHE_PATH`` / ``COMBO_DATA_PATH`` per test and assert on fetch
+    behavior, so a memo populated by one test must never leak into the
+    next. The combos cache is keyed on (path, mtime, size) and would
+    usually self-invalidate, but clearing both keeps the isolation rule
+    uniform and obvious.
+    """
+    from commander_builder import combo_detection as _cd
+    from commander_builder import game_changers as _gc
+    _gc.clear_memo()
+    _cd._COMBOS_CACHE = None
+    yield
+    _gc.clear_memo()
+    _cd._COMBOS_CACHE = None
+
+
+@pytest.fixture(autouse=True)
 def _isolate_knowledge_log_default_path(tmp_path, monkeypatch):
     """Point ``knowledge_log.DEFAULT_DB_PATH`` at a per-test temp file.
 

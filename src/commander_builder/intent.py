@@ -197,14 +197,22 @@ def learn_intent(
     # 4. Theme detection -- needs oracle texts.  Fetch each card lazily;
     #    skip cards that fail Scryfall lookup (offline / unknown names).
     # ------------------------------------------------------------------
-    deck_oracles: list[tuple[str, str]] = []
+    # Capture the type_line in the same pass — step 5 below needs it, and a
+    # second lookup_fn per card doubled the lookup count (a real cost when
+    # the lookup falls through to disk or network).
+    deck_cards: list[tuple[str, str, str]] = []
     for card_name in main_cards:
         try:
             data = lookup_fn(card_name)
             oracle = (data.get("oracle_text") or "") if data else ""
+            type_line = (data.get("type_line") or "") if data else ""
         except Exception:  # noqa: BLE001
             oracle = ""
-        deck_oracles.append((card_name, oracle))
+            type_line = ""
+        deck_cards.append((card_name, oracle, type_line))
+    deck_oracles: list[tuple[str, str]] = [
+        (name, oracle) for name, oracle, _tl in deck_cards
+    ]
 
     try:
         themes = themes_fn(deck_oracles)
@@ -216,16 +224,9 @@ def learn_intent(
     #    "win_condition" or "finisher" is a key win-con to protect.
     # ------------------------------------------------------------------
     key_wincons: list[str] = []
-    for card_name, oracle in deck_oracles:
+    for card_name, oracle, type_line in deck_cards:
         if not oracle:
             continue
-        # Fetch the full card for the type_line so role_fn can handle
-        # land priority correctly.
-        try:
-            data = lookup_fn(card_name)
-            type_line = (data.get("type_line") or "") if data else ""
-        except Exception:  # noqa: BLE001
-            type_line = ""
         try:
             role = role_fn(oracle, type_line)
         except Exception:  # noqa: BLE001

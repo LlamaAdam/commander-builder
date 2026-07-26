@@ -115,6 +115,7 @@ import math
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Iterable, Optional
 
 from .lift_analysis import MIN_CORPUS_DECKS
@@ -1246,6 +1247,27 @@ def _f_role_fit(name: str, ctx: DeckContext,
                  f"ceiling {sat}")
 
 
+@lru_cache(maxsize=64)
+def _archetype_curve_cached(archetype_key: str,
+                            bracket_key: Optional[int]) -> tuple[
+                                tuple[int, float], ...]:
+    """Memoized core of :func:`archetype_curve` — a pure function of its
+    two (normalized) inputs, but called once per scored card via
+    ``_f_curve_fit``. Returns an immutable tuple so cached state can't be
+    mutated through a caller's dict."""
+    tilt = ARCHETYPE_CURVE_TILT.get(archetype_key, 0.0)
+    if bracket_key is not None:
+        tilt += BRACKET_CURVE_TILT.get(bracket_key, 0.0)
+    raw: dict[int, float] = {}
+    for mv, base in TARGET_CURVE_BASE.items():
+        factor = 1.0 - tilt * (CURVE_TILT_PIVOT - mv) / CURVE_TILT_PIVOT
+        raw[mv] = base * max(0.1, factor)
+    total = sum(raw.values()) or 1.0
+    return tuple(
+        (mv, v * CURVE_NONLAND_SLOTS / total) for mv, v in raw.items()
+    )
+
+
 def archetype_curve(archetype: Optional[str] = None,
                     bracket: Optional[int] = None) -> dict[int, float]:
     """Target NONLAND mana-value histogram for an archetype + bracket.
@@ -1256,15 +1278,9 @@ def archetype_curve(archetype: Optional[str] = None,
     Negative tilt = shift down (aggro/combo/high bracket); positive =
     shift up (control/low bracket).
     """
-    tilt = ARCHETYPE_CURVE_TILT.get((archetype or "").lower(), 0.0)
-    if bracket is not None:
-        tilt += BRACKET_CURVE_TILT.get(int(bracket), 0.0)
-    raw: dict[int, float] = {}
-    for mv, base in TARGET_CURVE_BASE.items():
-        factor = 1.0 - tilt * (CURVE_TILT_PIVOT - mv) / CURVE_TILT_PIVOT
-        raw[mv] = base * max(0.1, factor)
-    total = sum(raw.values()) or 1.0
-    return {mv: v * CURVE_NONLAND_SLOTS / total for mv, v in raw.items()}
+    key = (archetype or "").lower()
+    bracket_key = int(bracket) if bracket is not None else None
+    return dict(_archetype_curve_cached(key, bracket_key))
 
 
 def _f_curve_fit(name: str, ctx: DeckContext) -> tuple[Optional[float], str]:

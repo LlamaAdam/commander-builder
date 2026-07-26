@@ -403,3 +403,46 @@ def test_trust_gate_thresholds():
     trusted, overlap = _scrape_is_trustworthy(
         set(fallback) | {f"New Card {i}" for i in range(50)})
     assert trusted and overlap == 1.0
+
+
+def test_load_game_changers_memoizes_within_process(monkeypatch):
+    """The 2026-07-25 perf pass: repeat calls must not re-fetch. Before the
+    memo, the rejected-scrape path performed a live HTTPS round-trip on
+    EVERY call (~6 per deck build) because a failed scrape deliberately
+    never writes the disk cache."""
+    from commander_builder import game_changers as gc
+    calls = {"n": 0}
+
+    def counting_fetch(use_cache=True):
+        calls["n"] += 1
+        return {"Rhystic Study"}
+
+    monkeypatch.setattr(gc, "fetch_game_changers", counting_fetch)
+    gc.clear_memo()
+    first = gc.load_game_changers()
+    second = gc.load_game_changers()
+    assert first == second == {"Rhystic Study"}
+    assert calls["n"] == 1
+
+    # force_refresh bypasses AND repopulates the memo.
+    monkeypatch.setattr(
+        gc, "fetch_game_changers",
+        lambda use_cache=True: {"Smothering Tithe"},
+    )
+    refreshed = gc.load_game_changers(force_refresh=True)
+    assert refreshed == {"Smothering Tithe"}
+    assert gc.load_game_changers() == {"Smothering Tithe"}
+
+
+def test_load_game_changers_memo_returns_defensive_copies(monkeypatch):
+    """Callers mutate the returned set (deck_builder folds it into derived
+    sets) — a shared mutable memo would leak one caller's edits into the
+    next."""
+    from commander_builder import game_changers as gc
+    monkeypatch.setattr(
+        gc, "fetch_game_changers", lambda use_cache=True: {"Rhystic Study"},
+    )
+    gc.clear_memo()
+    first = gc.load_game_changers()
+    first.add("Injected Card")
+    assert gc.load_game_changers() == {"Rhystic Study"}

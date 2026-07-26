@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -320,13 +321,47 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
     return merged
 
 
+# Process-level memo for load_game_changers. The list is effectively a
+# process constant, yet before this memo existed a single deck build paid
+# ~6 calls, and on the (currently broken) WotC-scrape path EVERY call was a
+# live HTTPS round-trip: the rejected-scrape branch deliberately never
+# writes the disk cache, so nothing short-circuited the retry. The TTL
+# keeps the documented "a failed scrape never blocks a retry" property at
+# process scope — a long-lived web app re-attempts every 15 minutes
+# instead of on every request, and short-lived CLIs fetch exactly once.
+_MEMO: Optional[tuple[float, frozenset[str]]] = None
+_MEMO_TTL_SEC = 900.0
+
+# Folded-set cache for is_game_changer, keyed on the exact set the last
+# call to load_game_changers() returned so tests that monkeypatch the
+# loader still see their patched list take effect immediately.
+_FOLDED: Optional[tuple[frozenset[str], frozenset[str]]] = None
+
+
+def clear_memo() -> None:
+    """Reset the in-process memos (test isolation seam)."""
+    global _MEMO, _FOLDED
+    _MEMO = None
+    _FOLDED = None
+
+
 def load_game_changers(force_refresh: bool = False) -> set[str]:
     """Load the cached Game Changers list. Triggers a fetch if cache is stale
-    or missing. Returns the fallback set on any error so audits don't break."""
+    or missing. Returns the fallback set on any error so audits don't break.
+
+    Memoized per process (15 min TTL); ``force_refresh=True`` bypasses and
+    repopulates the memo."""
+    global _MEMO
+    if not force_refresh and _MEMO is not None:
+        stamp, cards = _MEMO
+        if time.monotonic() - stamp < _MEMO_TTL_SEC:
+            return set(cards)
     try:
-        return fetch_game_changers(use_cache=not force_refresh)
+        result = fetch_game_changers(use_cache=not force_refresh)
     except Exception:  # noqa: BLE001
-        return set(_FALLBACK)
+        result = set(_FALLBACK)
+    _MEMO = (time.monotonic(), frozenset(result))
+    return set(result)
 
 
 def is_game_changer(card_name: str) -> bool:
@@ -337,9 +372,14 @@ def is_game_changer(card_name: str) -> bool:
     slugs, and user input all disagree on capitalization), and an
     exact-case check here silently missed e.g. "smothering tithe".
     casefold (not lower) for parity with how Python recommends caseless
-    matching; the GC list is small so folding it per call is cheap."""
-    folded = card_name.casefold()
-    return folded in {c.casefold() for c in load_game_changers()}
+    matching. The folded set is cached against the loader's exact return
+    value so per-card loops don't rebuild it, while a monkeypatched or
+    refreshed loader still takes effect immediately."""
+    global _FOLDED
+    cards = frozenset(load_game_changers())
+    if _FOLDED is None or _FOLDED[0] != cards:
+        _FOLDED = (cards, frozenset(c.casefold() for c in cards))
+    return card_name.casefold() in _FOLDED[1]
 
 
 if __name__ == "__main__":

@@ -369,3 +369,32 @@ def test_one_piece_away_defaults_to_the_bundled_combo_db(tmp_path, monkeypatch):
 
 def test_one_piece_away_on_an_empty_deck_is_empty():
     assert one_piece_away("", combos=_OPA_COMBOS) == []
+
+
+def test_load_combos_cache_invalidates_on_rewrite(tmp_path, monkeypatch):
+    """The 2026-07-25 perf pass memoizes the parsed combos file keyed on
+    (path, mtime, size) — a rewritten DB (e.g. --refresh) must be picked
+    up without a process restart, and repeat loads must not re-parse."""
+    import os
+    out = tmp_path / "combos.json"
+    out.write_text(
+        json.dumps({"combos": [{"cards": ["A", "B"], "produces": "X"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(combo_detection, "COMBO_DATA_PATH", out)
+    first = combo_detection.load_combos()
+    assert [c["produces"] for c in first] == ["X"]
+
+    # Returned list is a defensive copy — mutating it must not poison
+    # the cache for the next caller.
+    first.append({"cards": ["Z"], "produces": "junk"})
+    assert [c["produces"] for c in combo_detection.load_combos()] == ["X"]
+
+    out.write_text(
+        json.dumps({"combos": [{"cards": ["C", "D"], "produces": "Y"}]}),
+        encoding="utf-8",
+    )
+    # Force a distinct mtime even on coarse-granularity filesystems.
+    st = out.stat()
+    os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    assert [c["produces"] for c in combo_detection.load_combos()] == ["Y"]
