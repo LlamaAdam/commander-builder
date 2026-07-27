@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
     "validate_card_score", REPO_ROOT / "scripts" / "validate_card_score.py")
@@ -337,22 +339,83 @@ def test_run_deck_reordered_arms_are_identical_and_skip(tmp_path):
     assert "identical" in row["skipped"]
 
 
-def test_run_deck_repeated_card_is_a_real_difference(tmp_path):
-    """Multiset, not set: staging two Forests differs from staging one."""
+def test_run_deck_repeated_staged_card_is_a_real_difference(tmp_path):
+    """Quantities count: staging two extra Forests differs from one."""
     deck = tmp_path / "t.dck"
     deck.write_text(DECK_TEXT, encoding="utf-8")
-    advise = make_advise({False: (["Forest", "Forest"], ["Cut Me"]),
-                          True: (["Forest"], ["Cut Me"])})
+    advise = make_advise(
+        {False: (["Forest", "Forest"], ["Cut Me", "Keep Me"]),
+         True: (["Forest"], ["Cut Me"])})
     row = vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage", dry_run=True,
                        advise_fn=advise)
     assert row["arms_identical"] is False
 
 
-def test_swap_signature_ignores_order_within_adds_and_cuts():
-    same = vcs._swap_signature((["A", "B"], ["C", "D"]))
-    assert vcs._swap_signature((["B", "A"], ["D", "C"])) == same
-    # An add moved to the cut side is NOT the same swap set.
-    assert vcs._swap_signature((["A", "B", "C"], ["D"])) != same
+def test_run_deck_balance_trimmed_surplus_is_not_a_difference(tmp_path):
+    """Requested multisets differ ({Forest x2} vs {Forest}) but the
+    surplus add is dropped for balance, so both arms STAGE the same
+    deck — requested-multiset dedupe simmed this as a real row."""
+    deck = tmp_path / "t.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    advise = make_advise({False: (["Forest", "Forest"], ["Cut Me"]),
+                          True: (["Forest"], ["Cut Me"])})
+
+    def compare_fn(**kw):  # pragma: no cover - must not be called
+        raise AssertionError("identical decklists must not be simmed")
+
+    row = vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage",
+                       advise_fn=advise, compare_fn=compare_fn)
+    assert row["arms_identical"] is True
+    assert "identical" in row["skipped"]
+
+
+def test_run_deck_same_multiset_different_staged_decks_runs(tmp_path):
+    """Pair-drop order-dependence, the false-skip direction.
+
+    ``_apply_swaps_to_dck`` validates positional (cut[i], add[i]) pairs
+    and drops the whole pair when the cut matches nothing. With cuts
+    [Cut Me, Ghost] the dropped Ghost pair takes A2 with it (stages
+    A1); with cuts [Ghost, Cut Me] it takes A1 (stages A2). Identical
+    swap MULTISETS, different staged decks — requested-multiset dedupe
+    called these "arms identical" and skipped a genuine difference.
+    """
+    deck = tmp_path / "t.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    advise = make_advise({False: (["A1", "A2"], ["Cut Me", "Ghost"]),
+                          True: (["A1", "A2"], ["Ghost", "Cut Me"])})
+    row = vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage", dry_run=True,
+                       advise_fn=advise)
+    assert row["arms_identical"] is False
+    assert row["skipped"] == "dry run"
+
+
+def test_run_deck_different_multisets_identical_staged_decks_skip(tmp_path):
+    """Pair-drop order-dependence, the false-run direction: the arm
+    requesting an extra (Ghost, A2) pair loses it to validation and
+    stages the same deck as the arm that never asked — simming the two
+    would feed pure noise into the paired CI."""
+    deck = tmp_path / "t.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    advise = make_advise({False: (["A1"], ["Cut Me"]),
+                          True: (["A1", "A2"], ["Cut Me", "Ghost"])})
+
+    def compare_fn(**kw):  # pragma: no cover - must not be called
+        raise AssertionError("identical decklists must not be simmed")
+
+    row = vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage",
+                       advise_fn=advise, compare_fn=compare_fn)
+    assert row["arms_identical"] is True
+    assert "identical" in row["skipped"]
+
+
+def test_staged_signature_ignores_name_line_and_printing_tails():
+    base = "[metadata]\nName={n}\n\n[Main]\n1 Forest{tail}\n2 Island\n"
+    same = vcs._staged_signature(base.format(n="A", tail="|ZEN|249"))
+    assert vcs._staged_signature(base.format(n="B", tail="")) == same
+    # Quantities are part of the identity: 1 Forest != 2 Forest.
+    bumped = vcs._staged_signature(
+        "[metadata]\nName=A\n\n[Main]\n2 Forest\n2 Island\n")
+    assert bumped != same
 
 
 def test_main_rejects_unknown_arm(tmp_path, capsys):
@@ -444,7 +507,8 @@ def test_gate_requires_measured_noise_floor():
 def test_gate_fail_below_noise_floor_and_pass_above():
     rows = [row(f"d{i}", bucket=0.0, bubble=0.2 + i * 0.001)
             for i in range(6)]
-    noisy = [{"deck": "n", "null": True, "margin": 0.5}]
+    noisy = [{"deck": "n", "null": True, "margin": 0.5},
+             {"deck": "n2", "null": True, "margin": -0.45}]
     s = vcs.build_summary(rows, ARMS2, noisy)
     assert s["gate"]["bubble"].startswith("fail (advantage below")
     quiet = [{"deck": "n", "null": True, "margin": 0.05},
@@ -452,7 +516,26 @@ def test_gate_fail_below_noise_floor_and_pass_above():
     s2 = vcs.build_summary(rows, ARMS2, quiet)
     assert s2["gate"]["bubble"] == "pass"
     assert s2["noise_floor"]["n"] == 2
+    assert s2["noise_floor"]["sufficient"] is True
     assert abs(s2["noise_floor"]["mean_abs_margin"] - 0.04) < 1e-9
+
+
+def test_gate_floor_not_evaluated_from_a_single_replicate():
+    """n=1 is one draw from the noise distribution, not a floor — the
+    gate must say the criterion could not be evaluated, not pass/fail
+    on it (the pilot's accidental-null lesson, deliberately this time).
+    """
+    rows = [row(f"d{i}", bucket=0.0, bubble=0.2 + i * 0.001)
+            for i in range(6)]
+    one = [{"deck": "n", "null": True, "margin": 0.05}]
+    s = vcs.build_summary(rows, ARMS2, one)
+    assert s["noise_floor"]["n"] == 1
+    assert s["noise_floor"]["sufficient"] is False
+    verdict = s["gate"]["bubble"]
+    assert verdict.startswith("insufficient-null-floor")
+    assert "NOT evaluated" in verdict
+    assert not verdict.startswith("fail")
+    assert verdict != "pass"
 
 
 def test_run_null_replicate_stages_two_copies_and_cleans_up(tmp_path):
@@ -477,3 +560,91 @@ def test_run_null_replicate_stages_two_copies_and_cleans_up(tmp_path):
     assert "nullA" in seen["names"][0] and "nullB" in seen["names"][1]
     assert seen["names_differ_in_meta_only"]
     assert not list((tmp_path / "stage").glob("*__tier3_null*.dck"))
+
+
+# ── failure containment: one crashed deck must not vaporize the run ──
+
+
+def test_run_deck_cleans_staged_decks_when_a_sim_crashes(tmp_path):
+    """The staged decks live in the REAL Forge deck dir (the web UI
+    lists it) — a mid-arm crash must not leave them behind."""
+    deck = tmp_path / "t.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    advise = make_advise({False: (["Bucket Add"], ["Cut Me"]),
+                          True: (["Score Add"], ["Cut Me"])})
+    calls = []
+
+    def compare_fn(old_deck, new_deck, bracket, games_per_pod, deck_dir):
+        calls.append(new_deck)
+        if len(calls) == 2:
+            raise RuntimeError("forge died mid-pod")
+        return SimpleNamespace(
+            old_stats=SimpleNamespace(wins=4, games=games_per_pod),
+            new_stats=SimpleNamespace(wins=6, games=games_per_pod))
+
+    with pytest.raises(RuntimeError, match="forge died"):
+        vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage",
+                     advise_fn=advise, compare_fn=compare_fn)
+    assert len(calls) == 2
+    assert not list((tmp_path / "stage").glob("t__tier3_*.dck"))
+
+
+def test_main_contains_per_deck_failures_and_still_summarizes(
+        tmp_path, capsys, monkeypatch):
+    """A crash on deck 1 of 2: deck 2 and the null replicates still
+    run, --out is still written, and the failure is recorded honestly
+    (excluded from the paired CI with a note, not silently)."""
+    d1 = tmp_path / "a.dck"
+    d2 = tmp_path / "b.dck"
+    d1.write_text(DECK_TEXT, encoding="utf-8")
+    d2.write_text(DECK_TEXT, encoding="utf-8")
+
+    def fake_run_deck(p, *a, **k):
+        if p.name == "a.dck":
+            raise RuntimeError("forge timeout")
+        return {"deck": p.name, "winner": "score", "bucket_margin": 0.0,
+                "score_margin": 0.2, "arms_identical": False}
+
+    monkeypatch.setattr(vcs, "run_deck", fake_run_deck)
+    monkeypatch.setattr(
+        vcs, "run_null_replicate",
+        lambda p, *a, **k: {"deck": p.name, "null": True, "margin": 0.05})
+    out = tmp_path / "summary.json"
+    rc = vcs.main([str(d1), str(d2), "--null-replicates", "2",
+                   "--out", str(out)])
+    assert rc == 0
+    summary = json.loads(out.read_text(encoding="utf-8"))
+    assert summary["failed"] == 1
+    assert summary["failed_decks"] == [
+        {"deck": "a.dck", "error": "RuntimeError: forge timeout"}]
+    assert "excluded from the paired CI" in summary["failure_note"]
+    # The surviving deck and BOTH null replicates still ran.
+    assert [r["deck"] for r in summary["rows"]] == ["a.dck", "b.dck"]
+    assert summary["wins_by_arm"]["score"] == 1
+    assert summary["noise_floor"]["n"] == 2
+    printed = capsys.readouterr().out
+    assert "a.dck: FAILED (RuntimeError: forge timeout)" in printed
+    assert "failed 1" in printed
+
+
+def test_main_contains_null_replicate_failures(tmp_path, capsys,
+                                               monkeypatch):
+    deck = tmp_path / "a.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+    monkeypatch.setattr(
+        vcs, "run_deck",
+        lambda p, *a, **k: {"deck": p.name, "winner": "score",
+                            "bucket_margin": 0.0, "score_margin": 0.2,
+                            "arms_identical": False})
+
+    def boom(*a, **k):
+        raise RuntimeError("null crashed")
+
+    monkeypatch.setattr(vcs, "run_null_replicate", boom)
+    rc = vcs.main([str(deck), "--null-replicates", "1", "--json"])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["failed_null_replicates"] == [
+        {"deck": "a.dck", "error": "RuntimeError: null crashed"}]
+    # No successful replicate -> no floor, and the row carries no margin.
+    assert summary["noise_floor"] is None

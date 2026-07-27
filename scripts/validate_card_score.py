@@ -90,21 +90,67 @@ def _advise_under_flag(
             os.environ[CARD_SCORE_ENV_VAR] = prior
 
 
-def _swap_signature(swaps: tuple[list[str], list[str]]) -> tuple:
-    """Order-insensitive identity of one arm's swap set.
+def _stage_preview(
+    original_text: str,
+    adds: list[str],
+    cuts: list[str],
+) -> tuple[str, bool]:
+    """Apply one arm's swaps through the shared legality path WITHOUT
+    touching disk. Returns ``(proposed_text, applied)`` where
+    ``applied`` is False when the swaps were a no-op."""
+    from commander_builder._advisor_models import SwapRecommendation
+    from commander_builder.web.deck_text_ops import _apply_swaps_to_dck
+    recs = ([SwapRecommendation(card=c, action="add", reason="tier3")
+             for c in adds]
+            + [SwapRecommendation(card=c, action="cut", reason="tier3")
+               for c in cuts])
+    proposed, applied_adds, applied_cuts, _kept = _apply_swaps_to_dck(
+        original_text, recs,
+    )
+    return proposed, bool(applied_adds or applied_cuts)
 
-    Two arms that pick the SAME cards in a different order stage
-    card-for-card identical decklists, so simming them measures the
-    harness' noise floor, not ranking. Comparing the ordered lists let
-    such a null replicate through as a real row: the 2026-07-25 tier-3
-    pilot's Hash deck differed only in cut ORDER, and its two identical
-    decks scored +0.130 and -0.217 — a 0.348 swing wider than every
-    real effect the pilot measured (docs/future-plans.md, "Tier-3 pilot
-    RESULT"). Multisets, not sets: a repeated card (basic lands) is a
-    real difference in what gets staged.
+
+def _staged_signature(deck_text: str) -> tuple:
+    """Card-content identity of a staged decklist: a multiset of
+    (section, name-key, quantity), ignoring ``Name=`` and printing
+    tails.
+
+    Arms must be deduped on what they STAGE, not what they REQUEST:
+    ``_apply_swaps_to_dck`` validates positional (cut[i], add[i]) pairs
+    and drops the whole pair when a cut doesn't match, so the applied
+    swap set is order-DEPENDENT even though a swap multiset is not.
+    Comparing requested multisets therefore failed both ways — two arms
+    with identical multisets can stage different decks (a real
+    difference skipped as "identical"), and arms with different
+    multisets can stage identical decks (the 2026-07-25 pilot's Hash
+    row: two card-for-card identical decks scored +0.130 and -0.217, a
+    0.348 swing of pure noise fed into the comparison; see
+    docs/future-plans.md, "Tier-3 pilot RESULT"). Printing tails are
+    ignored the same way that pilot diff treated them: |SET|CN drift on
+    an identical card list is not a gameplay difference.
     """
-    adds, cuts = swaps
-    return Counter(adds), Counter(cuts)
+    from commander_builder.dck_utils import CARD_LINE_RE
+    from commander_builder.web.deck_text_ops import _dck_name_key
+    sig: Counter = Counter()
+    section = ""
+    for raw in deck_text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            section = s.lower()
+            continue
+        if section == "[metadata]":
+            continue
+        m = CARD_LINE_RE.match(s)
+        if not m:
+            continue
+        try:
+            qty = int(m.group(1))
+        except (TypeError, ValueError):
+            qty = 1
+        sig[(section, _dck_name_key(m.group(2).strip()))] += qty
+    return tuple(sorted(sig.items()))
 
 
 def _swaps_from(report, k: int) -> tuple[list[str], list[str]]:
@@ -176,36 +222,6 @@ def build_bubble_arm_swaps(
     return adds, cuts, info
 
 
-def stage_arm(
-    original_text: str,
-    adds: list[str],
-    cuts: list[str],
-    out_path: Path,
-) -> bool:
-    """Apply one arm's swaps through the shared legality path and write
-    the staged ``.dck``. Returns False when the swaps were a no-op
-    (nothing applied — no point simming an identical deck)."""
-    from commander_builder._advisor_models import SwapRecommendation
-    from commander_builder.dck_meta import rewrite_name
-    from commander_builder.web.deck_text_ops import _apply_swaps_to_dck
-    recs = ([SwapRecommendation(card=c, action="add", reason="tier3")
-             for c in adds]
-            + [SwapRecommendation(card=c, action="cut", reason="tier3")
-               for c in cuts])
-    proposed, applied_adds, applied_cuts, _kept = _apply_swaps_to_dck(
-        original_text, recs,
-    )
-    if not applied_adds and not applied_cuts:
-        return False
-    # Name= MUST match the staged filename stem — log_parser attributes
-    # wins by Forge's displayed deck name, and base + arm sharing the
-    # original Name= would resurrect the pre-e8777b6 attribution bug
-    # (caught live: first pilot parsed 0 games).
-    out_path.write_text(rewrite_name(proposed, out_path.stem),
-                        encoding="utf-8")
-    return True
-
-
 def _build_arms(
     deck_path: Path,
     bracket: int,
@@ -244,10 +260,26 @@ def _build_arms(
 # Policy (set 2026-07-26): the CardScore/bubble flag earns default-on
 # ONLY if the challenger arm's PAIRED per-deck margin advantage over the
 # baseline arm has a 95% CI excluding zero across >= GATE_MIN_DECKS
-# decks AND a mean advantage above the MEASURED null-replicate noise
-# floor. A 2-of-3 winner tally (the pilot's headline) gates nothing.
+# decks AND a mean advantage above the null-replicate noise reference.
+# A 2-of-3 winner tally (the pilot's headline) gates nothing.
+#
+# The noise reference is a HEURISTIC, not the sampling noise of the
+# gated statistic: each null replicate measures the magnitude of ONE
+# base-vs-self margin, while the gate tests a mean over >= 6 decks of a
+# PAIRED difference of two independently simmed margins (per-deck noise
+# ~sqrt(2)x a single margin, shrunk by sqrt(n_decks) in the mean).
+# Comparing the mean advantage to the raw single-margin reference is
+# therefore conservative — it stays a belt-and-suspenders check on top
+# of the paired CI, which carries the statistical claim.
 
 GATE_MIN_DECKS = 6
+
+#: A single base-vs-self replicate is one draw from the margin-noise
+#: distribution — publishing a "floor" from it is the same n=1 mistake
+#: the 2026-07-25 pilot made by accident. Below this many replicates
+#: the floor is insufficient and the gate reports the floor criterion
+#: as not evaluated instead of passing or failing on it.
+GATE_MIN_NULL_REPLICATES = 2
 
 #: Two-sided 95% t critical values by degrees of freedom; the sparse
 #: tail uses the next-lower entry (conservative), >30 ~ normal.
@@ -262,10 +294,8 @@ def _t_crit(df: int) -> float:
         return float("inf")
     if df in _T_CRIT_95:
         return _T_CRIT_95[df]
-    lower = [k for k in _T_CRIT_95 if k <= df]
-    if lower:
-        return _T_CRIT_95[max(lower)]
-    return 1.96 if df > 30 else 12.706
+    # df >= 1 always has a lower table entry (the table starts at 1).
+    return _T_CRIT_95[max(k for k in _T_CRIT_95 if k <= df)]
 
 
 def paired_ci(diffs: list) -> Optional[dict]:
@@ -292,7 +322,9 @@ def run_null_replicate(
     """(b): sim an UNMODIFIED copy of the deck against itself.
 
     Any non-zero margin here is pure simulation noise at this games/pod
-    setting — the published floor real arm differences must clear. The
+    setting. Replicates publish a single-margin magnitude reference —
+    a heuristic sanity check, NOT the sampling noise of the gated
+    paired-mean statistic (see the gate policy comment above). The
     two copies get distinct staged names + Name= stamps (attribution
     invariant), and are removed afterwards like the real arms.
     """
@@ -335,9 +367,23 @@ def build_summary(rows: list, arms: tuple, null_rows: list) -> dict:
     noise_floor = None
     if null_margins:
         abs_m = [abs(m) for m in null_margins]
-        noise_floor = {"n": len(abs_m),
-                       "mean_abs_margin": sum(abs_m) / len(abs_m),
-                       "max_abs_margin": max(abs_m)}
+        noise_floor = {
+            "n": len(abs_m),
+            "mean_abs_margin": sum(abs_m) / len(abs_m),
+            "max_abs_margin": max(abs_m),
+            "sufficient": len(abs_m) >= GATE_MIN_NULL_REPLICATES,
+            "note": (
+                "heuristic single-margin magnitude reference: each "
+                "replicate is |margin| of one base-vs-self sim, not "
+                "the sampling noise of the gated paired-mean statistic "
+                "(per-deck paired noise ~sqrt(2)x a single margin, "
+                "shrunk by sqrt(n_decks) in the mean) — gating the "
+                "mean advantage on the raw reference is conservative"),
+        }
+    failed_decks = [{"deck": r.get("deck"), "error": r["failed"]}
+                    for r in rows if r.get("failed")]
+    failed_nulls = [{"deck": r.get("deck"), "error": r["failed"]}
+                    for r in null_rows if r.get("failed")]
     baseline = arms[0]
     paired: dict = {}
     gate: dict = {}
@@ -353,10 +399,14 @@ def build_summary(rows: list, arms: tuple, null_rows: list) -> dict:
                          "paired decks)")
         elif not (ci["mean"] > 0 and ci["excludes_zero"]):
             gate[arm] = "fail (95% CI does not show a positive advantage)"
-        elif noise_floor is None:
-            gate[arm] = "insufficient-null-floor (run --null-replicates)"
+        elif noise_floor is None or not noise_floor["sufficient"]:
+            have = noise_floor["n"] if noise_floor else 0
+            gate[arm] = (
+                "insufficient-null-floor (floor criterion NOT evaluated: "
+                f"{have} null replicate(s), need >= "
+                f"{GATE_MIN_NULL_REPLICATES} — run --null-replicates)")
         elif ci["mean"] <= noise_floor["mean_abs_margin"]:
-            gate[arm] = "fail (advantage below the measured noise floor)"
+            gate[arm] = "fail (advantage below the null-noise reference)"
         else:
             gate[arm] = "pass"
     return {
@@ -370,6 +420,14 @@ def build_summary(rows: list, arms: tuple, null_rows: list) -> dict:
         "bucket_wins": wins_by_arm.get("bucket", 0),
         "ties": sum(1 for r in rows if r.get("winner") == "tie"),
         "skipped": sum(1 for r in rows if r.get("skipped")),
+        "failed": len(failed_decks),
+        "failed_decks": failed_decks,
+        "failed_null_replicates": failed_nulls,
+        "failure_note": (
+            (f"{len(failed_decks)} deck(s) failed mid-run; a failed deck "
+             "has no margins and is excluded from the paired CI and win "
+             "tallies — the gate below is over the surviving decks only")
+            if failed_decks else None),
         "mean_margin_by_arm": {a: (sum(v) / len(v) if v else None)
                                for a, v in margins.items()},
         "paired_vs_" + baseline: paired,
@@ -378,7 +436,10 @@ def build_summary(rows: list, arms: tuple, null_rows: list) -> dict:
         "gate_policy": (
             f"default-on requires >= {GATE_MIN_DECKS} paired decks, a 95% "
             "paired-CI excluding zero, AND a mean advantage above the "
-            "measured null-replicate noise floor"),
+            "null-replicate noise reference (a heuristic single-margin "
+            f"magnitude check from >= {GATE_MIN_NULL_REPLICATES} "
+            "replicates; with fewer, the floor criterion is reported as "
+            "not evaluated)"),
     }
 
 
@@ -401,14 +462,18 @@ def run_deck(
         deck_path, bracket, k, arms, advise_fn=advise_fn,
         verdict_fn=verdict_fn, corpus_fn=corpus_fn)
 
-    swap_sets = list(built.values())
+    # Dedupe on what each arm STAGES, not what it requested — the
+    # legality path drops pairs order-dependently, so only the staged
+    # texts say whether two arms actually differ (see _staged_signature).
+    previews = {arm: _stage_preview(original_text, adds, cuts)
+                for arm, (adds, cuts) in built.items()}
+    signatures = [_staged_signature(text) for text, _ in previews.values()]
     row: dict = {
         "deck": deck_path.name,
         "bracket": bracket,
         "k": k,
         "arms": list(arms),
-        "arms_identical": all(_swap_signature(s) == _swap_signature(swap_sets[0])
-                              for s in swap_sets),
+        "arms_identical": all(s == signatures[0] for s in signatures),
     }
     for arm, (adds, cuts) in built.items():
         row[f"{arm}_arm"] = {"adds": adds, "cuts": cuts}
@@ -423,7 +488,7 @@ def run_deck(
             row["skipped"] = "verdict allowed a 0-swap budget"
             return row
     if row["arms_identical"]:
-        row["skipped"] = ("arms identical (same cards, any order) — "
+        row["skipped"] = ("arms stage identical decklists — "
                           "no signal to measure")
         return row
     if dry_run:
@@ -435,41 +500,53 @@ def run_deck(
     arm_margins: dict[str, Optional[float]] = {}
     if compare_fn is None:
         from commander_builder.compare_versions import compare as compare_fn
-    for arm, (adds, cuts) in built.items():
-        staged = stage_dir / f"{stem}__tier3_{arm}.dck"
-        if not stage_arm(original_text, adds, cuts, staged):
-            arm_margins[arm] = None
-            continue
-        # Stage the original beside it so compare() resolves both from
-        # one deck_dir — with its Name= rewritten to the staged stem for
-        # the same attribution reason as the arm deck.
-        from commander_builder.dck_meta import rewrite_name
-        original_copy = stage_dir / f"{stem}__tier3_base.dck"
-        original_copy.write_text(
-            rewrite_name(original_text, original_copy.stem),
-            encoding="utf-8")
-        report = compare_fn(
-            old_deck=original_copy.name,
-            new_deck=staged.name,
-            bracket=bracket,
-            games_per_pod=games,
-            deck_dir=stage_dir,
-        )
-        old_wins = report.old_stats.wins
-        new_wins = report.new_stats.wins
-        decisive = old_wins + new_wins
-        arm_margins[arm] = ((new_wins - old_wins) / decisive
-                            if decisive else None)
-        row[f"{arm}_sim"] = {"old_wins": old_wins, "new_wins": new_wins,
-                             "games": report.old_stats.games}
-    # The staged decks live in the REAL deck dir (Forge requirement) —
-    # remove them so they never pollute the deck list / web UI. The
-    # persisted compare reports remain the durable record.
-    for leftover in stage_dir.glob(f"{stem}__tier3_*.dck"):
-        try:
-            leftover.unlink()
-        except OSError:
-            pass
+    from commander_builder.dck_meta import rewrite_name
+    try:
+        for arm, (adds, cuts) in built.items():
+            proposed, applied = previews[arm]
+            if not applied:
+                arm_margins[arm] = None
+                continue
+            staged = stage_dir / f"{stem}__tier3_{arm}.dck"
+            # Name= MUST match the staged filename stem — log_parser
+            # attributes wins by Forge's displayed deck name, and base +
+            # arm sharing the original Name= would resurrect the
+            # pre-e8777b6 attribution bug (caught live: first pilot
+            # parsed 0 games).
+            staged.write_text(rewrite_name(proposed, staged.stem),
+                              encoding="utf-8")
+            # Stage the original beside it so compare() resolves both
+            # from one deck_dir — with its Name= rewritten to the staged
+            # stem for the same attribution reason as the arm deck.
+            original_copy = stage_dir / f"{stem}__tier3_base.dck"
+            original_copy.write_text(
+                rewrite_name(original_text, original_copy.stem),
+                encoding="utf-8")
+            report = compare_fn(
+                old_deck=original_copy.name,
+                new_deck=staged.name,
+                bracket=bracket,
+                games_per_pod=games,
+                deck_dir=stage_dir,
+            )
+            old_wins = report.old_stats.wins
+            new_wins = report.new_stats.wins
+            decisive = old_wins + new_wins
+            arm_margins[arm] = ((new_wins - old_wins) / decisive
+                                if decisive else None)
+            row[f"{arm}_sim"] = {"old_wins": old_wins,
+                                 "new_wins": new_wins,
+                                 "games": report.old_stats.games}
+    finally:
+        # The staged decks live in the REAL deck dir (Forge
+        # requirement) — remove them so they never pollute the deck
+        # list / web UI, INCLUDING when a sim crashes mid-arm. The
+        # persisted compare reports remain the durable record.
+        for leftover in stage_dir.glob(f"{stem}__tier3_*.dck"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
     for arm in built:
         row[f"{arm}_margin"] = arm_margins.get(arm)
     # A winner needs EVERY arm measured: a None margin means that arm
@@ -540,19 +617,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     stage_dir = (Path(args.stage_dir) if args.stage_dir
                  else deck_paths[0].parent)
 
+    # One crashed deck (Forge dying mid-pod, a timeout, a bad .dck)
+    # must not vaporize the whole run: before this containment, a
+    # failure on deck 4 of 6 meant decks 5-6 and the null replicates
+    # never ran, build_summary never executed, and --out was never
+    # written — every completed game lost. Record the failure as a row
+    # and keep going; build_summary excludes failed decks explicitly.
     rows = []
     for p in deck_paths:
         print(f"[tier3] {p.name} ...", file=sys.stderr, flush=True)
-        rows.append(run_deck(p, args.bracket, args.k, args.games,
-                             stage_dir, dry_run=args.dry_run, arms=arms))
+        try:
+            rows.append(run_deck(p, args.bracket, args.k, args.games,
+                                 stage_dir, dry_run=args.dry_run,
+                                 arms=arms))
+        except Exception as exc:
+            print(f"[tier3] {p.name} FAILED: {exc}",
+                  file=sys.stderr, flush=True)
+            rows.append({"deck": p.name,
+                         "failed": f"{type(exc).__name__}: {exc}"})
 
     null_rows: list = []
     if args.null_replicates and not args.dry_run:
         for p in deck_paths[:args.null_replicates]:
             print(f"[tier3] null replicate: {p.name} ...",
                   file=sys.stderr, flush=True)
-            null_rows.append(run_null_replicate(
-                p, args.bracket, args.games, stage_dir))
+            try:
+                null_rows.append(run_null_replicate(
+                    p, args.bracket, args.games, stage_dir))
+            except Exception as exc:
+                print(f"[tier3] null replicate {p.name} FAILED: {exc}",
+                      file=sys.stderr, flush=True)
+                null_rows.append({"deck": p.name, "null": True,
+                                  "failed":
+                                  f"{type(exc).__name__}: {exc}"})
 
     summary = build_summary(rows, arms, null_rows)
     if args.out:
@@ -562,7 +659,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(summary, indent=2))
     else:
         for r in rows:
-            if r.get("skipped"):
+            if r.get("failed"):
+                print(f"  {r['deck']}: FAILED ({r['failed']})")
+            elif r.get("skipped"):
                 print(f"  {r['deck']}: SKIPPED ({r['skipped']})")
                 if r.get("arms_identical") is False and args.dry_run:
                     for arm in arms:
@@ -573,11 +672,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 margins = " vs ".join(
                     f"{arm} {r.get(f'{arm}_margin')}" for arm in arms)
                 print(f"  {r['deck']}: {margins} -> {r.get('winner')}")
+        if summary.get("failure_note"):
+            print(summary["failure_note"])
         if summary.get("noise_floor"):
             nf = summary["noise_floor"]
-            print(f"noise floor ({nf['n']} null replicate(s)): "
+            print(f"null-noise reference ({nf['n']} null replicate(s), "
+                  "heuristic single-margin magnitude): "
                   f"mean |margin| {nf['mean_abs_margin']:.3f}, "
-                  f"max {nf['max_abs_margin']:.3f}")
+                  f"max {nf['max_abs_margin']:.3f}"
+                  + ("" if nf["sufficient"] else
+                     f" — INSUFFICIENT (need >= "
+                     f"{GATE_MIN_NULL_REPLICATES}; floor criterion not "
+                     "evaluated)"))
         for arm, verdict in (summary.get("gate") or {}).items():
             ci = summary[f"paired_vs_{arms[0]}"].get(arm)
             ci_txt = (f"mean {ci['mean']:+.3f} "
@@ -587,7 +693,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         tally = " / ".join(
             f"{arm} {summary['wins_by_arm'][arm]}" for arm in arms)
         print(f"{tally} / tie {summary['ties']} / "
-              f"skipped {summary['skipped']} over {summary['decks']} decks")
+              f"skipped {summary['skipped']} / failed {summary['failed']} "
+              f"over {summary['decks']} decks")
     return 0
 
 
