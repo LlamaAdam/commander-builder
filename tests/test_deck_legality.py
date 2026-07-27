@@ -749,6 +749,114 @@ def test_lookup_is_memoized_per_distinct_name():
     assert len(calls) <= 3
 
 
+# ---------------------------------------------------------------------------
+# Network circuit breaker (hard failures trip cache-only for the scan)
+# ---------------------------------------------------------------------------
+
+class _TimeoutFetcher:
+    """Injected lookup simulating a hard network failure. Each call
+    stands in for a real ~20s connect-timeout, so the CALL COUNT is
+    the latency bound the breaker exists to enforce."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, name: str):
+        self.calls += 1
+        raise TimeoutError("connect timed out")
+
+
+def test_network_failure_trips_breaker_after_one_attempt():
+    """A Scryfall outage must cost ~one timeout, not one per card:
+    100 names, ONE lookup attempt, the remainder drained for free."""
+    fetcher = _TimeoutFetcher()
+    names = [f"Card {i}" for i in range(100)]
+    assert scan_banned(names, lookup=fetcher) is None  # outage contract
+    assert fetcher.calls == 1
+
+
+def test_outage_via_breaker_yields_unverified_never_banned():
+    """The breaker preserves the RESULT contract: lookup failure →
+    "could not verify", never a fabricated ban or a clean bill."""
+    deck = _deck(["Test Commander"], [(98, "Forest"), (1, "Fastbond")])
+    report = validate_deck(deck, lookup=_TimeoutFetcher())
+    assert report.violations == ()
+    assert report.status == "unverified"
+    assert report.lookup_failures > 0
+
+
+def test_breaker_trips_mid_scan_and_keeps_verified_results():
+    """Names resolved BEFORE the failure keep their verdicts; names
+    after it go unverified without further lookup calls — the scan
+    degrades, it doesn't lie and it doesn't stall."""
+    calls: list[str] = []
+    good = _ban_lookup()
+
+    def fetcher(name: str):
+        calls.append(name)
+        if name == "Karakas":
+            raise TimeoutError("connect timed out")
+        return good(name)
+
+    names = ["Fastbond", "Coalition Victory", "Karakas", "Balance"]
+    scan = scan_banned(names, lookup=fetcher)
+    assert scan is not None
+    assert scan.banned == ("Fastbond",)
+    assert scan.unverified == ("Balance", "Karakas")
+    assert calls == ["Fastbond", "Coalition Victory", "Karakas"]
+
+
+def test_breaker_resets_between_scans():
+    """The breaker is per-scan state (each ``scan_banned`` builds a
+    fresh ``_Cards``): one dead-network scan must not poison the next
+    request permanently."""
+    fetcher = _TimeoutFetcher()
+    scan_banned(["A", "B", "C"], lookup=fetcher)
+    scan_banned(["A", "B", "C"], lookup=fetcher)
+    assert fetcher.calls == 2  # one attempt per scan, not one total
+
+
+def test_non_network_errors_do_not_trip_breaker():
+    """Only OSError-shaped failures trip cache-only. A per-card bug
+    keeps the existing contract: that card goes unverified and every
+    other name is still attempted."""
+    calls: list[str] = []
+
+    def fetcher(name: str):
+        calls.append(name)
+        raise RuntimeError("scryfall is down")
+
+    scan_banned(["A", "B", "C"], lookup=fetcher)
+    assert len(calls) == 3
+
+
+def test_default_lookup_breaker_drains_from_snapshots(monkeypatch):
+    """With the default (network-backed) lookup, a tripped breaker
+    serves the REST of the scan via ``lookup_card(cache_only=True)``:
+    already-snapshotted cards still resolve — including the card that
+    tripped it — with no further network attempts."""
+    network_calls: list[str] = []
+    snapshots = _lookup(
+        _card("Sol Ring", legality="legal"),
+        _card("Balance", legality="banned"),
+    )
+
+    def fake_lookup(name, cache=True, cache_only=False):
+        if cache_only:
+            return snapshots(name)
+        network_calls.append(name)
+        raise TimeoutError("connect timed out")
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    scan = scan_banned(["Sol Ring", "Balance", "Uncached Card"])
+    assert network_calls == ["Sol Ring"]  # one attempt, then cache-only
+    assert scan is not None
+    assert scan.banned == ("Balance",)         # snapshots stay authoritative
+    assert scan.unverified == ("Uncached Card",)
+
+
 def test_status_prefers_illegal_over_unverified():
     """A confirmed violation beats an un-run check: the deck is
     illegal regardless of what we couldn't check."""
@@ -873,4 +981,43 @@ def test_deck_audit_outage_reports_nothing_as_banned(tmp_path, monkeypatch):
     assert sorted(body["unverified_cards"]) == [
         "Fastbond", "Forest", "Test Commander",
     ]
+    assert any("could not be verified" in w for w in body["warnings"])
+
+
+def test_deck_audit_lookups_are_snapshot_only(tmp_path, monkeypatch):
+    """The audit runs inside a synchronous web request, so every
+    lookup it makes must be ``cache_only`` — a cold cache must not
+    serialize ~100 network GETs (nor, during an outage, ~100 20s
+    timeouts) before the response renders. A not-yet-snapshotted card
+    lands in ``unverified_cards`` instead."""
+    from commander_builder.web.app import create_app
+
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    (deck_dir / "Cold.dck").write_text(
+        _deck(["Test Commander"], [(98, "Forest"), (1, "Fastbond")]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "commander_builder.game_changers.load_game_changers", lambda **kw: set(),
+    )
+    snapshots = _lookup(GENERIC_CMDR, FOREST)  # Fastbond not yet cached
+
+    def fake_lookup(name, cache=True, cache_only=False):
+        if not cache_only:
+            raise AssertionError(
+                f"deck_audit hit the network for {name!r}"
+            )
+        return snapshots(name)
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+    app = create_app(deck_dir=deck_dir)
+    app.config["TESTING"] = True
+    resp = app.test_client().get("/api/deck_audit?deck=Cold&bracket=3")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["illegal_cards"] == []
+    assert body["unverified_cards"] == ["Fastbond"]
     assert any("could not be verified" in w for w in body["warnings"])
