@@ -115,6 +115,15 @@ def refresh_card(name: str) -> Optional[dict]:
         data = _http_get_json(url)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
+            # Scryfall disowned the name (card deleted or renamed). This
+            # function's contract is guaranteed-current data, so BOTH stale
+            # layers go: negative-memo the name (mirrors lookup_card's own
+            # 404 handling) AND remove the disk snapshot. Keeping the
+            # snapshot would let lookup_card — this process or the next —
+            # keep resurrecting data Scryfall says doesn't exist, which is
+            # exactly the staleness a refresh caller asked us to rule out.
+            _memo_put(_memo_key(name), _LOOKUP_MISS)
+            _cache_path(name).unlink(missing_ok=True)
             return None
         raise
     cache_path = _cache_path(name)
@@ -122,7 +131,7 @@ def refresh_card(name: str) -> Optional[dict]:
     cache_path.write_text(json.dumps(data), encoding="utf-8")
     # Keep the process memo coherent with the snapshot we just rewrote.
     _memo_put(_memo_key(name), data)
-    return data
+    return dict(data)  # top-level copy — see the memo contract note
 
 
 def format_card_for_display(name: str) -> str:
@@ -187,9 +196,15 @@ def diff_oracle_text(name: str, candidate: str) -> Optional[dict]:
 # rate-limit sleep plus a live HTTP round-trip on EVERY call, forever.
 # Keyed on (current CACHE_DIR, folded name) because tests monkeypatch
 # ``CACHE_DIR`` per test; the autouse conftest fixture clears the memo
-# between tests. Entries are the parsed snapshot dicts themselves —
-# treat them as READ-ONLY (the same contract DeckContext.card already
-# established for its per-context memo).
+# between tests.
+#
+# COPY CONTRACT: the memo holds the parsed snapshot dicts, but callers
+# never see them — ``lookup_card`` / ``refresh_card`` return a fresh
+# TOP-LEVEL ``dict(...)`` copy per call, so mutating a returned dict's
+# keys cannot poison the process-wide cache. The copy is shallow (a
+# deep copy would tax every call for a hazard no caller exhibits), so
+# NESTED values — ``color_identity`` lists, ``prices``/``legalities``
+# dicts — are still the cached objects: treat those as READ-ONLY.
 _LOOKUP_MEMO: dict = {}
 _LOOKUP_MEMO_MAX = 8192
 #: Negative-cache sentinel: Scryfall answered 404 for this name. Process
@@ -237,7 +252,7 @@ def lookup_card(
         if hit is _LOOKUP_MISS:
             return None
         if hit is not None:
-            return hit
+            return dict(hit)  # top-level copy — see the memo contract note
     cache_path = _cache_path(name)
     if cache and cache_path.exists():
         try:
@@ -246,7 +261,7 @@ def lookup_card(
             pass  # Re-fetch on corruption.
         else:
             _memo_put(key, data)
-            return data
+            return dict(data)
     if cache_only:
         return None
     url = f"{SCRYFALL_BASE}/cards/named?{urllib.parse.urlencode({'exact': name})}"
@@ -265,6 +280,7 @@ def lookup_card(
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(data), encoding="utf-8")
         _memo_put(key, data)
+        return dict(data)  # top-level copy — see the memo contract note
     return data
 
 

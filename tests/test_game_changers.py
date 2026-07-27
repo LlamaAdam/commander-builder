@@ -446,3 +446,81 @@ def test_load_game_changers_memo_returns_defensive_copies(monkeypatch):
     first = gc.load_game_changers()
     first.add("Injected Card")
     assert gc.load_game_changers() == {"Rhystic Study"}
+
+
+def test_transient_fetch_failure_pins_fallback_only_briefly(monkeypatch, capsys):
+    """One network blip must not freeze the bundled fallback for the full
+    15-minute memo window — a bracket audit inside it would silently run
+    on a possibly-stale list (pre-memo code retried on every call).
+    Degraded results are pinned for _FAILURE_TTL_SEC and the pin is
+    logged loudly, once per pin."""
+    import urllib.error
+    from commander_builder import game_changers as gc
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(gc.time, "monotonic", lambda: clock["t"])
+    calls = {"n": 0}
+
+    def flaky_fetch(use_cache=True):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("transient blip")
+        return {"Rhystic Study"}
+
+    monkeypatch.setattr(gc, "fetch_game_changers", flaky_fetch)
+    gc.clear_memo()
+
+    assert gc.load_game_changers() == set(gc._FALLBACK)  # degraded
+    assert "fallback" in capsys.readouterr().err  # loud once per pin
+
+    # Inside the failure window: pinned, no re-fetch, no re-log.
+    clock["t"] += gc._FAILURE_TTL_SEC - 1
+    assert gc.load_game_changers() == set(gc._FALLBACK)
+    assert calls["n"] == 1
+    assert capsys.readouterr().err == ""
+
+    # Just past the failure window — far inside the 15-minute success
+    # TTL — the retry happens and recovers.
+    clock["t"] += 2
+    assert gc.load_game_changers() == {"Rhystic Study"}
+    assert calls["n"] == 2
+
+    # The healthy result is pinned for the FULL window again.
+    clock["t"] += gc._FAILURE_TTL_SEC + 5
+    assert gc.load_game_changers() == {"Rhystic Study"}
+    assert calls["n"] == 2
+
+
+def test_degraded_real_fetch_gets_the_short_pin(tmp_path, monkeypatch, capsys):
+    """The non-raising degradation path — fetch_game_changers RETURNS the
+    fallback after a dead scrape — must also get the short pin. It is
+    signalled via _LAST_FETCH_DEGRADED (a content comparison against
+    _FALLBACK cannot work: a trusted scrape identical to the bundled
+    list is the healthy in-sync steady state)."""
+    import urllib.error
+    from commander_builder import game_changers as gc
+
+    clock = {"t": 500.0}
+    monkeypatch.setattr(gc.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(gc, "CACHE_PATH", tmp_path / "gc.v2.json")
+    fetches = {"n": 0}
+
+    def offline_http(url, timeout=20):
+        fetches["n"] += 1
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(gc, "_http_get_text", offline_http)
+    gc.clear_memo()
+
+    assert gc.load_game_changers() == set(gc._FALLBACK)
+    assert gc._LAST_FETCH_DEGRADED is True
+    assert "fallback" in capsys.readouterr().err
+
+    # Pinned within the failure TTL...
+    clock["t"] += 10
+    gc.load_game_changers()
+    assert fetches["n"] == 1
+    # ...and retried right after it, not 15 minutes later.
+    clock["t"] += gc._FAILURE_TTL_SEC
+    gc.load_game_changers()
+    assert fetches["n"] == 2

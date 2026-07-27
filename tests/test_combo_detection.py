@@ -398,3 +398,30 @@ def test_load_combos_cache_invalidates_on_rewrite(tmp_path, monkeypatch):
     st = out.stat()
     os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     assert [c["produces"] for c in combo_detection.load_combos()] == ["Y"]
+
+
+def test_load_combos_inner_dicts_are_shared_do_not_mutate(tmp_path, monkeypatch):
+    """Pins load_combos's documented COPY CONTRACT: the returned LIST is
+    fresh per call, but the combo dicts inside are the cached objects,
+    shared process-wide (deep-copying a ~1,500-entry refreshed DB every
+    call would claw back most of the cache's win). If a future caller
+    starts mutating combo dicts, this test is the tripwire — either fix
+    the caller or upgrade load_combos to per-call dict copies."""
+    out = tmp_path / "combos.json"
+    out.write_text(
+        json.dumps({"combos": [{"cards": ["A", "B"], "produces": "X"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(combo_detection, "COMBO_DATA_PATH", out)
+    first = combo_detection.load_combos()
+    # List-level mutation does NOT leak (fresh list per call)...
+    first.append({"cards": ["C", "D"], "produces": "list-level junk"})
+    second = combo_detection.load_combos()
+    assert [c["produces"] for c in second] == ["X"]
+    # ...but inner-dict mutation DOES — this is the documented sharing.
+    second[0]["produces"] = "MUTATED"
+    assert combo_detection.load_combos()[0]["produces"] == "MUTATED"
+    # The fallback path shares its inner dicts the same way (module-level
+    # _FALLBACK entries), so the same DO-NOT-MUTATE rule applies there.
+    fb = combo_detection.load_combos(force_fallback=True)
+    assert fb[0] is combo_detection._FALLBACK[0]
