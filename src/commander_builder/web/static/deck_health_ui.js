@@ -309,11 +309,20 @@ function renderHealthTile(opts) {
     { class: "muted", style: "font-size: 11px; margin-bottom: 2px;" },
     opts.label,
   ));
-  tile.appendChild(el(
+  const valueEl = el(
     "div",
     { style: "font-size: 18px; font-weight: 600;" },
     String(opts.value),
-  ));
+  );
+  // WCAG 1.4.1 — the warn/good state was conveyed only by the tile's
+  // tint. Screen-reader-only suffix names the state; sighted rendering
+  // is unchanged (.sr-only is visually hidden).
+  if (opts.flavor === "warn") {
+    valueEl.appendChild(el("span", { class: "sr-only" }, " (below recommended)"));
+  } else if (opts.flavor === "good") {
+    valueEl.appendChild(el("span", { class: "sr-only" }, " (good)"));
+  }
+  tile.appendChild(valueEl);
   if (opts.sub) {
     tile.appendChild(el(
       "div",

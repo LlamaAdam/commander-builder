@@ -295,6 +295,82 @@ def test_root_has_mobile_drawer_markup(client):
     body = resp.data.decode("utf-8")
     assert 'id="btn-drawer-toggle"' in body
     assert 'id="drawer-scrim"' in body
+    # A11y contract (WCAG 4.1.2): the hamburger announces its name +
+    # expanded state and points at the drawer it controls; the scrim is
+    # decoration only.
+    hamburger = body.split('id="btn-drawer-toggle"')[0].rsplit("<button", 1)[1] \
+        + body.split('id="btn-drawer-toggle"')[1].split(">")[0]
+    assert 'aria-label="Menu"' in hamburger
+    assert 'aria-expanded="false"' in hamburger
+    assert 'aria-controls="sidebar-panel"' in hamburger
+    scrim_tag = body.split('id="drawer-scrim"')[0].rsplit("<div", 1)[1] \
+        + body.split('id="drawer-scrim"')[1].split(">")[0]
+    assert 'aria-hidden="true"' in scrim_tag
+
+
+def test_root_has_a11y_markup(client):
+    """WCAG 2.1 AA pass (fix/web-a11y): rendered index ships the ARIA
+    contract app.js builds on — dialog semantics on the custom modals,
+    live regions for async status text, and label associations on the
+    build-from-scratch form."""
+    resp = client.get("/")
+    body = resp.data.decode("utf-8")
+
+    # Custom modals are real dialogs (the native settings <dialog>
+    # brings its own semantics + focus trap).
+    assert body.count('role="dialog"') >= 3
+    assert body.count('aria-modal="true"') >= 3
+    assert 'aria-labelledby="new-deck-title"' in body
+    assert 'aria-labelledby="alert-title"' in body
+    assert 'aria-labelledby="propose-title"' in body
+    assert 'aria-labelledby="settings-title"' in body
+
+    # Async status text (build poller, propose sim, settings save, and
+    # the sidebar Cards/Rules search results) announces via live regions
+    # instead of being visual-only.
+    for status_id in ("new-deck-status", "propose-status", "settings-status"):
+        idx = body.index('id="%s"' % status_id)
+        tag = body[body.rindex("<", 0, idx):body.index(">", idx)]
+        assert 'aria-live="polite"' in tag, status_id
+    for results_id in ("library-results", "rules-results"):
+        idx = body.index('id="%s"' % results_id)
+        tag = body[body.rindex("<", 0, idx):body.index(">", idx)]
+        assert 'aria-live="polite"' in tag, results_id
+
+    # Add-deck tabs carry the tablist pattern.
+    assert 'role="tablist"' in body
+    assert body.count('role="tab"') >= 4
+    assert body.count('role="tabpanel"') >= 4
+    assert 'aria-selected="true"' in body
+
+    # Build-from-scratch labels are programmatically associated
+    # (label[for] -> input id), incl. the FP-014 partner field.
+    for field in ("new-build-commander", "new-build-partner",
+                  "new-build-name", "new-build-bracket",
+                  "new-mox-url", "new-paste-text", "new-bulk-urls"):
+        assert 'for="%s"' % field in body, field
+
+    # Unlabeled-by-position inputs get aria-labels.
+    assert 'id="card-search-input"' in body
+    idx = body.index('id="card-search-input"')
+    tag = body[body.rindex("<", 0, idx):body.index(">", idx)]
+    assert "aria-label" in tag
+
+
+def test_static_css_has_a11y_rules(client):
+    """The stylesheet ships the a11y primitives the fix relies on:
+    reduced-motion opt-out, the sr-only utility, explicit placeholder
+    contrast, and the themed settings dialog (the UA-default white
+    background put .muted text at 3.09:1 — below AA's 4.5:1)."""
+    resp = client.get("/static/app.css")
+    try:
+        css = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    assert "prefers-reduced-motion" in css
+    assert ".sr-only" in css
+    assert "::placeholder" in css
+    assert "#settings-dialog" in css
 
 
 def test_static_css_serves(client):

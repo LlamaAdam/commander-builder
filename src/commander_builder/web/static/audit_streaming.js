@@ -144,7 +144,14 @@ function updateAuditProgress(sug, phase, data, sourceFinal) {
   // accumulate stale status lines.
   let prog = sug.querySelector(".audit-progress");
   if (!prog) {
-    prog = el("p", { class: "muted audit-progress" }, "");
+    // role=status/aria-live: announce the streaming audit's phase
+    // updates ("Analyzing…", "Manabase scan…", "Finalizing…") to
+    // screen readers, not just visually (WCAG 4.1.3).
+    prog = el(
+      "p",
+      { class: "muted audit-progress", role: "status", "aria-live": "polite" },
+      "",
+    );
     sug.appendChild(prog);
   }
   if (phase === "diagnosis") {

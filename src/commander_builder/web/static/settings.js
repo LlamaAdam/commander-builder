@@ -24,7 +24,10 @@
 
   function setStatus(msg, isError) {
     statusEl.textContent = msg || "";
-    statusEl.style.color = isError ? "#c0392b" : "";
+    // var(--bad) #f07a7a is 6.45:1 on the dialog's var(--panel)
+    // background; the old #c0392b computed 3.20:1 there (below the
+    // WCAG AA 4.5:1 floor once the dialog picked up the dark theme).
+    statusEl.style.color = isError ? "var(--bad)" : "";
   }
 
   // Populate the form from the redacted config payload.
