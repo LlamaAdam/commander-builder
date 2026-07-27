@@ -40,7 +40,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from .card_score import DeckContext, cut_score, deck_context, score_card
+from .card_score import (
+    DeckContext,
+    _is_land_card,
+    cut_score,
+    deck_context,
+    score_card,
+)
 
 # ---------------------------------------------------------------------------
 # Tuning surface (hand-set priors, same pattern as CARD_SCORE_WEIGHTS)
@@ -441,9 +447,14 @@ def _component_reference_alignment(
 ) -> Optional[tuple[float, str]]:
     if corpus is None:
         return None
+    # FRONT face decides land-ness (``card_score._is_land_card``), the
+    # same rule the rest of the FP-015 slice uses — so a "Sorcery //
+    # Land" MDFC counts as a nonland SPELL and participates in the
+    # alignment mean (the old whole-type-line "Land" test silently
+    # excluded MDFC spell-fronts). A card the lookup can't resolve
+    # still counts as a nonland, exactly as before.
     nonlands = [c for c in ctx.deck_cards
-                if not ctx.card(c) or "Land" not in
-                (ctx.card(c) or {}).get("type_line", "")]
+                if not (ctx.card(c) and _is_land_card(c, ctx.card(c)))]
     supports = [s for s in (corpus.support(c) for c in nonlands)
                 if s is not None]
     if not supports:
@@ -516,6 +527,19 @@ def score_deck(
     0-2 proposals, ``polish`` 2-5, and ``overhaul`` means structural
     work (roles/manabase) should come before card swaps at all —
     FP-002's fix-structure-first finding, operationalized.
+
+    Two presentation quirks every surface that prints
+    "propose {min}-{max} changes" inherits (see
+    :func:`apply_verdict_to_report` for the trimming that implements
+    them):
+
+    - The budget counts SWAPS, and the trim caps adds and cuts at
+      ``max`` EACH — so "keep (0-2)" can still surface up to 2 adds
+      plus 2 cuts, i.e. 4 changed card lines.
+    - ``overhaul`` prints "propose 0-0 changes" yet the
+      recommendation list below it is NOT emptied: the advisor's recs
+      ARE the structural fixes, so they all survive. The 0-budget
+      means "swaps alone won't fix this deck", not "show nothing".
     """
     if ctx is None:
         if corpus is not None and "salt_scores" not in ctx_kwargs:
@@ -686,6 +710,11 @@ def find_bubble_cards(
         # pipeline owns land counts. (Caught live 2026-07-25: Temple
         # Garden outscored real spell candidates via its mana_fit
         # component and was offered as a creature's replacement.)
+        # Deliberately a whole-type-line "Land" match, NOT the
+        # front-face rule ``_component_reference_alignment`` uses: ANY
+        # land face (an MDFC spell-front included) disqualifies a
+        # replacement, because offering it would still hand the deck a
+        # card the manabase pipeline may count as a land.
         cand_card = ctx.card(cand)
         if cand_card and "Land" in (cand_card.get("type_line") or ""):
             continue
@@ -764,13 +793,17 @@ def apply_verdict_to_report(
       keeps the best); non-essential cuts are reordered **bubble-first**
       (easiest replacements lead, so the downstream i-mod-n add/cut
       pairing consumes bubble cards before coin-flip cuts) and capped
-      at the same budget. Recs whose ``evidence.source`` ends with
-      ``"_essentials"`` (manabase / tribal fixes) are structural and
-      always survive the trim.
+      at the same budget. The cap applies to adds and cuts EACH —
+      the budget counts swaps, so "keep (0-2)" can still deliver up
+      to 2 adds plus 2 cuts (4 changed card lines). Recs whose
+      ``evidence.source`` ends with ``"_essentials"`` (manabase /
+      tribal fixes) are structural and always survive the trim.
     - ``verdict == "overhaul"``: nothing is trimmed. The budget of 0
       swaps means "swaps alone won't fix this deck" — but the
       advisor's recommendations ARE the structural fixes, so they all
-      stay. The verdict text tells the user to fix structure first.
+      stay. The verdict text tells the user to fix structure first,
+      which is why a surface can honestly print "propose 0-0 changes"
+      directly above a full, untrimmed recommendation list.
 
     ``score_fn`` / ``bubble_fn`` default to :func:`score_deck` /
     :func:`find_bubble_cards` and are injectable for tests.

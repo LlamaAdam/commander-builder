@@ -55,7 +55,11 @@ EDHREC (average deck + salt), and further sites as they're added.
 
 **Also shipped (2026-07-25, later):** advisor integration.
 `AdviceReport` gained optional `deck_score` / `bubble_cards` fields
-(default None/empty — the default path is untouched);
+(default None/empty — flag-off behavior is untouched, but the flag-off
+invariant is *behavioral, not byte-level* for serialized shapes:
+`to_dict()` and every JSON surface built from it always carry both
+keys as null/[] — schema additive by design, see
+`AdviceReport.deck_score`);
 `bubble_analysis.apply_verdict_to_report()` returns a NEW report with
 recommendations trimmed to the change budget (advisor-ranked adds
 capped; cuts reordered **bubble-first** then capped; `*_essentials`

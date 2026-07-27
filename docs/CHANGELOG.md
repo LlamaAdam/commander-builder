@@ -6,6 +6,47 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-27 — FP-015 boundary semantics: measured-zero vs unavailable, flag isolation
+
+#### Fixed
+
+- **`fix(card-score)`: a measured 0.0% EDHREC synergy is scored, not
+  renormalized away.** `_f_synergy` used truthiness (`if synergy_pct`), so a
+  real measurement of 0.0 was treated as "unavailable" and its weight shifted
+  onto the card's other components — letting a 0%-synergy card outrank a
+  0.1%-synergy card on the synergy component itself, violating the module's
+  "unavailable != bad" contract. Now `is not None`. `_f_consensus` keeps its
+  `0.0 <` fallthrough **deliberately** (opposite choice, documented in-code):
+  a literal 0.0 inclusion is overwhelmingly the EDHREC client's missing-data
+  sentinel (`CardEntry` defaults + `or 0` coercions), and falling through
+  swaps that ambiguous sentinel for `edhrec_rank`, a real measurement.
+- **`fix(tests)`: autouse `COMMANDER_BUILDER_CARD_SCORE` isolation.** The
+  conftest isolated the collection path and knowledge log but not the FP-015
+  flag, so an operator shell with the flag exported (the tier-3 workflow does
+  exactly this) ran the whole suite down the flag-on path. New autouse
+  `delenv` fixture; tests that opt in still `setenv` inside the test body,
+  which runs after fixture setup (pinned by test).
+- **`fix(bubble)`: `_component_reference_alignment` now uses the front-face
+  land rule** (`card_score._is_land_card`) like the rest of the FP-015 slice,
+  so "Sorcery // Land" MDFC spell-fronts participate in the alignment mean
+  instead of being silently excluded. The replacement-pool land filter keeps
+  its whole-type-line match on purpose (any land face disqualifies a
+  replacement) — documented at the site.
+
+#### Docs
+
+- **Flag-off schema invariant restated honestly: behaviorally gated, schema
+  additive.** `AdviceReport.to_dict()`, the web audit payload, and
+  `auto-curate --json` always carry `deck_score` (null) / `bubble_cards`
+  ([]) even with the flag off. Keys are kept rather than stripped — the
+  additive shape already shipped, and removing keys would change the schema a
+  second time for existing consumers.
+- Recorded the verdict presentation quirks where users meet them: "overhaul"
+  prints "propose 0-0 changes" above a deliberately untrimmed recommendation
+  list (the recs ARE the structure fixes), and the change budget counts
+  swaps — "keep (0-2)" trims adds and cuts to 2 **each**, i.e. up to 4
+  changed card lines.
+
 ### 2026-07-24 — FP-012 full slice: budget-bounded UCB1 swap search in the improve loop
 
 #### Added
