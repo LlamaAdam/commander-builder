@@ -79,6 +79,18 @@ CACHE_TTL_DAYS = 7
 _MIN_SCRAPED_NAMES = 40
 _MIN_FALLBACK_OVERLAP = 0.80
 
+# Did the LAST fetch_game_changers call degrade to the bundled fallback
+# (network failure or rejected scrape) rather than return trusted data
+# (fresh cache or trusted scrape)? load_game_changers reads this to pick
+# its memo TTL — a degraded result must not be pinned for the full
+# window. A module-level flag rather than a widened return type so
+# existing callers (and the tests that monkeypatch fetch_game_changers
+# wholesale) keep working unchanged. Content comparison against
+# _FALLBACK can't stand in for it: a trusted scrape that matches the
+# bundled list exactly is the healthy in-sync steady state, not a
+# degradation. Reset by clear_memo (test isolation seam).
+_LAST_FETCH_DEGRADED = False
+
 # Fallback list — keep in sync with prompts/moxfield_audit_v3.md "Hardcoded
 # fallback" section. Update when the prompt updates (or when this module's
 # dynamic fetch surfaces additions).
@@ -258,7 +270,11 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
     cache, so a fallback-only result never masquerades as "fresh" for the
     whole TTL and never blocks a retry on the next call — and a bad parse
     never poisons the cache for a week.
+
+    Sets ``_LAST_FETCH_DEGRADED`` on every call so ``load_game_changers``
+    can pin degraded results for a shorter window.
     """
+    global _LAST_FETCH_DEGRADED
     if use_cache and _cache_is_fresh(CACHE_PATH):
         try:
             data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
@@ -275,6 +291,7 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
             # being served for the rest of its TTL.
             trusted, _overlap = _scrape_is_trustworthy(cached)
             if trusted:
+                _LAST_FETCH_DEGRADED = False
                 return cached
         except (OSError, ValueError):
             pass  # Re-fetch on cache corruption.
@@ -300,9 +317,11 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
                 f"using bundled fallback, not caching.",
                 file=sys.stderr, flush=True,
             )
+        _LAST_FETCH_DEGRADED = True
         return set(_FALLBACK)
 
     _log_divergence(scraped)
+    _LAST_FETCH_DEGRADED = False
     merged = set(scraped)
 
     if use_cache:
@@ -329,8 +348,18 @@ def fetch_game_changers(use_cache: bool = True) -> set[str]:
 # keeps the documented "a failed scrape never blocks a retry" property at
 # process scope — a long-lived web app re-attempts every 15 minutes
 # instead of on every request, and short-lived CLIs fetch exactly once.
-_MEMO: Optional[tuple[float, frozenset[str]]] = None
+# The tuple is (monotonic stamp, cards, ttl): the TTL is chosen per entry
+# because degraded results get a much shorter one (below).
+_MEMO: Optional[tuple[float, frozenset[str], float]] = None
 _MEMO_TTL_SEC = 900.0
+# Degraded results (fallback served because the fetch failed or the
+# scrape was rejected) get a much shorter pin: one transient network
+# blip must not freeze the bundled fallback in place for the full
+# 15-minute window — a bracket audit run inside it would silently use a
+# possibly-stale list, and pre-memo code retried on every call. 60s
+# keeps most of the memo's protection (a deck build's ~6 calls still
+# collapse to one fetch) while restoring retry pressure quickly.
+_FAILURE_TTL_SEC = 60.0
 
 # Folded-set cache for is_game_changer, keyed on the exact set the last
 # call to load_game_changers() returned so tests that monkeypatch the
@@ -340,27 +369,42 @@ _FOLDED: Optional[tuple[frozenset[str], frozenset[str]]] = None
 
 def clear_memo() -> None:
     """Reset the in-process memos (test isolation seam)."""
-    global _MEMO, _FOLDED
+    global _MEMO, _FOLDED, _LAST_FETCH_DEGRADED
     _MEMO = None
     _FOLDED = None
+    _LAST_FETCH_DEGRADED = False
 
 
 def load_game_changers(force_refresh: bool = False) -> set[str]:
     """Load the cached Game Changers list. Triggers a fetch if cache is stale
     or missing. Returns the fallback set on any error so audits don't break.
 
-    Memoized per process (15 min TTL); ``force_refresh=True`` bypasses and
-    repopulates the memo."""
+    Memoized per process (15 min TTL for trusted data, ``_FAILURE_TTL_SEC``
+    when the fetch degraded to the bundled fallback — degradation is also
+    logged loudly once per pin, house style); ``force_refresh=True``
+    bypasses and repopulates the memo."""
     global _MEMO
     if not force_refresh and _MEMO is not None:
-        stamp, cards = _MEMO
-        if time.monotonic() - stamp < _MEMO_TTL_SEC:
+        stamp, cards, ttl = _MEMO
+        if time.monotonic() - stamp < ttl:
             return set(cards)
     try:
         result = fetch_game_changers(use_cache=not force_refresh)
+        degraded = _LAST_FETCH_DEGRADED
     except Exception:  # noqa: BLE001
         result = set(_FALLBACK)
-    _MEMO = (time.monotonic(), frozenset(result))
+        degraded = True
+    ttl = _FAILURE_TTL_SEC if degraded else _MEMO_TTL_SEC
+    if degraded:
+        # Once per PIN, not per call — the memo would otherwise hide that
+        # audits are running on the bundled fallback list for this window.
+        print(
+            f"[game_changers] fetch degraded to the bundled fallback "
+            f"({len(result)} cards) — serving it for {ttl:g}s before "
+            f"retrying.",
+            file=sys.stderr, flush=True,
+        )
+    _MEMO = (time.monotonic(), frozenset(result), ttl)
     return set(result)
 
 

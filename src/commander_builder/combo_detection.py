@@ -73,7 +73,15 @@ _COMBOS_CACHE: tuple[tuple[str, int, int], list[dict]] | None = None
 def load_combos(force_fallback: bool = False) -> list[dict]:
     """Load the combo list: the refreshed ``data/combos.json`` if present,
     else the hand-curated fallback. Each combo is ``{cards, produces,
-    [popularity], [identity]}``."""
+    [popularity], [identity]}``.
+
+    COPY CONTRACT: every return hands back a fresh LIST (append/sort/del
+    on it is safe), but the combo dicts INSIDE are the cached objects
+    themselves, shared by every caller in the process — deep-copying a
+    ~1,500-entry refreshed DB on each call would claw back most of what
+    the mtime-keyed cache saves, and no caller mutates them today. DO
+    NOT MUTATE a returned combo dict; copy it first. Pinned by
+    ``test_load_combos_inner_dicts_are_shared_do_not_mutate``."""
     global _COMBOS_CACHE
     if not force_fallback and COMBO_DATA_PATH.exists():
         try:
@@ -88,6 +96,8 @@ def load_combos(force_fallback: bool = False) -> list[dict]:
                 return list(combos)
         except (OSError, ValueError):
             pass
+    # Same zero-copy contract as above: fresh list, shared inner dicts
+    # (here the module-level _FALLBACK entries).
     return list(_FALLBACK)
 
 

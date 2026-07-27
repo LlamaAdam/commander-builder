@@ -580,3 +580,36 @@ def test_lookup_memo_is_bounded(cache_dir, monkeypatch):
         _snapshot(cache_dir, f"Card {i}", {"name": f"Card {i}"})
         lookup_card(f"Card {i}")
     assert len(sc._LOOKUP_MEMO) <= 3
+
+
+def test_refresh_card_404_evicts_stale_memo_and_snapshot(cache_dir, monkeypatch):
+    """A 404 on refresh means Scryfall disowned the name (gone/renamed).
+    Both stale layers must be evicted: before this fix the positive memo
+    entry and the disk snapshot survived, so lookup_card kept serving
+    data for a card Scryfall says doesn't exist."""
+    snap = _snapshot(cache_dir, "Renamed Card", {"name": "Renamed Card"})
+    assert lookup_card("Renamed Card")["name"] == "Renamed Card"  # memo warm
+    calls = _http_counter(monkeypatch, status=404)
+    assert sc.refresh_card("Renamed Card") is None
+    assert not snap.exists()  # snapshot evicted alongside the memo entry
+    # Subsequent lookups answer None from the negative memo — the stale
+    # dict is gone and the 404 verdict is not re-fetched.
+    assert lookup_card("Renamed Card") is None
+    assert calls["n"] == 1  # only refresh_card itself hit the network
+
+
+def test_lookup_card_returns_defensive_copies(cache_dir, monkeypatch):
+    """lookup_card hands out a fresh top-level dict per call, so a caller
+    that mutates its result cannot poison the process-wide memo. (The
+    copy is shallow — nested values stay shared and READ-ONLY; see the
+    memo contract note in scryfall_client.)"""
+    _http_counter(monkeypatch, status=500)  # any refetch would raise loudly
+    _snapshot(cache_dir, "Sol Ring", {"name": "Sol Ring", "cmc": 1})
+    first = lookup_card("Sol Ring")   # disk-load branch
+    first["name"] = "MUTATED"
+    first["injected"] = True
+    second = lookup_card("Sol Ring")  # memo-hit branch
+    assert second == {"name": "Sol Ring", "cmc": 1}
+    assert second is not first
+    second["name"] = "ALSO MUTATED"   # memo-hit copies are independent too
+    assert lookup_card("Sol Ring")["name"] == "Sol Ring"
