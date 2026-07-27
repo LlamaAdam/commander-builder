@@ -57,6 +57,15 @@ DEFAULT_REFERENCE_N = 50
 #: Cache lifetime for a fetched corpus. Liked-deck rankings move slowly.
 CACHE_TTL_HOURS = 168
 
+#: Cache lifetime when at least one corpus source came back EMPTY. An
+#: empty source is indistinguishable from a transient outage (every
+#: fetcher degrades to [] on failure) — same reasoning as the EDHREC
+#: "empty parse NOT cached" fix — so a partial corpus must not squat on
+#: the full week-long TTL. Short enough that the next hour's run
+#: retries; long enough that a hard-down source doesn't trigger a
+#: ~75-request cold rebuild on every call.
+PARTIAL_CACHE_TTL_HOURS = 1
+
 #: A card is support-bubble-eligible when at most this fraction of
 #: reference decks run it.
 BUBBLE_SUPPORT_CEILING = 0.25
@@ -116,6 +125,12 @@ class ReferenceCorpus:
     key -> canonical printed name so replacement suggestions render
     properly. ``average_deck_keys`` is EDHREC's aggregate list;
     ``salt_map`` is EDHREC's key -> 0-5 salt score.
+
+    ``partial_sources`` names the deck-content sources that came back
+    empty at build time (``"moxfield"`` / ``"archidekt"`` /
+    ``"edhrec_average"``). Non-empty means this corpus is degraded —
+    the cache layer expires it at ``PARTIAL_CACHE_TTL_HOURS`` instead
+    of the full TTL, and callers/logs can see why support() is thin.
     """
 
     commander: str
@@ -125,6 +140,7 @@ class ReferenceCorpus:
     average_deck_keys: frozenset[str] = frozenset()
     salt_map: dict[str, float] = field(default_factory=dict)
     fetched_at: float = 0.0
+    partial_sources: tuple[str, ...] = ()
 
     @property
     def n_decks(self) -> int:
@@ -181,6 +197,7 @@ class ReferenceCorpus:
             "average_deck": sorted(self.average_deck_keys),
             "salt_map": self.salt_map,
             "fetched_at": self.fetched_at,
+            "partial_sources": list(self.partial_sources),
         }
 
     @classmethod
@@ -196,6 +213,7 @@ class ReferenceCorpus:
             salt_map={k: float(v)
                       for k, v in (payload.get("salt_map") or {}).items()},
             fetched_at=float(payload.get("fetched_at", 0.0)),
+            partial_sources=tuple(payload.get("partial_sources") or ()),
         )
 
 
@@ -282,19 +300,42 @@ def build_reference_corpus(
     Archidekt top-viewed decks (plain card-name lists, capped at its own
     smaller request budget) and merges into the same reference pool —
     ``support()`` is denominatored over ALL merged decks.
+
+    Partial builds: every source degrades to empty on failure, so
+    "some sources empty, some not" usually means a transient outage —
+    NOT what the community actually builds. Such a corpus is still
+    returned (degraded beats nothing) but is marked via
+    ``partial_sources`` and cached at ``PARTIAL_CACHE_TTL_HOURS`` so
+    the next run soon retries, instead of a near-empty corpus silently
+    serving support()=None for the full week-long TTL.
     """
     path = _cache_path(commander, bracket)
     if cache and path.exists():
-        age_h = (time.time() - path.stat().st_mtime) / 3600.0
-        if age_h <= ttl_hours:
-            try:
-                return ReferenceCorpus.from_dict(
-                    json.loads(path.read_text(encoding="utf-8")))
-            except Exception:  # noqa: BLE001 — corrupt cache = refetch
-                pass
+        cached: Optional[ReferenceCorpus] = None
+        try:
+            cached = ReferenceCorpus.from_dict(
+                json.loads(path.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001 — corrupt cache = refetch
+            cached = None
+        if cached is not None:
+            age_h = (time.time() - path.stat().st_mtime) / 3600.0
+            # A partial corpus never gets to squat on the full TTL.
+            effective_ttl = (min(ttl_hours, PARTIAL_CACHE_TTL_HOURS)
+                             if cached.partial_sources else ttl_hours)
+            if age_h <= effective_ttl:
+                if cached.partial_sources:
+                    print(
+                        f"[ref_corpus] serving PARTIAL corpus for "
+                        f"{commander!r} (empty sources: "
+                        f"{', '.join(cached.partial_sources)}; retry in "
+                        f"{max(0.0, effective_ttl - age_h):.1f}h)",
+                        file=sys.stderr, flush=True,
+                    )
+                return cached
 
     from ._advisor_bracket_peers import _extract_main_cards_from_moxfield_json
 
+    empty_sources: list[str] = []
     deck_jsons = (fetch_decks or _default_fetch_decks)(commander, bracket, n)
     display: dict[str, str] = {}
     deck_sets: list[frozenset[str]] = []
@@ -308,11 +349,14 @@ def build_reference_corpus(
             keys.add(k)
             display.setdefault(k, name)
         deck_sets.append(frozenset(keys))
+    if not deck_sets:
+        empty_sources.append("moxfield")
 
     from .archidekt_client import DEFAULT_N as _ARCHIDEKT_N
     extra_lists = (fetch_extra_lists or _default_fetch_extra_lists)(
         commander, bracket, min(n, _ARCHIDEKT_N),
     )
+    n_before_extra = len(deck_sets)
     for names in extra_lists or []:
         keys = set()
         for name in names:
@@ -321,6 +365,8 @@ def build_reference_corpus(
             display.setdefault(k, name)
         if keys:
             deck_sets.append(frozenset(keys))
+    if len(deck_sets) == n_before_extra:
+        empty_sources.append("archidekt")
 
     avg_names = (fetch_average or _default_fetch_average)(commander)
     avg_keys = set()
@@ -328,9 +374,20 @@ def build_reference_corpus(
         k = _key(name)
         avg_keys.add(k)
         display.setdefault(k, name)
+    if not avg_keys:
+        empty_sources.append("edhrec_average")
 
     if not deck_sets and not avg_keys:
         return None
+
+    if empty_sources:
+        print(
+            f"[ref_corpus] PARTIAL corpus for {commander!r} — empty "
+            f"sources: {', '.join(empty_sources)} "
+            f"({len(deck_sets)} reference decks); caching for "
+            f"{PARTIAL_CACHE_TTL_HOURS}h instead of {ttl_hours}h",
+            file=sys.stderr, flush=True,
+        )
 
     corpus = ReferenceCorpus(
         commander=commander,
@@ -342,6 +399,7 @@ def build_reference_corpus(
                   for k, v in ((fetch_salt or _default_fetch_salt)() or {}
                                ).items()},
         fetched_at=time.time(),
+        partial_sources=tuple(empty_sources),
     )
     if cache:
         try:

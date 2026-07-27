@@ -8,6 +8,7 @@ no dependence on the staples regexes.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -235,6 +236,113 @@ def test_build_corpus_skips_cache_when_disabled(ref_cache):
     build_reference_corpus("Krenko, Mob Boss", **kwargs)
     assert calls["n"] == 2
     assert not list(ref_cache.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# Partial-failure corpus caching
+# ---------------------------------------------------------------------------
+
+def _age_cache(ref_cache, hours):
+    import os
+    old = time.time() - hours * 3600
+    for f in ref_cache.iterdir():
+        os.utime(f, (old, old))
+
+
+def all_ok_kwargs(fetch_decks):
+    return dict(fetch_decks=fetch_decks,
+                fetch_average=lambda c: ["Impact Tremors"],
+                fetch_salt=lambda: {},
+                fetch_extra_lists=lambda c, b, n: [["Skirk Prospector"]])
+
+
+def test_build_corpus_all_sources_ok_is_not_partial(ref_cache):
+    calls = {"n": 0}
+
+    def fetch(c, b, n):
+        calls["n"] += 1
+        return [moxfield_deck_json("Sol Ring")]
+
+    kwargs = all_ok_kwargs(fetch)
+    first = build_reference_corpus("Krenko, Mob Boss", **kwargs)
+    assert first.partial_sources == ()
+    # Aged past the partial TTL but well inside the full one: the
+    # healthy corpus keeps its week-long cache.
+    _age_cache(ref_cache, ba.PARTIAL_CACHE_TTL_HOURS + 1)
+    build_reference_corpus("Krenko, Mob Boss", **kwargs)
+    assert calls["n"] == 1
+
+
+def test_build_corpus_partial_marked_and_expires_early(ref_cache):
+    """The review scenario: deck sources fail, only the EDHREC average
+    survives. The degraded corpus must not squat on the full TTL."""
+    calls = {"n": 0}
+
+    def fetch(c, b, n):
+        calls["n"] += 1
+        return []  # Moxfield down
+
+    kwargs = dict(fetch_decks=fetch,
+                  fetch_average=lambda c: ["Impact Tremors"],
+                  fetch_salt=lambda: {},
+                  fetch_extra_lists=lambda c, b, n: [])  # Archidekt down
+    first = build_reference_corpus("Krenko, Mob Boss", **kwargs)
+    assert set(first.partial_sources) == {"moxfield", "archidekt"}
+    # Within the short TTL the cache still serves (no request storm)...
+    second = build_reference_corpus("Krenko, Mob Boss", **kwargs)
+    assert calls["n"] == 1
+    assert set(second.partial_sources) == {"moxfield", "archidekt"}
+    # ...but past PARTIAL_CACHE_TTL_HOURS it refetches — 1h, not 168h.
+    _age_cache(ref_cache, ba.PARTIAL_CACHE_TTL_HOURS + 1)
+    build_reference_corpus("Krenko, Mob Boss", **kwargs)
+    assert calls["n"] == 2
+
+
+def test_build_corpus_partial_recovers_to_full_corpus(ref_cache):
+    """Once the sources come back, the refetch replaces the partial
+    cache with a healthy full-TTL corpus."""
+    decks = {"out": []}
+    kwargs = all_ok_kwargs(lambda c, b, n: decks["out"])
+    kwargs["fetch_extra_lists"] = lambda c, b, n: []
+    first = build_reference_corpus("Krenko, Mob Boss", **kwargs)
+    assert "moxfield" in first.partial_sources
+    _age_cache(ref_cache, ba.PARTIAL_CACHE_TTL_HOURS + 1)
+    decks["out"] = [moxfield_deck_json("Sol Ring")]
+    kwargs["fetch_extra_lists"] = lambda c, b, n: [["Skirk Prospector"]]
+    second = build_reference_corpus("Krenko, Mob Boss", **kwargs)
+    assert second.partial_sources == ()
+    assert second.n_decks == 2
+
+
+def test_build_corpus_partial_build_logs_loudly(ref_cache, capsys):
+    build_reference_corpus(
+        "Krenko, Mob Boss",
+        fetch_decks=lambda c, b, n: [],
+        fetch_average=lambda c: ["Impact Tremors"],
+        fetch_salt=lambda: {},
+        fetch_extra_lists=lambda c, b, n: [],
+    )
+    err = capsys.readouterr().err
+    assert "PARTIAL" in err
+    assert "moxfield" in err and "archidekt" in err
+
+
+def test_partial_sources_survive_dict_round_trip():
+    corpus = ReferenceCorpus(
+        commander="X", bracket=None, deck_card_keys=(),
+        average_deck_keys=frozenset({"sol ring"}),
+        partial_sources=("moxfield", "archidekt"))
+    clone = ReferenceCorpus.from_dict(corpus.to_dict())
+    assert clone.partial_sources == ("moxfield", "archidekt")
+
+
+def test_legacy_cache_payload_defaults_to_not_partial():
+    # Pre-fix cache files carry no partial_sources key; they must load
+    # as healthy corpora (and thus keep the full TTL).
+    corpus = make_corpus(n_decks=12)
+    payload = corpus.to_dict()
+    payload.pop("partial_sources")
+    assert ReferenceCorpus.from_dict(payload).partial_sources == ()
 
 
 # ---------------------------------------------------------------------------
