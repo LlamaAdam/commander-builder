@@ -11,7 +11,7 @@
     <!-- Mobile-only drawer toggle (hidden >768px via .hamburger in app.css).
          Toggles body.drawer-open; app.js wires the click + close handlers. -->
     <button class="topbar-btn hamburger" id="btn-drawer-toggle" type="button"
-            aria-label="Open menu" aria-expanded="false" aria-controls="sidebar-panel"
+            aria-label="Menu" aria-expanded="false" aria-controls="sidebar-panel"
             title="Menu">&#9776;</button>
     <h1>Commander Builder</h1>
     <span class="muted" id="health-badge">checking…</span>
@@ -31,6 +31,7 @@
     </button>
     <form id="card-search-form" style="display: inline-flex; gap: 4px; align-items: center; margin: 0;" title="Look up any card's oracle text, identity, legality, and price">
       <input type="text" id="card-search-input" placeholder="Card lookup…" autocomplete="off"
+             aria-label="Card lookup"
              style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); width: 150px;" />
       <button type="submit" class="topbar-btn" id="card-search-btn">Cards</button>
     </form>
@@ -42,10 +43,13 @@
   <!-- FP-011 Settings panel. Native <dialog> so it needs no extra CSS;
        settings.js wires GET/PUT /api/config. The API token is never
        echoed back — the field shows a "set / …last4" hint instead. -->
-  <dialog id="settings-dialog" style="max-width: 30rem; border: 1px solid #888; border-radius: 8px; padding: 1.25rem;">
+  <!-- Themed via #settings-dialog in app.css (the old inline white
+       UA-default background put .muted #8a93a6 text at 3.09:1 —
+       below the WCAG AA 4.5:1 floor; on var(--panel) it's 5.65:1). -->
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
     <form id="settings-form" method="dialog">
-      <h2 style="margin-top: 0;">Settings</h2>
-      <p class="muted" id="settings-status" style="min-height: 1.2em;"></p>
+      <h2 id="settings-title" style="margin-top: 0;">Settings</h2>
+      <p class="muted" id="settings-status" role="status" aria-live="polite" style="min-height: 1.2em;"></p>
 
       <label style="display: block; margin: 0.75rem 0;">
         Anthropic API key
@@ -110,7 +114,7 @@
               title="Combo and bracket rules lookup">Rules</button>
     </nav>
 
-    <aside class="sidebar" id="sidebar-panel">
+    <aside class="sidebar" id="sidebar-panel" aria-label="Sidebar">
       <!-- DECKS section (default visible) -->
       <div id="section-decks">
         <h2>Decks</h2>
@@ -127,12 +131,12 @@
         </p>
         <form id="library-search-form" style="display:flex;gap:4px;flex-direction:column;">
           <input type="text" id="library-card-input" placeholder="Card name..."
-                 autocomplete="off"
+                 autocomplete="off" aria-label="Card name"
                  style="padding:6px 8px;border-radius:4px;border:1px solid var(--border);
                         background:var(--bg);color:var(--text);" />
           <button type="submit" class="advise-btn" style="margin:0;">Search decks</button>
         </form>
-        <div id="library-results" style="margin-top:12px;"></div>
+        <div id="library-results" aria-live="polite" style="margin-top:12px;"></div>
       </div>
 
       <!-- RULES section: combo + bracket lookup -->
@@ -142,7 +146,7 @@
           Look up combos by color identity or view Game Changers.
         </p>
         <form id="combo-search-form" style="display:flex;gap:4px;flex-direction:column;">
-          <label class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;">
+          <label class="muted" for="combo-identity-input" style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;">
             Color identity (e.g. WUB, R, G)
           </label>
           <input type="text" id="combo-identity-input" placeholder="WUBRG"
@@ -155,7 +159,7 @@
                 style="margin-top:8px;width:100%;">
           Show Game Changers
         </button>
-        <div id="rules-results" style="margin-top:12px;"></div>
+        <div id="rules-results" aria-live="polite" style="margin-top:12px;"></div>
       </div>
     </aside>
 
@@ -167,27 +171,27 @@
   <!-- Mobile drawer scrim: covers the dashboard behind the open drawer;
        tapping it closes the drawer (wired in app.js). Hidden >768px and
        when body.drawer-open is absent (see .drawer-scrim in app.css). -->
-  <div class="drawer-scrim" id="drawer-scrim"></div>
+  <div class="drawer-scrim" id="drawer-scrim" aria-hidden="true"></div>
 
   <!-- New / import deck modal -->
   <div class="modal-backdrop" id="new-deck-modal" hidden>
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-deck-title">
       <header>
-        <h2>Add a deck</h2>
+        <h2 id="new-deck-title">Add a deck</h2>
         <button class="modal-close" data-close="new-deck-modal" aria-label="Close">&times;</button>
       </header>
-      <div class="tabs">
-        <button class="tab active" data-tab="moxfield">Moxfield URL</button>
-        <button class="tab" data-tab="paste">Paste deck list</button>
-        <button class="tab" data-tab="bulk">Bulk URLs</button>
-        <button class="tab" data-tab="build">Build from scratch</button>
+      <div class="tabs" role="tablist" aria-label="Deck source">
+        <button class="tab active" role="tab" id="tab-btn-moxfield" aria-selected="true" aria-controls="tab-moxfield" data-tab="moxfield">Moxfield URL</button>
+        <button class="tab" role="tab" id="tab-btn-paste" aria-selected="false" aria-controls="tab-paste" data-tab="paste">Paste deck list</button>
+        <button class="tab" role="tab" id="tab-btn-bulk" aria-selected="false" aria-controls="tab-bulk" data-tab="bulk">Bulk URLs</button>
+        <button class="tab" role="tab" id="tab-btn-build" aria-selected="false" aria-controls="tab-build" data-tab="build">Build from scratch</button>
       </div>
-      <div class="tab-panel" id="tab-moxfield">
-        <label>Display name (optional — defaults to Moxfield deck name)</label>
+      <div class="tab-panel" id="tab-moxfield" role="tabpanel" aria-labelledby="tab-btn-moxfield">
+        <label for="new-mox-name">Display name (optional — defaults to Moxfield deck name)</label>
         <input id="new-mox-name" type="text" placeholder="e.g. Hakbal Test">
-        <label>Moxfield URL or deck id</label>
+        <label for="new-mox-url">Moxfield URL or deck id</label>
         <input id="new-mox-url" type="text" placeholder="https://moxfield.com/decks/abc123 or just abc123">
-        <label>Bracket</label>
+        <label for="new-mox-bracket">Bracket</label>
         <select id="new-mox-bracket">
           <option value="1">1 — Exhibition</option>
           <option value="2">2 — Core</option>
@@ -197,10 +201,10 @@
         </select>
         <button class="advise-btn" id="new-mox-import">Import from Moxfield</button>
       </div>
-      <div class="tab-panel" id="tab-paste" hidden>
-        <label>Display name</label>
+      <div class="tab-panel" id="tab-paste" role="tabpanel" aria-labelledby="tab-btn-paste" hidden>
+        <label for="new-paste-name">Display name</label>
         <input id="new-paste-name" type="text" placeholder="e.g. Brewed Up">
-        <label>Bracket</label>
+        <label for="new-paste-bracket">Bracket</label>
         <select id="new-paste-bracket">
           <option value="1">1 — Exhibition</option>
           <option value="2">2 — Core</option>
@@ -208,12 +212,12 @@
           <option value="4">4 — Optimized</option>
           <option value="5">5 — cEDH</option>
         </select>
-        <label>Deck list (.dck, MTG Arena export, CSV, or plain card lines — auto-detected)</label>
+        <label for="new-paste-text">Deck list (.dck, MTG Arena export, CSV, or plain card lines — auto-detected)</label>
         <textarea id="new-paste-text" spellcheck="false" placeholder="1 Sol Ring&#10;1 Arcane Signet&#10;1 Command Tower&#10;..."></textarea>
         <button class="advise-btn" id="new-paste-create">Create deck</button>
       </div>
-      <div class="tab-panel" id="tab-bulk" hidden>
-        <label>Moxfield URLs — one per line (max 50)</label>
+      <div class="tab-panel" id="tab-bulk" role="tabpanel" aria-labelledby="tab-btn-bulk" hidden>
+        <label for="new-bulk-urls">Moxfield URLs — one per line (max 50)</label>
         <textarea id="new-bulk-urls" spellcheck="false" placeholder="https://moxfield.com/decks/abc123&#10;https://moxfield.com/decks/def456&#10;..."></textarea>
         <p class="muted" style="font-size: 12px; margin-top: 4px;">
           Polite rate-limit: 1s between Moxfield fetches. A 20-URL batch
@@ -222,16 +226,16 @@
         <button class="advise-btn" id="new-bulk-import">Import all</button>
         <div id="new-bulk-result"></div>
       </div>
-      <div class="tab-panel" id="tab-build" hidden>
-        <label>Commander</label>
+      <div class="tab-panel" id="tab-build" role="tabpanel" aria-labelledby="tab-btn-build" hidden>
+        <label for="new-build-commander">Commander</label>
         <input id="new-build-commander" type="text" autocomplete="off"
                placeholder="e.g. Krenko, Mob Boss">
-        <label>Partner (optional — a second commander with a Partner-style ability)</label>
+        <label for="new-build-partner">Partner (optional — a second commander with a Partner-style ability)</label>
         <input id="new-build-partner" type="text" autocomplete="off"
                placeholder="Partner commander (optional)">
-        <label>Display name (optional — defaults to "&lt;Commander&gt; Build")</label>
+        <label for="new-build-name">Display name (optional — defaults to "&lt;Commander&gt; Build")</label>
         <input id="new-build-name" type="text" placeholder="e.g. Krenko Goblins">
-        <label>Target bracket</label>
+        <label for="new-build-bracket">Target bracket</label>
         <select id="new-build-bracket">
           <option value="1">1 — Exhibition</option>
           <option value="2">2 — Core</option>
@@ -259,13 +263,16 @@
         <button class="advise-btn" id="new-build-run">Build deck</button>
         <div id="new-build-summary"></div>
       </div>
-      <div id="new-deck-status" class="muted"></div>
+      <!-- role=status/aria-live: the build poller's "Building…" updates and
+           validation errors (bad bracket, missing commander) announce to
+           screen readers instead of being visual-only. -->
+      <div id="new-deck-status" class="muted" role="status" aria-live="polite"></div>
     </div>
   </div>
 
   <!-- Game Changers / Illegal alert modal (single shared modal) -->
   <div class="modal-backdrop" id="alert-modal" hidden>
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="alert-title">
       <header>
         <h2 id="alert-title">Alert</h2>
         <button class="modal-close" data-close="alert-modal" aria-label="Close">&times;</button>
@@ -276,9 +283,9 @@
 
   <!-- Propose-swap modal (hidden by default) -->
   <div class="modal-backdrop" id="propose-modal" hidden>
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="propose-title">
       <header>
-        <h2>Propose changes</h2>
+        <h2 id="propose-title">Propose changes</h2>
         <button class="modal-close" id="propose-close" aria-label="Close">&times;</button>
       </header>
       <p class="muted">
@@ -286,7 +293,7 @@
         Old vs. new will play head-to-head; the winner is whichever
         version wins more games.
       </p>
-      <textarea id="propose-text" spellcheck="false"></textarea>
+      <textarea id="propose-text" spellcheck="false" aria-label="Deck list"></textarea>
       <div class="propose-controls">
         <fieldset class="games-radio">
           <legend>Mode:</legend>
@@ -302,7 +309,7 @@
         </fieldset>
         <button class="advise-btn" id="propose-run">Run A/B sim</button>
       </div>
-      <div id="propose-status" class="muted"></div>
+      <div id="propose-status" class="muted" role="status" aria-live="polite"></div>
       <div id="propose-result"></div>
     </div>
   </div>

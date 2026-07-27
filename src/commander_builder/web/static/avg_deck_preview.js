@@ -124,17 +124,29 @@ function renderAverageDeckCard(card) {
           style: "color: var(--accent); cursor: pointer; "
                + "width: 14px; font-weight: bold;",
           title: "Add this card (click to copy name)",
+          // Keyboard access (WCAG 2.1.1): the copy affordance was a
+          // mouse-only span.
+          tabindex: "0",
+          role: "button",
+          "aria-label": "Copy card name: " + card.name,
           "data-card-name": card.name,
         },
         "+",
       );
   if (!card.in_user_deck) {
-    marker.addEventListener("click", () => {
+    const copyName = () => {
       // Best-effort: copy the name to clipboard so the user can paste
       // into whatever add-card flow they use. Falls back silently if
       // clipboard API is unavailable.
       if (navigator.clipboard) {
         navigator.clipboard.writeText(card.name).catch(() => {});
+      }
+    };
+    marker.addEventListener("click", copyName);
+    marker.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        copyName();
       }
     });
   }

@@ -121,8 +121,16 @@ async function loadDecks() {
       return;
     }
     for (const d of decks) {
-      const li = el("li", { "data-id": d.id }, d.name);
+      // tabindex/role/keydown: deck rows are the app's primary nav but
+      // were click-only <li>s — invisible to keyboard users (WCAG 2.1.1).
+      const li = el("li", { "data-id": d.id, tabindex: "0", role: "button" }, d.name);
       li.addEventListener("click", () => selectDeck(d.id, li));
+      li.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          selectDeck(d.id, li);
+        }
+      });
       list.appendChild(li);
     }
   } catch (e) {
@@ -131,8 +139,16 @@ async function loadDecks() {
 }
 
 function highlight(li) {
-  document.querySelectorAll(".deck-list li").forEach((n) => n.classList.remove("active"));
-  if (li) li.classList.add("active");
+  document.querySelectorAll(".deck-list li").forEach((n) => {
+    n.classList.remove("active");
+    n.removeAttribute("aria-current");
+  });
+  if (li) {
+    li.classList.add("active");
+    // Mirror the .active highlight for screen readers (WCAG 1.4.1 —
+    // the selected deck was conveyed by background color alone).
+    li.setAttribute("aria-current", "true");
+  }
 }
 
 // --- Mobile sidebar drawer -------------------------------------------
@@ -141,20 +157,125 @@ function highlight(li) {
 // All drawer styling lives behind the <=768px media query in app.css,
 // so on desktop these toggles are inert: the hamburger + scrim are
 // display:none and the sidebar/rail keep their grid positions.
+// Focus management (WCAG 2.4.3): opening the drawer moves focus into
+// it; closing returns focus to the hamburger. Both are gated on the
+// hamburger actually being visible (offsetParent non-null — i.e. the
+// <=768px layout) so the desktop code path, where closeDrawer() runs
+// on every deck select, never steals focus.
+function _drawerToggleVisible() {
+  const t = document.getElementById("btn-drawer-toggle");
+  return !!(t && t.offsetParent !== null);
+}
 function openDrawer() {
   document.body.classList.add("drawer-open");
   const t = document.getElementById("btn-drawer-toggle");
   if (t) t.setAttribute("aria-expanded", "true");
+  if (_drawerToggleVisible()) {
+    const first = document.querySelector("#left-rail .rail-btn.active")
+      || document.querySelector("#left-rail .rail-btn")
+      || document.getElementById("sidebar-panel");
+    if (first && first.focus) first.focus();
+  }
 }
 function closeDrawer() {
+  const wasOpen = document.body.classList.contains("drawer-open");
   document.body.classList.remove("drawer-open");
   const t = document.getElementById("btn-drawer-toggle");
   if (t) t.setAttribute("aria-expanded", "false");
+  // Return focus to the hamburger only when the drawer was really open
+  // in the mobile layout and focus is stranded inside the now-hidden
+  // drawer (or fell to <body>). A deck select that moved focus into
+  // the dashboard keeps it.
+  if (wasOpen && t && _drawerToggleVisible()) {
+    const active = document.activeElement;
+    const stranded = !active || active === document.body
+      || !!(active.closest
+            && (active.closest("#sidebar-panel") || active.closest("#left-rail")));
+    if (stranded) t.focus();
+  }
 }
 function toggleDrawer() {
   if (document.body.classList.contains("drawer-open")) closeDrawer();
   else openDrawer();
 }
+
+// --- Modal focus management ------------------------------------------
+// The three custom .modal-backdrop overlays (add-deck / alert /
+// propose) are plain divs, so unlike the native <dialog> settings
+// panel they get no focus handling for free. showModal/hideModal
+// centralize the hidden-flag flips that used to be inline so that:
+//   * opening records the opener and moves focus into the dialog
+//     (WCAG 2.4.3);
+//   * closing returns focus to the opener;
+//   * a document-level Tab handler wraps focus inside the visible
+//     dialog (focus trap — WCAG 2.1.2 keyboard users can otherwise
+//     tab into the inert page behind the backdrop).
+const _FOCUSABLE_SEL =
+  'a[href], button:not([disabled]), input:not([disabled]), '
+  + 'select:not([disabled]), textarea:not([disabled]), '
+  + '[tabindex]:not([tabindex="-1"])';
+
+function showModal(id) {
+  const bd = document.getElementById(id);
+  if (!bd) return;
+  if (bd.hidden) bd._returnFocus = document.activeElement;
+  bd.hidden = false;
+  const modal = bd.querySelector(".modal") || bd;
+  // Prefer the first field/button AFTER the header's close button so
+  // screen-reader users land on content, not the close control.
+  const focusables = Array.from(modal.querySelectorAll(_FOCUSABLE_SEL))
+    .filter((n) => n.offsetParent !== null);
+  const target = focusables.find((n) => !n.classList.contains("modal-close"))
+    || focusables[0] || modal;
+  if (target && target.focus) target.focus();
+}
+
+function hideModal(id) {
+  const bd = typeof id === "string" ? document.getElementById(id) : id;
+  if (!bd || bd.hidden) return;
+  const hadFocus = bd.contains(document.activeElement);
+  bd.hidden = true;
+  const rf = bd._returnFocus;
+  bd._returnFocus = null;
+  // Only restore when focus was inside the dialog (or got dropped on
+  // <body> by the hide) — never yank it from wherever the user went.
+  const active = document.activeElement;
+  if (rf && document.contains(rf) && (hadFocus || !active || active === document.body)) {
+    rf.focus();
+  }
+}
+
+function _visibleModalBackdrop() {
+  for (const bd of document.querySelectorAll(".modal-backdrop")) {
+    if (!bd.hidden) return bd;
+  }
+  return null;
+}
+
+// Focus trap: wrap Tab / Shift+Tab inside the open custom modal. The
+// native settings <dialog> traps on its own; card overlays (single
+// focusable scrim) are handled by their own key handlers.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const bd = _visibleModalBackdrop();
+  if (!bd) return;
+  const modal = bd.querySelector(".modal") || bd;
+  const focusables = Array.from(modal.querySelectorAll(_FOCUSABLE_SEL))
+    .filter((n) => n.offsetParent !== null);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const inside = modal.contains(document.activeElement);
+  if (e.shiftKey) {
+    if (!inside || document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    }
+  } else if (!inside || document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
 
 let _activeDeckId = null;
 // AbortController for the currently in-flight audit stream. Reset on
@@ -323,7 +444,7 @@ async function openProposeModal(opts) {
   result.innerHTML = "";
   updateGamesEta();  // show the time hint for the current selection on open
   ta.value = "Loading…";
-  modal.hidden = false;
+  showModal("propose-modal");
   try {
     const body = await fetchJSON(
       `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
@@ -337,7 +458,7 @@ async function openProposeModal(opts) {
 }
 
 function closeProposeModal() {
-  $("propose-modal").hidden = true;
+  hideModal("propose-modal");
 }
 
 async function runProposeSwap() {
@@ -366,7 +487,7 @@ async function runProposeSwap() {
         return;
       }
       status.textContent = "Saved.";
-      $("propose-modal").hidden = true;
+      hideModal("propose-modal");
       // Soft-refresh: keep the prior dashboard visible while the new
       // data fetches in background. Avoids the 5+s "Loading…" blank
       // when Edit added cards Scryfall hasn't cached yet.
@@ -832,10 +953,15 @@ function openCardImageOverlay(cardName) {
   // Remove any prior overlay (defensive — click-spam can race).
   const prior = document.getElementById("_card-overlay");
   if (prior) prior.remove();
+  const opener = document.activeElement;
   const scrim = el(
     "div",
     {
       id: "_card-overlay",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": `${cardName} card image`,
+      tabindex: "-1",
       style: "position: fixed; inset: 0; background: rgba(0,0,0,0.7); "
            + "z-index: 1000; display: flex; align-items: center; "
            + "justify-content: center; cursor: pointer;",
@@ -854,11 +980,14 @@ function openCardImageOverlay(cardName) {
   function close() {
     scrim.remove();
     document.removeEventListener("keydown", onKey);
+    // Return focus to the thumbnail that opened the overlay.
+    if (opener && document.contains(opener) && opener.focus) opener.focus();
   }
   function onKey(e) { if (e.key === "Escape") close(); }
   scrim.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
   document.body.appendChild(scrim);
+  scrim.focus();
 }
 
 // FP-007 card-reference panel: fetch /api/card/<name> and show a richer
@@ -870,8 +999,13 @@ async function openCardReference(name) {
   if (!name) return;
   const prior = document.getElementById("_card-ref-overlay");
   if (prior) prior.remove();
+  const opener = document.activeElement;
   const scrim = el("div", {
     id: "_card-ref-overlay",
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-label": `Card reference: ${name}`,
+    tabindex: "-1",
     style: "position: fixed; inset: 0; background: rgba(0,0,0,0.7); "
          + "z-index: 1000; display: flex; align-items: center; "
          + "justify-content: center;",
@@ -885,11 +1019,16 @@ async function openCardReference(name) {
   panel.addEventListener("click", (e) => e.stopPropagation());  // clicks inside keep it open
   panel.appendChild(el("div", { class: "muted" }, `Looking up "${name}"…`));
   scrim.appendChild(panel);
-  function close() { scrim.remove(); document.removeEventListener("keydown", onKey); }
+  function close() {
+    scrim.remove();
+    document.removeEventListener("keydown", onKey);
+    if (opener && document.contains(opener) && opener.focus) opener.focus();
+  }
   function onKey(e) { if (e.key === "Escape") close(); }
   scrim.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
   document.body.appendChild(scrim);
+  scrim.focus();
 
   try {
     const resp = await fetch(`/api/card/${encodeURIComponent(name)}`);
@@ -1853,8 +1992,12 @@ function renderAuditResult(container, body) {
             src: cardImageUrl(a.card, "small"),
             loading: "lazy",
             decoding: "async",
-            alt: a.card,
+            alt: `${a.card} — view full size`,
             title: `${a.card} — click to view full size`,
+            // Keyboard access (WCAG 2.1.1): the thumbnail is an
+            // interactive control, not just decoration.
+            tabindex: "0",
+            role: "button",
             style: "width: 60px; height: 84px; "
                  + "border-radius: 3px; "
                  + "object-fit: cover; cursor: pointer; "
@@ -1865,6 +2008,12 @@ function renderAuditResult(container, body) {
         // image. Keeps the row compact while still letting users
         // read the card text without leaving the audit panel.
         thumb.addEventListener("click", () => openCardImageOverlay(a.card));
+        thumb.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            openCardImageOverlay(a.card);
+          }
+        });
         row.appendChild(thumb);
       }
       row.appendChild(el(
@@ -2631,7 +2780,7 @@ async function verifyAgainstSource() {
   const body = $("alert-body");
   body.className = "alert-body";
   body.innerHTML = '<p class="muted">Fetching live Moxfield deck and diffing…</p>';
-  $("alert-modal").hidden = false;
+  showModal("alert-modal");
   try {
     const resp = await fetchJSON(
       `/api/verify_against_source?deck=${encodeURIComponent(_activeDeckId)}`,
@@ -2904,7 +3053,7 @@ function showFallbackCopyDialog(text) {
   });
   ta.value = text;
   body.appendChild(ta);
-  $("alert-modal").hidden = false;
+  showModal("alert-modal");
   // Pre-select the textarea content so a single Ctrl+C copies it.
   setTimeout(() => { ta.focus(); ta.select(); }, 50);
 }
@@ -2955,7 +3104,7 @@ async function showGameChangersAlert() {
   const body = $("alert-body");
   body.className = "alert-body";
   body.innerHTML = '<p class="muted">Loading…</p>';
-  modal.hidden = false;
+  showModal("alert-modal");
   try {
     const list = await fetchJSON("/api/game_changers");
     body.innerHTML = "";
@@ -3011,7 +3160,7 @@ async function showIllegalAlert() {
   const body = $("alert-body");
   body.className = "alert-body";
   body.innerHTML = '<p class="muted">Loading…</p>';
-  modal.hidden = false;
+  showModal("alert-modal");
   if (!_activeDeckId) {
     body.innerHTML = '<p class="muted">Select a deck first to check for illegal cards.</p>';
     return;
@@ -3077,7 +3226,7 @@ function showSaltCardsAlert(saltCards) {
     }
     body.appendChild(ul);
   }
-  modal.hidden = false;
+  showModal("alert-modal");
 }
 
 function openNewDeckModal() {
@@ -3103,7 +3252,7 @@ function openNewDeckModal() {
   // collection; grey it out (with a note) otherwise so the user isn't
   // misled into thinking an inert option does something.
   refreshBuildOwnedToggle();
-  $("new-deck-modal").hidden = false;
+  showModal("new-deck-modal");
 }
 
 // Enable/disable the build "prefer owned" toggle based on whether a
@@ -3132,7 +3281,11 @@ async function refreshBuildOwnedToggle() {
 
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach((t) => {
-    t.classList.toggle("active", t.dataset.tab === name);
+    const isActive = t.dataset.tab === name;
+    t.classList.toggle("active", isActive);
+    // Keep the ARIA tab state in sync with the visual underline
+    // (index.html ships role=tab + aria-selected on these buttons).
+    t.setAttribute("aria-selected", isActive ? "true" : "false");
   });
   document.querySelectorAll(".tab-panel").forEach((p) => {
     p.hidden = p.id !== `tab-${name}`;
@@ -3161,7 +3314,7 @@ async function importMoxfield() {
       return;
     }
     status.textContent = `Imported as ${body.filename}.`;
-    $("new-deck-modal").hidden = true;
+    hideModal("new-deck-modal");
     await loadDecks();
   } catch (e) {
     status.textContent = `Network error: ${e.message}`;
@@ -3304,7 +3457,7 @@ async function createPasteDeck() {
       return;
     }
     status.textContent = `Created ${body.filename}.`;
-    $("new-deck-modal").hidden = true;
+    hideModal("new-deck-modal");
     await loadDecks();
   } catch (e) {
     status.textContent = `Network error: ${e.message}`;
@@ -3451,7 +3604,7 @@ function renderBuildSummary(container, result) {
   const actions = el("div", { style: "margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;" });
   const loadBtn = el("button", { class: "advise-btn" }, "Load deck");
   loadBtn.addEventListener("click", () => {
-    $("new-deck-modal").hidden = true;
+    hideModal("new-deck-modal");
     const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
     if (li) selectDeck(result.id, li);
   });
@@ -3471,7 +3624,7 @@ function renderBuildSummary(container, result) {
     "Load the deck and run the advisor + A/B Forge sim on it. Costs Forge "
     + "time and Anthropic tokens.";
   tuneBtn.addEventListener("click", () => {
-    $("new-deck-modal").hidden = true;
+    hideModal("new-deck-modal");
     const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
     if (li) selectDeck(result.id, li, { improveAfterLoad: true });
   });
@@ -3656,7 +3809,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Generic modal-close buttons (Add-deck modal + Alert modal).
   document.querySelectorAll("[data-close]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      $(btn.dataset.close).hidden = true;
+      hideModal(btn.dataset.close);
     });
   });
 
@@ -3670,9 +3823,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // ESC closes any open modal (and the mobile drawer).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      ["propose-modal", "new-deck-modal", "alert-modal"].forEach((id) => {
-        const m = $(id); if (m) m.hidden = true;
-      });
+      ["propose-modal", "new-deck-modal", "alert-modal"].forEach(hideModal);
       closeDrawer();
     }
   });
@@ -3680,7 +3831,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Backdrop click closes — for each modal-backdrop.
   document.querySelectorAll(".modal-backdrop").forEach((bd) => {
     bd.addEventListener("click", (e) => {
-      if (e.target === bd) bd.hidden = true;
+      if (e.target === bd) hideModal(bd);
     });
   });
 

@@ -128,16 +128,27 @@
         style: "padding:6px 8px;border-radius:4px;font-size:13px;cursor:pointer;",
         "data-deck": id,
         title: "Click to open this deck",
+        // Keyboard access (WCAG 2.1.1): result rows act as buttons.
+        tabindex: "0",
+        role: "button",
       }, [display]);
       item.addEventListener("mouseenter", () => { item.style.background = "var(--panel-2)"; });
       item.addEventListener("mouseleave", () => { item.style.background = ""; });
-      // Clicking a deck result switches back to Decks section and selects it.
-      item.addEventListener("click", () => {
+      // Clicking (or Enter/Space on) a deck result switches back to the
+      // Decks section and selects it.
+      const openDeck = () => {
         activateSection("decks");
         // Trigger deck selection in app.js if available.
         const li = document.querySelector('.deck-list li[data-id="' + CSS.escape(id) + '"]');
         if (li && typeof selectDeck === "function") {  // eslint-disable-line no-undef
           selectDeck(id, li);
+        }
+      };
+      item.addEventListener("click", openDeck);
+      item.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openDeck();
         }
       });
       list.appendChild(item);
