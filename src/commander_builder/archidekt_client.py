@@ -26,6 +26,9 @@ raising, and ``fetch_json`` is injectable so tests stay offline.
 from __future__ import annotations
 
 import json
+import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, Optional
@@ -44,6 +47,18 @@ DEFAULT_N = 25
 #: draft in progress, not a reference build).
 MIN_DECK_SIZE = 60
 
+#: Retry budget for rate-limited / transient-5xx requests. A couple of
+#: retries, smaller than EDHREC's (3): a cold corpus build issues up to
+#: ~26 sequential GETs, so a hard-down Archidekt must not multiply into
+#: minutes of backoff.
+MAX_RETRIES = 2
+RETRY_BASE_DELAY_SEC = 1.0
+
+# Same transient set as edhrec_client: 429 is rate-limiting (honor
+# Retry-After), 5xx is server-side weather. Other 4xx (404, 400, 403)
+# are deterministic — retrying can't help, raise immediately.
+_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
 
 def _http_get_json(url: str) -> dict:
     req = urllib.request.Request(
@@ -52,6 +67,51 @@ def _http_get_json(url: str) -> dict:
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
+
+
+def _get_json_with_retry(
+    get: Callable[[str], dict],
+    url: str,
+    max_retries: int = MAX_RETRIES,
+    base_delay: float = RETRY_BASE_DELAY_SEC,
+) -> dict:
+    """Call ``get(url)`` with backoff on 429/5xx HTTPError.
+
+    Mirrors edhrec_client's ``_http_get_text_with_retry`` house pattern
+    (Retry-After honored and clamped, else exponential backoff, one
+    stderr line per retry) but wraps the injectable ``get`` seam so
+    tests exercise it with canned responses, and retries ONLY
+    HTTPError: network-level failures (URLError/OSError) propagate
+    immediately — the caller's degrade-don't-die handling owns those,
+    and stacking sleeps onto a dead network would triple the corpus
+    build's failure latency.
+    """
+    from .edhrec_client import MAX_RETRY_AFTER_SEC, _parse_retry_after
+
+    last_exc: Optional[urllib.error.HTTPError] = None
+    for attempt in range(max_retries + 1):
+        try:
+            return get(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in _RETRYABLE_HTTP_CODES:
+                raise
+            last_exc = exc
+        if attempt >= max_retries:
+            break
+        # Prefer the server's own backoff hint over our exp curve.
+        hdrs = getattr(last_exc, "headers", None)
+        hint = _parse_retry_after(
+            hdrs.get("Retry-After") if hdrs is not None else None)
+        delay = (min(hint, MAX_RETRY_AFTER_SEC) if hint is not None
+                 else base_delay * (2 ** attempt))
+        print(
+            f"[archidekt] retry {attempt + 1}/{max_retries} after "
+            f"HTTP {last_exc.code} — sleeping {delay:.1f}s",
+            file=sys.stderr, flush=True,
+        )
+        time.sleep(delay)
+    assert last_exc is not None  # the loop only exits via return or here
+    raise last_exc
 
 
 def extract_mainboard(deck_json: dict) -> list[str]:
@@ -99,8 +159,11 @@ def fetch_top_decks(
 
     ``bracket`` soft-filters: a search hit whose ``edhBracket`` is SET
     and differs is skipped; null (the common case) always passes —
-    strict filtering would starve the corpus. Individual detail-fetch
-    failures skip that deck; a search failure returns ``[]``.
+    strict filtering would starve the corpus. A non-numeric
+    ``edhBracket`` (API drift) drops that hit only — never the whole
+    source. Individual detail-fetch failures skip that deck; a search
+    failure returns ``[]``. 429/5xx responses get a couple of retries
+    (Retry-After honored) before either verdict.
     """
     if n <= 0:
         return []
@@ -114,7 +177,7 @@ def fetch_top_decks(
     }
     url = f"{BASE}/decks/v3/?{urllib.parse.urlencode(params)}"
     try:
-        payload = get(url)
+        payload = _get_json_with_retry(get, url)
     except Exception:  # noqa: BLE001 — search outage = empty corpus source
         return []
     results = payload.get("results") or []
@@ -128,12 +191,18 @@ def fetch_top_decks(
         size = hit.get("size")
         if isinstance(size, int) and size < MIN_DECK_SIZE:
             continue
-        hit_bracket = hit.get("edhBracket")
-        if (bracket is not None and hit_bracket is not None
-                and int(hit_bracket) != int(bracket)):
-            continue
+        if bracket is not None:
+            hit_bracket = hit.get("edhBracket")
+            if hit_bracket is not None:
+                try:
+                    if int(hit_bracket) != int(bracket):
+                        continue
+                except (TypeError, ValueError):
+                    # API drift: an unparseable bracket drops THIS hit,
+                    # not the whole source.
+                    continue
         try:
-            detail = get(f"{BASE}/decks/{hit['id']}/")
+            detail = _get_json_with_retry(get, f"{BASE}/decks/{hit['id']}/")
         except Exception:  # noqa: BLE001 — one dead deck, not the run
             continue
         names = extract_mainboard(detail)

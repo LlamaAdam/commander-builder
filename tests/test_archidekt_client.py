@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import email.message
+import urllib.error
+
 import pytest
 
+import commander_builder.archidekt_client as ac
 from commander_builder.archidekt_client import (
     DEFAULT_N,
     extract_mainboard,
@@ -147,3 +151,98 @@ def test_default_n_is_modest():
     # The corpus build's request budget — a deliberate cap, pinned so a
     # future edit can't silently 4x the cold-build fetch count.
     assert DEFAULT_N <= 30
+
+
+def test_bad_edh_bracket_drops_hit_not_source():
+    # API drift: a non-numeric edhBracket must cost that hit only —
+    # before the guard it raised ValueError and sank the whole source.
+    fetch = make_fetcher(
+        [search_hit(1, edh_bracket="not-a-number"),
+         search_hit(2, edh_bracket=3)],
+        {2: detail([card("B")])},
+    )
+    out = fetch_top_decks("X", bracket=3, n=5, fetch_json=fetch)
+    assert out == [["B"]]
+    assert not any("/decks/1/" in u for u in fetch.calls)
+
+
+def test_bad_edh_bracket_ignored_when_no_bracket_filter():
+    # Without a bracket filter the field is never consulted, so drift
+    # there must not cost the hit.
+    fetch = make_fetcher([search_hit(1, edh_bracket="junk")],
+                         {1: detail([card("A")])})
+    assert fetch_top_decks("X", n=5, fetch_json=fetch) == [["A"]]
+
+
+# ---------------------------------------------------------------------------
+# 429 / transient retry
+# ---------------------------------------------------------------------------
+
+def http_error(code, retry_after=None):
+    hdrs = email.message.Message()
+    if retry_after is not None:
+        hdrs["Retry-After"] = retry_after
+    return urllib.error.HTTPError("https://x", code, "err", hdrs, None)
+
+
+def test_search_429_retried_honoring_retry_after(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(ac.time, "sleep", sleeps.append)
+    state = {"n": 0}
+
+    def fetch(url):
+        if "/decks/v3/" in url:
+            state["n"] += 1
+            if state["n"] == 1:
+                raise http_error(429, retry_after="7")
+            return {"count": 1, "results": [search_hit(1)]}
+        return detail([card("A")])
+
+    out = fetch_top_decks("X", n=1, fetch_json=fetch)
+    assert out == [["A"]]
+    assert sleeps == [7.0]  # server hint honored, not the exp curve
+
+
+def test_429_exhausted_returns_empty_source(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(ac.time, "sleep", sleeps.append)
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        raise http_error(429)
+
+    assert fetch_top_decks("X", n=1, fetch_json=fetch) == []
+    assert len(calls) == ac.MAX_RETRIES + 1
+    # No Retry-After header -> exponential fallback, base * 2^attempt.
+    assert sleeps == [ac.RETRY_BASE_DELAY_SEC * (2 ** a)
+                      for a in range(ac.MAX_RETRIES)]
+
+
+def test_detail_429_retried_per_deck(monkeypatch):
+    monkeypatch.setattr(ac.time, "sleep", lambda s: None)
+    state = {"n": 0}
+
+    def fetch(url):
+        if "/decks/v3/" in url:
+            return {"count": 1, "results": [search_hit(1)]}
+        state["n"] += 1
+        if state["n"] == 1:
+            raise http_error(503)
+        return detail([card("A")])
+
+    assert fetch_top_decks("X", n=1, fetch_json=fetch) == [["A"]]
+
+
+def test_deterministic_4xx_not_retried(monkeypatch):
+    monkeypatch.setattr(
+        ac.time, "sleep",
+        lambda s: pytest.fail("must not back off on a deterministic 4xx"))
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        raise http_error(404)
+
+    assert fetch_top_decks("X", n=1, fetch_json=fetch) == []
+    assert len(calls) == 1
