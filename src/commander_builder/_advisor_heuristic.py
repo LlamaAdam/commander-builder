@@ -192,7 +192,8 @@ def _card_score_enabled() -> bool:
         return False
 
 
-def _card_score_context(deck_cards, edhrec_page, average_deck):
+def _card_score_context(deck_cards, edhrec_page, average_deck,
+                        deck_text=""):
     """Build the ``card_score.DeckContext`` for this audit.
 
     Uses ``_cached_scryfall`` (cache-only, no network) as the lookup, so
@@ -202,6 +203,15 @@ def _card_score_context(deck_cards, edhrec_page, average_deck):
     The bracket comes from EDHREC's average-deck slug when we fetched one —
     that is the only bracket signal in scope at these seams; without it
     the bracket-dependent gate/modifiers simply don't fire.
+
+    ``deck_text`` is the raw ``.dck`` blob when the caller holds it, and
+    it MATTERS: the context's text-derived math (``manabase``,
+    ``effective_lands``) reads quantities off the text, so without it a
+    stacked ``27 Mountain`` line collapses to 1 Mountain, ``mana_fit``
+    reports every color massively short, and every mana producer gets
+    inflated by up to the component's full weight. ``deck_cards`` still
+    supplies the (sorted, deterministic) name list the per-name
+    derivations iterate.
     """
     from . import card_score
     from .edhrec_client import BRACKET_SLUG
@@ -211,6 +221,7 @@ def _card_score_context(deck_cards, edhrec_page, average_deck):
         bracket = {v: k for k, v in BRACKET_SLUG.items()}.get(slug)
     commander = getattr(edhrec_page, "commander_name", "") or ""
     return card_score.deck_context(
+        deck_text=deck_text or "",
         deck_cards=sorted(deck_cards),
         commander_names=[commander] if commander else [],
         bracket=bracket,
@@ -243,7 +254,8 @@ def _score_add(rec: SwapRecommendation, ctx):
     return result
 
 
-def _card_score_cut_order(deck_cards, edhrec_page, average_deck, fallback):
+def _card_score_cut_order(deck_cards, edhrec_page, average_deck, fallback,
+                          deck_text=""):
     """Cut iteration order by ``100 - CardScore(card | deck - card)``.
 
     Guard-railed names (``Protect=``, role floors, the 33 effective-land
@@ -255,7 +267,8 @@ def _card_score_cut_order(deck_cards, edhrec_page, average_deck, fallback):
     """
     try:
         from . import card_score
-        ctx = _card_score_context(deck_cards, edhrec_page, average_deck)
+        ctx = _card_score_context(deck_cards, edhrec_page, average_deck,
+                                  deck_text=deck_text)
         return card_score.cut_order(sorted(deck_cards), ctx)
     except Exception:  # noqa: BLE001
         return fallback
@@ -280,6 +293,14 @@ def _heuristic_swap_recommendations(
     # candidates*; it never introduces off-archetype/off-color cards, so a
     # bad/empty fetch can only fail to boost, never add noise.
     trending: Optional[set[str]] = None,
+    # Raw ``.dck`` text of the deck under audit. The heuristic itself
+    # only needs the name set, but the FP-015 scoring seam derives
+    # manabase + effective-land counts from deck TEXT — without the real
+    # text every stacked line ("27 Mountain") collapses to 1x and
+    # ``mana_fit`` reports phantom color deficits. Callers holding the
+    # file should always pass it; ``None`` keeps the synthesized-1x
+    # behavior for name-set-only callers.
+    deck_text: Optional[str] = None,
 ) -> list[SwapRecommendation]:
     """Pure-data swap proposals from EDHREC inclusion-% deltas.
 
@@ -506,6 +527,7 @@ def _heuristic_swap_recommendations(
         if _score_ranking:
             _score_ctx = _card_score_context(
                 deck_cards, edhrec_page, average_deck,
+                deck_text=deck_text or "",
             )
             # ``inclusion_pct`` / ``synergy_pct`` / ``role`` are already in
             # ``evidence`` (lines 383-389) — the scorer reuses them rather
@@ -608,6 +630,7 @@ def _heuristic_swap_recommendations(
     if _card_score_enabled():
         _cut_iteration_order = _card_score_cut_order(
             deck_cards, edhrec_page, average_deck, _cut_iteration_order,
+            deck_text=deck_text or "",
         )
     for card in _cut_iteration_order:
         # Don't recommend cutting any land (basic, dual, fetch,
