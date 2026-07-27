@@ -2145,3 +2145,102 @@ def test_compare_multi_profile_host_honors_foreign_injected_runner(
     # ...on the shared-profile path, so each tail carries the marker.
     for sim in fr.sims:
         assert sim.forge_log_tail == _PARALLEL_LOG_TAIL_MARKER
+
+
+def test_compare_customized_runner_on_pool_profile_is_not_superseded(
+    tmp_path, monkeypatch,
+):
+    """The injected runner's forge_dir IS a discovered profile, but it
+    carries a caller-pinned jar — NOT what locate()/for_profile would build
+    for that profile. Coverage must fail on the jar mismatch: compare()
+    takes the shared-runner fallback and routes every pod through the
+    injection, so the caller's explicit jar/java choice is never silently
+    replaced by default pool runners."""
+    from pathlib import Path
+
+    from commander_builder.compare_versions import _PARALLEL_LOG_TAIL_MARKER
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    monkeypatch.setattr(
+        cv, "_discover_profiles",
+        lambda: [Path("vendor/forge"), Path("vendor/forge2")],
+    )
+    # The pool's would-be runners (java_path/forge_jar unset on the fakes)
+    # differ from the injection's pinned jar, so coverage must not hold.
+    runner_for, tracker = _make_profile_tracking_runner_factory("pool tail")
+    monkeypatch.setattr(cv, "_runner_for", runner_for)
+
+    fr = _tail_capturing_runner(_make_pod_stdout(1, 1), "interleaved tail")
+    fr.forge_dir = Path("vendor/forge")
+    fr.forge_jar = Path("vendor/forge/forge-gui-desktop-1.6.50-pinned.jar")
+    fr.java_path = Path("C:/custom/jdk/bin/java.exe")
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=fr,
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    # Every pod ran through the injected instance...
+    assert len(fr.sims) == 2
+    assert report.total_games == 4
+    # ...and no pool runner ever ran a pod (the coverage probe may build
+    # one to compare against, but it must never be dispatched).
+    assert tracker["profiles_used"] == []
+    assert tracker["distinct_profiles"] == set()
+    # Shared-profile path: each tail carries the marker.
+    for sim in fr.sims:
+        assert sim.forge_log_tail == _PARALLEL_LOG_TAIL_MARKER
+
+
+def test_compare_default_runner_for_secondary_profile_rotates_pool(
+    tmp_path, monkeypatch,
+):
+    """The injected runner is a DEFAULT runner for vendor/forge3 (same
+    java/jar as the pool would build — the for_profile(vendor/forge3) case,
+    e.g. deliberately steering clear of vendor/forge while a soak occupies
+    it). The pool must supersede it AND respect the profile choice: rotate
+    so the pool starts at forge3, leaving vendor/forge untouched when
+    enough other profiles exist for the concurrent workers."""
+    from pathlib import Path
+
+    from commander_builder.compare_versions import _PARALLEL_LOG_TAIL_MARKER
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    monkeypatch.setattr(
+        cv, "_discover_profiles",
+        lambda: [
+            Path("vendor/forge"), Path("vendor/forge2"),
+            Path("vendor/forge3"), Path("vendor/forge4"),
+        ],
+    )
+    runner_for, tracker = _make_profile_tracking_runner_factory("real pod tail")
+    monkeypatch.setattr(cv, "_runner_for", runner_for)
+
+    injected = _ExplodingRunner()
+    injected.forge_dir = Path("vendor/forge3")
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=injected,
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    # Two pods, two workers: the rotated pool is [forge3, forge4] — the
+    # caller's profile leads, and the soak-occupied vendor/forge (plus
+    # forge2) is never touched.
+    assert tracker["violation"] is None
+    assert tracker["distinct_profiles"] == {
+        str(Path("vendor/forge3")), str(Path("vendor/forge4")),
+    }
+    assert str(Path("vendor/forge")) not in tracker["profiles_used"]
+    assert len(report.pods) == 2
+    assert report.total_games == 4
+    # Isolated path: the real tail survives on every pod.
+    for sim in tracker["sims"]:
+        assert sim.forge_log_tail == "real pod tail"
+        assert sim.forge_log_tail != _PARALLEL_LOG_TAIL_MARKER

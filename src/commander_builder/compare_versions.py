@@ -704,12 +704,17 @@ def compare(
     ``runner`` (default None) injects the ForgeRunner used for every pod;
     None locates the repo-local install. An injected runner is ALWAYS
     honored: parallel dispatch only replaces it with the per-worker
-    isolated-profile pool when the runner is itself bound to one of the
-    discovered vendor profiles (``ForgeRunner.locate()`` /
-    ``for_profile``) — i.e. when the pool reproduces it exactly. Any
-    other runner (a test double, a custom-profile runner) forces the
-    shared-runner dispatch path so caller-configured behavior is never
-    silently discarded.
+    isolated-profile pool when the runner is a DEFAULT runner for one of
+    the discovered vendor profiles — same ``java_path`` and ``forge_jar``
+    as ``ForgeRunner.locate()`` / ``for_profile`` would build for that
+    profile — i.e. when the pool reproduces it exactly. The pool is then
+    rotated to START at that runner's profile, so a deliberate
+    ``for_profile(vendor/forgeN)`` choice (e.g. steering clear of
+    vendor/forge while a soak occupies it) is respected rather than
+    silently mapped back to vendor/forge. Any other runner (a test
+    double, a custom java/pinned-jar runner, a custom-profile runner)
+    forces the shared-runner dispatch path so caller-configured behavior
+    is never silently discarded.
 
     ``parallel`` (default True) dispatches multi-pod runs concurrently.
     Pods are I/O-bound (each spawns a Forge JVM as a subprocess) so a
@@ -977,18 +982,45 @@ def compare(
         # run_ab_parallel agree on what a profile is and where it lives.
         profiles = _discover_profiles()
         # An explicitly injected ``runner`` may only be superseded by the
-        # per-worker profile pool when it is itself bound to one of the
-        # discovered profiles (ForgeRunner.locate() / for_profile): the pool's
-        # runner for that profile is behaviorally the injected runner, so
-        # pooling discards nothing the caller configured. Any OTHER injected
-        # runner — a test double, or a runner bound to a profile outside the
-        # vendor/ layout — carries caller behavior the pool cannot reproduce
-        # and must never be silently ignored: take the shared-runner fallback
-        # so every pod runs through it.
-        runner_is_pool_covered = (
-            injected_runner is None
-            or getattr(injected_runner, "forge_dir", None) in profiles
-        )
+        # per-worker profile pool when the pool actually REPRODUCES it — a
+        # forge_dir that happens to match a discovered profile is NOT enough.
+        # Coverage requires the injection to be a DEFAULT runner for that
+        # profile: same java_path and forge_jar as _runner_for
+        # (ForgeRunner.locate() / for_profile) would build for it. A runner
+        # carrying a custom java or a caller-pinned jar — like any test
+        # double, or a runner bound to a profile outside the vendor/ layout —
+        # embodies caller behavior the pool cannot reproduce and must never
+        # be silently ignored: take the shared-runner fallback so every pod
+        # runs through it.
+        #
+        # When the injection IS a default runner for a NON-primary profile
+        # (for_profile(vendor/forgeN) — e.g. deliberately steering clear of
+        # vendor/forge while a soak occupies it), the caller's PROFILE choice
+        # is part of that behavior too: rotate the discovered list so the
+        # pool (profiles[:workers]) starts at the injected profile instead of
+        # defaulting back to vendor/forge. For the primary profile
+        # (ForgeRunner.locate(), forge_dir == vendor/forge — the web path)
+        # the rotation is the identity, so that caller keeps the exact
+        # per-worker pool it gets today.
+        runner_is_pool_covered = injected_runner is None
+        if not runner_is_pool_covered:
+            injected_dir = getattr(injected_runner, "forge_dir", None)
+            if injected_dir in profiles:
+                try:
+                    default_runner = _runner_for(injected_dir)
+                except Exception:
+                    # Can't even build the default runner for this profile —
+                    # then the pool certainly can't reproduce the injection.
+                    default_runner = None
+                if default_runner is not None and (
+                    getattr(injected_runner, "java_path", None)
+                    == getattr(default_runner, "java_path", None)
+                    and getattr(injected_runner, "forge_jar", None)
+                    == getattr(default_runner, "forge_jar", None)
+                ):
+                    runner_is_pool_covered = True
+                    pivot = profiles.index(injected_dir)
+                    profiles = profiles[pivot:] + profiles[:pivot]
         isolated = len(profiles) >= 2 and runner_is_pool_covered
         free_runners: "Optional[queue.Queue]" = None
         if isolated:
