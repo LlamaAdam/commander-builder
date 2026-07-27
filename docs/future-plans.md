@@ -177,7 +177,10 @@ an arm pair that picks the same cards in a different order is skipped
 instead of simmed. Replayed against the pilot's own
 `_tier3_pilot_result.json` the guard skips Hash and leaves BlackPanther
 and Mothy simming. (Multisets, not sets: a repeated card is a real
-staging difference.) +3 offline tests;
+staging difference.) +3 offline tests. *Superseded 2026-07-27:*
+`_staged_signature` now compares the staged deck *texts* — requested
+multisets were still order-sensitive through
+`_apply_swaps_to_dck`'s pair-drop validation;
 (b) **run explicit null replicates** (same deck vs itself) to publish a
 measured noise floor rather than discovering one by accident;
 (c) raise games/pod substantially and widen the deck set — at a 0.35
@@ -185,13 +188,24 @@ noise floor, 3 decks × 40 games was never going to resolve anything;
 (d) consider gating on **mean margin with a CI**, not a 2-of-3 tally.
 
 **Design fixes SHIPPED + the gated run LAUNCHED (2026-07-26):**
-(a) multiset null-replicate guard (PR #32); (b) explicit
-`--null-replicates N` sims an unmodified copy vs itself to publish a
-measured noise floor; (d) the gate is now a **paired 95% t-interval vs
-the baseline arm** — default-on requires >= 6 paired decks, CI
-excluding zero, AND mean advantage above the measured floor (winner
-tallies gate nothing). Policy set 2026-07-26; machinery in
-`build_summary`/`run_null_replicate` (PR #35, 29 harness tests).
+(a) staged-decklist guard (PR #32 shipped a requested-swap *multiset*
+compare; hardened 2026-07-27 to compare the *staged deck texts*, since
+`_apply_swaps_to_dck` drops invalid (cut, add) pairs order-dependently
+— identical requested multisets can stage different decks and vice
+versa); (b) explicit `--null-replicates N` sims an unmodified copy vs
+itself to publish a **single-margin noise reference** — a heuristic
+magnitude check, NOT the sampling noise of the gated statistic (each
+replicate is one base-vs-self |margin|; the gated statistic is a mean
+over >= 6 decks of a *paired difference* of two independently simmed
+margins, so per-deck noise is ~sqrt(2)x a single margin and the mean
+shrinks by sqrt(n_decks) — gating the mean advantage on the raw
+reference is conservative, and it needs >= 2 replicates or the floor
+criterion is reported as not evaluated); (d) the gate is now a
+**paired 95% t-interval vs the baseline arm** — default-on requires
+>= 6 paired decks, CI excluding zero, AND mean advantage above that
+noise reference (winner tallies gate nothing). Policy set 2026-07-26;
+machinery in `build_summary`/`run_null_replicate` (PR #35, 29 harness
+tests).
 (c) The properly-powered run is RUNNING detached since ~13:30 local:
 6 B3 decks, arms bucket vs bubble (bubble budget caps both arms),
 60 games/pod, 2 null replicates (~1,680 games). Verdict lands at
