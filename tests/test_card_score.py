@@ -1139,3 +1139,118 @@ def test_deck_role_counts_matches_count_deck_roles():
         assert ctx.deck_role_counts[staples.role_bucket(
             card.get("oracle_text") or "", card.get("type_line") or "",
         )] >= 1
+
+
+# --- Quantity-collapse regression (2026-07-26) -----------------------------
+# The advisor seam built its scoring context from the NAME SET only, so
+# DeckContext synthesized ``1 <name>`` per name and every text-derived
+# derivation saw a stacked ``37 Island`` line as 1 Island: the Karsten
+# source counts read ~8 lands, ``mana_fit`` reported every color
+# massively short (inflating every mana producer by up to the full
+# component weight, with false "N source(s) short" evidence), and
+# ``effective_lands`` fired the 33-land cut floor on EVERY land. These
+# tests pin the plumbed-through quantities at each seam.
+
+_STACKED_DECK_TEXT = (
+    "[metadata]\n"
+    "[Commander]\n"
+    "1 Talrand, Sky Summoner\n"
+    "[Main]\n"
+    "37 Island\n"
+    "1 Rhystic Study\n"
+    "1 Divination\n"
+    "1 Counterspell\n"
+)
+_STACKED_DECK_CARDS = {"Island", "Rhystic Study", "Divination",
+                       "Counterspell"}
+
+
+def _stacked_ctx() -> cs.DeckContext:
+    """A context built the way bubble_analysis builds one: real text."""
+    return cs.deck_context(deck_text=_STACKED_DECK_TEXT, lookup=_lookup,
+                           combos=[], salt_scores={}, game_changers=[])
+
+
+def test_advisor_context_manabase_sees_stacked_basic_quantities(
+    monkeypatch,
+):
+    """The advisor seam with the real ``.dck`` text plumbed through must
+    count all 37 Islands as U sources, not the 1 the synthesized 1x
+    blob credited."""
+    from commander_builder import _advisor_heuristic as ah
+    monkeypatch.setattr(
+        "commander_builder._advisor_heuristic._cached_scryfall", _lookup,
+    )
+    ctx = ah._card_score_context(
+        _STACKED_DECK_CARDS, _advisor_page(), None,
+        deck_text=_STACKED_DECK_TEXT,
+    )
+    report = ctx.manabase
+    assert report is not None
+    assert report["per_color"]["U"]["sources"] == 37
+
+
+def test_mana_fit_reports_no_deficit_for_a_properly_built_manabase(
+    monkeypatch,
+):
+    """37 Islands in a mono-U deck meets every Karsten target, so a mana
+    producer must score 0.0 with "already at target" — never a false
+    "U is N source(s) short" evidence string."""
+    from commander_builder import _advisor_heuristic as ah
+    monkeypatch.setattr(
+        "commander_builder._advisor_heuristic._cached_scryfall", _lookup,
+    )
+    ctx = ah._card_score_context(
+        _STACKED_DECK_CARDS, _advisor_page(), None,
+        deck_text=_STACKED_DECK_TEXT,
+    )
+    f, detail = cs._f_mana_fit("Island", ctx)
+    assert f == 0.0
+    assert "short" not in detail
+    assert "already at target" in detail
+
+
+def test_effective_lands_counts_stacked_quantities():
+    """``37 Island`` is 37 effective lands, and the 33-land cut floor
+    must NOT fire on a deck with headroom (the collapsed count blocked
+    every land cut with false "drops the deck to N" evidence)."""
+    ctx = _stacked_ctx()
+    assert ctx.effective_lands == pytest.approx(37.0)
+    assert not cs.cut_score("Island", ctx).blocked
+
+
+def test_without_preserves_stacked_quantities():
+    """A ``without()`` child inherits the parent's real text minus the
+    card's line(s) — re-synthesizing 1x-per-name would poison every cut
+    score's manabase math the same way the advisor seam was."""
+    ctx = _stacked_ctx()
+    sub = ctx.without("Divination")
+    assert "37 Island" in sub.deck_text
+    assert "Divination" not in sub.deck_text
+    assert sub.effective_lands == pytest.approx(37.0)
+    assert sub.manabase is not None
+    assert sub.manabase["per_color"]["U"]["sources"] == 37
+
+
+def test_flag_off_path_is_untouched_by_deck_text(monkeypatch):
+    """Flag off, ``deck_text`` supplied: ordering stays byte-identical to
+    the pre-FP-015 bucket order and no score payload appears."""
+    monkeypatch.delenv(cs.CARD_SCORE_ENV_VAR, raising=False)
+    recs = _heuristic_swap_recommendations(
+        {"Island", "Counterspell"}, _advisor_page(),
+        deck_text=_STACKED_DECK_TEXT,
+    )
+    adds = [r.card for r in recs if r.action == "add"]
+    assert adds == _PRE_FP015_ADD_ORDER
+    assert all("card_score" not in r.evidence for r in recs)
+
+
+def test_real_deck_text_context_matches_direct_manabase_report():
+    """The bubble_analysis path (``deck_context(deck_text=...)``) must
+    keep producing exactly what ``manabase_report`` itself says — the
+    fix adds quantity plumbing for name-set callers, it must not perturb
+    callers that already passed real text."""
+    from commander_builder.deck_builder_manabase import manabase_report
+    ctx = _stacked_ctx()
+    assert ctx.manabase == manabase_report(_STACKED_DECK_TEXT,
+                                           lookup=ctx.card)

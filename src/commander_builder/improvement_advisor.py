@@ -207,15 +207,6 @@ def _aggregate_match_history(deck_filename: str, match_dir: Path = MATCH_DIR) ->
 
 # --- Card-level signals from EDHREC ---------------------------------------
 
-def _read_main_cards(deck_path: Path) -> list[str]:
-    """Pull the [Main] section card names (without qty / set / cn).
-
-    Thin wrapper over ``dck_utils.main_card_names``."""
-    if not deck_path.exists():
-        return []
-    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
-
-
 # Signal-to-roles map + _signals_to_priority_roles + heuristic
 # recommender all live in _advisor_heuristic. Re-exported here so
 # external imports (and the legacy in-file `_aggregate_match_history`
@@ -552,7 +543,17 @@ def _advise_steps(
     primary_commander = commanders[0]
 
     diagnosis = _aggregate_match_history(deck_path.name, match_dir=match_dir)
-    main_cards = set(_read_main_cards(deck_path))
+    # Read the raw ``.dck`` text ONCE and keep it alongside the name set:
+    # the heuristic's FP-015 scoring seam derives manabase + effective-land
+    # counts from deck TEXT, and handing it only names collapses stacked
+    # lines ("27 Mountain") to 1x — phantom color deficits, inflated mana
+    # producers. Existence was validated above, so a read failure here is
+    # a real I/O error worth degrading quietly on (empty set, no audit).
+    try:
+        deck_text = deck_path.read_text(encoding="utf-8")
+    except OSError:
+        deck_text = ""
+    main_cards = set(dck_utils.main_card_names(deck_text))
 
     # --- Phase 1: diagnosis. Streamed immediately so the UI can
     # render weakness pills + "scanning for X" placeholders while
@@ -768,6 +769,7 @@ def _advise_steps(
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
                 trending=_fetch_trending_lazy(),
+                deck_text=deck_text,
             )
             effective_source = "heuristic"
     elif source == "claude":
@@ -802,6 +804,7 @@ def _advise_steps(
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
                 trending=_fetch_trending_lazy(),
+                deck_text=deck_text,
             )
             effective_source = "heuristic"
         except Exception as exc:  # noqa: BLE001
@@ -815,6 +818,7 @@ def _advise_steps(
                 average_deck=_fetch_avg_deck_lazy(),
                 tag_pages=_fetch_tag_pages_lazy(),
                 trending=_fetch_trending_lazy(),
+                deck_text=deck_text,
             )
             effective_source = "heuristic"
     else:
@@ -825,6 +829,7 @@ def _advise_steps(
             average_deck=_fetch_avg_deck_lazy(),
             tag_pages=_fetch_tag_pages_lazy(),
             trending=_fetch_trending_lazy(),
+            deck_text=deck_text,
         )
 
     yield AdvicePhase("primary", {

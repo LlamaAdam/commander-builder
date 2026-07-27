@@ -579,6 +579,32 @@ def synth_deck_text(commander_names: Iterable[str],
     return "\n".join(lines) + "\n"
 
 
+def _deck_text_minus(deck_text: str, card_name: str) -> str:
+    """``deck_text`` with every ``[Main]`` line for ``card_name`` removed.
+
+    :meth:`DeckContext.without` uses this so a child context keeps its
+    parent's REAL deck text — a stacked ``27 Mountain`` line stays 27
+    Mountains in the child's manabase math. Re-synthesizing from the
+    remaining name list (the pre-fix behavior) collapsed every quantity
+    to 1x, so the child's Karsten source counts saw a ~8-land deck.
+    Matches ``without``'s name semantics: ALL lines for the name go.
+    """
+    from .dck_utils import parse_card_line
+    k = _key(card_name)
+    out: list[str] = []
+    in_main = False
+    for raw in (deck_text or "").splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_main = stripped.lower() == "[main]"
+        elif in_main:
+            parsed = parse_card_line(stripped)
+            if parsed and parsed[1] and _key(parsed[1]) == k:
+                continue
+        out.append(raw)
+    return "\n".join(out) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Deck context — every deck-level derivation, memoized and injectable
 # ---------------------------------------------------------------------------
@@ -711,7 +737,11 @@ class DeckContext:
         """
         k = _key(card_name)
         remaining = [n for n in self.deck_cards if _key(n) != k]
+        # The child inherits the parent's deck TEXT minus the card's
+        # line(s), not a re-synthesized 1x blob — text-derived math
+        # (manabase, effective_lands) must keep real quantities.
         ctx = DeckContext(
+            deck_text=_deck_text_minus(self.deck_text, card_name),
             deck_cards=remaining,
             commander_names=self.commander_names,
             **self._init_kwargs,
@@ -949,15 +979,22 @@ class DeckContext:
 
     @property
     def effective_lands(self) -> float:
-        """Lands + 0.5 per spell-front MDFC — ``deck_health``'s counting."""
+        """Lands + 0.5 per spell-front MDFC — ``deck_health``'s counting.
+
+        Quantity-aware: walks ``self.deck_text`` (the real ``.dck`` blob
+        when the caller supplied one, the synthesized 1x blob otherwise),
+        so a stacked ``27 Mountain`` line counts as 27 lands rather than
+        the 1 the old per-entry walk over ``deck_cards`` credited.
+        """
         def _compute():
+            from .dck_utils import iter_main_cards
             from .deck_health import _MDFC_LANDS
             total = 0.0
-            for name in self.deck_cards:
+            for qty, name in iter_main_cards(self.deck_text):
                 if _is_land_card(name, self.card(name)):
-                    total += 1.0
+                    total += float(qty)
                 elif _key(name) in _MDFC_LANDS:
-                    total += 0.5
+                    total += 0.5 * float(qty)
             return total
         value = self._lazy("effective_lands", _compute)
         return float(value or 0.0)
