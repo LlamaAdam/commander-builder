@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable, Iterable, Optional
 
 from . import dck_utils
@@ -295,6 +296,20 @@ class _Cards:
     lazily: that module writes to a disk cache on import-time-
     resolvable paths, and tests inject a stub instead of monkeypatching
     a module global.
+
+    Network circuit breaker: the first HARD network failure (timeout /
+    connection refused / 5xx — anything ``OSError``-shaped, which
+    covers ``urllib.error.URLError``) trips the scan to cache-only for
+    its REMAINDER: the default lookup drains the rest of the deck from
+    disk snapshots via ``lookup_card(cache_only=True)``, and an
+    injected lookup simply stops being called. Without this, a
+    Scryfall outage costs one ~20s connect-timeout per distinct name —
+    a 100-card deck scanned inside a synchronous web request stalls
+    for over half an hour. Same shape as ``deck_pricing``'s printings
+    breaker, including the retry-THIS-card-cache-only step so a
+    mid-scan outage doesn't skip a card whose snapshot already exists.
+    The breaker is per-``_Cards`` (i.e. per scan): one dead-network
+    scan never poisons the next one.
     """
 
     def __init__(self, fn: Optional[LookupFn] = None) -> None:
@@ -302,6 +317,7 @@ class _Cards:
         self._cache: dict[str, Optional[dict]] = {}
         self.attempts = 0
         self.failures = 0
+        self._offline = False  # Tripped by the first hard network failure.
 
     def get(self, name: str) -> Optional[dict]:
         """Card dict for ``name``, or None if it can't be resolved.
@@ -314,20 +330,40 @@ class _Cards:
         if key in self._cache:
             return self._cache[key]
         self.attempts += 1
-        fn = self._fn
-        if fn is None:
-            from .scryfall_client import lookup_card
-            fn = lookup_card
-        try:
-            card = fn(name)
-        except Exception:  # noqa: BLE001 -- outage contract: unknown, not illegal
-            card = None
+        card = self._lookup(name)
         if not isinstance(card, dict):
             card = None
         if card is None:
             self.failures += 1
         self._cache[key] = card
         return card
+
+    def _lookup(self, name: str) -> Optional[dict]:
+        """One breaker-aware lookup attempt. Never raises."""
+        fn = self._fn
+        snapshot: Optional[LookupFn] = None
+        if fn is None:
+            from .scryfall_client import lookup_card
+            fn = lookup_card
+            snapshot = partial(lookup_card, cache_only=True)
+        if not self._offline:
+            try:
+                return fn(name)
+            except OSError:
+                # Hard network failure: trip cache-only for the rest
+                # of this scan, then fall through to retry THIS card
+                # from the snapshot (mirrors deck_pricing).
+                self._offline = True
+            except Exception:  # noqa: BLE001 -- outage contract: unknown, not illegal
+                return None
+        if snapshot is None:
+            # Injected lookups have no disk snapshot behind them; a
+            # tripped breaker just stops calling them.
+            return None
+        try:
+            return snapshot(name)
+        except Exception:  # noqa: BLE001 -- outage contract: unknown, not illegal
+            return None
 
 
 def _faces(card: dict) -> list[dict]:

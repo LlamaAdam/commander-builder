@@ -121,6 +121,40 @@ def test_lookup_card_empty_name():
     assert lookup_card("") is None
 
 
+def test_lookup_card_cache_only_never_fetches(tmp_path, monkeypatch):
+    monkeypatch.setattr("commander_builder.scryfall_client.CACHE_DIR", tmp_path)
+
+    def fail_fetch(url):
+        raise AssertionError(f"Should not have fetched {url}")
+    monkeypatch.setattr("commander_builder.scryfall_client._http_get_json", fail_fetch)
+
+    # Nothing cached + cache_only → None, no network attempt.
+    assert lookup_card("Uncached Card", cache_only=True) is None
+
+    # And the miss is NOT negatively memoized — "not snapshotted yet"
+    # is not a 404, so a later networked call must still fetch.
+    fake = {"name": "Uncached Card"}
+    monkeypatch.setattr("commander_builder.scryfall_client.REQUEST_SLEEP_SEC", 0)
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client._http_get_json", lambda url: fake,
+    )
+    assert lookup_card("Uncached Card") == fake
+
+
+def test_lookup_card_cache_only_serves_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr("commander_builder.scryfall_client.CACHE_DIR", tmp_path)
+    fake = {"name": "Foo", "color_identity": ["W", "B"]}
+    (tmp_path / "foo.json").write_text(
+        '{"name": "Foo", "color_identity": ["W", "B"]}', encoding="utf-8",
+    )
+
+    def fail_fetch(url):
+        raise AssertionError(f"Should not have fetched {url}")
+    monkeypatch.setattr("commander_builder.scryfall_client._http_get_json", fail_fetch)
+
+    assert lookup_card("Foo", cache_only=True) == fake
+
+
 # --- refresh_card (force-fetch, bypass cache) -----------------------------
 
 def test_refresh_card_writes_fresh_snapshot(tmp_path, monkeypatch):

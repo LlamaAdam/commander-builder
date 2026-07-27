@@ -902,7 +902,24 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         # every name under ``unverified_cards`` — an outage must never
         # render as a false accusation, and it must never render as a
         # reassuring empty list either.
-        scan = scan_banned(names)
+        #
+        # Snapshot-only lookup: this runs inside a synchronous web
+        # request, and the default network-backed path costs a
+        # rate-limit sleep plus an up-to-20s GET per uncached name,
+        # serially — a cold cache means ~100 serial GETs before the
+        # response renders, and a Scryfall outage used to mean one
+        # 20s timeout PER CARD. So the audit vouches only for cards
+        # already snapshotted on disk (anything this app has ever
+        # looked up — i.e. every card of a deck it built); a
+        # not-yet-cached name lands in ``unverified_cards``, which is
+        # honest, fast, and already rendered by the outage contract
+        # above.
+        from ..scryfall_client import lookup_card
+
+        def _snapshot_lookup(name: str):
+            return lookup_card(name, cache_only=True)
+
+        scan = scan_banned(names, lookup=_snapshot_lookup)
         if scan is None:
             banned: list[str] = []
             unverified: list[str] = sorted(set(names))

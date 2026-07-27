@@ -215,9 +215,20 @@ def _memo_put(key: tuple, value) -> None:
     _LOOKUP_MEMO[key] = value
 
 
-def lookup_card(name: str, cache: bool = True) -> Optional[dict]:
+def lookup_card(
+    name: str, cache: bool = True, cache_only: bool = False,
+) -> Optional[dict]:
     """Look up `name` via Scryfall's exact-named endpoint. Caches successful
-    responses to ``oracle_snapshots/<slug>.json``. Returns None on 404."""
+    responses to ``oracle_snapshots/<slug>.json``. Returns None on 404.
+
+    ``cache_only=True`` never touches the network — returns the memoized
+    or disk-snapshotted card, or None on a miss (mirrors
+    ``lookup_card_prints``). Callers use it as an offline circuit
+    breaker: after one network failure, drain the remaining cards from
+    cache instead of eating a connect-timeout per card. A cache-only
+    miss is NOT negatively memoized — it means "not snapshotted yet",
+    never "doesn't exist", so a later networked call must still fetch.
+    """
     if not name:
         return None
     key = _memo_key(name)
@@ -236,6 +247,8 @@ def lookup_card(name: str, cache: bool = True) -> Optional[dict]:
         else:
             _memo_put(key, data)
             return data
+    if cache_only:
+        return None
     url = f"{SCRYFALL_BASE}/cards/named?{urllib.parse.urlencode({'exact': name})}"
     try:
         time.sleep(REQUEST_SLEEP_SEC)
