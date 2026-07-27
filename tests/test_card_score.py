@@ -21,6 +21,9 @@ would be uninformative at our sample size.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -498,6 +501,52 @@ def test_consensus_falls_back_to_scryfall_edhrec_rank():
     assert "rank" in tail.components["consensus"].explanation
 
 
+def test_measured_zero_synergy_is_scored_not_renormalized_away():
+    """EDHREC synergy is a signed delta from the format baseline, so
+    0.0 is a REAL measurement and must stay a scored component. The
+    pre-fix truthiness test (``if synergy_pct``) renormalized a
+    measured 0.0 away — which let a 0%-synergy card OUTRANK a
+    0.1%-synergy card: the zero card's synergy weight shifted onto its
+    stronger components while the 0.1% card was charged a near-zero."""
+    ctx = _ctx(_blue_deck())
+    zero = cs.score_card("Divination", ctx, inclusion_pct=30.0,
+                         synergy_pct=0.0)
+    assert "synergy" not in zero.unavailable
+    assert zero.components["synergy"].available
+    assert zero.components["synergy"].value == pytest.approx(0.0)
+    tiny = cs.score_card("Divination", ctx, inclusion_pct=30.0,
+                         synergy_pct=0.1)
+    assert (zero.components["synergy"].value
+            < tiny.components["synergy"].value)
+    # Same card, same deck, every other input identical — the measured
+    # 0.0 must not outrank the measured 0.1 overall either.
+    assert zero.total < tiny.total
+
+
+def test_negative_synergy_is_measured_bad_not_unavailable():
+    """EDHREC reports negative synergy for cards played BELOW their
+    format baseline. That clamps to a scored 0.0 — measured bad —
+    exactly like the literal 0.0, never to 'unavailable'."""
+    ctx = _ctx(_blue_deck())
+    neg = cs.score_card("Divination", ctx, inclusion_pct=30.0,
+                        synergy_pct=-5.0)
+    assert "synergy" not in neg.unavailable
+    assert neg.components["synergy"].value == pytest.approx(0.0)
+
+
+def test_zero_inclusion_defers_to_edhrec_rank_not_a_hard_zero():
+    """Pin the deliberate asymmetry with the synergy fix: a literal
+    0.0 ``inclusion_pct`` is overwhelmingly the EDHREC client's
+    missing-data sentinel (``CardEntry`` defaults the field to 0.0 and
+    its parsers coerce absent values with ``or 0``), so ``_f_consensus``
+    falls through to ``edhrec_rank`` — a real per-card measurement —
+    instead of scoring a hard 0. See the comment in ``_f_consensus``."""
+    ctx = _ctx(_blue_deck())
+    zero = cs.score_card("Sol Ring", ctx, inclusion_pct=0.0)  # rank 1
+    assert zero.components["consensus"].value == pytest.approx(1.0)
+    assert "rank" in zero.components["consensus"].explanation
+
+
 def test_consensus_treats_a_raw_deck_count_as_not_a_percentage():
     """EDHREC sometimes reports a raw deck count in ``inclusion_pct``
     (30627 == 'in 30627 decks'), a quirk the advisor's rationale strings
@@ -925,6 +974,50 @@ def test_flag_truthy_values_match_the_rest_of_the_codebase(
 ):
     monkeypatch.setenv(cs.CARD_SCORE_ENV_VAR, value)
     assert cs.is_enabled() is expected
+
+
+def test_conftest_isolates_the_card_score_flag():
+    """No ``delenv`` here on purpose: the conftest autouse fixture
+    (``_isolate_card_score_flag``) must already have stripped the flag
+    before this test body runs. This test FAILS if an operator shell's
+    ``COMMANDER_BUILDER_CARD_SCORE=1`` export leaks into the suite —
+    the exact leak the fixture exists to stop (the tier-3 workflow has
+    the operator export the flag, and ``is_enabled`` reads the
+    environment at call time). Driven end to end by
+    ``test_flag_isolation_survives_an_exported_operator_shell``."""
+    assert cs.CARD_SCORE_ENV_VAR not in os.environ
+    assert cs.is_enabled() is False
+
+
+def test_setenv_in_a_test_still_beats_the_autouse_delenv(monkeypatch):
+    """Referenced by the conftest fixture's docstring: opt-in tests
+    ``setenv`` inside the test body (or a non-autouse fixture), which
+    runs AFTER the autouse ``delenv`` at fixture setup — so the opt-in
+    always wins and the flag-on tests keep working."""
+    monkeypatch.setenv(cs.CARD_SCORE_ENV_VAR, "1")
+    assert cs.is_enabled() is True
+
+
+@pytest.mark.slow
+def test_flag_isolation_survives_an_exported_operator_shell():
+    """End-to-end proof of the conftest fixture: run the probe test
+    (``test_conftest_isolates_the_card_score_flag``) in a child pytest
+    whose environment carries the operator export. Without the autouse
+    ``delenv`` the probe fails, so this run passing IS the isolation.
+    Slow lane: one child pytest startup (~5-10s)."""
+    env = dict(os.environ)
+    env["COMMANDER_BUILDER_CARD_SCORE"] = "1"
+    repo = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "tests/test_card_score.py::"
+         "test_conftest_isolates_the_card_score_flag"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, (
+        f"probe failed under an exported flag — the conftest autouse "
+        f"delenv is not isolating the suite\n{proc.stdout}\n{proc.stderr}"
+    )
 
 
 def _advisor_page() -> CommanderPage:

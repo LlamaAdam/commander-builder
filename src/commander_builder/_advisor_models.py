@@ -113,11 +113,21 @@ class AdviceReport:
     # Whole-deck verdict from bubble_analysis.score_deck (FP-015 bubble
     # slice): {total, verdict, change_budget, components, ...}. None
     # unless the card-score flag is on and the verdict pass ran — the
-    # report is unchanged (and this stays None) on the default path.
+    # report is BEHAVIORALLY unchanged (and this stays None) on the
+    # default path. NOTE the flag-off invariant is behavioral, not
+    # byte-level, for serialized shapes: ``to_dict()`` (a plain
+    # ``asdict``) and every JSON surface built from it (web audit
+    # payload, auto-curate --json) always CARRY this key — flag off
+    # means a null value, not an absent key. Chosen deliberately over
+    # stripping: the additive shape shipped, and removing keys now
+    # would change the schema a second time for any consumer already
+    # reading it.
     deck_score: Optional[dict] = None
     # bubble_analysis.find_bubble_cards output (each entry a
     # BubbleCard.to_dict()): the deck's easiest replacements, best
-    # first. Empty unless the verdict pass ran.
+    # first. Empty unless the verdict pass ran. Same schema-additive
+    # note as ``deck_score`` above: serialized surfaces always carry
+    # the key; flag off means [].
     bubble_cards: list[dict] = field(default_factory=list)
 
     def to_manifest(self) -> dict:

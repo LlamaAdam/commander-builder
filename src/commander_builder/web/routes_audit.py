@@ -393,8 +393,11 @@ def _build_audit_payload(
         # (ManaFoundry parity). Rendered as the tile row's header.
         "health_grade": _compute_health_grade_safe(original, health_signals),
         "combo_assessment": _assess_combos_safe(original, bracket),
-        # FP-015 whole-deck verdict + bubble cards. None/[] unless the
-        # card-score flag is on and the verdict pass above succeeded.
+        # FP-015 whole-deck verdict + bubble cards. The keys are ALWAYS
+        # present — None/[] unless the card-score flag is on and the
+        # verdict pass above succeeded. Flag-off gating is behavioral,
+        # not schematic (see AdviceReport.deck_score): stripping the
+        # keys now would change the shipped shape a second time.
         "deck_score": getattr(report, "deck_score", None),
         "bubble_cards": list(getattr(report, "bubble_cards", []) or []),
     }

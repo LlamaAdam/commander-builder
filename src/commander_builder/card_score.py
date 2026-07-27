@@ -1199,6 +1199,15 @@ def _f_consensus(
     the ``edhrec_rank`` path rather than pretend every such card is a
     perfect 1.0.
     """
+    # ``0.0 <`` is deliberate — the opposite choice from ``_f_synergy``.
+    # A literal 0.0 inclusion is overwhelmingly a MISSING-data sentinel,
+    # not a measurement: ``edhrec_client.CardEntry`` defaults the field
+    # to 0.0 and its parsers coerce absent values with ``or 0``, and a
+    # card genuinely recommended on an EDHREC commander page never
+    # carries a true 0% inclusion. Falling through swaps that ambiguous
+    # sentinel for ``edhrec_rank`` — a real per-card measurement — so
+    # this is "unavailable != bad" honored, not violated. (Synergy has
+    # no such fallback signal, and its 0.0 IS a common true value.)
     if inclusion_pct is not None and 0.0 < inclusion_pct <= 100.0:
         f = _clamp(inclusion_pct / CONSENSUS_SATURATION_PCT)
         return f, (f"in {inclusion_pct:.0f}% of EDHREC decks for this "
@@ -1229,8 +1238,16 @@ def _f_synergy(name: str, ctx: DeckContext,
     if lift_score is None:
         lift_score = ctx.lift_scores.get(_key(name))
     corpus_ok = ctx.corpus_decks >= MIN_CORPUS_DECKS
+    # ``is not None``, NOT truthiness: EDHREC synergy is a signed delta
+    # from the format baseline, so 0.0 is a REAL measurement ("exactly
+    # baseline here") and must stay a scored component. The old truthy
+    # test renormalized a measured 0.0 away — which let a 0%-synergy
+    # card OUTRANK a 0.1%-synergy card on this very component (its
+    # weight shifted onto stronger components) while a -0.1% clamped to
+    # a scored hard zero. Callers with no figure must pass None, never
+    # 0.0. (Negative synergy still clamps to 0.0 — measured bad.)
     edh = (_clamp(synergy_pct / SYNERGY_SATURATION_PCT)
-           if synergy_pct else None)
+           if synergy_pct is not None else None)
     lift = (_clamp((lift_score - 1.0) / SYNERGY_LIFT_SATURATION)
             if (corpus_ok and lift_score is not None) else None)
 

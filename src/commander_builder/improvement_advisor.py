@@ -1352,6 +1352,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Whole-deck verdict section — present only when the FP-015 verdict
     # pass ran above (card-score flag on and nothing raised).
+    #
+    # Two deliberate presentation quirks (documented at
+    # ``bubble_analysis.score_deck`` / ``apply_verdict_to_report``):
+    # the budget counts SWAPS and trims adds and cuts to the max EACH,
+    # so "propose 0-2 changes" can precede 2 adds + 2 cuts; and an
+    # "overhaul" verdict prints "propose 0-0 changes" above a full,
+    # untrimmed recommendation list — the recs ARE the structure fixes.
     if report.deck_score:
         _ds = report.deck_score
         _vlines = [

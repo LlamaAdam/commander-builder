@@ -497,6 +497,10 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
             "output_deck": str(out_path),
             "dry_run": args.dry_run,
             "mode": args.mode,
+            # FP-015 whole-deck verdict. The key is ALWAYS present —
+            # null when COMMANDER_BUILDER_CARD_SCORE is off or the
+            # verdict pass failed. Flag-off gating is behavioral, not
+            # schematic (see AdviceReport.deck_score for the rationale).
             "deck_score": deck_verdict,
             "max_adds": effective_max_adds,
             "max_cuts": effective_max_cuts,

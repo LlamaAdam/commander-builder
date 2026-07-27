@@ -439,6 +439,26 @@ def test_score_deck_lands_excluded_from_alignment():
     assert "1 nonland" in detail
 
 
+def test_score_deck_alignment_counts_mdfc_spell_fronts_as_nonlands():
+    """FRONT face decides land-ness (``card_score._is_land_card``), the
+    same rule the rest of the FP-015 slice uses: a "Sorcery // Land"
+    MDFC is a spell you sometimes play as a land, so it belongs in the
+    alignment mean. The old whole-type-line "Land" test silently
+    excluded MDFC spell-fronts. Whole lands stay excluded."""
+    corpus = make_corpus(n_decks=12)
+    ctx = full_ctx(
+        deck_cards=("Rhystic Study", "Sea Gate Restoration", "Wastes"),
+        cards={
+            "sea gate restoration": {"name": "Sea Gate Restoration",
+                                     "type_line": "Sorcery // Land"},
+            "wastes": {"name": "Wastes", "type_line": "Basic Land"},
+        },
+    )
+    report = score_deck(corpus=corpus, ctx=ctx)
+    detail = report.components["reference_alignment"]["detail"]
+    assert "2 nonland" in detail
+
+
 # ---------------------------------------------------------------------------
 # find_bubble_cards
 # ---------------------------------------------------------------------------

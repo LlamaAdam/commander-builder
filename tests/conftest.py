@@ -159,6 +159,27 @@ def _isolate_knowledge_log_default_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_card_score_flag(monkeypatch):
+    """Strip ``COMMANDER_BUILDER_CARD_SCORE`` from the test environment.
+
+    Same hazard class as the two isolation fixtures around this one:
+    the FP-015 tier-3 workflow has the operator EXPORT the flag in
+    their shell, and ``card_score.is_enabled()`` reads ``os.environ``
+    at call time — so without this, running the suite from that shell
+    would send every flag-sensitive test down the flag-ON path except
+    the handful that ``delenv`` explicitly. The suite's baseline is
+    flag-off (the shipped default).
+
+    Tests that deliberately exercise the flag-on path still work:
+    they ``monkeypatch.setenv(...)`` inside the test body (or a
+    non-autouse fixture), which runs AFTER this autouse fixture's
+    setup — pinned by
+    ``test_card_score.py::test_setenv_in_a_test_still_beats_the_autouse_delenv``.
+    """
+    monkeypatch.delenv("COMMANDER_BUILDER_CARD_SCORE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_collection_path(tmp_path, monkeypatch):
     """Point the card-collection file at a per-test (nonexistent) temp
     path so tests never read the developer's real
