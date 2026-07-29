@@ -58,7 +58,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import dck_meta, deck_builder_personalize as personalize, lift_analysis
+from . import (
+    corpus_themes,
+    dck_meta,
+    deck_builder_personalize as personalize,
+    lift_analysis,
+)
 from ._proposer_filters import enforce_color_identity
 from .bracket_estimator import derive_signals, estimate_bracket
 from .collection import load_collection, name_key, owns, parse_collection_lines
@@ -151,6 +156,13 @@ class BuildResult:
     steer_notes: list[str] = field(default_factory=list)  # steer actions.
     owned_swaps: list[str] = field(default_factory=list)  # owned-bias trades.
     buy_list: list[str] = field(default_factory=list)     # still-unowned cards.
+
+    # ---- Corpus-norms provenance (corpus_themes, flag-gated) -------------
+    # None/empty when the COMMANDER_BUILDER_CORPUS_NORMS flag is off, no
+    # mined norms artifact exists, or the shell matched no measured
+    # cluster — the absent-data path is a clean no-op by contract.
+    corpus_cluster: Optional[str] = None
+    corpus_notes: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -577,8 +589,10 @@ def _assemble(
     enable_lift: bool = True,
     enable_steer: bool = True,
     owned_bias: bool = True,
+    enable_corpus_norms: bool = True,
     deck_dir: Optional[Path] = None,
     lift_matrix: Optional[dict] = None,
+    corpus_norms: Optional[dict] = None,
     estimate_fn: Optional[Callable[[str], dict]] = None,
     is_game_changer: Optional[Callable[[str], bool]] = None,
     is_fast_mana: Optional[Callable[[str], bool]] = None,
@@ -758,6 +772,33 @@ def _assemble(
     if coll is not None:
         nonlands.sort(key=lambda nm: 0 if owns(coll, nm) else 1)
 
+    # ---- 3c. CORPUS NORMS (mined population norms; flag-gated) -----------
+    # Resolve the mined theme-cluster norms for THIS shell (corpus_themes).
+    # ``corpus_norms`` is the injectable test seam (like ``lift_matrix``);
+    # production reads the data/corpus_theme_norms.v1.json artifact ONLY
+    # when the COMMANDER_BUILDER_CORPUS_NORMS env flag is set — the
+    # default build stays byte-identical. Absent artifact / no matched
+    # cluster / any failure → clean no-op (label None, no notes).
+    corpus_label: Optional[str] = None
+    corpus_cluster: Optional[dict] = None
+    corpus_notes: list[str] = []
+    if enable_corpus_norms:
+        try:
+            _norms = corpus_norms
+            if _norms is None and corpus_themes.is_enabled():
+                _norms = corpus_themes.load_norms()
+            if _norms:
+                corpus_label, corpus_cluster = corpus_themes.cluster_for_shell(
+                    _norms, commanders, nonlands, lookup,
+                )
+                if corpus_label:
+                    corpus_notes.append(
+                        f"shell matched corpus cluster {corpus_label!r} "
+                        f"({corpus_cluster.get('n_decks', 0)} measured decks)"
+                    )
+        except Exception:  # noqa: BLE001 — norms are advisory, never fatal.
+            corpus_label, corpus_cluster, corpus_notes = None, None, []
+
     # ---- 4. MANABASE (color-source-aware, FP-014.2) + exact-size budget --
     # The land BUDGET and the main-size invariant (99 single / 98 partner)
     # live HERE (deck_builder owns them); WHICH lands fill the budget lives
@@ -771,6 +812,19 @@ def _assemble(
     # for both the count and the per-color source targets.
     stats = pip_stats(nonlands, lookup)
     land_target = target_land_count(stats.avg_mana_value, seed_land_count)
+    # Corpus-norms curve/land steering: blend the model's land count 50/50
+    # with the matched cluster's measured median (corpus_themes documents
+    # the blend rationale). Only when a measured cluster matched above.
+    if corpus_cluster is not None:
+        _blended = corpus_themes.blended_land_target(
+            land_target, corpus_cluster,
+        )
+        if _blended != land_target:
+            corpus_notes.append(
+                f"land target {land_target} -> {_blended} (blend with "
+                f"cluster median {corpus_cluster.get('land_median')})"
+            )
+            land_target = _blended
 
     # Trim spells to the nonland budget, then read the ACTUAL land count off
     # what's left (when a seed has few spells, the spare slots become lands —
@@ -840,6 +894,7 @@ def _assemble(
         owned_swaps,
         bracket_estimate,
         buy_list,
+        corpus_swap_notes,
     ) = _personalize(
         commanders, bracket, nonlands, manabase, ci, lookup, cmdr_keys,
         coll=coll,
@@ -854,7 +909,10 @@ def _assemble(
         is_fast_mana=is_fast_mana,
         power_pool=power_pool,
         owned_names=owned_names,
+        corpus_label=corpus_label,
+        corpus_cluster=corpus_cluster,
     )
+    corpus_notes.extend(corpus_swap_notes)
 
     # ---- 5. OUTPUT + INVARIANT -------------------------------------------
     if name:
@@ -914,6 +972,8 @@ def _assemble(
         steer_notes=steer_notes,
         owned_swaps=owned_swaps,
         buy_list=buy_list,
+        corpus_cluster=corpus_label,
+        corpus_notes=corpus_notes,
     )
 
 
@@ -946,7 +1006,7 @@ def _personalize(
     commanders, bracket, nonlands, manabase, ci, lookup, cmdr_keys,
     *, coll, collection_path, enable_lift, enable_steer, owned_bias,
     deck_dir, lift_matrix, estimate_fn, is_game_changer, is_fast_mana,
-    power_pool, owned_names,
+    power_pool, owned_names, corpus_label=None, corpus_cluster=None,
 ):
     """Run the FP-014.3 stages over ``nonlands``; return the provenance.
 
@@ -956,9 +1016,14 @@ def _personalize(
     zone (a card that pairs with the PARTNER is exactly as deck-relevant as
     one that pairs with the primary).
 
+    ``corpus_label``/``corpus_cluster`` (both None unless the flag-gated
+    corpus-norms resolution in ``_assemble`` matched a measured cluster)
+    enable the corpus-norms role/curve steer between the lift and bracket
+    stages — see the stage comment for why that slot.
+
     Returns ``(nonlands, lift_notes, lift_skipped, steer_notes, owned_swaps,
-    bracket_estimate, buy_list)``. Every stage is wrapped so its failure is
-    contained, and every stage's output is re-validated by
+    bracket_estimate, buy_list, corpus_swap_notes)``. Every stage is wrapped
+    so its failure is contained, and every stage's output is re-validated by
     ``_revalidate_swaps`` before it's accepted.
     """
     lift_notes: list[str] = []
@@ -967,6 +1032,7 @@ def _personalize(
     owned_swaps: list[str] = []
     bracket_estimate: Optional[int] = None
     buy_list: list[str] = []
+    corpus_swap_notes: list[str] = []
 
     # Keys a swap candidate must never collide with: EVERY commander in the
     # command zone and every land/basic already committed (personalization
@@ -1040,6 +1106,27 @@ def _personalize(
                 lift_skipped = "lift swaps discarded (invariant re-check)"
         except Exception:  # noqa: BLE001
             lift_skipped = "lift stage error"
+
+    # --- STAGE 1b: CORPUS-NORMS ROLE/CURVE STEER (flag-gated) -------------
+    # Between lift and bracket-steer on purpose: it reshapes the ROLE MIX
+    # (which lift deliberately holds fixed), and the bracket estimate must
+    # be read off the settled list. Same net-zero-swap + revalidate
+    # contract as every other stage; a failure or an invariant break
+    # degrades to "no corpus steering", never a failed build.
+    if corpus_label is not None and corpus_cluster is not None:
+        try:
+            new, corpus_swap_notes = corpus_themes.norms_steer(
+                nonlands, label=corpus_label, cluster=corpus_cluster,
+                role_of=role_of, ci_ok=ci_ok, reserved_keys=reserved,
+                mv_of=mv_of,
+            )
+            nonlands, ok = _revalidate_swaps(nonlands, new, reserved, ci_ok)
+            if not ok:
+                corpus_swap_notes = [
+                    "corpus norms steer discarded (invariant re-check)"
+                ]
+        except Exception:  # noqa: BLE001
+            corpus_swap_notes = []
 
     # --- STAGE 2: BRACKET STEERING ----------------------------------------
     if enable_steer:
@@ -1139,7 +1226,7 @@ def _personalize(
 
     return (
         nonlands, lift_notes, lift_skipped, steer_notes, owned_swaps,
-        bracket_estimate, buy_list,
+        bracket_estimate, buy_list, corpus_swap_notes,
     )
 
 
@@ -1238,6 +1325,7 @@ def build_deck(
     enable_lift: bool = True,
     enable_steer: bool = True,
     owned_bias: bool = True,
+    enable_corpus_norms: bool = True,
     deck_dir: Optional[Path] = None,
     **personalize_kwargs,
 ) -> str:
@@ -1264,6 +1352,7 @@ def build_deck(
         enable_lift=enable_lift,
         enable_steer=enable_steer,
         owned_bias=owned_bias,
+        enable_corpus_norms=enable_corpus_norms,
         deck_dir=deck_dir,
         **personalize_kwargs,
     ).text
@@ -1316,7 +1405,13 @@ def main(argv=None) -> int:
                         action="store_false",
                         help="Disable owned-card bias even when a "
                              "--collection is given (FP-014.3).")
-    parser.set_defaults(enable_lift=True, enable_steer=True, owned_bias=True)
+    parser.add_argument("--no-corpus-norms", dest="enable_corpus_norms",
+                        action="store_false",
+                        help="Disable mined corpus-norms steering even when "
+                             f"the {corpus_themes.FLAG_ENV} flag is set "
+                             "(corpus_themes).")
+    parser.set_defaults(enable_lift=True, enable_steer=True, owned_bias=True,
+                        enable_corpus_norms=True)
     # FP-014.4 HAND-OFF (the validation moat): after building, optionally
     # hand the fresh .dck straight to commander-improve so the from-scratch
     # pile gets MEASURED (Forge A/B sims) and tuned. Gated behind explicit
@@ -1350,6 +1445,7 @@ def main(argv=None) -> int:
             enable_lift=args.enable_lift,
             enable_steer=args.enable_steer,
             owned_bias=args.owned_bias,
+            enable_corpus_norms=args.enable_corpus_norms,
         )
     except ValueError as exc:
         # Clean, user-facing message (e.g. "cannot build: no EDHREC data
@@ -1390,6 +1486,10 @@ def main(argv=None) -> int:
             print(f"    - {note}")
     elif result.lift_skipped:
         print(f"  lift swaps: skipped — {result.lift_skipped}")
+    if result.corpus_cluster:
+        print(f"  corpus norms: cluster {result.corpus_cluster}")
+        for note in result.corpus_notes:
+            print(f"    - {note}")
     if result.bracket_estimate is not None:
         verdict = (
             "meets target" if result.bracket_estimate == result.bracket_target
