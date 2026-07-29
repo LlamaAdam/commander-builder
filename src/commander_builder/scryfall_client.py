@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -32,6 +33,11 @@ from . import dck_utils
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: Canonical shared-cards location on the dev box. A module constant (not
+#: a literal inside ``_resolve_cards_dir``) so tests can monkeypatch it to
+#: a tmp path and exercise both resolution branches deterministically.
+_CANONICAL_CARDS_DIR = Path("C:/dev/mtg_cards")
+
 
 def _resolve_cards_dir() -> Path:
     """Resolve the shared mtg_cards directory.
@@ -41,14 +47,25 @@ def _resolve_cards_dir() -> Path:
     2. ``C:\\dev\\mtg_cards`` if it exists (the canonical local path).
     3. Project-local ``.cache/`` fallback (legacy; keeps tests / fresh
        checkouts working on machines without the shared folder).
+
+    The fallback case logs ONE stderr line saying where snapshots
+    actually live — operators on machines without the shared folder were
+    surprised to find a populated ``.cache/`` instead of ``mtg_cards``
+    (2026-07 corpus-mining confusion), and silence made that a hunt.
     """
     env = os.environ.get("MTG_CARDS_DIR")
     if env:
         return Path(env)
-    canonical = Path("C:/dev/mtg_cards")
-    if canonical.exists():
-        return canonical
-    return REPO_ROOT / ".cache"
+    if _CANONICAL_CARDS_DIR.exists():
+        return _CANONICAL_CARDS_DIR
+    fallback = REPO_ROOT / ".cache"
+    print(
+        f"[scryfall] shared cards dir {_CANONICAL_CARDS_DIR} not found and "
+        f"MTG_CARDS_DIR unset — falling back: oracle snapshots live under "
+        f"{fallback / 'scryfall'}",
+        file=sys.stderr, flush=True,
+    )
+    return fallback
 
 
 _CARDS_DIR = _resolve_cards_dir()
