@@ -1250,3 +1250,28 @@ Setup installer + `build_installer.py` driver (`8146450`, PR #7).
 Producing the `.exe`/installer remains a local
 `python scripts/build_desktop.py` / `build_installer.py` run (deps are
 heavy); CI builds the artifact on tag.
+
+**EXE refreshed 2026-07-29** against everything that landed since the
+first freeze (mobile-responsive layout, accessibility overhaul PR #36,
+Build-from-scratch tab + async build/sim job endpoints, premade deck
+type, FP-007 card-reference/rules/library nav). Spec changes:
+
+- `datas` now bundles the whole `src/commander_builder/data/` package
+  dir (picks up `oracle_diff_buckets.json`, FP-009; previously only the
+  optional icon PNG shipped from there) — future package-data files are
+  covered automatically.
+- `hiddenimports` collects **all of `commander_builder`** instead of
+  just `commander_builder.web`, so route handlers' lazy in-function
+  imports no longer depend on bytecode analysis alone.
+- Repo-root `data/` artifacts (`combos.json`,
+  `corpus_theme_norms.v1.json`) stay unbundled on purpose: they are
+  gitignored derived data and every reader has an explicit fallback /
+  flag-gate (game-changers 53-card bundled list, corpus norms off by
+  default) — same behavior as a fresh dev checkout.
+
+Live-launch verified (pywebview window + HTTP probes against the
+frozen server): `GET /` serves the shell with Build/Cards/Rules/
+Library/Settings nav, `/api/health` ok, `/api/decks` lists decks with
+`type` fields, `/api/dashboard?deck=…` returns the full payload,
+`/api/library?card=Sol+Ring` cross-deck search works, and
+`/api/rules/game_changers` serves the bundled fallback offline.
