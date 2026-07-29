@@ -8,6 +8,7 @@ derives from it at call time).
 from __future__ import annotations
 
 import email.message
+import gzip
 import io
 import json
 import os
@@ -66,9 +67,40 @@ def _write_bulk(tmp_path, cards, filename="bulk.json") -> Path:
     return p
 
 
+def _gz_jsonl(cards) -> bytes:
+    """Cards as gzip-compressed JSONL — the live bulk format (2026-07)."""
+    lines = "\n".join(json.dumps(c) for c in cards) + "\n"
+    return gzip.compress(lines.encode("utf-8"))
+
+
+def _write_bulk_jsonl_gz(tmp_path, cards, filename="bulk.jsonl.gz") -> Path:
+    p = tmp_path / filename
+    p.write_bytes(_gz_jsonl(cards))
+    return p
+
+
 # --- download_bulk_oracle ---------------------------------------------------
 
-def _index_payload(uri="https://data.scryfall.io/oracle-cards.json"):
+_JSONL_URI = "https://data.scryfall.io/oracle-cards/oracle-cards-20260729090224.jsonl.gz"
+
+
+def _index_payload(uri=_JSONL_URI):
+    """The LIVE index shape (verified 2026-07-29): jsonl_download_uri
+    only — entries no longer carry download_uri."""
+    return {
+        "data": [
+            {"object": "bulk_data", "type": "default_cards",
+             "jsonl_download_uri": "https://x/other.jsonl.gz"},
+            {"object": "bulk_data", "type": "oracle_cards",
+             "updated_at": "2026-07-29T09:02:24.821+00:00",
+             "jsonl_download_uri": uri,
+             "compressed_size": 24332018},
+        ],
+    }
+
+
+def _legacy_index_payload(uri="https://data.scryfall.io/oracle-cards.json"):
+    """The pre-2026-07 index shape: plain-JSON-array download_uri."""
     return {
         "data": [
             {"type": "default_cards", "download_uri": "https://x/other"},
@@ -77,8 +109,8 @@ def _index_payload(uri="https://data.scryfall.io/oracle-cards.json"):
     }
 
 
-def test_download_writes_dated_file_and_streams_payload(cache_dir):
-    payload = json.dumps([SOL_RING]).encode("utf-8")
+def test_download_live_index_shape_writes_dated_jsonl_gz(cache_dir):
+    payload = _gz_jsonl([SOL_RING])
     fetched_urls = []
 
     def fetch_json(url):
@@ -94,20 +126,57 @@ def test_download_writes_dated_file_and_streams_payload(cache_dir):
     dest = oracle_store.download_bulk_oracle(
         fetch_json=fetch_json, open_stream=open_stream)
     assert fetched_urls == [oracle_store.BULK_INDEX_URL]
-    assert opened == ["https://data.scryfall.io/oracle-cards.json"]
+    assert opened == [_JSONL_URI]
     assert dest.parent == oracle_store.bulk_data_dir()
     stamp = time.strftime("%Y%m%d")
-    assert dest.name == f"oracle-cards-{stamp}.json"
-    assert dest.read_bytes() == payload
+    assert dest.name == f"oracle-cards-{stamp}.jsonl.gz"
+    assert dest.read_bytes() == payload  # stored compressed, byte-for-byte
     # The .part temp file was renamed away, not left behind.
     assert list(dest.parent.glob("*.part")) == []
 
 
-def test_download_skips_when_fresh_copy_exists(cache_dir):
+def test_download_legacy_index_shape_falls_back_to_plain_json(cache_dir):
+    payload = json.dumps([SOL_RING]).encode("utf-8")
+    opened = []
+
+    def open_stream(uri):
+        opened.append(uri)
+        return io.BytesIO(payload)
+
+    dest = oracle_store.download_bulk_oracle(
+        fetch_json=lambda url: _legacy_index_payload(),
+        open_stream=open_stream)
+    assert opened == ["https://data.scryfall.io/oracle-cards.json"]
+    assert dest.name == f"oracle-cards-{time.strftime('%Y%m%d')}.json"
+    assert dest.read_bytes() == payload
+
+
+def test_download_prefers_jsonl_over_legacy_when_both_present(cache_dir):
+    index = {
+        "data": [{
+            "type": "oracle_cards",
+            "jsonl_download_uri": "https://x/oc.jsonl.gz",
+            "download_uri": "https://x/oc.json",
+        }],
+    }
+    opened = []
+    dest = oracle_store.download_bulk_oracle(
+        fetch_json=lambda url: index,
+        open_stream=lambda uri: opened.append(uri) or io.BytesIO(b"x"),
+    )
+    assert opened == ["https://x/oc.jsonl.gz"]
+    assert dest.name.endswith(".jsonl.gz")
+
+
+@pytest.mark.parametrize("filename", [
+    "oracle-cards-20990101.jsonl.gz",
+    "oracle-cards-20990101.json",  # legacy copies stay reusable
+])
+def test_download_skips_when_fresh_copy_exists(cache_dir, filename):
     d = oracle_store.bulk_data_dir()
     d.mkdir(parents=True)
-    existing = d / "oracle-cards-20990101.json"
-    existing.write_text("[]", encoding="utf-8")
+    existing = d / filename
+    existing.write_bytes(b"whatever")
 
     def boom(url):  # pragma: no cover - must not be called
         raise AssertionError("network touched despite fresh local copy")
@@ -117,36 +186,49 @@ def test_download_skips_when_fresh_copy_exists(cache_dir):
     assert dest == existing
 
 
+def test_download_ignores_leftover_part_files_for_freshness(cache_dir):
+    d = oracle_store.bulk_data_dir()
+    d.mkdir(parents=True)
+    (d / "oracle-cards-20990101.jsonl.gz.part").write_bytes(b"partial")
+
+    dest = oracle_store.download_bulk_oracle(
+        fetch_json=lambda url: _index_payload(),
+        open_stream=lambda uri: io.BytesIO(_gz_jsonl([])),
+    )
+    assert dest.name == f"oracle-cards-{time.strftime('%Y%m%d')}.jsonl.gz"
+
+
 def test_download_redownloads_when_local_copy_stale(cache_dir):
     d = oracle_store.bulk_data_dir()
     d.mkdir(parents=True)
-    stale = d / "oracle-cards-20200101.json"
-    stale.write_text("[]", encoding="utf-8")
+    stale = d / "oracle-cards-20200101.jsonl.gz"
+    stale.write_bytes(b"old")
     old = time.time() - (oracle_store.BULK_FRESH_DAYS + 1) * 86400
     os.utime(stale, (old, old))
 
     dest = oracle_store.download_bulk_oracle(
         fetch_json=lambda url: _index_payload(),
-        open_stream=lambda uri: io.BytesIO(b"[]"),
+        open_stream=lambda uri: io.BytesIO(_gz_jsonl([])),
     )
     assert dest != stale
-    assert dest.name == f"oracle-cards-{time.strftime('%Y%m%d')}.json"
+    assert dest.name == f"oracle-cards-{time.strftime('%Y%m%d')}.jsonl.gz"
 
 
 def test_download_force_overrides_freshness(cache_dir):
     d = oracle_store.bulk_data_dir()
     d.mkdir(parents=True)
-    fresh = d / "oracle-cards-20990101.json"
-    fresh.write_text("[]", encoding="utf-8")
+    fresh = d / "oracle-cards-20990101.jsonl.gz"
+    fresh.write_bytes(b"old-fresh")
     calls = []
+    body = _gz_jsonl([SOL_RING])
 
     dest = oracle_store.download_bulk_oracle(
         force=True,
         fetch_json=lambda url: calls.append(url) or _index_payload(),
-        open_stream=lambda uri: io.BytesIO(b"[1]"),
+        open_stream=lambda uri: io.BytesIO(body),
     )
     assert calls == [oracle_store.BULK_INDEX_URL]
-    assert dest.read_text(encoding="utf-8") == "[1]"
+    assert dest.read_bytes() == body
 
 
 def test_download_errors_when_no_oracle_cards_entry(cache_dir):
@@ -155,6 +237,42 @@ def test_download_errors_when_no_oracle_cards_entry(cache_dir):
             fetch_json=lambda url: {"data": [{"type": "rulings"}]},
             open_stream=lambda uri: io.BytesIO(b"[]"),
         )
+
+
+def test_download_errors_when_entry_has_no_uri_at_all(cache_dir):
+    with pytest.raises(RuntimeError, match="oracle_cards"):
+        oracle_store.download_bulk_oracle(
+            fetch_json=lambda url: {"data": [{"type": "oracle_cards"}]},
+            open_stream=lambda uri: io.BytesIO(b"[]"),
+        )
+
+
+# --- _load_bulk_cards -------------------------------------------------------
+
+def test_load_bulk_cards_jsonl_gz(tmp_path):
+    p = _write_bulk_jsonl_gz(tmp_path, [SOL_RING, DELVER])
+    cards = oracle_store._load_bulk_cards(p)
+    assert [c["name"] for c in cards] == [SOL_RING["name"], DELVER["name"]]
+
+
+def test_load_bulk_cards_jsonl_gz_skips_blank_lines(tmp_path):
+    raw = json.dumps(SOL_RING) + "\n\n" + json.dumps(CULTIVATE) + "\n"
+    p = tmp_path / "b.jsonl.gz"
+    p.write_bytes(gzip.compress(raw.encode("utf-8")))
+    cards = oracle_store._load_bulk_cards(p)
+    assert len(cards) == 2
+
+
+def test_load_bulk_cards_plain_json_array(tmp_path):
+    p = _write_bulk(tmp_path, [SOL_RING])
+    assert oracle_store._load_bulk_cards(p) == [SOL_RING]
+
+
+def test_load_bulk_cards_plain_json_non_array_raises(tmp_path):
+    p = tmp_path / "b.json"
+    p.write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="not a JSON array"):
+        oracle_store._load_bulk_cards(p)
 
 
 # --- write_snapshots_from_bulk ----------------------------------------------
@@ -170,6 +288,15 @@ def test_write_snapshots_targets_only(cache_dir, tmp_path):
     # Non-target cards were NOT written.
     assert scryfall_client.lookup_card("Cultivate", cache_only=True) is None
     assert len(list(cache_dir.glob("*.json"))) == 1
+
+
+def test_write_snapshots_from_jsonl_gz_bulk(cache_dir, tmp_path):
+    bulk = _write_bulk_jsonl_gz(tmp_path, [SOL_RING, CULTIVATE])
+    summary = oracle_store.write_snapshots_from_bulk(
+        ["Sol Ring"], bulk_path=bulk)
+    assert summary == {"written": 1, "missing": [], "targets": 1}
+    card = scryfall_client.lookup_card("Sol Ring", cache_only=True)
+    assert card is not None and card["oracle_text"] == "{T}: Add {C}{C}."
 
 
 def test_write_snapshots_dfc_front_face_lookup_hits(cache_dir, tmp_path):
@@ -209,6 +336,19 @@ def test_write_snapshots_case_insensitive_targets(cache_dir, tmp_path):
     summary = oracle_store.write_snapshots_from_bulk(
         ["sol ring"], bulk_path=bulk)
     assert summary["written"] == 1 and summary["missing"] == []
+
+
+def test_write_snapshots_diacritic_insensitive_targets(cache_dir, tmp_path):
+    """Deck files spell it Lim-Dul's Vault; Scryfall's canonical name has
+    the û. The exact-named API resolves that, so the bulk index must too
+    (live-run regression, 2026-07-29)."""
+    vault = {"name": "Lim-Dûl's Vault", "oracle_text": "..."}
+    bulk = _write_bulk(tmp_path, [vault])
+    summary = oracle_store.write_snapshots_from_bulk(
+        ["Lim-Dul's Vault"], bulk_path=bulk)
+    assert summary["written"] == 1 and summary["missing"] == []
+    card = scryfall_client.lookup_card("Lim-Dul's Vault", cache_only=True)
+    assert card is not None and card["name"] == "Lim-Dûl's Vault"
 
 
 def test_write_snapshots_everything_writes_all_plus_face_alias(
@@ -386,8 +526,12 @@ def test_no_fallback_log_when_canonical_exists(tmp_path, monkeypatch, capsys):
 
 # --- CLI --------------------------------------------------------------------
 
-def _stub_bulk_download(monkeypatch, tmp_path, cards):
-    bulk = _write_bulk(tmp_path, cards, filename="stub-bulk.json")
+def _stub_bulk_download(monkeypatch, tmp_path, cards, jsonl=False):
+    if jsonl:
+        bulk = _write_bulk_jsonl_gz(tmp_path, cards,
+                                    filename="stub-bulk.jsonl.gz")
+    else:
+        bulk = _write_bulk(tmp_path, cards, filename="stub-bulk.json")
     calls = []
 
     def fake_download(*, force=False):
@@ -399,7 +543,9 @@ def _stub_bulk_download(monkeypatch, tmp_path, cards):
 
 
 def test_cli_from_bulk_deck(cache_dir, tmp_path, monkeypatch, capsys):
-    _stub_bulk_download(monkeypatch, tmp_path, [SOL_RING, CULTIVATE, DELVER])
+    # jsonl=True: exercises the live .jsonl.gz format end-to-end.
+    _stub_bulk_download(monkeypatch, tmp_path, [SOL_RING, CULTIVATE, DELVER],
+                        jsonl=True)
     deck = tmp_path / "d.dck"
     deck.write_text(
         "[metadata]\nName=T\n\n[Main]\n1 Sol Ring\n1 Delver of Secrets\n",
@@ -428,6 +574,24 @@ def test_cli_from_bulk_all_walks_deck_dir(cache_dir, tmp_path, monkeypatch,
     summary = json.loads(capsys.readouterr().out)
     assert summary["written"] == 2
     assert summary["missing"] == ["Ghost Card"]
+
+
+def test_cli_from_bulk_all_defaults_to_forge_deck_dir(
+        cache_dir, tmp_path, monkeypatch, capsys):
+    """Without --deck-dir, --from-bulk --all targets the FORGE deck dir
+    (run_match.DECK_DIR) — the dir the rest of the CLI tooling uses —
+    not the desktop app's Documents library."""
+    from commander_builder import run_match
+
+    _stub_bulk_download(monkeypatch, tmp_path, [SOL_RING])
+    forge_decks = tmp_path / "forge_decks"
+    forge_decks.mkdir()
+    _write_deck(forge_decks / "a.dck", ["Sol Ring"])
+    monkeypatch.setattr(run_match, "DECK_DIR", forge_decks)
+    rc = oracle_store.main(["--from-bulk", "--all", "--json"])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["written"] == 1 and summary["missing"] == []
 
 
 def test_cli_from_bulk_force_flag_passes_through(cache_dir, tmp_path,

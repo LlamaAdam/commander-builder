@@ -29,10 +29,12 @@ stub in tests; nothing here talks to Scryfall directly.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -282,7 +284,12 @@ BULK_INDEX_URL = "https://api.scryfall.com/bulk-data"
 #: slowly than that). ``--force-bulk`` overrides.
 BULK_FRESH_DAYS = 7.0
 
-_BULK_FILE_GLOB = "oracle-cards-*.json"
+# Both on-disk bulk formats: gzip-compressed JSONL (what Scryfall's index
+# serves via ``jsonl_download_uri`` as of 2026-07) and the legacy plain
+# JSON array (``download_uri``, kept as a fallback). Explicit per-format
+# globs — a single ``oracle-cards-*.json*`` would also match stray
+# ``.part`` temp files from a killed download.
+_BULK_FILE_GLOBS = ("oracle-cards-*.jsonl.gz", "oracle-cards-*.json")
 
 
 def bulk_data_dir() -> Path:
@@ -297,20 +304,22 @@ def bulk_data_dir() -> Path:
 
 
 def find_fresh_bulk_file(max_age_days: float = BULK_FRESH_DAYS) -> Optional[Path]:
-    """Newest local ``oracle-cards-*.json`` younger than ``max_age_days``,
-    or ``None`` when there isn't one (missing dir, no files, all stale)."""
+    """Newest local bulk file (``oracle-cards-*.jsonl.gz`` or the legacy
+    ``oracle-cards-*.json``) younger than ``max_age_days``, or ``None``
+    when there isn't one (missing dir, no files, all stale)."""
     d = bulk_data_dir()
     if not d.is_dir():
         return None
     best: Optional[Path] = None
     best_mtime = 0.0
-    for p in d.glob(_BULK_FILE_GLOB):
-        try:
-            mtime = p.stat().st_mtime
-        except OSError:
-            continue
-        if mtime > best_mtime:
-            best, best_mtime = p, mtime
+    for pattern in _BULK_FILE_GLOBS:
+        for p in d.glob(pattern):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best, best_mtime = p, mtime
     if best is None:
         return None
     age_days = (time.time() - best_mtime) / 86400.0
@@ -339,11 +348,18 @@ def download_bulk_oracle(
 
     Reuses a fresh (< ``BULK_FRESH_DAYS`` days) local copy unless
     ``force``. Otherwise fetches the bulk-data index, picks the
-    ``oracle_cards`` entry, and streams its ``download_uri`` to a dated
-    filename (``oracle-cards-YYYYMMDD.json``) under ``bulk_data_dir()``,
-    via a ``.part`` temp file so a killed download never masquerades as
-    a complete one. Raises ``RuntimeError`` when the index carries no
-    usable ``oracle_cards`` entry; network errors propagate.
+    ``oracle_cards`` entry, and streams its payload to a dated filename
+    under ``bulk_data_dir()`` via a ``.part`` temp file so a killed
+    download never masquerades as a complete one.
+
+    Index drift (observed live 2026-07-29): entries no longer carry
+    ``download_uri``; the export is now published as gzip-compressed
+    JSONL under ``jsonl_download_uri``. That's the primary format
+    (saved as ``oracle-cards-YYYYMMDD.jsonl.gz``, kept compressed on
+    disk); a plain-JSON ``download_uri`` is still honored as a fallback
+    if Scryfall ever serves it again (``oracle-cards-YYYYMMDD.json``).
+    Raises ``RuntimeError`` when the index carries no usable
+    ``oracle_cards`` entry; network errors propagate.
     """
     if not force:
         fresh = find_fresh_bulk_file()
@@ -363,23 +379,62 @@ def download_bulk_oracle(
          if isinstance(e, dict) and e.get("type") == "oracle_cards"),
         None,
     )
-    if entry is None or not entry.get("download_uri"):
+    uri: Optional[str] = None
+    suffix = ""
+    if entry is not None:
+        if entry.get("jsonl_download_uri"):
+            uri, suffix = entry["jsonl_download_uri"], ".jsonl.gz"
+        elif entry.get("download_uri"):
+            uri, suffix = entry["download_uri"], ".json"
+    if uri is None:
         raise RuntimeError(
-            "Scryfall bulk-data index has no usable oracle_cards entry")
+            "Scryfall bulk-data index has no usable oracle_cards entry "
+            "(neither jsonl_download_uri nor download_uri)")
 
     dest_dir = bulk_data_dir()
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"oracle-cards-{time.strftime('%Y%m%d')}.json"
+    dest = dest_dir / f"oracle-cards-{time.strftime('%Y%m%d')}{suffix}"
     tmp = dest.with_name(dest.name + ".part")
     opener = open_stream or _http_open_stream
     print(
-        f"[oracle-bulk] downloading {entry['download_uri']} -> {dest}",
+        f"[oracle-bulk] downloading {uri} -> {dest}",
         file=sys.stderr, flush=True,
     )
-    with opener(entry["download_uri"]) as resp, open(tmp, "wb") as out:
+    with opener(uri) as resp, open(tmp, "wb") as out:
         shutil.copyfileobj(resp, out)
     tmp.replace(dest)
     return dest
+
+
+def _load_bulk_cards(bulk_path: Path) -> list[dict]:
+    """Parse a local bulk file into a list of card dicts.
+
+    Dispatches on extension: ``.jsonl.gz`` (Scryfall's current export —
+    gzip-compressed, one card object per line; decompressed as a stream,
+    never fully in memory as text) and ``.jsonl`` parse per line; anything
+    else is the legacy plain JSON array. Non-dict entries and blank lines
+    are dropped. Raises ``RuntimeError`` on a plain file that isn't an
+    array, ``ValueError``/``OSError`` propagate for corrupt payloads.
+    """
+    p = Path(bulk_path)
+    lower = p.name.lower()
+    if lower.endswith(".jsonl.gz") or lower.endswith(".jsonl"):
+        opener = gzip.open if lower.endswith(".gz") else open
+        cards: list[dict] = []
+        with opener(p, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    cards.append(obj)
+        return cards
+    with open(p, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, list):
+        raise RuntimeError(f"bulk file is not a JSON array: {bulk_path}")
+    return [c for c in data if isinstance(c, dict)]
 
 
 def _front_face_name(card: dict) -> Optional[str]:
@@ -399,24 +454,37 @@ def _front_face_name(card: dict) -> Optional[str]:
     return fname if isinstance(fname, str) and fname.strip() else None
 
 
+def _fold_name(name: str) -> str:
+    """Casefold + strip diacritics for bulk-index keys.
+
+    Scryfall's ``/cards/named?exact=`` matches diacritic-insensitively
+    (deck files say ``Lim-Dul's Vault``; the canonical name is
+    ``Lim-Dûl's Vault``), so the bulk index must too or the bulk path
+    silently misses cards the per-card API path would have found —
+    caught against the live 2026-07-29 export."""
+    folded = unicodedata.normalize("NFKD", name.strip().lower())
+    return "".join(c for c in folded if not unicodedata.combining(c))
+
+
 def _bulk_name_index(cards: list) -> dict[str, dict]:
-    """Index bulk card objects by casefolded name — full names AND
-    individual face names, full names winning collisions (two passes) so
-    a face name can never shadow a real card's canonical name."""
+    """Index bulk card objects by folded name (``_fold_name``) — full
+    names AND individual face names, full names winning collisions (two
+    passes) so a face name can never shadow a real card's canonical
+    name."""
     index: dict[str, dict] = {}
     for card in cards:
         if not isinstance(card, dict):
             continue
         name = card.get("name")
         if isinstance(name, str) and name.strip():
-            index.setdefault(name.strip().lower(), card)
+            index.setdefault(_fold_name(name), card)
     for card in cards:
         if not isinstance(card, dict):
             continue
         for face in (card.get("card_faces") or []):
             fname = face.get("name") if isinstance(face, dict) else None
             if isinstance(fname, str) and fname.strip():
-                index.setdefault(fname.strip().lower(), card)
+                index.setdefault(_fold_name(fname), card)
     return index
 
 
@@ -442,10 +510,7 @@ def write_snapshots_from_bulk(
 
     Returns ``{"written": int, "missing": [str, ...], "targets": int}``.
     """
-    with open(bulk_path, encoding="utf-8") as fh:
-        cards = json.load(fh)
-    if not isinstance(cards, list):
-        raise RuntimeError(f"bulk file is not a JSON array: {bulk_path}")
+    cards = _load_bulk_cards(bulk_path)
 
     snap_dir = scryfall_client.CACHE_DIR
     snap_dir.mkdir(parents=True, exist_ok=True)
@@ -476,7 +541,7 @@ def write_snapshots_from_bulk(
         index = _bulk_name_index(cards)
         targets = len(names or [])
         for name in (names or []):
-            card = index.get(name.strip().lower())
+            card = index.get(_fold_name(name))
             if card is None:
                 missing.append(name)
                 continue
@@ -514,10 +579,16 @@ def _main_from_bulk(args, names: Optional[list[str]]) -> int:
         # --all under --from-bulk targets the DECK DIR, not the snapshot
         # store: the whole point is populating snapshots for cards that
         # don't have one yet, which a store walk can never reach.
+        #
+        # Default = the FORGE deck dir (run_match.DECK_DIR), matching the
+        # rest of the repo's CLI tooling (soak, curator, corpus_themes).
+        # config_store.get_deck_dir() is the DESKTOP APP's library
+        # (~/Documents/CommanderBuilder/decks) and defaulting to it sent
+        # operators to "deck dir not found" on dev boxes (2026-07-29).
         deck_dir = args.deck_dir
         if deck_dir is None:
-            from .config_store import get_deck_dir
-            deck_dir = get_deck_dir()
+            from .run_match import DECK_DIR
+            deck_dir = DECK_DIR
         if not Path(deck_dir).is_dir():
             print(f"ERROR: deck dir not found: {deck_dir}", flush=True)
             return 2
@@ -590,7 +661,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         f"(<{BULK_FRESH_DAYS:g} days) local copy exists.")
     p.add_argument("--deck-dir", type=Path, default=None, metavar="DIR",
                    help="Deck directory for --from-bulk --all (default: "
-                        "the configured deck dir).")
+                        "the Forge deck dir, "
+                        "vendor/forge/userdata/decks/commander).")
     p.add_argument("--json", action="store_true",
                    help="Emit the summary as JSON.")
     args = p.parse_args(argv)
