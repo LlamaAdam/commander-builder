@@ -81,14 +81,19 @@ def _runner_for(profile: Path) -> ForgeRunner:
     return ForgeRunner.locate() if profile == VENDOR_FORGE else ForgeRunner.for_profile(profile)
 
 
-def _deck_pairs() -> list[tuple[Path, Path]]:
-    names = {p.name for p in DECK_DIR.glob("*.dck")}
+def _deck_pairs(deck_dir: Path = DECK_DIR) -> list[tuple[Path, Path]]:
+    """(base, v2) test pairs: [USER] curated decks AND [PREMADE] minted
+    ones (commander_builder.premade_mint) — both roles feed the FP-002
+    pair count. Same discovery rule for each: a ` v2 ` file whose
+    base-named sibling exists. Row schema is unchanged; pair_base /
+    test_deck simply carry premade filenames too."""
+    names = {p.name for p in deck_dir.glob("*.dck")}
     pairs = []
     for n in sorted(names):
-        if n.startswith("[USER]") and " v2 " in n:
+        if (n.startswith("[USER]") or n.startswith("[PREMADE]")) and " v2 " in n:
             base = n.replace(" v2 ", " ")
             if base in names:
-                pairs.append((DECK_DIR / base, DECK_DIR / n))
+                pairs.append((deck_dir / base, deck_dir / n))
     return pairs
 
 
