@@ -23,21 +23,30 @@ PKG = ROOT / "src" / "commander_builder"
 # them under the same package-relative path so create_app() finds them
 # inside PyInstaller's _MEIPASS extraction dir.
 #
-# The app icon (if present) lives at src/commander_builder/data/<name>
-# and is bundled under commander_builder/data/ so _icon_path() resolves
-# it correctly via sys._MEIPASS / __file__ in desktop.py.
+# The whole package data/ dir ships (2026-07 refresh): it now carries
+# oracle_diff_buckets.json (FP-009 oracle-text presentation, read via
+# Path(__file__).parent / "data" in oracle_diff.py) in addition to the
+# optional app icon — bundling the dir keeps future package-data files
+# from silently missing in the EXE. Repo-root data/ (combos.json,
+# corpus_theme_norms.v1.json) is NOT bundled: those are gitignored
+# derived artifacts and every reader has an explicit in-code fallback /
+# flag-gate for their absence, same as a fresh dev checkout.
 _ICON_SRC = PKG / "data" / "commander_builder_icon.png"
 datas = [
     (str(PKG / "web" / "templates"), "commander_builder/web/templates"),
     (str(PKG / "web" / "static"), "commander_builder/web/static"),
+    (str(PKG / "data"), "commander_builder/data"),
 ]
-if _ICON_SRC.exists():
-    datas.append((str(_ICON_SRC), "commander_builder/data"))
 
-# Blueprints are imported dynamically by create_app; pywebview's platform
-# backend is imported lazily — declare both so the freezer keeps them.
+# Blueprints are imported dynamically by create_app, the route modules
+# lazy-import heavyweight commander_builder deps inside handlers, and
+# pywebview's platform backend is imported lazily — collect the WHOLE
+# first-party package (pure Python, tiny) plus webview so the freezer
+# keeps them all. (Pre-refresh this only collected commander_builder.web,
+# which left the FP-007 card/rules/library blueprints' lazy deps to
+# bytecode analysis alone.)
 hiddenimports = (
-    collect_submodules("commander_builder.web")
+    collect_submodules("commander_builder")
     + collect_submodules("webview")
     + ["flask", "jinja2"]
 )
