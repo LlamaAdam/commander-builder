@@ -76,6 +76,7 @@ gauntlet soak owns the CPU. See docs/future-plans.md (FP-012).
 """
 from __future__ import annotations
 
+import os
 import random
 import sys
 from dataclasses import dataclass, field
@@ -102,6 +103,25 @@ BREAK_EVEN_REWARD = 0.5
 # GP-BO slice B2). Three keeps the applied set attributable while still
 # letting a productive round move more than one card.
 MAX_APPLIED_SWAPS = 3
+
+# Env flag that force-enables the forge_py screening gate (same effect
+# as --screen). The literal is duplicated from
+# forge_py_screen.SCREEN_ENV_FLAG ON PURPOSE: the byte-identical
+# disabled path must never import the screen module, so the flag check
+# cannot pull the constant from there. A test pins the two literals
+# equal.
+_SCREEN_ENV_FLAG = "COMMANDER_BUILDER_FORGEPY_SCREEN"
+
+
+def _screening_enabled(args) -> bool:
+    """--screen flag OR COMMANDER_BUILDER_FORGEPY_SCREEN=1. Default OFF
+    (both unset) = byte-identical pre-screen behavior, pinned by test.
+    Mirrors forge_py_screen.screening_enabled without importing it —
+    see _SCREEN_ENV_FLAG's comment."""
+    if getattr(args, "screen", False):
+        return True
+    return os.environ.get(_SCREEN_ENV_FLAG, "") == "1"
+
 
 # Default for --search-min-pulls. One pull of a 45-game sim has a
 # win-rate standard error around 0.1 on ~22 decisive games — a single
@@ -383,6 +403,7 @@ def make_search_round_fn(
     *,
     arm_builder: Callable = build_swap_arms,
     sim_fn: Optional[Callable] = None,
+    screen_fn: Optional[Callable] = None,
 ):
     """Build a ``round_fn`` for ``run_improve_loop`` that replaces the
     Claude curator's proposal with the bandit's chosen swap set.
@@ -398,7 +419,12 @@ def make_search_round_fn(
     touch Forge. ``sim_fn`` must match ``forge_batch.run_ab_simulation``
     's shape: ``(deck_a_path, deck_b_path, games=..., fillers=...) ->
     ABResult``; the default resolves lazily so importing this module
-    stays cheap.
+    stays cheap. ``screen_fn`` is the forge_py screening seam —
+    ``(deck_path, arms, args) -> kept_arms`` — consulted ONLY when
+    screening is enabled (``--screen`` / the env flag; see
+    ``forge_py_screen``); the default resolves lazily to
+    ``forge_py_screen.screen_arms_for_search`` so the disabled path
+    never touches the screen module at all.
     """
 
     def round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
@@ -449,6 +475,38 @@ def make_search_round_fn(
                 verdict="neutral", advanced=False,
                 applied_adds=0, applied_cuts=0,
             )
+
+        # --- 1b. forge_py screening gate (flag-gated, default OFF). ----
+        # SCREEN, NOT JUDGE: forge_py (r ~= 0.898 rank correlation vs
+        # real Forge — FP-001 measurement) only decides which arms get
+        # Forge time; Forge remains the ONLY verdict engine, and the
+        # round's keep-if-better machinery below is untouched. A
+        # missing/broken forge_py (or a screen bug) degrades LOUDLY to
+        # the unscreened pool — the screen must never block the improve
+        # loop. Pruned arms are logged with their screen scores by the
+        # screen module (no silent drops). With the flag off, this
+        # branch is never entered and the round is byte-identical to
+        # pre-screen behavior (pinned by test).
+        if _screening_enabled(args):
+            _screen = screen_fn
+            if _screen is None:
+                from .forge_py_screen import screen_arms_for_search \
+                    as _screen
+            try:
+                kept = _screen(deck_path, arms, args)
+            except Exception as exc:  # noqa: BLE001 — degrade, never block
+                print(f"[screen] forge_py screening failed "
+                      f"({type(exc).__name__}: {exc}); keeping all "
+                      f"{len(arms)} arms unscreened.",
+                      file=sys.stderr, flush=True)
+                kept = arms
+            if kept:
+                arms = list(kept)
+            else:
+                print("[screen] screen returned an empty arm pool; "
+                      "ignoring it and keeping all arms (a screen may "
+                      "narrow the pool, never empty it).",
+                      file=sys.stderr, flush=True)
 
         # --- 2. Fillers, picked ONCE per round. ------------------------
         # Deliberate: every pull (and the final verdict sim) faces the

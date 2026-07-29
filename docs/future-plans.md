@@ -890,6 +890,56 @@ candidate sourcing incl. the claude-coercion, full round integration
 through `run_improve_loop` with injected arm builder + sim, legality
 guard kill-path, CLI wiring + validation). No test touches Forge.
 
+## forge_py screening gate (added 2026-07-29)
+
+`--screen` (or `COMMANDER_BUILDER_FORGEPY_SCREEN=1`) puts a cheap
+forge_py pre-filter in front of the `--search-budget` arm pool:
+before the bandit spends ANY Forge games, every candidate swap is
+staged through the shared `apply_proposal_to_deck` legality path and
+goldfished against the base deck in forge_py (`forge_py_screen.py`,
+invoking forge_py ONLY through the FP-001 correlation harness's
+`run_forge_py_ab` seam — one sanctioned invocation path). The weakest
+arms are pruned so the Forge budget concentrates on arms forge_py
+already ranks as plausible.
+
+**The contract — SCREEN, NOT JUDGE.** forge_py's measured agreement
+with real Forge outcomes is r ≈ 0.898 rank correlation (FP-001
+measurement; the paired corpus lives with `forge_py_correlation.py`).
+That is plenty to rank a candidate pool and nowhere near enough to
+render a verdict: nothing from the screen may ever feed a
+keep/kept/advance decision. Forge remains the ONLY verdict engine —
+the round's keep-if-better machinery is untouched, and every applied
+swap still earns its place through real Forge sims.
+
+Mechanics and guarantees (all pinned by tests in
+`tests/test_forge_py_screen.py` + the screen section of
+`tests/test_improve_search.py`, driven through injected runner/screen
+seams — no test touches forge_py or Forge):
+
+- **Default OFF = byte-identical.** With the flag and env var unset the
+  screen seam is never consulted and the search round behaves exactly
+  as before.
+- **Prune rule:** keep the top `--screen-keep` fraction (default 0.5)
+  of MEASURED arms, floor of 2 arms kept overall; pools of ≤ 2 arms
+  skip screening entirely. `--screen-games` (default 20) forge_py
+  games per arm — in-process Python sims, seconds not minutes.
+- **A screen only condemns what it measured.** Unstageable arms,
+  forge_py errors, and zero-decisive results are always KEPT; the
+  bandit's own evaluate path handles them at pull time as today.
+- **Loud degrade:** a missing/broken forge_py (or a screen crash)
+  stands the screen down with a stderr note and the full unscreened
+  pool proceeds — the screen can never block the improve loop.
+- **No silent drops:** every pruned arm is logged to stderr with its
+  screen score (house convention).
+
+FP-014 hand-off note: the same hook was considered for
+`commander-build`'s personalize stage and deliberately skipped — the
+personalize pipeline (lift → bracket-steer → collection) transforms a
+single deck through staged swaps and never materializes a candidate
+SET to rank, and its `--improve` hand-off already delegates to
+`commander-improve`, where this gate lives. No clean seam, nothing
+duplicated.
+
 ## Open questions for the post-soak shakedown
 
 1. Does per-swap probing beat spending the same total games on one
@@ -899,6 +949,10 @@ guard kill-path, CLI wiring + validation). No test touches Forge.
 2. Is 45 games/pull the right probe size, or do cheaper noisier pulls
    (more of them) win under UCB1? Reward variance vs pull count is
    exactly the bandit's trade to tune.
+3. Screening thresholds (`--screen-keep 0.5`, 20 py-games/arm) are
+   educated defaults, not measurements — once real screened rounds
+   run, check the correlation log for pruned-arm regret (did the
+   screen ever prune a swap Forge would have kept?).
 
 ---
 
