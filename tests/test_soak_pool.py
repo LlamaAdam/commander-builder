@@ -324,3 +324,56 @@ def test_write_summary_includes_storm_counters(tmp_path):
     assert storm["breaker_open"] is True
     assert storm["breaker_opens"] == 1
     assert storm["breaker_open_hours"] == 0.0  # just opened on a frozen clock
+
+
+# --- pair discovery: [USER] and [PREMADE] both feed FP-002 ----------------
+
+def _touch_decks(deck_dir: Path, names: list[str]) -> None:
+    deck_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (deck_dir / n).write_text("[Commander]\n1 X\n", encoding="utf-8")
+
+
+def test_deck_pairs_finds_premade_pairs_alongside_user_pairs(tmp_path):
+    _touch_decks(tmp_path, [
+        "[USER] Mine [B3].dck", "[USER] Mine v2 [B3].dck",
+        "[PREMADE] Popular [B4].dck", "[PREMADE] Popular v2 [B4].dck",
+    ])
+    pairs = [(a.name, b.name) for a, b in soak_pool._deck_pairs(tmp_path)]
+    assert ("[USER] Mine [B3].dck", "[USER] Mine v2 [B3].dck") in pairs
+    assert ("[PREMADE] Popular [B4].dck",
+            "[PREMADE] Popular v2 [B4].dck") in pairs
+    assert len(pairs) == 2
+
+
+def test_deck_pairs_user_only_behavior_unchanged(tmp_path):
+    # A library with no premades yields exactly the historical selection.
+    _touch_decks(tmp_path, [
+        "[USER] Mine [B3].dck", "[USER] Mine v2 [B3].dck",
+        "[USER] Unpaired v2 [B2].dck",       # v2 with no base: excluded
+        "Pool Deck [B3].dck", "Pool Deck v2 [B3].dck",  # pool role: excluded
+    ])
+    pairs = [(a.name, b.name) for a, b in soak_pool._deck_pairs(tmp_path)]
+    assert pairs == [("[USER] Mine [B3].dck", "[USER] Mine v2 [B3].dck")]
+
+
+def test_deck_pairs_premade_v2_without_base_is_excluded(tmp_path):
+    _touch_decks(tmp_path, ["[PREMADE] Orphan v2 [B3].dck"])
+    assert soak_pool._deck_pairs(tmp_path) == []
+
+
+def test_record_gauntlet_premade_row_schema_unchanged(tmp_path):
+    # pair_base/test_deck simply carry premade filenames; role derivation
+    # (' v2 ' token) is prefix-agnostic.
+    s = _soak_stub(tmp_path)
+    res = GauntletResult(
+        test_deck="[PREMADE] Popular v2 [B4].dck",
+        gauntlet=["G1.dck", "G2.dck", "G3.dck"],
+        games=12, wins=4, losses=8, draws=0, status="done", error=None,
+    )
+    soak_pool.Soak._record_gauntlet(
+        s, res, None, tmp_path / "[PREMADE] Popular v2 [B4].dck")
+    (row,) = _read_rows(s.args.out)
+    assert row["role"] == "v2"
+    assert row["pair_base"] == "[PREMADE] Popular [B4].dck"
+    assert row["test_deck"] == "[PREMADE] Popular v2 [B4].dck"

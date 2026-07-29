@@ -197,6 +197,24 @@ def test_gauntlet_ignores_bad_roles_and_low_games():
     assert (p.base_w, p.base_l) == (10, 30) and (p.v2_w, p.v2_l) == (15, 25)
 
 
+def test_gauntlet_aggregation_includes_premade_pairs(tmp_path):
+    # FP-002's unit is pair_base regardless of role prefix: minted
+    # [PREMADE] pairs (commander_builder.premade_mint) aggregate and
+    # join exactly like [USER] pairs -- no prefix filter anywhere.
+    (tmp_path / "[PREMADE] Popular [B4].dck").write_text(_DECK, encoding="utf-8")
+    rows = [
+        _grow(pair_base="[PREMADE] Popular [B4].dck", role="base",
+              games=40, wins=10, losses=30),
+        _grow(pair_base="[PREMADE] Popular [B4].dck", role="v2",
+              games=40, wins=20, losses=20),
+    ]
+    pairs = ma.aggregate_gauntlet(rows, min_games=40)
+    samples, skipped, missing = ma.build_gauntlet_samples(pairs, [str(tmp_path)])
+    assert len(samples) == 1 and samples[0].deck == "[PREMADE] Popular [B4].dck"
+    assert samples[0].margin == pytest.approx(0.25)
+    assert skipped == [] and missing == {}
+
+
 def test_build_gauntlet_samples_joins_and_skips(tmp_path):
     (tmp_path / "[USER] D [B4].dck").write_text(_DECK, encoding="utf-8")
     rows = [
