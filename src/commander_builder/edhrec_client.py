@@ -1016,11 +1016,34 @@ class AverageDeck:
     budget_slug: Optional[str]       # "expensive" / "budget" / None
     cards: list[CardEntry]           # mainboard + commander, mixed
 
-    def to_moxfield_shape(self, bracket_int: Optional[int] = None) -> dict:
+    def to_moxfield_shape(
+        self,
+        bracket_int: Optional[int] = None,
+        commander_names: Optional[list[str]] = None,
+    ) -> dict:
         """Build a Moxfield-shape deck JSON so existing import code can
-        consume this without a separate path. Commander cards are routed to
-        the [Commander] section by name match (the commander itself in the
-        cards list); everything else lands in [Main].
+        consume this without a separate path. The commander(s) ALWAYS land
+        in the commanders board and never in [Main].
+
+        Commander handling (bug fix 2026-07-29): EDHREC's average-deck
+        cardlist does NOT include the commander itself (verified against
+        live payloads — the commander is page chrome, not a deck slot).
+        The prior code only *routed* a name-matched card from the payload
+        into the commanders board, so real pulls produced .dck files with
+        no [Commander] section at all ("no commanders found" downstream).
+        Now the commanders board is built explicitly from
+        ``commander_names`` (default: ``[self.commander_name]``), whether
+        or not the payload happens to list them, and any payload card
+        matching a commander (full name or front face — EDHREC uses
+        front-face-only names for DFCs) is excluded from [Main] so the
+        commander is never duplicated. Partner pairs pass two names and
+        get a 98-card mainboard target (``100 - len(commander_names)``,
+        the ``dck_utils.main_target`` invariant).
+
+        The one exception is the ``direct_url`` fetch path, whose
+        ``commander_name`` is the ``"Unknown"`` sentinel — injecting that
+        as a card would corrupt the deck, so it keeps the legacy
+        route-by-match behavior (usually: everything in [Main]).
 
         Basic-land handling (design choice 2026-05-30):
         EDHREC exposes ``num_decks`` ("appears in N decks") for each card but
@@ -1028,17 +1051,48 @@ class AverageDeck:
         ``max(1, min(40, num_decks))`` which produced decks with up to 40
         copies of a single popular basic. Instead, we now treat the basics
         that EDHREC lists as the deck's *basic-land slot mix* and distribute
-        ``max(0, 99 - non_basic_count)`` copies evenly across them (remainder
-        goes to the first-listed basics). When EDHREC lists no basics we
-        leave the deck short of 99 main rather than guessing a color
-        identity — the caller can decide to top up.
+        ``max(0, main_target - non_basic_count)`` copies evenly across them
+        (remainder goes to the first-listed basics). When EDHREC lists no
+        basics we leave the deck short of the main target rather than
+        guessing a color identity — the caller can decide to top up.
         """
         BASIC_TYPES = {
             "forest", "island", "plains", "mountain", "swamp", "wastes",
         }
-        cmdr_name_lc = self.commander_name.lower()
+        names = [
+            n.strip() for n in (commander_names or [self.commander_name])
+            if n and n.strip()
+        ]
+        # ``fetch_average_deck(direct_url=...)`` doesn't know the commander
+        # and stores the "Unknown" sentinel — never inject that as a card.
+        inject = bool(names) and names != ["Unknown"]
+
+        def _name_keys(name: str) -> set[str]:
+            """Lowercased match keys: full name + front face (DFC/EDHREC
+            front-face convention, mirrors ``commander_slug``)."""
+            lc = name.lower()
+            return {lc, lc.split("//")[0].strip()}
+
+        cmdr_keys: set[str] = set()
+        if inject:
+            for n in names:
+                cmdr_keys |= _name_keys(n)
+
+        def _is_commander(card_name: str) -> bool:
+            return bool(_name_keys(card_name) & cmdr_keys)
+
         commanders: dict[str, dict] = {}
+        if inject:
+            for i, n in enumerate(names):
+                commanders[f"cmdr-{i}"] = {
+                    "quantity": 1,
+                    "card": {"name": n, "set": "", "cn": ""},
+                }
         mainboard: dict[str, dict] = {}
+
+        # Legal mainboard size: 100 total minus the command zone (99 for a
+        # single commander, 98 for partners; assume 1 when uninjectable).
+        main_target = 100 - (len(commanders) or 1)
 
         # Pre-pass: count non-basic mainboard entries + collect basics in
         # the order EDHREC listed them.
@@ -1046,7 +1100,7 @@ class AverageDeck:
         listed_basics: list[int] = []  # indices into self.cards
         for i, card in enumerate(self.cards):
             lc = card.name.lower()
-            if lc == cmdr_name_lc:
+            if _is_commander(card.name):
                 continue
             if lc in BASIC_TYPES:
                 listed_basics.append(i)
@@ -1055,9 +1109,9 @@ class AverageDeck:
 
         # Even split of the remaining slots across the listed basics. Every
         # listed basic gets an explicit quantity (possibly 0 when the
-        # non-basic load already meets/exceeds 99) so the prior 40-cap
-        # behavior never re-emerges via the default.
-        basic_target = max(0, 99 - non_basic_count)
+        # non-basic load already meets/exceeds the target) so the prior
+        # 40-cap behavior never re-emerges via the default.
+        basic_target = max(0, main_target - non_basic_count)
         basic_qty_by_idx: dict[int, int] = {idx: 0 for idx in listed_basics}
         if listed_basics and basic_target > 0:
             n = len(listed_basics)
@@ -1066,6 +1120,10 @@ class AverageDeck:
                 basic_qty_by_idx[idx] = base + (1 if rank < remainder else 0)
 
         for i, card in enumerate(self.cards):
+            if _is_commander(card.name):
+                # Already represented in the commanders board — a payload
+                # copy must not ALSO occupy a [Main] slot.
+                continue
             entry = {
                 "quantity": 1,
                 "card": {
@@ -1074,14 +1132,10 @@ class AverageDeck:
                     "cn": "",
                 },
             }
-            if card.name.lower() == cmdr_name_lc:
-                entry["quantity"] = 1
-                commanders[f"cmdr-{i}"] = entry
-            else:
-                if i in basic_qty_by_idx:
-                    entry["quantity"] = basic_qty_by_idx[i]
-                # Non-basics keep qty=1 (singleton format).
-                mainboard[f"main-{i}"] = entry
+            if i in basic_qty_by_idx:
+                entry["quantity"] = basic_qty_by_idx[i]
+            # Non-basics keep qty=1 (singleton format).
+            mainboard[f"main-{i}"] = entry
         return {
             "name": f"EDHREC Average — {self.commander_name}"
                     + (f" ({self.bracket_slug})" if self.bracket_slug else "")

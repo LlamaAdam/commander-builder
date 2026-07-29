@@ -58,6 +58,7 @@ The CLI never runs from here directly — ``commander-import --premade``
 
 from __future__ import annotations
 
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -67,8 +68,14 @@ from . import edhrec_client as _edhrec
 from . import moxfield_import as _mox
 from .bracket_estimator import estimate_bracket
 from .dck_meta import stamp_name_preserving_display
-from .dck_utils import section_card_names
+from .dck_utils import (
+    COMMANDER_DECK_SIZE,
+    count_commander_cards,
+    parse_card_line,
+    section_card_names,
+)
 from .moxfield_import import DECK_OUT_DIR, FETCH_SLEEP_SEC
+from .scryfall_client import lookup_card
 
 PREMADE_PREFIX = _mox._PREMADE_PREFIX
 
@@ -319,6 +326,33 @@ def _salt_for(commander_name: str, salt_map: dict[str, float]) -> float:
     return 0.0
 
 
+def _commander_card_names(commander_name: str) -> list[str]:
+    """Resolve an EDHREC commander entry into ``[Commander]`` card names.
+
+    EDHREC joins partner PAIRS with ``//`` — the very same separator a
+    single double-faced card's two faces use ("Frodo, Adventurous Hobbit
+    // Sam, Loyal Attendant" is TWO cards; "Sephiroth, Fabled SOLDIER //
+    Sephiroth, One-Winged Angel" is ONE). Disambiguate with a Scryfall
+    exact-name lookup (cached; the importer is a network path anyway):
+
+    - no ``//``                       → single commander, as-is;
+    - the full string names one card  → single DFC commander, full name
+      (Forge accepts the full "Front // Back" form on a card line);
+    - every half names its own card   → partner pair, one line each;
+    - lookups inconclusive/offline    → treat as a single commander (the
+      conservative shape: still yields a valid 99+1 deck).
+    """
+    name = (commander_name or "").strip()
+    if "//" not in name:
+        return [name] if name else []
+    if lookup_card(name) is not None:
+        return [name]
+    halves = [h.strip() for h in name.split("//") if h.strip()]
+    if len(halves) >= 2 and all(lookup_card(h) is not None for h in halves):
+        return halves
+    return [name]
+
+
 def import_edhrec_premades(
     count: int = 10,
     out_dir: Path = DECK_OUT_DIR,
@@ -365,7 +399,12 @@ def import_edhrec_premades(
         if deck is None or not deck.cards:
             print(f"  SKIP {name} (no average deck published/parseable)")
             continue
-        dck = _mox.to_dck(deck.to_moxfield_shape())
+        # Explicit commander names (partner-aware): the average-deck
+        # payload does NOT include the commander, so the shape must
+        # inject it — see AverageDeck.to_moxfield_shape.
+        dck = _mox.to_dck(deck.to_moxfield_shape(
+            commander_names=_commander_card_names(name),
+        ))
         bracket = estimate_bracket(dck)["estimate"]
         salt = _salt_for(name, salt_map)
         dck = _insert_metadata_lines(
@@ -451,3 +490,173 @@ def run_premade_pull(
     if not rows and (moxfield_count > 0 or edhrec_count > 0):
         return 1
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Repair — retrofit [Commander] sections onto broken EDHREC premades
+# ---------------------------------------------------------------------------
+#
+# Every EDHREC premade written before the to_moxfield_shape commander-inject
+# fix has NO [Commander] section (the average-deck payload never lists the
+# commander, and the old code only routed payload matches). Those files fail
+# improvement_advisor's commander parse ("no commanders found") and the
+# tier-3 harness. `commander-import --premade-repair` fixes them in place.
+
+# DisplayName= written by the importer: "EDHREC Average — <commander>"
+# (the premade pull never passes bracket/budget, so no suffixes). The
+# commander name is everything after the em-dash.
+_EDHREC_DISPLAY_RE = re.compile(
+    r"^DisplayName=EDHREC Average — (?P<name>.+)$", re.MULTILINE,
+)
+
+# Filename fallback: "[PREMADE] EDHREC <commander> [B<n>]" (stem). Less
+# faithful than DisplayName (safe_filename strips non-ASCII), so it's
+# only used when the metadata line is missing.
+_EDHREC_STEM_RE = re.compile(
+    r"^\[PREMADE\] EDHREC (?P<name>.+?)(?: \[B[1-5?]\])?$",
+)
+
+_SOURCE_EDHREC_RE = re.compile(r"^Source=edhrec$", re.MULTILINE)
+
+_BASIC_NAMES = frozenset(
+    {"forest", "island", "plains", "mountain", "swamp", "wastes"},
+)
+
+
+def _edhrec_premade_commander(text: str, stem: str) -> Optional[str]:
+    """Recover the commander name of a broken EDHREC premade file."""
+    m = _EDHREC_DISPLAY_RE.search(text)
+    if m:
+        return m.group("name").strip() or None
+    m = _EDHREC_STEM_RE.match(stem)
+    if m:
+        return m.group("name").strip() or None
+    return None
+
+
+def repair_premade_text(text: str, commander_names: list[str]) -> str:
+    """Rebuild a commander-less premade ``.dck`` text with a proper
+    ``[Commander]`` section.
+
+    - Inserts ``[Commander]`` (one ``1 <name>`` line per commander)
+      directly above ``[Main]``.
+    - Drops any [Main] line that IS a commander (full-name or front-face
+      match) — the commander must occupy the command zone, not a slot.
+    - Rebalances the mainboard onto the legal target
+      (``100 - len(commander_names)``, the ``dck_utils.main_target``
+      invariant) by adjusting the largest basic-land line(s); a deck
+      with no basics to adjust is left as-is rather than guessed at.
+
+    Pure text transform (no I/O) so tests can drive it directly.
+    """
+    keys: set[str] = set()
+    for n in commander_names:
+        lc = n.strip().lower()
+        keys.add(lc)
+        keys.add(lc.split("//")[0].strip())
+
+    def _is_commander_line(name: str) -> bool:
+        lc = name.lower()
+        return lc in keys or lc.split("//")[0].strip() in keys
+
+    lines = text.splitlines()
+    out: list[str] = []
+    main_header_at: Optional[int] = None
+    main_card_at: list[int] = []  # indices into ``out`` of [Main] card lines
+    in_main = False
+    for ln in lines:
+        stripped = ln.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_main = stripped.lower() == "[main]"
+            if in_main and main_header_at is None:
+                main_header_at = len(out)
+            out.append(ln)
+            continue
+        if in_main:
+            parsed = parse_card_line(stripped)
+            if parsed is not None:
+                if parsed[1] and _is_commander_line(parsed[1]):
+                    continue  # commander leaves [Main] for the command zone
+                main_card_at.append(len(out))
+        out.append(ln)
+
+    # Rebalance [Main] onto the legal size via the basic-land lines.
+    target = COMMANDER_DECK_SIZE - max(1, len(commander_names))
+    total = 0
+    basics: list[int] = []  # indices into ``out``, basics only
+    for idx in main_card_at:
+        parsed = parse_card_line(out[idx].strip())
+        if parsed is None:
+            continue
+        total += parsed[0]
+        if parsed[1].lower() in _BASIC_NAMES:
+            basics.append(idx)
+    delta = target - total
+    if delta != 0 and basics:
+        # Largest basic first: absorbs shrinks without zeroing small
+        # lines, and is the least-wrong place to grow.
+        basics.sort(
+            key=lambda i: parse_card_line(out[i].strip())[0], reverse=True,
+        )
+        for idx in basics:
+            if delta == 0:
+                break
+            qty, _name = parse_card_line(out[idx].strip())
+            new_qty = max(0, qty + delta)
+            delta -= new_qty - qty
+            m = re.match(r"^(\d+)\s+(.*)$", out[idx].strip())
+            out[idx] = f"{new_qty} {m.group(2)}" if new_qty > 0 else None
+        out = [ln for ln in out if ln is not None]
+        # Re-locate the [Main] header if line removal shifted it.
+        main_header_at = next(
+            (i for i, ln in enumerate(out)
+             if ln.strip().lower() == "[main]"), main_header_at,
+        )
+
+    block = ["[Commander]"] + [f"1 {n}" for n in commander_names]
+    insert_at = main_header_at if main_header_at is not None else len(out)
+    out[insert_at:insert_at] = block
+    return "\n".join(out) + "\n"
+
+
+def repair_premades(out_dir: Path = DECK_OUT_DIR) -> int:
+    """Fix on-disk EDHREC ``[PREMADE]`` decks missing their ``[Commander]``.
+
+    Scans ``out_dir`` for premade-role files with ``Source=edhrec`` and
+    zero ``[Commander]`` cards, recovers the commander from the
+    ``DisplayName=`` metadata (filename-stem fallback), and rewrites the
+    file via ``repair_premade_text``. Idempotent — a repaired (or
+    correctly written) file has commander cards and is skipped, so
+    re-runs are no-ops. Returns the number of files that could NOT be
+    repaired (0 = success), mirroring the failure-count convention of
+    ``moxfield_import.main``.
+    """
+    repaired = 0
+    failures = 0
+    if not out_dir.is_dir():
+        print(f"  ERROR: deck dir not found: {out_dir}")
+        return 1
+    for path in sorted(out_dir.glob("*.dck")):
+        if _mox._deck_role(path) != "premade":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"  ERROR reading {path.name}: {exc}")
+            failures += 1
+            continue
+        if not _SOURCE_EDHREC_RE.search(text):
+            continue  # Moxfield premades never shipped broken.
+        if count_commander_cards(text) > 0:
+            continue  # already correct (or already repaired).
+        name = _edhrec_premade_commander(text, path.stem)
+        if not name:
+            print(f"  ERROR: cannot recover commander for {path.name}")
+            failures += 1
+            continue
+        fixed = repair_premade_text(text, _commander_card_names(name))
+        path.write_text(fixed, encoding="utf-8")
+        repaired += 1
+        print(f"  Repaired {path.name} (+[Commander] {name})")
+    print(f"Premade repair: {repaired} repaired, {failures} failed.")
+    return failures
