@@ -34,7 +34,7 @@ path is hardcoded here, and tests never touch the network share.
 
 Usage:
   commander-mint-v2
-  commander-mint-v2 --stage-inbox "\\\\192.168.4.49\\soak_inbox\\new_decks"
+  commander-mint-v2 --stage-inbox "\\\\LLAMA\\soak_inbox\\new_decks"
 """
 
 from __future__ import annotations

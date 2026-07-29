@@ -30,7 +30,9 @@ param(
   [string]$Body,
   [string]$BodyFile,
   [string]$Me,
-  [string]$InboxHost = '192.168.4.49',
+  # Hostname, not IP: DHCP moved the inbox host (192.168.4.49 -> .92)
+  # and broke UNC writes; \\LLAMA is stable.
+  [string]$InboxHost = 'LLAMA',
   [switch]$KeepRead
 )
 $ErrorActionPreference = 'Stop'

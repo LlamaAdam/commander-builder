@@ -94,7 +94,8 @@ repo-root `_tier3_pilot_result.json` (`--out`); progress at
 `*__tier3_*` decks are auto-removed per deck. Expect several hours;
 do NOT start competing Forge work while it runs.
 ⚠️ FP-002 note (2026-07-25 evening): the gauntlet soak is NOT running
-and the soak share `\\192.168.4.49\soak_inbox` is unreachable from
+and the soak share `\\LLAMA\soak_inbox` (was `\\192.168.4.49\...`; DHCP
+moved the host to .92, so scripts now default to the hostname) is unreachable from
 box1 — the n=45 dataset is inaccessible until box2/the share returns;
 campaign paused pending operator. Active queue is now the top of
 [docs/future-plans.md](future-plans.md) (reordered 2026-07-25:
