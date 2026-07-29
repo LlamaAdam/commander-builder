@@ -699,6 +699,12 @@ def _list_bracket_candidates(bracket: int, deck_dir: Path = DECK_DIR) -> list[st
                   of the limited --max-candidates slots). Mirrors
                   _proposer_sim's filler exclusion ("never use a calibration
                   deck as filler").
+      [PREMADE] — popularity-ranked imports (Moxfield top-liked / EDHREC
+                  top-commander average decks, see premade_import). Letting
+                  the most-liked decks on the internet into the opponent
+                  pool would skew pod opposition strength; the harvest
+                  recipe's like-weighted sampling is the intended amount of
+                  popularity bias. Mirrors run_match._fallback_opponents.
     [REF] decks (meta_test's imported community references) are deliberately
     KEPT: they are real, playable community builds at the bracket — exactly
     the population the curator exists to rank.
@@ -711,6 +717,7 @@ def _list_bracket_candidates(bracket: int, deck_dir: Path = DECK_DIR) -> list[st
         if f.name.endswith(suffix)
         and not f.name.startswith("[USER]")
         and not f.name.startswith("[CONTROL]")
+        and not f.name.startswith("[PREMADE]")
     )
 
 

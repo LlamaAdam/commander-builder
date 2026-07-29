@@ -73,3 +73,76 @@ def test_fetch_top_cards_uses_cache(no_cache, monkeypatch):
     fetch_top_cards("year")          # fetch + write cache
     fetch_top_cards("year")          # served from cache
     assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# fetch_top_commanders — same JSON-API machinery, commanders/<slug> page
+# ---------------------------------------------------------------------------
+
+_COMMANDERS_JSON = json.dumps({
+    "container": {"json_dict": {"cardlists": [
+        {"header": "Top Commanders", "cardviews": [
+            {"name": "Ms. Bumbleflower", "num_decks": 20000},
+            {"name": "Atraxa, Praetors' Voice", "num_decks": 50000},
+            {"name": "Tergrid, God of Fright", "num_decks": 30000},
+        ]},
+    ]}},
+})
+
+
+def test_fetch_top_commanders_parses_and_ranks(no_cache, monkeypatch):
+    seen = {}
+
+    def fake(url):
+        seen["url"] = url
+        return _COMMANDERS_JSON
+
+    monkeypatch.setattr(edhrec_client, "_http_get_text_with_retry", fake)
+    commanders = edhrec_client.fetch_top_commanders("year")
+    assert [c.name for c in commanders] == [
+        "Atraxa, Praetors' Voice",
+        "Tergrid, God of Fright",
+        "Ms. Bumbleflower",
+    ]
+    # Commander ranking lives on the commanders/<slug> JSON page, not
+    # top/<slug> (which ranks CARDS).
+    assert seen["url"].endswith("/pages/commanders/year.json")
+
+
+def test_fetch_top_commanders_network_failure_returns_empty(
+        no_cache, monkeypatch):
+    def boom(url):
+        raise OSError("network down")
+    monkeypatch.setattr(edhrec_client, "_http_get_text_with_retry", boom)
+    assert edhrec_client.fetch_top_commanders("year") == []
+
+
+def test_fetch_top_commanders_empty_parse_not_cached(no_cache, monkeypatch):
+    """No-cache-on-empty convention: a 200-OK page with no recognizable
+    cardlists must not poison the cache — the next call refetches."""
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return json.dumps({"nothing": "here"})
+        return _COMMANDERS_JSON
+
+    monkeypatch.setattr(edhrec_client, "_http_get_text_with_retry", flaky)
+    assert edhrec_client.fetch_top_commanders("year") == []
+    commanders = edhrec_client.fetch_top_commanders("year")
+    assert calls["n"] == 2
+    assert commanders and commanders[0].name == "Atraxa, Praetors' Voice"
+
+
+def test_fetch_top_commanders_uses_cache(no_cache, monkeypatch):
+    calls = {"n": 0}
+
+    def once(url):
+        calls["n"] += 1
+        return _COMMANDERS_JSON
+
+    monkeypatch.setattr(edhrec_client, "_http_get_text_with_retry", once)
+    edhrec_client.fetch_top_commanders("year")   # fetch + write cache
+    edhrec_client.fetch_top_commanders("year")   # served from cache
+    assert calls["n"] == 1
