@@ -217,6 +217,31 @@ repo-root `_tier3_gated_result.json`; a scheduled report fires
 2026-07-27 09:30. `master` was tagged `tier3-baseline-2026-07-26`
 before the run as the stable "before" reference.
 
+### Tier-3 GATED RESULT — 2026-07-28 (gate FAIL; flag stays default-off)
+
+The 2026-07-26 run above was **discarded**: it consumed flag-on advisor
+rankings poisoned by the quantity-collapse bug (PR #37 — `mana_fit` saw
+"27 Mountain" as "1 Mountain", inflating every mana producer), so its
+verdict measured the bug, not the ranking. The re-run launched
+2026-07-27 on post-#37/#39 master with **7** B3 decks (one spare so an
+identical-arms skip can't drop paired n below the >=6 gate minimum),
+same config otherwise. The box needed `commander-import --harvest 3`
+first — it had no B3 filler pool, and the hardened harness (PR #39)
+failed that first attempt loudly per-deck instead of losing the run.
+
+Result (`_tier3_gated_result.json`, ~24 h wall): 6 paired decks
+(Hakbal skipped — arms staged identical decklists), bubble won 4,
+bucket 2, mean bubble advantage **+0.075, 95% CI [−0.159, +0.310]** —
+the CI includes zero, so **gate: fail**. Null-noise reference from 2
+replicates: mean |margin| 0.378 (max 0.621) — single-deck margins at
+60 games/pod are still large versus the effect being hunted. Honest
+read: with unpoisoned rankings and a clean harness, bubble-first
+ordering shows no statistically demonstrable win-rate advantage at this
+power; the 4-2 winner tally is exactly the kind of signal the gate
+policy was designed not to trust. `COMMANDER_BUILDER_CARD_SCORE`
+stays default-off. Next escalation, if wanted: more decks (paired n
+drives the CI width down as sqrt(n)) rather than more games per deck.
+
 ## The gap
 
 There is **no per-card score anywhere in the codebase.** Card ordering is
