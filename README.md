@@ -212,7 +212,17 @@ both engines side-by-side; opt in via
 
 Shared card data at `C:\dev\mtg_cards\` (out-of-repo, ~180MB Scryfall
 bulk + per-card snapshots + Magic Comp Rules). Both projects read via
-`MTG_CARDS_DIR` env var with a sensible default.
+`MTG_CARDS_DIR` env var with a sensible default. On machines without
+that folder, snapshots fall back to the repo-local `.cache/scryfall/`
+(a stderr line says so at startup). To populate a cold snapshot store,
+prefer the bulk path over per-card fetching:
+
+```
+# Snapshot every card named in the configured deck dir from Scryfall's
+# oracle_cards bulk export (one rate-limit-exempt ~150MB GET):
+python -m commander_builder.oracle_store --from-bulk --all
+# or for one deck: ... --from-bulk --deck "path\to\deck.dck"
+```
 
 ## Where to start when picking this up cold
 

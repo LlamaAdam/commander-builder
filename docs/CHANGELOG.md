@@ -6,6 +6,41 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-29 — Scryfall bulk-data snapshot path + per-card 429 backoff
+
+#### Added
+
+- **`feat(oracle_store)`: `--from-bulk` populates oracle snapshots from
+  Scryfall's `oracle_cards` bulk export.** One ~150MB rate-limit-exempt
+  GET (dated `bulk/oracle-cards-YYYYMMDD.json` beside the snapshot dir;
+  a <7-day-old local copy is reused, `--force-bulk` re-downloads)
+  replaces one request per card for cold-store population — the 2026-07
+  corpus-mining run found 11,721 cards with no snapshot, and the
+  per-card path died mid-run on an unhandled HTTP 429. Target selection
+  reuses the existing machinery: `--deck PATH` / `--name CARD`; under
+  `--from-bulk`, `--all` means every card named in the deck dir
+  (`--deck-dir` overrides the configured one) so only needed snapshots
+  are written; `--everything` writes all ~35k. Snapshots are the full
+  Scryfall card object — byte-format-identical to what `lookup_card`
+  caches from `/cards/named` — and multi-face cards are indexed by face
+  name (plus written under their front-face slug in `--everything`
+  mode), so DFC/split front-face lookups hit.
+
+#### Fixed
+
+- **`fix(oracle_store)`: per-card refresh path now backs off on 429/5xx
+  instead of dying.** `bulk_refresh` wraps `check_errata` /
+  `refresh_card` in the house retry pattern (PRs #40/#41: Retry-After
+  honored and clamped, else exponential backoff, one stderr line per
+  retry, bounded budget). A persistent 429 degrades loudly
+  (`status="http_error"` + stderr line) and the run continues with the
+  next card.
+- **`fix(scryfall_client)`: loud cards-dir fallback.** When
+  `C:\dev\mtg_cards` is absent and `MTG_CARDS_DIR` unset, resolution
+  logs one stderr line saying snapshots live under the repo-local
+  `.cache/scryfall` — operators were surprised to find a populated
+  `.cache/` and no `mtg_cards`.
+
 ### 2026-07-28 — [PREMADE] deck role + popularity importers
 
 #### Added
