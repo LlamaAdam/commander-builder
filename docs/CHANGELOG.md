@@ -6,6 +6,37 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-28 — [PREMADE] deck role + popularity importers
+
+#### Added
+
+- **`feat(premade)`: `[PREMADE]` deck role + Moxfield/EDHREC popularity
+  importers (`commander-import --premade`).** New `premade_import` module
+  pulls the top public Moxfield Commander decks by likes (`Source=moxfield`,
+  `Likes=<n>` recorded in `[metadata]`) and the EDHREC average decks of the
+  most popular commanders (`Source=edhrec`, `Salt=<x.xx>` — the commander's
+  score from the `/top/salt` list) as `[PREMADE] <name> [B<n>].dck` files.
+  Per-source counts via `--premade-moxfield N` / `--premade-edhrec N`
+  (default 10 each; either flag implies `--premade`). Commander diversity:
+  candidates whose commander is already represented — on disk in ANY role or
+  earlier in the same pull — are skipped and backfilled from further down the
+  popularity ranking, so N decks means N distinct new commanders. Bracket
+  tags come from Moxfield's declared bracket when present, else the offline
+  `bracket_estimator`. A summary table (name, source, likes/salt, bracket)
+  prints after the pull. New `edhrec_client.fetch_top_commanders` reads
+  `json.edhrec.com/pages/commanders/<window>.json` with the same
+  no-cache-on-empty convention as the other EDHREC fetchers.
+- **`[PREMADE]` is a third role beside `[USER]` and the pool.** Premades
+  appear in the web deck list (`_list_decks` / `GET /api/decks` rows now
+  carry a `type` field: `"user"` / `"premade"` / `"pool"`) but are excluded
+  from opponent/filler selection (`run_match._fallback_opponents`,
+  `pool_curator._list_bracket_candidates`, `_proposer_sim` fillers) —
+  popularity-ranked decks would skew pod opposition strength. `[USER]`-keyed
+  scanners (soak pairing, status listing) never match them by construction.
+  Same-id role scoping: `_existing_moxfield_ids(is_user=False)` now means
+  POOL files only (premade copies no longer read as "already harvested"),
+  via the new `moxfield_import._deck_role` helper.
+
 ### 2026-07-27 — FP-015 boundary semantics: measured-zero vs unavailable, flag isolation
 
 #### Fixed

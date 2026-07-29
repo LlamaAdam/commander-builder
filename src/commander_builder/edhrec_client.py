@@ -586,6 +586,80 @@ def fetch_top_cards(
     return cards
 
 
+def fetch_top_commanders(
+    slug: str = "year",
+    cache: bool = True,
+    ttl_hours: int = CACHE_TTL_HOURS,
+) -> list[CardEntry]:
+    """Fetch EDHREC's most-popular commanders for a time window.
+
+    ``slug`` is a window (``year`` = past 2 years, ``month``, ``week``) —
+    EDHREC serves each at ``json.edhrec.com/pages/commanders/<slug>.json``,
+    the commander-ranking sibling of the ``/pages/top/<slug>.json`` card
+    pages ``fetch_top_cards`` reads. Returns a ``CardEntry`` list ranked by
+    popularity (``num_decks`` desc) — ``name`` is the commander's name.
+
+    Returns ``[]`` on any failure (network/404/parse) so callers degrade
+    gracefully. Cached to ``.cache/edhrec/top-commanders-<slug>.json``;
+    an empty parse is never cached (same no-cache-on-empty convention as
+    ``fetch_top_cards`` / ``fetch_salt_list``) so a challenge page can't
+    zero the ranking for a whole TTL.
+    """
+    cache_path = _cache_path(f"top-commanders-{slug}")
+    if cache and _is_cache_fresh(cache_path, ttl_hours):
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return [CardEntry(**e) for e in data.get("commanders", [])]
+        except (OSError, ValueError, TypeError):
+            pass
+
+    url = f"{EDHREC_JSON_BASE}/commanders/{urllib.parse.quote(slug)}.json"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        raw = _http_get_text_with_retry(url)
+        payload = json.loads(raw)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        # Same failure envelope as fetch_top_cards: OSError covers
+        # HTTPError/URLError/TimeoutError, HTTPException covers mid-body
+        # disconnects, ValueError covers non-JSON challenge pages.
+        print(
+            f"[edhrec] WARNING: top-commanders fetch failed for {slug!r} "
+            f"({exc!r}) — continuing without commander ranking",
+            file=sys.stderr, flush=True,
+        )
+        return []
+
+    buckets: dict[str, list[CardEntry]] = {}
+    _walk_for_cardlists(payload, buckets)
+    seen: set[str] = set()
+    commanders: list[CardEntry] = []
+    for lst in buckets.values():
+        for c in lst:
+            key = c.name.lower()
+            if not c.name or key in seen:
+                continue
+            seen.add(key)
+            commanders.append(c)
+    commanders.sort(key=lambda c: c.num_decks, reverse=True)
+
+    if not commanders:
+        print(
+            f"[edhrec] WARNING: top-commanders page {slug!r} fetched OK but "
+            "contained no recognizable cardlists — bad slug or JSON "
+            "schema change. Result NOT cached; will retry next run.",
+            file=sys.stderr, flush=True,
+        )
+
+    if cache and commanders:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"slug": slug,
+                        "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        "commanders": [asdict(c) for c in commanders]}),
+            encoding="utf-8")
+    return commanders
+
+
 def top_main(argv=None) -> int:
     """``commander-top`` — list EDHREC's most-played cards for a window/type."""
     import argparse

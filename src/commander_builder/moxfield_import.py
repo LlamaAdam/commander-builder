@@ -407,10 +407,29 @@ _MOXFIELD_META = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
 # checks in status/app/pool_curator so all role filters agree.)
 _USER_PREFIX = "[USER]"
 
+# Filename prefix marking a popularity-ranked community build imported by
+# `premade_import` (Moxfield top-liked / EDHREC top-commander average decks).
+# A THIRD role beside [USER] and the pool: premades appear in the web deck
+# list (typed "premade") but are excluded from opponent/filler selection
+# (run_match._fallback_opponents, pool_curator, _proposer_sim) — popularity-
+# ranked decks would skew pod opposition strength — and from every
+# [USER]-keyed test-deck scanner (those match on the [USER] prefix).
+_PREMADE_PREFIX = "[PREMADE]"
 
-def _is_user_deck_file(path: Path) -> bool:
-    """True if the file lives on the user side of the [USER]/pool boundary."""
-    return path.name.startswith(_USER_PREFIX)
+
+def _deck_role(path: Path) -> str:
+    """Classify a .dck file's role by filename prefix.
+
+    ``"user"`` for `[USER]`-prefixed files, ``"premade"`` for
+    `[PREMADE]`-prefixed files, ``"pool"`` for everything else (harvested
+    opponents, [REF] references, [CONTROL] calibration decks). Same-id
+    matching never crosses role boundaries — see `_existing_moxfield_ids`.
+    """
+    if path.name.startswith(_USER_PREFIX):
+        return "user"
+    if path.name.startswith(_PREMADE_PREFIX):
+        return "premade"
+    return "pool"
 
 
 # Trailing ` v<N>` version token on a stem CORE (i.e. AFTER the ` [B<n>]`
@@ -561,10 +580,15 @@ def _existing_moxfield_ids(
     the pre-fix behavior — saw the OTHER colliding deck there and minted a
     fresh `(3)` duplicate on every re-pull.
 
-    ``is_user`` scopes the map to one side of the [USER]/pool role boundary
-    (see ``_USER_PREFIX``): True → only `[USER]`-prefixed files, False →
-    only non-`[USER]` files, None → the whole dir (role-agnostic tooling
-    only). Every WRITER must pass its own role: an unscoped map made a
+    ``is_user`` scopes the map to one role (see ``_deck_role``): True →
+    only `[USER]`-prefixed files, False → only POOL files (neither
+    `[USER]` nor `[PREMADE]` — a popularity-ranked premade copy of a
+    candidate's id must not read as "already harvested", or the pool
+    would silently stay one deck short forever), None → the whole dir
+    (role-agnostic tooling only). Premade-role scans live in
+    ``premade_import._existing_premade_ids``, which walks the same
+    ``Moxfield=`` metadata for `[PREMADE]` files only.
+    Every WRITER must pass its own role: an unscoped map made a
     user import "find" the opponent-pool copy of the same Moxfield id and
     either skip the import (bulk paths — the user could never obtain a
     `[USER]` copy) or overwrite the pool file in place (import_deck — the
@@ -601,7 +625,9 @@ def _existing_moxfield_ids(
     for path in sorted(out_dir.glob("*.dck")):
         if suffix is not None and not path.name.endswith(suffix):
             continue
-        if is_user is not None and _is_user_deck_file(path) != is_user:
+        if is_user is not None and _deck_role(path) != (
+            "user" if is_user else "pool"
+        ):
             # Wrong side of the role boundary — invisible to this caller.
             continue
         pid = _read_moxfield_id(path)
@@ -1239,6 +1265,30 @@ def _build_argparser() -> argparse.ArgumentParser:
         default=[],
         help="Run the full mixed-recipe harvest for the given bracket. Repeatable.",
     )
+    p.add_argument(
+        "--premade",
+        action="store_true",
+        help="Pull popular community builds as [PREMADE] decks: Moxfield's "
+             "top decks by likes + EDHREC average decks for the top "
+             "commanders (salt score recorded). 10 per source by default; "
+             "tune with --premade-moxfield / --premade-edhrec.",
+    )
+    p.add_argument(
+        "--premade-moxfield",
+        type=int,
+        default=None,
+        metavar="N",
+        help="How many top-liked Moxfield decks to pull as [PREMADE] "
+             "(default 10). Implies --premade.",
+    )
+    p.add_argument(
+        "--premade-edhrec",
+        type=int,
+        default=None,
+        metavar="N",
+        help="How many EDHREC top-commander average decks to pull as "
+             "[PREMADE] (default 10). Implies --premade.",
+    )
     return p
 
 
@@ -1536,11 +1586,32 @@ def bulk_main(argv: Optional[list[str]] = None) -> int:
 def main(argv: Optional[list[str]] = None) -> int:
     args = _build_argparser().parse_args(argv)
 
-    if not args.decks and not args.bracket and not args.harvest:
+    premade_requested = (
+        args.premade
+        or args.premade_moxfield is not None
+        or args.premade_edhrec is not None
+    )
+    if (not args.decks and not args.bracket and not args.harvest
+            and not premade_requested):
         _build_argparser().print_help()
         return 2
 
     failures = 0
+
+    if premade_requested:
+        # Lazy import: premade_import pulls in edhrec_client +
+        # bracket_estimator, which plain single-deck imports never need.
+        from .premade_import import run_premade_pull
+        failures += run_premade_pull(
+            moxfield_count=(
+                args.premade_moxfield
+                if args.premade_moxfield is not None else 10
+            ),
+            edhrec_count=(
+                args.premade_edhrec
+                if args.premade_edhrec is not None else 10
+            ),
+        )
 
     for url_or_id in args.decks:
         try:

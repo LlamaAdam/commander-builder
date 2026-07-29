@@ -179,7 +179,9 @@ def _pick_filler_decks(
         being compared -- pitting the new deck against the old deck's
         identical copy in the filler slots would be self-defeating).
       - Skip ``[USER]`` prefixed decks (those are the user's own
-        work; the opponent pool is everything WITHOUT the prefix).
+        work; the opponent pool is everything WITHOUT the prefix),
+        ``[CONTROL]`` calibration decks, and ``[PREMADE]``
+        popularity-ranked imports (they'd skew filler strength).
       - When ``target_bracket`` is given, group candidates by
         |bracket_of_candidate - target_bracket| and walk the buckets
         from delta=0 up. Each bucket is shuffled via ``rng`` for
@@ -201,6 +203,7 @@ def _pick_filler_decks(
         p.name for p in deck_dir.glob("*.dck")
         if not p.name.startswith("[USER]")
         and not p.name.startswith("[CONTROL]")  # never use a calibration deck as filler
+        and not p.name.startswith("[PREMADE]")  # popularity-ranked; would skew filler strength
         and p.name not in exclude_set
     ]
     if not candidates:

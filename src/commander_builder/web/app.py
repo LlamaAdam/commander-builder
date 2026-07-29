@@ -4,7 +4,7 @@ placeholder root page.
 Routes:
     GET  /                          -> placeholder HTML (no design yet)
     GET  /api/health                -> {"status": "ok"}
-    GET  /api/decks                 -> {"decks": [{"id", "name", "path"}, ...]}
+    GET  /api/decks                 -> {"decks": [{"id", "name", "path", "type"}, ...]}
     GET  /api/dashboard?deck=<id>   -> DashboardData JSON for that deck
     GET  /api/dashboard?path=<p>    -> DashboardData JSON for an explicit path
     GET  /api/iterations            -> recent iterations across all decks
@@ -106,9 +106,12 @@ def _cleanup_stale_staged_files(
 def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
     """Enumerate ``.dck`` files under ``deck_dir`` (non-recursive).
 
-    By default returns only ``[USER] *.dck`` files — those are the
-    decks under active iteration. Set ``user_only=False`` to also
-    list filler / pool decks (used by curation commands).
+    By default returns only ``[USER] *.dck`` and ``[PREMADE] *.dck``
+    files — the decks under active iteration plus the popularity-ranked
+    premades imported by ``premade_import`` (distinguishable via the
+    ``type`` field: ``"user"`` / ``"premade"``). Set ``user_only=False``
+    to also list filler / pool decks (``type: "pool"`` — used by
+    curation commands).
 
     Always hides ``*_proposed_<timestamp>.dck`` files. Those are
     transient working copies the propose-swap A/B-sim flow stages
@@ -119,7 +122,13 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
     out: list[dict] = []
     import re as _re
     for p in sorted(deck_dir.glob("*.dck")):
-        if user_only and not p.stem.startswith("[USER]"):
+        if p.stem.startswith("[USER]"):
+            role = "user"
+        elif p.stem.startswith("[PREMADE]"):
+            role = "premade"
+        else:
+            role = "pool"
+        if user_only and role == "pool":
             continue
         # Skip transient propose-swap working copies regardless of mode.
         # The optional trailing 8-hex uid matches routes_sim's per-request
@@ -129,11 +138,12 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
             r"_(proposed|converted)_\d{8}_\d{6}(_[0-9a-f]{8})?$", p.stem,
         ):
             continue
-        display = _re.sub(r"^\[USER\]\s*", "", p.stem)
+        display = _re.sub(r"^\[(USER|PREMADE)\]\s*", "", p.stem)
         out.append({
             "id": p.stem,
             "name": display,
             "path": str(p),
+            "type": role,
         })
     return out
 

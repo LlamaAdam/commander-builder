@@ -125,6 +125,13 @@ commander-iterate \
 # Bulk-harvest decks at a bracket for the curator's candidate pool
 commander-import --harvest 3      # ~60 B3 decks via the multi-axis recipe
 
+# Pull popular community builds as [PREMADE] decks: Moxfield's top decks by
+# likes (Likes= recorded) + EDHREC average decks for the top commanders
+# (Salt= recorded). Skips commanders already represented on disk; listed in
+# the web UI as type "premade"; never used as sim opponents/filler.
+commander-import --premade                                # 10 + 10
+commander-import --premade-moxfield 20 --premade-edhrec 20  # per-source counts
+
 # Curate the canonical opponent pool from candidates on disk
 commander-curate --bracket 3 --max-candidates 12 --seed 0
 
