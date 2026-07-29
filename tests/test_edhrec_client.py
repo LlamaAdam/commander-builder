@@ -1232,3 +1232,58 @@ def test_to_moxfield_shape_non_basics_are_singletons():
     main = deck.to_moxfield_shape()["boards"]["mainboard"]["cards"]
     for e in main.values():
         assert e["quantity"] == 1, e
+
+
+def test_to_moxfield_shape_injects_commander_missing_from_payload():
+    """Real average-deck payloads do NOT list the commander (verified
+    against live pages) — the shape must inject it anyway, or the .dck
+    is written with no [Commander] section at all (2026-07 bug)."""
+    from commander_builder.edhrec_client import AverageDeck, CardEntry
+    deck = AverageDeck(
+        commander_name="Urtet, Remnant of Memnarch",
+        slug="urtet-remnant-of-memnarch", url="x",
+        bracket_slug=None, budget_slug=None,
+        cards=[CardEntry(name="Sol Ring"), CardEntry(name="Island")],
+    )
+    shape = deck.to_moxfield_shape()
+    cmdrs = shape["boards"]["commanders"]["cards"]
+    main = shape["boards"]["mainboard"]["cards"]
+    assert [c["card"]["name"] for c in cmdrs.values()] == [
+        "Urtet, Remnant of Memnarch"]
+    # 99-card main: Sol Ring + Island filled to 98.
+    assert sum(e["quantity"] for e in main.values()) == 99
+    assert all(e["card"]["name"] != "Urtet, Remnant of Memnarch"
+               for e in main.values())
+
+
+def test_to_moxfield_shape_partner_names_use_98_main_target():
+    """Two commander_names (a partner pair) -> two commander entries and
+    a 98-card mainboard (100 - commander_count invariant)."""
+    deck = _build_avg_deck("ignored", non_basic_count=60,
+                           basics_listed=["Forest", "Island"])
+    shape = deck.to_moxfield_shape(
+        commander_names=["Alpha One", "Beta Two"])
+    cmdrs = shape["boards"]["commanders"]["cards"]
+    main = shape["boards"]["mainboard"]["cards"]
+    assert sorted(c["card"]["name"] for c in cmdrs.values()) == [
+        "Alpha One", "Beta Two"]
+    # The payload's "ignored" commander entry matches neither partner,
+    # so it stays in [Main] as a 61st non-basic; 98 - 61 = 37 basics
+    # split 19/18. Total lands exactly on the 98-card partner target.
+    assert sum(e["quantity"] for e in main.values()) == 98
+
+
+def test_to_moxfield_shape_direct_url_unknown_sentinel_not_injected():
+    """direct_url fetches store commander_name='Unknown' — that sentinel
+    must never be injected as a commander card."""
+    from commander_builder.edhrec_client import AverageDeck, CardEntry
+    deck = AverageDeck(
+        commander_name="Unknown", slug="", url="x",
+        bracket_slug=None, budget_slug=None,
+        cards=[CardEntry(name="Sol Ring")],
+    )
+    shape = deck.to_moxfield_shape()
+    assert shape["boards"]["commanders"]["cards"] == {}
+    assert [e["card"]["name"]
+            for e in shape["boards"]["mainboard"]["cards"].values()] == [
+        "Sol Ring"]

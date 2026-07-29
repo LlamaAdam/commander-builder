@@ -1289,6 +1289,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="How many EDHREC top-commander average decks to pull as "
              "[PREMADE] (default 10). Implies --premade.",
     )
+    p.add_argument(
+        "--premade-repair",
+        action="store_true",
+        help="Repair on-disk EDHREC [PREMADE] decks written without a "
+             "[Commander] section (pre-fix pulls): re-adds the commander "
+             "and rebalances the mainboard to 100 - commander_count. "
+             "Idempotent; already-correct files are untouched.",
+    )
     return p
 
 
@@ -1592,11 +1600,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         or args.premade_edhrec is not None
     )
     if (not args.decks and not args.bracket and not args.harvest
-            and not premade_requested):
+            and not premade_requested and not args.premade_repair):
         _build_argparser().print_help()
         return 2
 
     failures = 0
+
+    if args.premade_repair:
+        # Lazy import, same rationale as the --premade branch below.
+        from .premade_import import repair_premades
+        failures += repair_premades()
 
     if premade_requested:
         # Lazy import: premade_import pulls in edhrec_client +
