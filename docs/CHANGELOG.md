@@ -6,6 +6,50 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-29 — Desktop EXE refresh (FP-010)
+
+#### Changed
+
+- **`chore(desktop)`: PyInstaller spec refreshed and EXE rebuilt** against
+  everything shipped since the first FP-010 freeze (mobile-responsive
+  layout, accessibility overhaul PR #36, Build-from-scratch tab + async
+  build/sim job endpoints, premade deck `type`, FP-007
+  card-reference/rules/library nav). `packaging/commander-builder.spec`
+  now bundles the whole `src/commander_builder/data/` package dir
+  (`oracle_diff_buckets.json` was previously missing from the bundle)
+  and collects all of `commander_builder` as hidden imports so route
+  handlers' lazy in-function imports survive freezing. Repo-root
+  `data/` derived artifacts (combos, corpus norms) remain deliberately
+  unbundled — all readers fall back gracefully. Live-launch verified:
+  shell + nav render, deck list (with `type`), dashboard, library
+  search, and offline game-changers fallback all serve from the frozen
+  app.
+
+### 2026-07-29 — Bulk path: live-API jsonl drift + Forge deck-dir default
+
+#### Fixed
+
+- **`fix(oracle_store)`: `--from-bulk` works against the LIVE Scryfall
+  index again.** Scryfall's `/bulk-data` entries no longer carry
+  `download_uri`; the export is published as gzip-compressed JSONL
+  under `jsonl_download_uri` (one card object per line). That's now
+  the primary format — saved as `bulk/oracle-cards-YYYYMMDD.jsonl.gz`
+  (kept compressed on disk), stream-decompressed and parsed per line —
+  with plain-JSON `download_uri` retained as a fallback and legacy
+  `.json` local copies still honored by the freshness check. Verified
+  against the live index: 9,277 snapshots written from the real
+  ~24MB export.
+- **`fix(oracle_store)`: `--from-bulk --all` defaults to the FORGE deck
+  dir** (`run_match.DECK_DIR`, `vendor/forge/userdata/decks/commander`)
+  like the rest of the CLI tooling (soak, curator, corpus_themes) —
+  not the desktop app's `~/Documents/CommanderBuilder/decks`, which
+  sent dev-box operators straight to "deck dir not found".
+  `--deck-dir` still overrides.
+- **`fix(oracle_store)`: bulk name index folds diacritics.** Deck files
+  say `Lim-Dul's Vault`; Scryfall's canonical name has the `û`. The
+  exact-named API matches diacritic-insensitively, so the bulk index
+  now does too (caught by the live verification run).
+
 ### 2026-07-29 — Scryfall bulk-data snapshot path + per-card 429 backoff
 
 #### Added
