@@ -560,6 +560,33 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                         "single ~22-decisive-game sim has a ~0.1 win-rate "
                         "standard error, so one lucky pull is not "
                         "evidence). Only used with --search-budget.")
+    # forge_py screening gate (FP-012 x forge_py). SCREEN, NOT JUDGE:
+    # forge_py only decides which arms get Forge time; Forge remains
+    # the only verdict engine. Default OFF -> byte-identical rounds.
+    p.add_argument("--screen", action="store_true",
+                   help="forge_py pre-SCREEN of the --search-budget arm "
+                        "pool: before the bandit spends ANY Forge games, "
+                        "goldfish each candidate swap in forge_py (cheap "
+                        "in-process Python sims, measured at r~0.898 "
+                        "rank correlation with real Forge outcomes) and "
+                        "prune the weakest arms. SCREEN, NOT JUDGE: "
+                        "Forge remains the only verdict engine; the "
+                        "screen merely decides which arms deserve Forge "
+                        "time. Pruned arms are logged with their screen "
+                        "scores; missing/broken forge_py degrades "
+                        "loudly to no screening. Also enabled by "
+                        "COMMANDER_BUILDER_FORGEPY_SCREEN=1. Requires "
+                        "--search-budget.")
+    p.add_argument("--screen-keep", type=float, default=0.5, metavar="FRAC",
+                   help="Fraction of measured arms the screen keeps "
+                        "(default 0.5 = keep the top half), floor of 2 "
+                        "arms overall; arms the screen could not "
+                        "measure are always kept. Only used with "
+                        "--screen.")
+    p.add_argument("--screen-games", type=int, default=20, metavar="G",
+                   help="forge_py games per candidate during screening "
+                        "(default 20). These are cheap Python sims, "
+                        "NOT Forge JVM games.")
     # Intent learning (FP-012 Slice A).
     p.add_argument("--learn-intent", dest="learn_intent_path",
                    type=Path, default=None, metavar="DCK",
@@ -632,6 +659,24 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                   f"--search-min-pulls {args.search_min_pulls}: no arm "
                   f"could ever qualify, every round would be a no-op. "
                   f"Raise the budget or lower min-pulls.", flush=True)
+            return 2
+
+    # --screen validation, before any Forge/forge_py/deck work.
+    if args.screen and not args.search_budget:
+        # The screen prunes the bandit's ARM POOL; without a search
+        # there is no pool to prune. Refuse rather than silently no-op.
+        print("ERROR: --screen is the forge_py pre-filter for the "
+              "--search-budget arm pool; pass --search-budget N too.",
+              flush=True)
+        return 2
+    if args.screen:
+        if not (0.0 < args.screen_keep <= 1.0):
+            print(f"ERROR: --screen-keep must be in (0, 1], got "
+                  f"{args.screen_keep}", flush=True)
+            return 2
+        if args.screen_games < 1:
+            print(f"ERROR: --screen-games must be >= 1, got "
+                  f"{args.screen_games}", flush=True)
             return 2
 
     # Resolve the deck to an on-disk .dck.
@@ -716,6 +761,10 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     if not args.json:
         search_note = (f", search-budget={args.search_budget} pulls/round"
                        if args.search_budget else "")
+        if args.search_budget and args.screen:
+            search_note += (f", forgepy-screen=on (keep "
+                            f"{args.screen_keep:g}, "
+                            f"{args.screen_games} py-games/arm)")
         print(f"[improve] {deck_id} (B{args.bracket}) -- strategy={args.strategy}, "
               f"up to {args.rounds} rounds, mode={args.mode}, "
               f"{args.sim_games} games/round{search_note}", flush=True)

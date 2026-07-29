@@ -273,8 +273,11 @@ def _scripted_sim(good_token="Good", decisive=(20, 5), total_games=45):
 
     def sim(deck_a_path, deck_b_path, games=None, fillers=None, **kw):
         text = Path(deck_b_path).read_text(encoding="utf-8")
+        # b_text is a SNAPSHOT at call time — every probe shares one
+        # on-disk path that later pulls (and the final apply) overwrite,
+        # so re-reading the path after the run shows the wrong deck.
         calls.append({"a": str(deck_a_path), "b": str(deck_b_path),
-                      "fillers": list(fillers or [])})
+                      "b_text": text, "fillers": list(fillers or [])})
         hi, lo = decisive
         if good_token in text:
             wa, wb = lo, hi
@@ -538,3 +541,188 @@ def test_help_carries_honest_cost_note(capsys):
     assert "--search-budget" in out
     # The flag's help must state the real price of a pull.
     assert "COST" in out
+
+
+# --- forge_py screening gate (FP-012 x forge_py; SCREEN, not judge) ---------
+
+_SCREEN_ENV = "COMMANDER_BUILDER_FORGEPY_SCREEN"
+
+
+def test_screen_off_is_byte_identical_screen_fn_never_called(tmp_path,
+                                                             monkeypatch):
+    """Default OFF must be byte-identical pre-screen behavior: with the
+    flag absent AND the env var unset, the injected screen seam is
+    never consulted and the round runs exactly as before (same sim-call
+    accounting as the pre-screen integration test)."""
+    monkeypatch.delenv(_SCREEN_ENV, raising=False)
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path)  # NOTE: no 'screen' attr at all
+
+    def arm_builder(deck_path, bracket, source, *, protected=(), max_arms=None):
+        return [SearchArm(key="+Good / -OldCard A", add="Good",
+                          cut="OldCard A"),
+                SearchArm(key="+Meh / -OldCard B", add="Meh",
+                          cut="OldCard B")]
+
+    def trap(*a, **k):  # pragma: no cover — the point is it never runs
+        raise AssertionError("screen_fn consulted while screening is OFF")
+
+    sim = _scripted_sim()
+    round_fn = make_search_round_fn(arm_builder=arm_builder, sim_fn=sim,
+                                    screen_fn=trap)
+    res = run_improve_loop(deck, "foo", 1, args, round_fn=round_fn)
+    assert res.history[0].verdict == "kept"
+    # Identical budget accounting to the unscreened integration test.
+    assert len(sim.calls) == args.search_budget + 1
+
+
+def test_screen_flag_prunes_arms_before_any_forge_spend(tmp_path,
+                                                        monkeypatch):
+    """With --screen on, the screen seam runs BEFORE the bandit spends
+    any Forge games: pruned arms never reach a sim; the whole budget
+    concentrates on the kept arms. Forge still renders the verdict."""
+    monkeypatch.delenv(_SCREEN_ENV, raising=False)
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path, screen=True, screen_keep=0.5,
+                        screen_games=10)
+
+    arms = [SearchArm(key="+Good / -OldCard A", add="Good",
+                      cut="OldCard A"),
+            SearchArm(key="+Meh / -OldCard B", add="Meh",
+                      cut="OldCard B")]
+    screened = {}
+
+    def screen_fn(deck_path, pool, a):
+        screened["pool"] = [x.key for x in pool]
+        screened["args"] = a
+        return [pool[0]]  # forge_py says only +Good deserves Forge time
+
+    sim = _scripted_sim()
+    round_fn = make_search_round_fn(
+        arm_builder=lambda *a, **k: arms, sim_fn=sim, screen_fn=screen_fn)
+    res = run_improve_loop(deck, "foo", 1, args, round_fn=round_fn)
+
+    assert screened["pool"] == ["+Good / -OldCard A", "+Meh / -OldCard B"]
+    assert screened["args"].screen_keep == 0.5
+    # The pruned arm's card never touched Forge — every probe (and the
+    # verdict) carries the kept swap only.
+    assert res.history[0].verdict == "kept"
+    for call in sim.calls:
+        assert "1 Meh" not in call["b_text"]
+    assert len(sim.calls) == args.search_budget + 1
+
+
+def test_screen_env_var_enables_without_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv(_SCREEN_ENV, "1")
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path)  # no screen attr — env alone enables
+    called = {}
+
+    def screen_fn(deck_path, pool, a):
+        called["yes"] = True
+        return pool
+
+    round_fn = make_search_round_fn(
+        arm_builder=lambda *a, **k: [
+            SearchArm(key="+Good / -OldCard A", add="Good",
+                      cut="OldCard A")],
+        sim_fn=_scripted_sim(), screen_fn=screen_fn)
+    run_improve_loop(deck, "foo", 1, args, round_fn=round_fn)
+    assert called == {"yes": True}
+
+
+def test_screen_failure_degrades_loudly_to_unscreened_pool(tmp_path,
+                                                           monkeypatch,
+                                                           capsys):
+    """A screen crash must NEVER block the improve loop: loud stderr
+    note, then the full unscreened pool proceeds to the bandit."""
+    monkeypatch.delenv(_SCREEN_ENV, raising=False)
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path, screen=True)
+
+    def screen_fn(deck_path, pool, a):
+        raise RuntimeError("forge_py melted")
+
+    sim = _scripted_sim()
+    round_fn = make_search_round_fn(
+        arm_builder=lambda *a, **k: [
+            SearchArm(key="+Good / -OldCard A", add="Good",
+                      cut="OldCard A"),
+            SearchArm(key="+Meh / -OldCard B", add="Meh",
+                      cut="OldCard B")],
+        sim_fn=sim, screen_fn=screen_fn)
+    res = run_improve_loop(deck, "foo", 1, args, round_fn=round_fn)
+
+    err = capsys.readouterr().err
+    assert "forge_py melted" in err
+    assert "unscreened" in err
+    # Both arms reached the bandit — nothing was dropped by the crash.
+    probed = {"1 Meh" in c["b_text"] for c in sim.calls}
+    assert probed == {True, False}
+    assert res.history[0].verdict == "kept"
+
+
+def test_screen_empty_result_ignored_loudly(tmp_path, monkeypatch, capsys):
+    """A screen that empties the pool violates its contract; the round
+    keeps all arms and says so — a screen may narrow, never empty."""
+    monkeypatch.delenv(_SCREEN_ENV, raising=False)
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path, screen=True)
+
+    sim = _scripted_sim()
+    round_fn = make_search_round_fn(
+        arm_builder=lambda *a, **k: [
+            SearchArm(key="+Good / -OldCard A", add="Good",
+                      cut="OldCard A")],
+        sim_fn=sim, screen_fn=lambda *a, **k: [])
+    res = run_improve_loop(deck, "foo", 1, args, round_fn=round_fn)
+    assert "never empty" in capsys.readouterr().err
+    assert res.history[0].verdict == "kept"  # the arm still ran
+
+
+# --- CLI wiring: --screen ---------------------------------------------------
+
+def test_screen_requires_search_budget(tmp_path, capsys):
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text("[metadata]\nName=Foo\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "1", "--screen"])
+    assert rc == 2
+    assert "--search-budget" in capsys.readouterr().out
+
+
+def test_screen_flags_pass_through_to_the_loop(tmp_path, monkeypatch):
+    captured = _stub_loop(monkeypatch)
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text("[metadata]\nName=Foo\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "1", "--search-budget", "6",
+                       "--screen"])
+    assert rc == 0
+    args = captured["args"]
+    assert args.screen is True
+    assert args.screen_keep == 0.5   # documented default
+    assert args.screen_games == 20   # documented default
+
+
+@pytest.mark.parametrize("frac", ["0", "1.5", "-0.2"])
+def test_screen_keep_out_of_range_rejected(tmp_path, frac):
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text("[metadata]\nName=Foo\n", encoding="utf-8")
+    assert improve_main([str(deck), "--rounds", "1", "--search-budget",
+                         "6", "--screen", "--screen-keep", frac]) == 2
+
+
+def test_screen_games_below_one_rejected(tmp_path):
+    deck = tmp_path / "[USER] Foo [B3].dck"
+    deck.write_text("[metadata]\nName=Foo\n", encoding="utf-8")
+    assert improve_main([str(deck), "--rounds", "1", "--search-budget",
+                         "6", "--screen", "--screen-games", "0"]) == 2
+
+
+def test_screen_help_states_the_contract(capsys):
+    with pytest.raises(SystemExit):
+        improve_main(["--help"])
+    out = capsys.readouterr().out
+    assert "--screen" in out
+    # The contract must be in the operator's face, not just the docs.
+    # (argparse re-wraps lines, so match words that survive wrapping.)
+    assert "SCREEN," in out and "judge" in out.lower()
