@@ -933,7 +933,29 @@ the web surface is the "Build from scratch" tab wiring the async
   it coherent. When no average deck is published we fall back to a
   role-target-filled shell from the commander page: that path is a
   *defensible pile*, not a coherent deck. This is the "hard 20%" below, and
-  it is **not** solved — it is deferred to the improve loop.
+  it is **not** solved — it is deferred to the improve loop. With the
+  corpus-norms extension (below) coherence is *additionally* borrowed from
+  measured population norms mined off the local reference corpus — still
+  borrowed, never synthesized.
+- **Corpus-norms steering (2026-07, `corpus_themes.py`) is measured, blended,
+  and flag-gated.** `commander-corpus-themes` scans the ~100-200 on-disk
+  reference decks (pool harvests, `[PREMADE]` popularity pulls, precons,
+  `[REF]` imports; `[USER]`/`[CONTROL]` excluded), derives per-deck
+  structural profiles (role-bucket counts via `classify_role`, curve, lands,
+  creature-type and oracle-motif theme signals — offline, snapshots only),
+  clusters them with transparent threshold rules (tribal-X / spellslinger /
+  aristocrats / lands-matter / stax-control / … / goodstuff-midrange
+  fallback; no ML), and writes per-cluster norms + signature cards to
+  `data/corpus_theme_norms.v1.json`. When `COMMANDER_BUILDER_CORPUS_NORMS=1`
+  and the assembling shell matches a measured cluster (≥3 decks),
+  `commander-build` steers toward the empirical norms **conservatively**: a
+  50/50 blend of the hand-written `ROLE_TARGETS` / curve-model land count
+  with the cluster medians, and at most 4 bounded like-for-like swaps that
+  pull deficit roles toward the blend using the cluster's signature cards.
+  The blend (not replacement) is deliberate: templates encode format wisdom,
+  medians encode what this population actually builds; neither is allowed to
+  overrule the other. Flag off / artifact absent / no cluster match = the
+  build is byte-identical to before.
 - **The manabase now uses the full Karsten per-CMC source table** (second
   cut): per-color targets are the MAX over each card's (cmc, pips) entry
   from the published 99-card Commander column (Karsten 2022 update), with
