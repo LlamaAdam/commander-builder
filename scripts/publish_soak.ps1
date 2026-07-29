@@ -16,7 +16,9 @@
 param(
   [string]$Label = $env:COMPUTERNAME,
   [int]$IntervalSec = 60,
-  [string]$InboxHost = "192.168.4.49"
+  # Hostname, not IP: DHCP moved the inbox host (192.168.4.49 -> .92)
+  # and broke UNC writes; \\LLAMA is stable.
+  [string]$InboxHost = "LLAMA"
 )
 $src = $env:USERPROFILE
 $dst = "\\$InboxHost\soak_inbox"

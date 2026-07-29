@@ -16,11 +16,16 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\sync_machine.ps1
-  powershell -ExecutionPolicy Bypass -File scripts\sync_machine.ps1 -InboxHost 192.168.4.49
+  # By hostname (preferred — DHCP reassigns IPs, the SMB name is stable):
+  powershell -ExecutionPolicy Bypass -File scripts\sync_machine.ps1 -InboxHost LLAMA
+  # By IP (works until DHCP moves the host again; was .49, now .92):
+  powershell -ExecutionPolicy Bypass -File scripts\sync_machine.ps1 -InboxHost 192.168.4.92
 #>
 param(
-  [string]$InboxHost = "192.168.4.49",
-  [string]$Branch = "feature/2026-04-28-session"
+  # Hostname, not IP: the inbox host's DHCP address changed
+  # (192.168.4.49 -> 192.168.4.92) and broke UNC writes; \\LLAMA is stable.
+  [string]$InboxHost = "LLAMA",
+  [string]$Branch = "master"
 )
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
@@ -67,6 +72,7 @@ Write-Host "user v2 pairs now present: $nPairs"
 
 Write-Host "`nSynced. To (re)launch on the unified config writing to the shared inbox:" -ForegroundColor Yellow
 Write-Host "  # stop any running soak_pool + java first, then:" -ForegroundColor DarkGray
-Write-Host "  .\.venv\Scripts\python.exe scripts\soak_pool.py --hours 24 --label box2b ``"
-Write-Host "    --out \\$InboxHost\soak_inbox\box2b_throughput.jsonl ``"
-Write-Host "    --summary \\$InboxHost\soak_inbox\box2b_summary.json"
+Write-Host "  .\.venv\Scripts\python.exe scripts\soak_pool.py --mode gauntlet --games 40 --append ``"
+Write-Host "    --hours 168 --label box2b ``"
+Write-Host "    --out \\$InboxHost\soak_inbox\box2b_gauntlet.jsonl ``"
+Write-Host "    --summary \\$InboxHost\soak_inbox\box2b_gauntlet_summary.json"
