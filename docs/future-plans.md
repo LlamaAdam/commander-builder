@@ -563,7 +563,33 @@ both cached and both currently unread) are all shipped and tested.
 # FP-002 (reframed) — curator margin regression
 
 **Status: REOPENED → first result in (2026-05-26) → n=45 gauntlet re-run
-(2026-07-23, the ≥+10-deck unblock fired; see "Result 2026-07-23" below).**
+(2026-07-23) → 80-pair gate CLEARED 2026-07-29 (see "Result 2026-07-29"
+below).**
+
+## Result 2026-07-29 — gate cleared; one stable feature survives
+
+The 80-pair gate cleared via the [PREMADE] pair program (popularity pulls
+from Moxfield/EDHREC + free heuristic v2 minting, PRs #46/#47/#48) with
+both boxes soaking: 83 pairs at ≥40 decisive games per side, 39k gauntlet
+games total; `margin_analysis --mode gauntlet --min-games 40` admitted
+**n=66 decks / 28,960 games** (17 since-deleted deck files and 26
+still-incomplete pairs excluded — n keeps growing as the soaks run).
+
+- **Mean curator margin −0.005** (kept=4 / reverted=8 / neutral=54):
+  heuristic curation is net-neutral against the fixed gauntlet. The
+  honest headline is unchanged from every prior cut — curation rarely
+  hurts, rarely demonstrably helps.
+- **One feature survives |t|≥2: `wincon_protection` r=−0.27 (t=−2.23)**,
+  stable from the n=58 preview to n=66. Decks that already protect their
+  wincons gain less from curation. `mdfc` (t=−1.84 here, significant at
+  n=58) did not hold; `bracket` sits at t=−1.98, borderline.
+- Caveats stated plainly: one survivor of ten features tested at p<.05
+  (expected false positives ≈ 0.5), r²≈7% of variance, and the n=58→66
+  "replication" shares most of its data. Suggestive, not proven.
+- **Actionable use**: as a soft advisor prior — spend curation/audit
+  effort preferentially on decks with weak wincon protection — NOT as a
+  shipped predictor. Re-check at n≥90 (both soaks are still filling
+  pairs) before wiring anything in.
 The original FP-002 was a
 *kept-vs-reverted classifier*. It was concluded NOT VIABLE on 2026-05-22 for a
 specific reason: after the A/B seat-attribution fix (`e8777b6`), the curator's
