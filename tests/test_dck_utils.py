@@ -105,6 +105,40 @@ def test_parse_card_line_keeps_split_card_names():
     assert parse_card_line("3 Fire // Ice|MH2|290") == (3, "Fire // Ice")
 
 
+def test_parse_card_line_strips_foil_marker_with_set_cn_tail():
+    # Forge marks foil printings with a trailing "+" on the name. It is
+    # not part of the card name — oracle/Scryfall lookups on the marked
+    # name miss (44 live decks hit this).
+    assert parse_card_line("1 Wilhelt, the Rotcleaver+|MIC|123") == (
+        1, "Wilhelt, the Rotcleaver")
+
+
+def test_parse_card_line_strips_foil_marker_without_tail():
+    assert parse_card_line("1 Anya, Merciless Angel+") == (
+        1, "Anya, Merciless Angel")
+
+
+def test_parse_card_line_strips_foil_marker_set_only_and_qty():
+    assert parse_card_line("2 Arcane Signet+|CMR") == (2, "Arcane Signet")
+    assert parse_card_line("27 Mountain+") == (27, "Mountain")
+
+
+def test_parse_card_line_strips_foil_marker_on_mdfc_name():
+    assert parse_card_line("1 Malakir Rebirth // Malakir Mire+|ZNR|111") == (
+        1, "Malakir Rebirth // Malakir Mire")
+    assert parse_card_line("1 Fire // Ice+") == (1, "Fire // Ice")
+
+
+def test_parse_card_line_keeps_interior_plus_in_name():
+    # "+2 Mace" is a real card: only a TRAILING "+" is the foil marker.
+    assert parse_card_line("1 +2 Mace") == (1, "+2 Mace")
+    assert parse_card_line("1 +2 Mace|AFR|157") == (1, "+2 Mace")
+
+
+def test_parse_card_line_foil_marker_with_space_before_pipe():
+    assert parse_card_line("1 Card Name+ |SET") == (1, "Card Name")
+
+
 def test_parse_card_line_returns_none_for_malformed_lines():
     assert parse_card_line("Name=Test Deck") is None
     assert parse_card_line("[Main]") is None
@@ -217,6 +251,31 @@ def test_section_card_names_skips_lines_without_qty_prefix():
 def test_section_card_names_case_insensitive_header():
     text = "[COMMANDER]\n1 Atraxa, Praetors' Voice|CMM|1\n"
     assert section_card_names(text, "Commander") == ["Atraxa, Praetors' Voice"]
+
+
+def test_section_card_names_strips_foil_marker():
+    text = (
+        "[Commander]\n1 Wilhelt, the Rotcleaver+|MIC|123\n"
+        "[Main]\n"
+        "1 Anya, Merciless Angel+\n"
+        "1 Malakir Rebirth // Malakir Mire+|ZNR|111\n"
+        "1 +2 Mace\n"
+    )
+    assert section_card_names(text, "Commander") == [
+        "Wilhelt, the Rotcleaver"]
+    assert main_card_names(text) == [
+        "Anya, Merciless Angel",
+        "Malakir Rebirth // Malakir Mire",
+        "+2 Mace",  # interior "+" is part of the name, not a foil marker
+    ]
+
+
+def test_iter_main_cards_and_quantities_strip_foil_marker():
+    # A foil and a non-foil printing of the same card fold to one name.
+    text = "[Main]\n1 Forest+|M21|266\n2 Forest\n1 Sol Ring+\n"
+    assert list(iter_main_cards(text)) == [
+        (1, "Forest"), (2, "Forest"), (1, "Sol Ring")]
+    assert main_card_quantities(text) == {"Forest": 3, "Sol Ring": 1}
 
 
 # --- count_commander_cards / main_target (partner invariant) -----------------

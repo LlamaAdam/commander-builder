@@ -2342,6 +2342,42 @@ def test_apply_swaps_duplicate_cut_decrements_quantity():
     assert kept == 26
 
 
+def test_apply_swaps_roundtrip_preserves_foil_marker_lines():
+    """Foil-marked lines (trailing ``+`` on the name) are canonicalized
+    READ-side only — a rewrite that doesn't touch the line must leave it
+    byte-identical, including the on-disk foil marker."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    original = (
+        "[metadata]\nName=Test\n\n"
+        "[Commander]\n1 Wilhelt, the Rotcleaver+|MIC|123\n\n"
+        "[Main]\n"
+        "1 Anya, Merciless Angel+\n"
+        "1 Sol Ring+|C21|263\n"
+        "1 Malakir Rebirth // Malakir Mire+|ZNR|111\n"
+        "1 Brainstorm\n"
+    )
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, [])
+    assert new_text == original
+    assert added == [] and removed == [] and kept == 4
+
+
+def test_apply_swaps_cut_matches_foil_marked_line_and_keeps_marker():
+    """A cut by the CANONICAL name decrements a foil-marked stack, and
+    the rewritten line preserves the ``+|SET|CN`` tail byte-for-byte."""
+    from commander_builder.web.app import _apply_swaps_to_dck
+    from types import SimpleNamespace
+    original = "[Main]\n27 Mountain+|EXP|123\n1 Sol Ring\n"
+    recs = [
+        SimpleNamespace(card="Mountain", action="cut", reason="", evidence={}),
+        SimpleNamespace(card="Path of Ancestry", action="add",
+                        reason="", evidence={}),
+    ]
+    new_text, added, removed, kept = _apply_swaps_to_dck(original, recs)
+    assert "26 Mountain+|EXP|123" in new_text
+    assert removed == ["Mountain"]
+    assert kept == 27  # 26 Mountains + Sol Ring
+
+
 def test_apply_swaps_cut_to_zero_removes_line():
     """If decrement drives the line's quantity to zero, the whole line
     drops. Same effect as the old line-remove behavior for quantity-1

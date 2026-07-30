@@ -11,19 +11,23 @@ A Forge ``.dck`` file is an INI-like text format::
     12 Forest
     ...
 
-Card lines are ``<qty> <Name>[|SET[|CN]]``. Section headers are matched
+Card lines are ``<qty> <Name>[+][|SET[|CN]]`` — the optional ``+`` right
+after the name is Forge's foil marker; it is NOT part of the card name
+and both regexes exclude it from the name group (read-side
+canonicalization; writers preserve the marker on disk, see
+``CARD_LINE_RE``'s comment). Section headers are matched
 case-insensitively. A section runs until the next ``[...]`` header (or EOF).
 
 Historically this parsing was reimplemented in ~10 modules with two slightly
-different line regexes. Both are preserved here verbatim because they diverge
+different line regexes. Both are preserved here because they diverge
 on degenerate inputs (a "name" that begins with ``|``):
 
-* ``CARD_LINE_RE`` -- ``^(\\d+)\\s+([^|]+?)(\\s*\\|.*)?$``
+* ``CARD_LINE_RE`` -- ``^(\\d+)\\s+([^|]+?)(\\+?\\s*\\|.*|\\+)?$``
   The quantity-summing convention (knowledge_log, deck_health,
   web/routes_audit). Rejects ``1 |SET|cn`` outright and yields an empty
   name for ``1   |x``.
 
-* ``NAME_LINE_RE`` -- ``^\\d+\\s+(.+?)(?:\\|.*)?$``
+* ``NAME_LINE_RE`` -- ``^\\d+\\s+(.+?)\\+?(?:\\s*\\|.*)?$``
   The name-collecting convention (intent, archetype, meta_test,
   improvement_advisor, scryfall_client). Matches ``1 |SET|cn`` with the
   bogus name ``|SET``.
@@ -46,10 +50,21 @@ from typing import Iterator, Optional
 COMMANDER_DECK_SIZE = 100
 
 # Quantity-summing convention: qty, base name (no "|"), optional |SET|CN tail.
-CARD_LINE_RE = re.compile(r"^(\d+)\s+([^|]+?)(\s*\|.*)?$")
+#
+# Foil marker: Forge appends ``+`` to the card name to mark a foil
+# printing (``1 Sol Ring+|C21|263``). The ``+`` is NOT part of the card
+# name — oracle/Scryfall lookups on ``Sol Ring+`` miss — so the name
+# group excludes a trailing ``+``. The marker is captured at the START
+# of the tail group instead of being dropped: rewriters that reconstruct
+# lines as ``{qty} {group2}{group3}`` stay byte-identical, preserving
+# the on-disk foil marker. (A real card name can contain ``+`` — e.g.
+# ``+2 Mace`` — but none ends with it, so the strip is safe.)
+CARD_LINE_RE = re.compile(r"^(\d+)\s+([^|]+?)(\+?\s*\|.*|\+)?$")
 
-# Legacy name-collecting convention: qty discarded, non-greedy name capture.
-NAME_LINE_RE = re.compile(r"^\d+\s+(.+?)(?:\|.*)?$")
+# Legacy name-collecting convention: qty discarded, non-greedy name
+# capture. Strips the same trailing ``+`` foil marker (non-capturing —
+# no call site reconstructs lines from this regex).
+NAME_LINE_RE = re.compile(r"^\d+\s+(.+?)\+?(?:\s*\|.*)?$")
 
 
 def iter_section_lines(deck_text: str, section: str) -> Iterator[str]:
@@ -80,7 +95,9 @@ def parse_card_line(line: str) -> Optional[tuple[int, str]]:
 
     Uses ``CARD_LINE_RE``: the base name is everything between the
     quantity and the first ``|`` (the ``|SET|CN`` printing suffix is
-    stripped), with surrounding whitespace removed.
+    stripped), with surrounding whitespace removed. A trailing ``+``
+    foil marker is stripped from the name too — consumers always see
+    the canonical (oracle-resolvable) card name.
 
     Returns ``None`` for non-card lines (no leading quantity, metadata
     ``Key=Value`` lines, headers, ...). Note the returned name can be
@@ -179,7 +196,8 @@ def main_card_quantities(deck_text: Optional[str]) -> dict[str, int]:
 
 
 def section_card_names(deck_text: str, section: str) -> list[str]:
-    """Collect card names (qty / ``|SET|CN`` stripped) from ``[section]``.
+    """Collect card names (qty / foil ``+`` / ``|SET|CN`` stripped) from
+    ``[section]``.
 
     Uses the legacy ``NAME_LINE_RE`` convention so existing call sites
     (intent, archetype, meta_test, improvement_advisor, scryfall_client)

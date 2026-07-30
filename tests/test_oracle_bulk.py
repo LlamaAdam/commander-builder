@@ -391,6 +391,25 @@ def test_names_from_deck_dir_dedupes_across_decks(tmp_path):
     assert names == ["Sol Ring", "Cultivate", "Delver of Secrets"]
 
 
+def test_snapshot_targets_from_foil_marked_deck_lines(cache_dir, tmp_path):
+    """A deck line with Forge's trailing ``+`` foil marker must target the
+    CANONICAL name in the bulk build — live-run regression: 44 foil-marked
+    names were reported "not in bulk data" and never got snapshots."""
+    bulk = _write_bulk(tmp_path, [SOL_RING, CULTIVATE])
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    (deck_dir / "a.dck").write_text(
+        "[metadata]\nName=T\n\n[Main]\n1 Sol Ring+|C21|263\n1 Cultivate+\n",
+        encoding="utf-8",
+    )
+    names = oracle_store.names_from_deck_dir(deck_dir)
+    assert names == ["Sol Ring", "Cultivate"]  # canonical, no "+"
+    summary = oracle_store.write_snapshots_from_bulk(names, bulk_path=bulk)
+    assert summary == {"written": 2, "missing": [], "targets": 2}
+    assert scryfall_client.lookup_card("Sol Ring", cache_only=True)
+    assert scryfall_client.lookup_card("Cultivate", cache_only=True)
+
+
 # --- per-card 429 backoff ---------------------------------------------------
 
 def test_retry_honors_retry_after(cache_dir):
