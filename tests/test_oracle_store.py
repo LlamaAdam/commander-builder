@@ -165,6 +165,22 @@ def test_names_from_deck(tmp_path):
     assert names == ["Atraxa, Praetors' Voice", "Sol Ring", "Cultivate"]
 
 
+def test_names_from_deck_strips_foil_marker(tmp_path):
+    """Forge's trailing ``+`` foil marker is not part of the card name —
+    unstripped it made every oracle lookup miss (44 live decks)."""
+    deck = tmp_path / "d.dck"
+    deck.write_text(
+        "[metadata]\nName=T\n\n"
+        "[Commander]\n1 Wilhelt, the Rotcleaver+|MIC|123\n\n"
+        "[Main]\n1 Sol Ring+|C21|263\n1 Anya, Merciless Angel+\n"
+        "1 Sol Ring|LEA|1\n",
+        encoding="utf-8",
+    )
+    names = oracle_store.names_from_deck(deck)
+    assert names == [
+        "Wilhelt, the Rotcleaver", "Sol Ring", "Anya, Merciless Angel"]
+
+
 def test_card_reference_is_presentation_helper():
     # Public alias points at the existing formatter.
     assert oracle_store.card_reference is scryfall_client.format_card_for_display
