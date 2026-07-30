@@ -590,6 +590,23 @@ still-incomplete pairs excluded — n keeps growing as the soaks run).
   effort preferentially on decks with weak wincon protection — NOT as a
   shipped predictor. Re-check at n≥90 (both soaks are still filling
   pairs) before wiring anything in.
+
+## Result 2026-07-30 — n≥90 re-check REFUTES the survivor; FP-002 closed
+
+The re-check fired a day later after 17 missing base decks (POP decks
+staged in the inbox's popular_decks/, plus 5 in box2_decks/) were
+restored to the deck dir, unlocking their 129 excluded rows:
+**n=93 decks / 37,120 games**. `wincon_protection` collapsed to
+r=−0.055 (t=−0.53); NOTHING clears |t|≥2 — the n=66 hit was the false
+positive the caveats predicted. Mean curator margin **−0.010**
+(kept=4 / reverted=16 / neutral=73): heuristic curation is net-neutral
+on average and, when it moves the needle at all, hurts (reverted) 4×
+more often than it helps (kept) — the empirical verdict gate is doing
+exactly its job. **Conclusion: no pre-sim deck-health feature predicts
+curation margin at practical n. No advisor prior ships. FP-002 is
+CLOSED (refuted, not parked)** — reopening requires a new feature
+substrate (e.g. CardScore components or corpus-theme cluster labels as
+regressors), not more games on the same features.
 The original FP-002 was a
 *kept-vs-reverted classifier*. It was concluded NOT VIABLE on 2026-05-22 for a
 specific reason: after the A/B seat-attribution fix (`e8777b6`), the curator's
