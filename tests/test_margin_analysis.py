@@ -310,3 +310,254 @@ def test_single_feature_ols_constant_feature_is_safe():
     res = ma.single_feature_ols(samples, "f")
     assert res["slope"] == 0.0   # no variance -> no slope, not a crash
     assert res["r2"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# --features substrates (FP-002 reopening probe)
+# --------------------------------------------------------------------------- #
+def _fixture_inbox(tmp_path):
+    """A tiny inbox + deck dir the CLI can run end-to-end against."""
+    import json
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    decks = tmp_path / "decks"
+    decks.mkdir()
+    for name in ("[USER] A [B4].dck", "[USER] B [B4].dck"):
+        (decks / name).write_text(_DECK, encoding="utf-8")
+    rows = [
+        _row("[USER] A [B4].dck", "[USER] A v2 [B4].dck", 40, 4, 16),
+        _row("[USER] B [B4].dck", "[USER] B v2 [B4].dck", 40, 16, 4),
+    ]
+    (inbox / "x_throughput.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return inbox, decks
+
+
+# The default report's exact JSON key set -- the byte-identical contract's
+# schema half. New substrate keys (features / cluster_analysis /
+# card_score_analysis / *_multiple_testing) must NOT appear by default.
+_DEFAULT_REPORT_KEYS = {
+    "n_decks", "total_games", "mean_margin", "verdicts",
+    "feature_correlations", "mode", "skipped", "min_games",
+    "missing_deck_files", "missing_deck_rows_dropped",
+}
+
+
+def test_default_features_output_is_byte_identical(tmp_path, capsys):
+    """No --features flag and --features deck_health emit the same bytes
+    (text AND json), and the default JSON schema is pinned."""
+    import json
+    inbox, decks = _fixture_inbox(tmp_path)
+    base = ["--inbox", str(inbox), "--decks", str(decks), "--min-games", "40"]
+
+    outs = {}
+    for tag, extra in (("default", []),
+                       ("explicit", ["--features", "deck_health"])):
+        assert ma.main(base + extra) == 0
+        outs[tag] = capsys.readouterr().out
+    assert outs["default"] == outs["explicit"]
+    # None of the new-substrate sections leak into the default text.
+    for banned in ("multiple-testing honesty", "corpus-theme cluster",
+                   "CardScore", "features="):
+        assert banned not in outs["default"]
+
+    for tag, extra in (("default", []),
+                       ("explicit", ["--features", "deck_health"])):
+        assert ma.main(base + extra + ["--json"]) == 0
+        outs[tag] = capsys.readouterr().out
+    assert outs["default"] == outs["explicit"]
+    assert set(json.loads(outs["default"]).keys()) == _DEFAULT_REPORT_KEYS
+
+
+def _tribal_deck(n_goblins=14):
+    lines = ["[metadata]", "Name=G", "[Commander]", "1 Gob Boss|X|1", "[Main]"]
+    for i in range(n_goblins):
+        lines.append(f"1 Goblin {i}|X|1")
+    lines.append("30 Mountain|X|1")
+    return "\n".join(lines) + "\n"
+
+
+def _stub_lookup_goblins(name):
+    if "Mountain" in name:
+        return {"type_line": "Basic Land — Mountain", "oracle_text": "",
+                "color_identity": ["R"]}
+    return {"type_line": "Creature — Goblin", "oracle_text": "",
+            "cmc": 2.0, "color_identity": ["R"]}
+
+
+def test_assign_cluster_uses_corpus_themes_ladder():
+    text = _tribal_deck()
+    assert ma.assign_cluster(text, lookup=_stub_lookup_goblins) == "tribal-goblin"
+
+
+def test_assign_cluster_is_stable_across_repeat_runs():
+    """Same synthetic corpus, two passes -> identical labels (the ladder is
+    deterministic; a flapping label would poison the indicator regressors)."""
+    corpus = [_tribal_deck(12 + i) for i in range(4)]
+    first = [ma.assign_cluster(t, lookup=_stub_lookup_goblins) for t in corpus]
+    second = [ma.assign_cluster(t, lookup=_stub_lookup_goblins) for t in corpus]
+    assert first == second == ["tribal-goblin"] * 4
+
+
+def test_assign_cluster_defaults_and_degrades_honestly():
+    # No dominant signal -> the ladder's honest default bucket.
+    plain = ("[metadata]\nName=P\n[Commander]\n1 Cmdr|X|1\n[Main]\n"
+             "1 Some Card|X|1\n30 Forest|X|1\n")
+
+    def lookup(name):
+        return {"type_line": "Sorcery", "oracle_text": "", "cmc": 3.0,
+                "color_identity": ["G"]}
+    assert ma.assign_cluster(plain, lookup=lookup) == "goodstuff-midrange"
+    # Empty deck text -> the explicit unclassified sentinel, never a raise.
+    assert ma.assign_cluster("", lookup=lookup) == ma.CLUSTER_UNCLASSIFIED
+
+
+def test_card_score_features_extracts_components(monkeypatch):
+    """The FP-015 seam is called directly (no env flag) with the filename
+    bracket, and component values (incl. legit Nones) map to cs_* keys."""
+    import commander_builder.bubble_analysis as ba
+    seen = {}
+
+    class _Stub:
+        total = 61.8
+        components = {
+            "role_fit": {"value": 0.9, "weight": 0.5, "detail": "ok"},
+            "mana_fit": {"value": 0.75, "weight": 0.5, "detail": "ok"},
+            "salt_fit": {"value": None, "weight": 0.0,
+                         "detail": "unavailable — skipped"},
+            "reference_alignment": {"value": None, "weight": 0.0,
+                                    "detail": "unavailable — skipped"},
+        }
+
+    def stub_score_deck(**kwargs):
+        seen.update(kwargs)
+        return _Stub()
+
+    monkeypatch.setattr(ba, "score_deck", stub_score_deck)
+    feats = ma.card_score_features(_DECK, "[USER] D [B3].dck")
+    assert seen["bracket"] == 3          # parsed from [B3]
+    assert seen["corpus"] is None        # never fetches a corpus in the loop
+    assert feats["cs_total"] == pytest.approx(61.8)
+    assert feats["cs_role_fit"] == pytest.approx(0.9)
+    assert feats["cs_mana_fit"] == pytest.approx(0.75)
+    assert feats["cs_salt_fit"] is None
+    assert feats["cs_reference_alignment"] is None
+
+
+def test_card_score_features_survive_seam_failure(monkeypatch):
+    import commander_builder.bubble_analysis as ba
+
+    def boom(**kwargs):
+        raise RuntimeError("no card db")
+    monkeypatch.setattr(ba, "score_deck", boom)
+    feats = ma.card_score_features(_DECK, "[USER] D [B3].dck")
+    assert feats == {n: None for n in ma.CARD_SCORE_FEATURES}
+
+
+def test_analyze_card_score_uses_per_feature_availability():
+    samples = [
+        ma.Sample(deck=f"d{i}", margin=0.1 * i, games=40,
+                  features={"cs_total": float(i),
+                            "cs_role_fit": (float(i) if i < 3 else None),
+                            "cs_reference_alignment": None})
+        for i in range(6)
+    ]
+    rep = ma.analyze_card_score(samples)
+    by_name = {f["feature"]: f for f in rep["features"]}
+    assert by_name["cs_total"]["n_avail"] == 6
+    assert by_name["cs_total"]["pearson_r"] == pytest.approx(1.0)
+    assert by_name["cs_role_fit"]["n_avail"] == 3      # Nones excluded
+    assert by_name["cs_reference_alignment"]["n_avail"] == 0
+    assert by_name["cs_reference_alignment"]["pearson_r"] is None
+    # honesty: only features that produced an r count as tested.
+    mt = rep["multiple_testing"]
+    assert mt["features_tested"] == 2                  # total + role_fit
+    assert mt["expected_false_positives_p05"] == pytest.approx(0.1)
+
+
+def test_analyze_clusters_lumps_small_clusters_into_other():
+    def s(i, cluster, margin):
+        return ma.Sample(deck=f"d{i}", margin=margin, games=40,
+                         features={}, cluster=cluster)
+    samples = (
+        [s(i, "tribal-goblin", 0.10 + 0.001 * i) for i in range(6)]  # tested
+        + [s(10 + i, "mill", -0.10) for i in range(2)]       # small: lumped
+        + [s(20, "blink-flicker", -0.10)]                    # small: lumped
+    )
+    rep = ma.analyze_clusters(samples, min_n=5)
+    assert rep["lumped_into_other"] == ["blink-flicker", "mill"]
+    by_label = {c["cluster"]: c for c in rep["clusters"]}
+    assert set(by_label) == {"tribal-goblin", "other"}
+    assert by_label["tribal-goblin"]["n"] == 6
+    assert by_label["other"]["n"] == 3
+    assert by_label["other"]["mean_margin"] == pytest.approx(-0.10)
+    # "other" (n=3 < min_n) is reported but NOT tested; goblins are tested
+    # one-vs-rest and (near-)cleanly separate the margins.
+    assert by_label["other"]["pearson_r"] is None
+    assert by_label["tribal-goblin"]["pearson_r"] > 0.99
+    mt = rep["multiple_testing"]
+    assert mt["features_tested"] == 1
+    assert mt["hits_abs_t_ge_2"] == 1
+
+
+def test_analyze_clusters_none_cluster_buckets_as_unclassified():
+    samples = [
+        ma.Sample(deck=f"d{i}", margin=0.01 * i, games=40, features={},
+                  cluster=None)
+        for i in range(5)
+    ]
+    rep = ma.analyze_clusters(samples, min_n=5)
+    (only,) = rep["clusters"]
+    assert only["cluster"] == ma.CLUSTER_UNCLASSIFIED
+    assert only["n"] == 5
+    # A single all-decks group has a constant indicator -> no variance -> NA.
+    assert only["pearson_r"] is None
+    assert rep["multiple_testing"]["features_tested"] == 0
+
+
+def test_features_clusters_mode_end_to_end(tmp_path, capsys, monkeypatch):
+    """--features clusters: no deck_health table, cluster section + honesty
+    line present, and the JSON carries the cluster_analysis block."""
+    import json
+    inbox, decks = _fixture_inbox(tmp_path)
+    monkeypatch.setattr(ma, "assign_cluster", lambda text: "tribal-goblin")
+    rc = ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                  "--min-games", "40", "--features", "clusters"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "features=clusters" in out
+    assert "feature -> margin correlation" not in out   # deck_health skipped
+    assert "corpus-theme cluster -> margin" in out
+    assert "multiple-testing honesty (clusters)" in out
+
+    rc = ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                  "--min-games", "40", "--features", "clusters", "--json"])
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["features"] == "clusters"
+    assert report["feature_correlations"] == []
+    assert report["cluster_analysis"]["clusters"][0]["n"] == 2
+
+
+def test_features_all_reports_every_family(tmp_path, capsys, monkeypatch):
+    import commander_builder.bubble_analysis as ba
+    inbox, decks = _fixture_inbox(tmp_path)
+    monkeypatch.setattr(ma, "assign_cluster", lambda text: "mill")
+
+    class _Stub:
+        total = 50.0
+        components = {"role_fit": {"value": 0.5},
+                      "mana_fit": {"value": None},
+                      "salt_fit": {"value": None},
+                      "reference_alignment": {"value": None}}
+    monkeypatch.setattr(ba, "score_deck", lambda **kw: _Stub())
+    rc = ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                  "--min-games", "40", "--features", "all"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "feature -> margin correlation" in out       # deck_health family
+    assert "multiple-testing honesty (deck_health)" in out
+    assert "corpus-theme cluster -> margin" in out
+    assert "multiple-testing honesty (clusters)" in out
+    assert "CardScore deck-level component" in out
+    assert "multiple-testing honesty (card_score)" in out
