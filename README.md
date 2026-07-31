@@ -79,6 +79,10 @@ The dashboard and audit also surface (ManaFoundry-parity additions):
   co-occurrence analysis over the harvested corpus.
 - **MTGA / CSV paste import** — the paste-import textarea now auto-detects
   MTG Arena exports and CSV card lists in addition to `.dck` / Moxfield.
+- **Replays** (FP-016) — set `COMMANDER_BUILDER_KEEP_GAME_LOGS=1` (or pass
+  `--keep-logs` to `run_match` / `compare_versions`) to persist each game's
+  Forge log (capped ~500MB, oldest-run eviction), then browse turn-by-turn
+  replays — life totals, eliminations, winner — under the Replays rail section.
 
 ## CLI commands
 

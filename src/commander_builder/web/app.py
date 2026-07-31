@@ -302,6 +302,7 @@ def create_app(
     from .routes_library import make_library_blueprint
     from .routes_meta import make_meta_blueprint
     from .routes_oracle import make_oracle_blueprint
+    from .routes_replays import make_replays_blueprint
     from .routes_rules import make_rules_blueprint
     from .routes_sim import make_sim_blueprint
     app.register_blueprint(make_audit_blueprint(deck_dir))
@@ -326,6 +327,9 @@ def create_app(
     # FP-011: per-user config (redacted GET / restricted PUT) backing
     # the Settings panel — BYO Anthropic token + app preferences.
     app.register_blueprint(make_config_blueprint())
+    # FP-016 replay-lite: browse persisted Forge game logs (read-only;
+    # capture itself is the opt-in COMMANDER_BUILDER_KEEP_GAME_LOGS=1).
+    app.register_blueprint(make_replays_blueprint())
     app.register_blueprint(make_sim_blueprint(deck_dir, knowledge_db))
 
 

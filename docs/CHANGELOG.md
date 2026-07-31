@@ -6,6 +6,37 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-07-30 — Replay-lite: turn-by-turn game replays (FP-016)
+
+#### Added
+
+- **`feat(replays)`: opt-in game-log persistence + web replay viewer.**
+  Three slices, all from Forge's OWN sim stdout (no forge_py, no engine
+  changes): (1) `replay_store.py` — with
+  `COMMANDER_BUILDER_KEEP_GAME_LOGS=1` (or `--keep-logs` on
+  `run_match` / `compare_versions`) every sim's stdout is split per game
+  and written to `~/.commander-builder/replays/<run>/game_<n>.log` +
+  `index.json` (decks, winner + eliminations via the existing parser
+  attribution, duration, truncated marker), recorded at the single
+  `ForgeRunner.run` seam so every harness is covered; thread-safe under
+  the parallel pod dispatcher (locked game-number allocation, atomic
+  index writes); **total store bounded** (~500MB default,
+  `COMMANDER_BUILDER_REPLAY_CAP_MB`) with oldest-run eviction at write
+  time and a sticky `cap_reached` stop for the in-flight run —
+  unbounded log growth is forbidden (39GB-incident insurance). Flag off
+  ⇒ byte-identical sim behavior, pinned by test. (2)
+  `replay_timeline.py` — pure log→timeline parser (turns + active
+  player, life events + per-turn totals, eliminations with Forge's loss
+  reasons, best-effort casts/attacks, game result) reusing the
+  log_parser/game_analyzer regex vocabulary; truncated/aborted logs
+  yield partial timelines with an honest `truncated` marker. (3)
+  "Replays" left-rail section — `GET /api/replays` + `GET
+  /api/replay/<run>/<game>` (validated ids, resolved-path containment,
+  clean JSON 404s) and a keyboard-accessible run → game → collapsible
+  per-turn viewer (`replays.js`, native `<details>`, PR #36 a11y
+  conventions). Log-replay is deliberately COARSER than forge_py
+  state-level replay — FP-007 slice 5 stays parked for that.
+
 ### 2026-07-29 — Desktop EXE refresh (FP-010)
 
 #### Changed

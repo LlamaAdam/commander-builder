@@ -46,7 +46,7 @@
   // Section switching
   // -----------------------------------------------------------------------
 
-  const SECTIONS = ["decks", "cards", "rules"];
+  const SECTIONS = ["decks", "cards", "rules", "replays"];
 
   function activateSection(name) {
     // Toggle rail buttons + sync aria-pressed for screen readers.
@@ -62,13 +62,21 @@
     });
     // Hide the main dashboard area when not in Decks; show an
     // instructional placeholder instead so the content pane isn't blank.
+    // FP-016: the Replays section has its OWN main pane (#replays-main,
+    // owned by replays.js) instead of the generic placeholder.
     const dash = $id("dashboard");
+    const replaysMain = $id("replays-main");
+    if (replaysMain) replaysMain.hidden = (name !== "replays");
     if (!dash) return;
     if (name === "decks") {
       // Restore: remove any nav placeholder and show the real dashboard.
       const ph = $id("nav-section-placeholder");
       if (ph) ph.remove();
       dash.hidden = false;
+    } else if (name === "replays") {
+      dash.hidden = true;
+      const ph = $id("nav-section-placeholder");
+      if (ph) ph.remove();
     } else {
       // Park the dashboard and put up a minimal notice.
       dash.hidden = true;

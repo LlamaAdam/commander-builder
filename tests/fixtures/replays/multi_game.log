@@ -1,0 +1,26 @@
+Loading decks from userdata/decks/commander
+Turn: Turn 1 (Ai(1)-Alpha Ramp [B3])
+Life: Life: Ai(2)-Beta Control [B3] 40 > 20
+Turn: Turn 2 (Ai(2)-Beta Control [B3])
+Life: Life: Ai(2)-Beta Control [B3] 20 > 0
+Life: Life: Ai(3)-Gamma Aggro [B3] 40 > 0
+Life: Life: Ai(4)-Delta Combo [B3] 40 > 0
+Game Outcome: Turn 2
+Game Outcome: Ai(2)-Beta Control [B3] has lost because life total reached 0
+Game Outcome: Ai(3)-Gamma Aggro [B3] has lost because life total reached 0
+Game Outcome: Ai(4)-Delta Combo [B3] has lost because life total reached 0
+Game Result: Game 1 ended in 41022 ms. Ai(1)-Alpha Ramp [B3] has won!
+Turn: Turn 1 (Ai(2)-Beta Control [B3])
+Life: Life: Ai(1)-Alpha Ramp [B3] 40 > 39
+Turn: Turn 2 (Ai(3)-Gamma Aggro [B3])
+Life: Life: Ai(2)-Beta Control [B3] 40 > 33
+Turn: Turn 3 (Ai(4)-Delta Combo [B3])
+Life: Life: Ai(3)-Gamma Aggro [B3] 40 > 28
+Stopping slow match as draw
+Game Outcome: Turn 21
+Game Outcome: Ai(1)-Alpha Ramp [B3] has won because all opponents have lost
+Game Outcome: Ai(2)-Beta Control [B3] has won because all opponents have lost
+Game Result: Game 2 ended in 120175 ms
+Turn: Turn 1 (Ai(3)-Gamma Aggro [B3])
+Life: Life: Ai(4)-Delta Combo [B3] 40 > 37
+Turn: Turn 2 (Ai(4)-Delta Combo [B3])

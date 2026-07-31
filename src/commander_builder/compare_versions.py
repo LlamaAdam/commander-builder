@@ -1301,7 +1301,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help=f"Number of filler-pair pods to run (default {DEFAULT_FILLER_PAIRS}).")
     p.add_argument("--mode", choices=["pod", "1v1"], default="pod",
                    help="'pod' = 4-player same-table comparison (default); '1v1' = Forge constructed 2-deck.")
+    p.add_argument(
+        "--keep-logs", action="store_true",
+        help="Persist each game's raw Forge log under "
+             "~/.commander-builder/replays/ for the web Replays viewer "
+             "(FP-016; same as COMMANDER_BUILDER_KEEP_GAME_LOGS=1).",
+    )
     args = p.parse_args(argv)
+
+    if args.keep_logs:
+        # The recorder reads the env at record time (forge_runner seam), so
+        # flipping it here covers every pod this invocation dispatches —
+        # including the threaded parallel path.
+        os.environ["COMMANDER_BUILDER_KEEP_GAME_LOGS"] = "1"
 
     report = compare(
         old_deck=args.old,

@@ -1141,6 +1141,66 @@ FP-014 research.
 
 # ── SHIPPED / REFERENCE — no open work beyond what's noted ────────────
 
+# FP-016 — Replay-lite: turn-by-turn game replays from Forge's own logs
+
+**Status: SHIPPED (2026-07-30) — slices 1–3 + docs.** Turn-by-turn game
+review built on the sim stdout Forge ALREADY emits, not on `forge_py`
+game state. This partially unparks FP-007 slice 5: it covers the
+practical 80% (what happened each turn, who lost when and why, who won)
+without waiting on engine work. **Explicitly:** log-replay is COARSER
+than `forge_py` full-state replays — no board state, no hands, no stack;
+you see what Forge chose to log. FP-007 slice 5 **stays parked** (with
+FP-001) for true state-level replay.
+
+## What shipped
+
+1. **Persistence (default OFF)** — `replay_store.py`. Opt in with
+   `COMMANDER_BUILDER_KEEP_GAME_LOGS=1` (or `--keep-logs` on
+   `run_match` / `compare_versions`). The single seam is the tail of
+   `ForgeRunner.run` — every harness (A/B, gauntlet, parallel chunks,
+   compare pods, web sims) funnels through it — which splits each sim's
+   stdout into per-game chunks and writes
+   `~/.commander-builder/replays/<run-id>/game_<n>.log` + a per-run
+   `index.json` (decks/seats, winner + eliminations from the EXISTING
+   parser attribution, duration, truncated marker). One run dir per
+   process; a lock serializes game-number allocation + atomic index
+   writes under the threaded dispatcher. **Retention cap:** total
+   replays dir bounded (default ~500MB, `COMMANDER_BUILDER_REPLAY_CAP_MB`)
+   with oldest-run eviction at write time; the in-flight run stops
+   recording (flagged `cap_reached`) rather than grow unbounded — the
+   39GB log incident is the reason this is a hard requirement. Flag off
+   ⇒ byte-identical sim behavior (pinned by test).
+2. **Parser** — `replay_timeline.py`, pure `log → timeline`:
+   `split_games` (per-game chunks at `Game Result:` boundaries, trailing
+   partials kept) + `parse_timeline` (turns with active player, life
+   events + per-turn life totals, eliminations with Forge's loss
+   reasons including commander-damage-at-positive-life, best-effort
+   cast/attack lines, game result). REUSES the log_parser /
+   game_analyzer regex vocabulary (imported, not copied) so replays can
+   never disagree with match scoring. Truncated/aborted logs
+   (`loop_unattributed` rows) parse to a partial timeline with an
+   honest `truncated: true` marker.
+3. **Web viewer** — "Replays" in the left-rail nav. `GET /api/replays`
+   (runs → game summaries from the index files), `GET
+   /api/replay/<run>/<game>` (parsed timeline; clean JSON 404s; run ids
+   allowlist-validated + resolved-path containment, log filename derived
+   from the validated game number — no arbitrary path reads). UI:
+   run list → game list → collapsible per-turn timeline (native
+   `<details>`, keyboard accessible per the PR #36 patterns), life
+   totals per turn, eliminations highlighted with a non-color marker,
+   truncated banner on partials. Vanilla JS (`replays.js`) matching the
+   existing `el()` no-innerHTML discipline.
+
+## How to capture replays on the next soak / tier-3 run
+
+```powershell
+$env:COMMANDER_BUILDER_KEEP_GAME_LOGS = "1"   # or --keep-logs on the CLI
+# ... run the soak / compare as usual ...
+# then browse: python -m commander_builder.web → Replays rail section
+```
+
+---
+
 # FP-007 — Unified MTG application (implementation plan)
 
 **Decision (2026-05-26):** start FP-007. North star: one app consolidating
@@ -1220,7 +1280,9 @@ slice 1 card-reference panel (`30def0d` — `/api/card` + topbar Cards
 search), nav shell + `/api/rules` + `/api/library` (merged via
 `dac2ed6`), plus loading/empty/error-state polish and keyboard
 accessibility (`ff8395a`, `e006f7c`, PR #5). Only slice 5 (replays)
-remains, parked on `forge_py` game-state (with FP-001).
+remains, parked on `forge_py` game-state (with FP-001). **Update
+2026-07-30:** FP-016 replay-lite ships log-based turn-by-turn replays
+(the practical 80%); slice 5 stays parked for STATE-level replay only.
 
 ---
 

@@ -396,7 +396,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--bracket", type=int, required=True)
     p.add_argument("--games", type=int, default=3, help="Games per pod (default 3).")
     p.add_argument("--pods", type=int, default=2, help="Number of pods to play (default 2).")
+    p.add_argument(
+        "--keep-logs", action="store_true",
+        help="Persist each game's raw Forge log under "
+             "~/.commander-builder/replays/ for the web Replays viewer "
+             "(FP-016; same as COMMANDER_BUILDER_KEEP_GAME_LOGS=1).",
+    )
     args = p.parse_args(argv)
+
+    if args.keep_logs:
+        # The recorder reads the env at record time (forge_runner seam), so
+        # flipping it here covers every sim this invocation launches.
+        import os
+        os.environ["COMMANDER_BUILDER_KEEP_GAME_LOGS"] = "1"
 
     report = run_matchup(
         user_deck=args.user,
