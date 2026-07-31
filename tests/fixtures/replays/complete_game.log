@@ -1,0 +1,29 @@
+Loading decks from userdata/decks/commander
+An unsupported card was requested: Obscure Legend of Kamigawa
+Turn: Turn 1 (Ai(1)-Alpha Ramp [B3])
+Phase: Ai(1)-Alpha Ramp [B3] Untap
+Phase: Ai(1)-Alpha Ramp [B3] Main1
+Turn: Turn 2 (Ai(2)-Beta Control [B3])
+Phase: Ai(2)-Beta Control [B3] Untap
+Life: Life: Ai(2)-Beta Control [B3] 40 > 38
+Turn: Turn 3 (Ai(3)-Gamma Aggro [B3])
+Life: Life: Ai(1)-Alpha Ramp [B3] 40 > 36
+default implementation of confirmAction is used by Rhystic Study
+Turn: Turn 4 (Ai(4)-Delta Combo [B3])
+Life: Life: Ai(4)-Delta Combo [B3] 40 > 21
+Life: Life: Ai(2)-Beta Control [B3] 38 > 40
+Turn: Turn 5 (Ai(1)-Alpha Ramp [B3])
+Phase: Ai(1)-Alpha Ramp [B3] Combat
+Life: Life: Ai(4)-Delta Combo [B3] 21 > 0
+Turn: Turn 6 (Ai(2)-Beta Control [B3])
+Life: Life: Ai(2)-Beta Control [B3] 40 > 12
+Turn: Turn 7 (Ai(3)-Gamma Aggro [B3])
+Life: Life: Ai(3)-Gamma Aggro [B3] 34 > 34
+Turn: Turn 8 (Ai(1)-Alpha Ramp [B3])
+Game Outcome: Turn 8
+Game Outcome: Ai(4)-Delta Combo [B3] has lost because life total reached 0
+Game Outcome: Ai(2)-Beta Control [B3] has lost due to accumulation of 21 damage from generals
+Game Outcome: Ai(3)-Gamma Aggro [B3] has lost trying to draw cards from empty library
+Game Outcome: Ai(1)-Alpha Ramp [B3] has won because all opponents have lost
+Game Result: Game 1 ended in 95321 ms. Ai(1)-Alpha Ramp [B3] has won!
+Match Result: Ai(1)-Alpha Ramp [B3]: 1 Ai(2)-Beta Control [B3]: 0 Ai(3)-Gamma Aggro [B3]: 0 Ai(4)-Delta Combo [B3]: 0

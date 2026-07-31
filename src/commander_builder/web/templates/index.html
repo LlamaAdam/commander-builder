@@ -112,6 +112,9 @@
       <button class="rail-btn"        data-section="rules"
               aria-label="Rules" aria-pressed="false"
               title="Combo and bracket rules lookup">Rules</button>
+      <button class="rail-btn"        data-section="replays"
+              aria-label="Replays" aria-pressed="false"
+              title="Turn-by-turn game replays from Forge logs (FP-016)">Replays</button>
     </nav>
 
     <aside class="sidebar" id="sidebar-panel" aria-label="Sidebar">
@@ -161,10 +164,33 @@
         </button>
         <div id="rules-results" aria-live="polite" style="margin-top:12px;"></div>
       </div>
+
+      <!-- REPLAYS section (FP-016): browse persisted Forge game logs.
+           Capture is opt-in — COMMANDER_BUILDER_KEEP_GAME_LOGS=1 or the
+           CLIs' --keep-logs flag; replays.js renders runs → games here
+           and the turn timeline into #replays-main. -->
+      <div id="section-replays" hidden>
+        <h2>Replays</h2>
+        <p class="muted" style="font-size:12px;margin:0 0 8px;">
+          Turn-by-turn replays from persisted Forge game logs.
+        </p>
+        <button type="button" class="topbar-btn" id="replays-refresh-btn"
+                style="width:100%;"
+                title="Reload the list of recorded runs">
+          Refresh runs
+        </button>
+        <div id="replays-run-list" aria-live="polite" style="margin-top:12px;"></div>
+      </div>
     </aside>
 
     <section class="dashboard" id="dashboard">
       <p class="empty-state">Select a deck on the left to load its dashboard.</p>
+    </section>
+
+    <!-- FP-016: replay timeline viewer (shown only in the Replays section;
+         nav.js toggles hidden). replays.js owns the contents. -->
+    <section class="dashboard" id="replays-main" hidden aria-label="Replay viewer">
+      <p class="empty-state">Pick a run on the left, then a game, to view its turn-by-turn replay.</p>
     </section>
   </main>
 
@@ -316,6 +342,8 @@
 
   <!-- FP-007: unified nav shell + library/rules UI -->
   <script src="{{ url_for('static', filename='nav.js') }}?v={{ asset_version }}"></script>
+  <!-- FP-016: replay browser + timeline viewer -->
+  <script src="{{ url_for('static', filename='replays.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='iteration_graph.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='audit_streaming.js') }}?v={{ asset_version }}"></script>
   <script src="{{ url_for('static', filename='deck_health_ui.js') }}?v={{ asset_version }}"></script>

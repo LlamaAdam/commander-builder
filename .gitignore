@@ -36,6 +36,8 @@ integration_test_*.sqlite-journal
 
 # Generated session logs (live runs, smoke tests)
 *.log
+# ... but FP-016 replay fixture logs are test data, not runtime output
+!tests/fixtures/replays/*.log
 b4_preflight_results.json
 hakbal_match.log
 compare_smoketest.log

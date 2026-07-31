@@ -423,7 +423,7 @@ class ForgeRunner:
             )
 
         duration = (time.monotonic() - started)
-        return SimResult(
+        result = SimResult(
             cmd=cmd,
             returncode=returncode,
             duration_sec=duration,
@@ -433,6 +433,24 @@ class ForgeRunner:
             error=error,
             forge_log_tail=self._read_forge_log_tail(),
         )
+        # FP-016 replay-lite: opt-in raw game-log persistence. Default OFF
+        # (COMMANDER_BUILDER_KEEP_GAME_LOGS=1 enables); with the flag unset
+        # this is a single env lookup and NOTHING else — sim behavior stays
+        # byte-identical. This is the one seam every harness (A/B, gauntlet,
+        # compare, run_match, web sims) funnels through, so hooking here
+        # covers them all. Best-effort: recording must never break a sim.
+        try:
+            from .replay_store import maybe_record_sim
+            maybe_record_sim(
+                result.stdout,
+                deck_filenames=list(deck_filenames),
+                game_format=game_format,
+                sim_duration_sec=duration,
+                source="forge_runner",
+            )
+        except Exception:  # noqa: BLE001 — replay capture is best-effort
+            pass
+        return result
 
     @staticmethod
     def _find_forge_log(forge_dir: Path) -> Optional[Path]:
