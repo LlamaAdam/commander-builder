@@ -21,6 +21,23 @@ among the curated decks. This module:
   4. Reports per-feature Pearson correlation with margin + a leave-one-out
      single-feature OLS baseline.
 
+FP-002 closed REFUTED on 2026-07-30: at n=93 no deck_health feature predicts
+curator margin. The closure names the only honest reopening path -- NEW
+regressors, not more games on the same features. `--features` selects the
+candidate substrate:
+
+  * deck_health (default) -- the original 10 features; byte-identical output.
+  * clusters   -- corpus-theme cluster labels (corpus_themes' transparent
+    ladder, applied to the base deck), tested one-vs-rest as 0/1 indicators
+    (point-biserial == Pearson on the indicator).
+  * card_score -- FP-015's deck-level CardScore components
+    (bubble_analysis.score_deck: total, role_fit, mana_fit, salt_fit,
+    reference_alignment) as continuous regressors. Called through the
+    internal entry directly -- no env flag is flipped.
+  * all        -- every family, each reported with its own multiple-testing
+    honesty line (features tested + expected false positives at p<.05),
+    because FP-002's history shows exactly how a lone |t|>=2 hit misleads.
+
 Pure stdlib -- numpy / sklearn / scipy are NOT installed on the soak boxes.
 The unit of analysis is the *deck* (group-level), so n == unique decks, not
 games. With ~30 decks this is exploratory, not a shipped predictor: it answers
@@ -43,6 +60,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 DEFAULT_INBOX = r"C:\Users\pilot\soak_inbox"
 NEUTRAL_BAND = 0.05  # |margin| <= this -> "neutral"
+
+# Candidate feature substrates (FP-002 closure: reopening requires NEW
+# regressors). "deck_health" is the original family and the default.
+FEATURE_FAMILIES = ("deck_health", "clusters", "card_score", "all")
+
+# A corpus-theme cluster only gets its own one-vs-rest indicator with at
+# least this many member decks; thinner clusters lump into "other" (the
+# same small-N refusal corpus_themes.MIN_CLUSTER_FOR_NORMS encodes).
+CLUSTER_MIN_N = 5
 
 
 # --------------------------------------------------------------------------- #
@@ -212,6 +238,7 @@ def aggregate_gauntlet(rows: list[dict], min_games: int = 0) -> dict[str, Gauntl
 def build_gauntlet_samples(
     pairs: dict[str, GauntletPair],
     decks_dirs: list[str],
+    features: str = "deck_health",
 ) -> tuple[list[Sample], list[str], dict[str, int]]:
     """Join each complete gauntlet pair to its base deck file -> feature sample.
 
@@ -242,9 +269,10 @@ def build_gauntlet_samples(
         except OSError:
             skipped.append(f"{name} (unreadable)")
             continue
+        feats, cluster = _featurize(text, name, features)
         samples.append(Sample(
             deck=name, margin=m, games=p.base_g + p.v2_g,
-            features=deck_features(text, name),
+            features=feats, cluster=cluster,
         ))
     return samples, skipped, missing
 
@@ -305,6 +333,124 @@ def deck_features(deck_text: str, filename: str = "") -> dict[str, float]:
     except Exception:
         pass
     return feats
+
+
+# --------------------------------------------------------------------------- #
+# Candidate substrate 1: corpus-theme cluster labels (FP-002 reopening path)
+# --------------------------------------------------------------------------- #
+# Label used when the classifier can't run (module import failure, empty
+# deck, no oracle snapshots resolving at all still yields a real label --
+# corpus_themes degrades to goodstuff-midrange, not an error).
+CLUSTER_UNCLASSIFIED = "unclassified"
+
+
+def assign_cluster(deck_text: str, lookup=None) -> str:
+    """Corpus-theme cluster label of a deck, via corpus_themes' OWN ladder.
+
+    Reproduces ``corpus_themes.profile_deck`` exactly (same ``_deck_entries``
+    -> ``_facts`` -> ``_classify`` pipeline, real quantities preserved) but
+    from deck TEXT instead of a path, so soak-joined decks classify by
+    precisely the rules that cluster the corpus. Offline by construction:
+    the default lookup is corpus_themes' cache-only snapshot read.
+    """
+    try:
+        from commander_builder import corpus_themes, dck_utils
+        from commander_builder.collection import name_key
+        if lookup is None:
+            lookup = corpus_themes.default_lookup
+        entries = list(corpus_themes._deck_entries(deck_text))
+        if not entries:
+            return CLUSTER_UNCLASSIFIED
+        commanders = dck_utils.section_card_names(deck_text, "Commander")
+        facts = corpus_themes._facts(
+            entries, lookup,
+            commander_keys={name_key(c) for c in commanders})
+        import statistics
+        cmcs = facts["cmcs"]
+        role_counts = dict(facts["role_counts"])
+        if "win_condition" in role_counts:
+            role_counts["finisher"] = (
+                role_counts.get("finisher", 0)
+                + role_counts.pop("win_condition"))
+        profile = corpus_themes.DeckProfile(
+            filename="<soak>", role="user", commanders=commanders,
+            role_counts=role_counts,
+            curve=facts["curve"],
+            cmc_mean=(round(statistics.fmean(cmcs), 2) if cmcs else 0.0),
+            cmc_median=(round(statistics.median(cmcs), 2) if cmcs else 0.0),
+            land_count=facts["land_count"],
+            color_count=len(facts["colors"]),
+            tribes=facts["tribes"], motifs=facts["motifs"],
+            artifact_count=facts["artifact_count"],
+            enchantment_count=facts["enchantment_count"],
+            card_keys=facts["card_keys"],
+        )
+        label, _reason = corpus_themes._classify(profile)
+        return label
+    except Exception:
+        return CLUSTER_UNCLASSIFIED
+
+
+# --------------------------------------------------------------------------- #
+# Candidate substrate 2: FP-015 CardScore deck-level components
+# --------------------------------------------------------------------------- #
+# The deck-level components bubble_analysis.score_deck exposes. Values may
+# legitimately be None ("unavailable != bad" is that module's contract:
+# reference_alignment needs a fetched corpus we deliberately do not fetch
+# here; salt_fit needs bracket<=3 + a cached salt map). None values are
+# excluded per-feature with an honest per-feature n.
+CARD_SCORE_FEATURES: list[str] = [
+    "cs_total",
+    "cs_role_fit",
+    "cs_mana_fit",
+    "cs_salt_fit",
+    "cs_reference_alignment",
+]
+
+
+def card_score_features(deck_text: str,
+                        filename: str = "") -> dict[str, Optional[float]]:
+    """FP-015 deck-level CardScore components for one deck.
+
+    Calls ``bubble_analysis.score_deck`` DIRECTLY (the flag-independent
+    internal entry) -- ``COMMANDER_BUILDER_CARD_SCORE`` is never read or
+    flipped. ``corpus=None`` on purpose: no network corpus fetch inside a
+    regression loop; the corpus-dependent components simply report None.
+    Bracket comes from the ``[Bn]`` filename tag (same parse as the
+    deck_health family) so salt_fit gets its bracket gate input.
+    """
+    feats: dict[str, Optional[float]] = {n: None for n in CARD_SCORE_FEATURES}
+    try:
+        from commander_builder.bubble_analysis import score_deck
+        mb = _BRACKET_RE.search(filename)
+        bracket = int(mb.group(1)) if mb else None
+        rep = score_deck(deck_text=deck_text, corpus=None, bracket=bracket)
+        feats["cs_total"] = float(rep.total)
+        comps = rep.components or {}
+        for comp in ("role_fit", "mana_fit", "salt_fit",
+                     "reference_alignment"):
+            v = (comps.get(comp) or {}).get("value")
+            feats["cs_" + comp] = float(v) if v is not None else None
+    except Exception:
+        pass
+    return feats
+
+
+def _featurize(deck_text: str, filename: str,
+               features: str) -> tuple[dict, Optional[str]]:
+    """(numeric features, cluster label) for the selected substrate(s).
+
+    ``features == "deck_health"`` runs exactly the original path (and only
+    it), keeping the default output byte-identical."""
+    feats: dict = {}
+    cluster: Optional[str] = None
+    if features in ("deck_health", "all"):
+        feats.update(deck_features(deck_text, filename))
+    if features in ("clusters", "all"):
+        cluster = assign_cluster(deck_text)
+    if features in ("card_score", "all"):
+        feats.update(card_score_features(deck_text, filename))
+    return feats, cluster
 
 
 # --------------------------------------------------------------------------- #
@@ -419,6 +565,7 @@ class Sample:
     margin: float
     games: int
     features: dict[str, float] = field(default_factory=dict)
+    cluster: Optional[str] = None   # corpus-theme label (--features clusters)
 
 
 def _find_deck(filename: str, decks_dirs: list[str]) -> Optional[str]:
@@ -445,6 +592,7 @@ def _warn_missing_deck(filename: str, rows_dropped: int) -> None:
 def build_samples(
     pairs: dict[str, Pair],
     decks_dirs: list[str],
+    features: str = "deck_health",
 ) -> tuple[list[Sample], list[str], dict[str, int]]:
     """Join each decided pair to its original deck file -> feature sample.
 
@@ -474,19 +622,27 @@ def build_samples(
         except OSError:
             skipped.append(f"{name} (unreadable)")
             continue
+        feats, cluster = _featurize(text, name, features)
         samples.append(Sample(
             deck=name, margin=m, games=p.games,
-            features=deck_features(text, name),
+            features=feats, cluster=cluster,
         ))
     return samples, skipped, missing
 
 
-def analyze(samples: list[Sample]) -> dict:
-    """Per-feature correlation of deck traits with curator improvement margin."""
+def analyze(samples: list[Sample],
+            feature_names: Optional[list[str]] = None) -> dict:
+    """Per-feature correlation of deck traits with curator improvement margin.
+
+    ``feature_names`` defaults to the deck_health family (the original
+    behavior, byte-identical); pass ``[]`` when another substrate is the
+    only one under test so no all-NA deck_health table is emitted."""
+    if feature_names is None:
+        feature_names = FEATURE_NAMES
     margins = [s.margin for s in samples]
     n = len(samples)
     out_feats = []
-    for fname in FEATURE_NAMES:
+    for fname in feature_names:
         xs = [s.features.get(fname, 0.0) for s in samples]
         r = pearson(xs, margins)
         out_feats.append({
@@ -516,6 +672,122 @@ def analyze(samples: list[Sample]) -> dict:
     }
 
 
+def _honesty(n_tested: int, n_hits: int) -> dict:
+    """Multiple-testing honesty numbers for one feature family.
+
+    FP-002's own history is the reason this is mandatory: at n=66 a lone
+    wincon_protection hit (1 of 10 features at p<.05, expected false
+    positives 0.5) looked like signal and was refuted at n=93. Every
+    family's report therefore states how many tests were run and how many
+    |t|>=2 hits pure chance would produce."""
+    return {
+        "features_tested": n_tested,
+        "expected_false_positives_p05": round(0.05 * n_tested, 2),
+        "hits_abs_t_ge_2": n_hits,
+    }
+
+
+def _honesty_line(family: str, h: dict) -> str:
+    return (f"  multiple-testing honesty ({family}): "
+            f"{h['features_tested']} feature(s) tested; expect "
+            f"~{h['expected_false_positives_p05']:.2f} false positive(s) at "
+            f"p<.05 by chance alone; observed |t|>=2 hits: "
+            f"{h['hits_abs_t_ge_2']}")
+
+
+def analyze_clusters(samples: list[Sample],
+                     min_n: int = CLUSTER_MIN_N) -> dict:
+    """One-vs-rest corpus-theme cluster indicators vs curator margin.
+
+    Each cluster with >= ``min_n`` member decks becomes a 0/1 indicator;
+    Pearson on a binary x IS the point-biserial correlation, so the
+    existing r/t machinery applies unchanged. Thinner clusters lump into
+    "other" (reported, and tested as its own indicator when big enough)."""
+    n = len(samples)
+    margins = [s.margin for s in samples]
+    counts: dict[str, int] = {}
+    for s in samples:
+        label = s.cluster or CLUSTER_UNCLASSIFIED
+        counts[label] = counts.get(label, 0) + 1
+    keep = {c for c, k in counts.items() if k >= min_n}
+    lumped = sorted(c for c in counts if c not in keep)
+
+    def group_of(s: Sample) -> str:
+        label = s.cluster or CLUSTER_UNCLASSIFIED
+        return label if label in keep else "other"
+
+    groups: dict[str, list[Sample]] = {}
+    for s in samples:
+        groups.setdefault(group_of(s), []).append(s)
+
+    out: list[dict] = []
+    n_tested = 0
+    n_hits = 0
+    for label in sorted(groups, key=lambda g: (-len(groups[g]), g)):
+        members = groups[label]
+        k = len(members)
+        mean_m = sum(m.margin for m in members) / k
+        r = t = None
+        if k >= min_n:
+            xs = [1.0 if group_of(s) == label else 0.0 for s in samples]
+            r = pearson(xs, margins)      # None when indicator has no variance
+            if r is not None:
+                n_tested += 1
+                t = t_stat(r, n)
+                if t is not None and abs(t) >= 2.0:
+                    n_hits += 1
+        out.append({
+            "cluster": label,
+            "n": k,
+            "mean_margin": round(mean_m, 4),
+            "pearson_r": None if r is None else round(r, 3),
+            "t_stat": None if t is None else round(t, 2),
+        })
+    return {
+        "min_cluster_n": min_n,
+        "lumped_into_other": lumped,
+        "clusters": out,
+        "multiple_testing": _honesty(n_tested, n_hits),
+    }
+
+
+def analyze_card_score(samples: list[Sample]) -> dict:
+    """FP-015 deck-level CardScore components vs curator margin.
+
+    A component can be None for some decks ("unavailable != bad"), so each
+    feature correlates over only the decks where it computed, with that
+    per-feature n reported honestly (r needs n>=3 for a t-stat anyway)."""
+    out: list[dict] = []
+    n_tested = 0
+    n_hits = 0
+    for fname in CARD_SCORE_FEATURES:
+        xs: list[float] = []
+        ys: list[float] = []
+        for s in samples:
+            v = s.features.get(fname)
+            if v is not None:
+                xs.append(float(v))
+                ys.append(s.margin)
+        n_avail = len(xs)
+        r = pearson(xs, ys) if n_avail >= 3 else None
+        t = t_stat(r, n_avail) if r is not None else None
+        if r is not None:
+            n_tested += 1
+            if t is not None and abs(t) >= 2.0:
+                n_hits += 1
+        out.append({
+            "feature": fname,
+            "n_avail": n_avail,
+            "pearson_r": None if r is None else round(r, 3),
+            "t_stat": None if t is None else round(t, 2),
+        })
+    out.sort(key=lambda d: abs(d["pearson_r"] or 0.0), reverse=True)
+    return {
+        "features": out,
+        "multiple_testing": _honesty(n_tested, n_hits),
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -531,6 +803,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "+ the repo's vendor/forge user decks.")
     ap.add_argument("--min-games", type=int, default=40,
                     help="only aggregate rows with >= this many games (default 40)")
+    ap.add_argument("--features", choices=FEATURE_FAMILIES,
+                    default="deck_health",
+                    help="feature substrate to regress margin on: deck_health "
+                         "(default; the original 10 features, byte-identical "
+                         "output), clusters (corpus-theme labels, one-vs-rest), "
+                         "card_score (FP-015 deck-level components), or all.")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of text")
     args = ap.parse_args(argv)
 
@@ -546,17 +824,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.mode == "gauntlet":
         rows = load_rows(args.inbox, "*gauntlet*.jsonl")
         pairs = aggregate_gauntlet(rows, min_games=args.min_games)
-        samples, skipped, missing = build_gauntlet_samples(pairs, decks_dirs)
+        samples, skipped, missing = build_gauntlet_samples(
+            pairs, decks_dirs, features=args.features)
     else:
         rows = load_rows(args.inbox)
         pairs = aggregate_pairs(rows, min_games=args.min_games)
-        samples, skipped, missing = build_samples(pairs, decks_dirs)
-    report = analyze(samples)
+        samples, skipped, missing = build_samples(
+            pairs, decks_dirs, features=args.features)
+    dh_active = args.features in ("deck_health", "all")
+    report = analyze(samples, feature_names=None if dh_active else [])
     report["mode"] = args.mode
     report["skipped"] = skipped
     report["min_games"] = args.min_games
     report["missing_deck_files"] = missing            # {deck: rows dropped}
     report["missing_deck_rows_dropped"] = sum(missing.values())
+    if args.features != "deck_health":
+        # New-substrate reports only; the default report keys stay pinned
+        # byte-identical (tests assert this).
+        report["features"] = args.features
+        if dh_active:
+            fam = report["feature_correlations"]
+            report["deck_health_multiple_testing"] = _honesty(
+                sum(1 for f in fam if f["pearson_r"] is not None),
+                sum(1 for f in fam
+                    if f["t_stat"] is not None and abs(f["t_stat"]) >= 2.0))
+        if args.features in ("clusters", "all"):
+            report["cluster_analysis"] = analyze_clusters(samples)
+        if args.features in ("card_score", "all"):
+            report["card_score_analysis"] = analyze_card_score(samples)
 
     if args.json:
         print(json.dumps(report, indent=2))
@@ -564,24 +859,67 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     margin_desc = ("winrate(v2)-winrate(base) vs fixed gauntlet"
                    if args.mode == "gauntlet" else "per-deck win-rate delta")
-    print(f"FP-002 margin analysis  (mode={args.mode}, min_games={args.min_games})")
+    feat_tag = ("" if args.features == "deck_health"
+                else f", features={args.features}")
+    print(f"FP-002 margin analysis  (mode={args.mode}, "
+          f"min_games={args.min_games}{feat_tag})")
     print(f"  decks: {report['n_decks']}   games: {report['total_games']}")
     print(f"  mean curator margin: {report['mean_margin']:+.4f}  "
           f"(>0 = curation helps; {margin_desc})")
     v = report["verdicts"]
     print(f"  per-deck verdicts: kept={v['kept']}  "
           f"reverted={v['reverted']}  neutral={v['neutral']}")
-    print(f"\n  feature -> margin correlation (|r| desc, n={report['n_decks']} decks):")
-    for f in report["feature_correlations"]:
-        r = f["pearson_r"]
-        t = f["t_stat"]
-        bar = ""
-        if r is not None:
-            star = "*" if (t is not None and abs(t) >= 2.0) else " "
-            bar = f"r={r:+.3f}  t={t if t is not None else 'NA':>6}  {star}"
-        else:
-            bar = "r=  NA   (no variance)"
-        print(f"    {f['feature']:<20} {bar}")
+    if dh_active:
+        print(f"\n  feature -> margin correlation (|r| desc, "
+              f"n={report['n_decks']} decks):")
+        for f in report["feature_correlations"]:
+            r = f["pearson_r"]
+            t = f["t_stat"]
+            bar = ""
+            if r is not None:
+                star = "*" if (t is not None and abs(t) >= 2.0) else " "
+                bar = f"r={r:+.3f}  t={t if t is not None else 'NA':>6}  {star}"
+            else:
+                bar = "r=  NA   (no variance)"
+            print(f"    {f['feature']:<20} {bar}")
+        if "deck_health_multiple_testing" in report:
+            print(_honesty_line("deck_health",
+                                report["deck_health_multiple_testing"]))
+    if "cluster_analysis" in report:
+        ca = report["cluster_analysis"]
+        print(f"\n  corpus-theme cluster -> margin (one-vs-rest point-"
+              f"biserial; indicator tested at n>={ca['min_cluster_n']}, "
+              f"n={report['n_decks']} decks):")
+        for c in ca["clusters"]:
+            r, t = c["pearson_r"], c["t_stat"]
+            if r is not None:
+                star = "*" if (t is not None and abs(t) >= 2.0) else " "
+                stat = f"r={r:+.3f}  t={t if t is not None else 'NA':>6}  {star}"
+            elif c["n"] < ca["min_cluster_n"]:
+                stat = "(below min n -- reported, not tested)"
+            else:
+                stat = "r=  NA   (no variance)"
+            print(f"    {c['cluster']:<24} n={c['n']:>3}  "
+                  f"mean_margin={c['mean_margin']:+.4f}  {stat}")
+        if ca["lumped_into_other"]:
+            print(f"    'other' lumps {len(ca['lumped_into_other'])} small "
+                  "cluster(s): " + ", ".join(ca["lumped_into_other"]))
+        print(_honesty_line("clusters", ca["multiple_testing"]))
+    if "card_score_analysis" in report:
+        cs = report["card_score_analysis"]
+        print("\n  CardScore deck-level component -> margin "
+              "(|r| desc; n = decks where the component computed):")
+        for f in cs["features"]:
+            r, t = f["pearson_r"], f["t_stat"]
+            if r is not None:
+                star = "*" if (t is not None and abs(t) >= 2.0) else " "
+                stat = f"r={r:+.3f}  t={t if t is not None else 'NA':>6}  {star}"
+            elif f["n_avail"] == 0:
+                stat = "unavailable (computed for 0 decks)"
+            else:
+                stat = "r=  NA   (no variance or n<3)"
+            print(f"    {f['feature']:<24} n={f['n_avail']:>3}  {stat}")
+        print(_honesty_line("card_score", cs["multiple_testing"]))
     if skipped:
         print(f"\n  skipped {len(skipped)} pair(s): "
               + "; ".join(skipped[:6]) + ("..." if len(skipped) > 6 else ""))
