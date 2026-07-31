@@ -8,144 +8,83 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Tier-3 pilot RESULT (finished 2026-07-25 21:36 local):** score 2 /
-bucket 1 / 0 ties over 3 decks — **inconclusive; the CardScore flag
-stays default-off.** The Hash row turned out to be an accidental null
-replicate (both arms staged card-for-card identical decklists) and
-still swung 0.348 in margin, a noise floor larger than every real
-effect the pilot measured — so the 2-1 tally is not a signal. Full
-numbers and the required design fixes are in the FP-015 addendum of
-[future-plans.md](future-plans.md).
+**Last updated:** 2026-07-30 (docs sync) — `master` @ `3e26552`
+(PR #59) is the live tip. PRs #36–#59 all landed via short-lived
+branches PR'd to `master`. Full offline suite: **2965 passed / 158
+skipped** (re-verified on this box for this sync).
 
-**Last updated:** 2026-07-26 ~00:40 local (scheduled token-check run) —
-**Tokens OK, no reset gap** (5.3 h since the prior beat). `master` @
-`4ad8b97` retested clean on this box (**2623 passed / 0 failed**),
-covering the bubble-arm and perf merges that landed tonight; CI has no
-failure on a current tip (the `#31` run shows `cancelled` only because
-`#30` superseded it). This run took design fix **(a)** from the tier-3
-pilot post-mortem: `arms_identical` in
-`scripts/validate_card_score.py` now compares card **multisets**
-instead of ordered lists, so an arm pair that picks the same cards in a
-different order is skipped as a null replicate instead of being simmed.
-Replayed against the real `_tier3_pilot_result.json`, the guard skips
-the Hash row and leaves BlackPanther and Mothy simming — exactly the
-row that produced the 0.348 noise swing. +3 offline tests (22 in
-`tests/test_validate_card_score.py`), on branch
-`fix/tier3-null-replicate-guard` (not pushed). Design fixes (b) null
-replicates, (c) larger n, and (d) CI-based gating remain open, and the
-bubble arm still has not been RUN (no Forge work started by this run).
-Note: a concurrent agent session was active in this repo tonight and
-authored the pilot post-mortem plus the `#30`/`#31` merges.
-Prior update: 2026-07-25 ~19:15 local (scheduled token-check run) —
-⚡ **TOKEN RESET DETECTED — resuming work after a 7.8-hour usage-limit
-gap.** Nothing was lost. `master` @ `c53a31b` retested clean on this
-box (**2610 passed / 0 failed** — the `test_compare_versions`
-hermeticity gap is GONE, fixed by `b4b5492` in the merge) and CI has no
-failure on the tip (the `b529392` run was cancelled by the newer push,
-not broken). With no in-flight branch and no CI failure, this run took
-the next FP-015 slice: **the tier-3 harness gained a `bubble` arm** —
-`scripts/validate_card_score.py --arms bucket,score,bubble`, where the
-bubble arm runs the flag-on ranking through `apply_verdict_to_report`
-and its change budget then caps every other arm (equal swap counts, so
-the comparison measures ORDERING, not budget size); a 0-swap verdict
-skips the deck instead of simming it against itself. +10 offline tests
-(**2620 passed / 0 failed**), on branch `feature/tier3-bubble-arm` (not
-pushed). Also verified and marked done: all five FP-015 "prerequisites"
-in future-plans.md are shipped (legality, `finisher`/curve,
-`manabase_report`, `one_piece_away`, `estimate_bracket` context) — that
-list was stale. **The CardScore tier-3 pilot is STILL RUNNING** (deck
-2/3, Hash pods dispatched 18:41); no Forge work was started by this
-run, and the bubble arm must not be run until the pilot finishes.
-Prior update: 2026-07-25 — ⚡ **work RESUMED after two usage-limit
-(rate-limit) interruptions on 2026-07-24/25; nothing was lost.** The
-in-flight work is `feature/eval-fixes`: the REVIEW.md evaluation
-(verified defects + rules-coverage gaps + the CardScore spec, repo
-root) is now **committed as `25c1a54`** (~10,100 lines —
-`card_score.py`, `deck_legality.py`, `consistency.py`,
-`interaction.py`, commander-aware `deck_health`, bracket-caller
-plumbing, and ~4,400 lines of new tests). Test state 2026-07-25:
-**2532 passed / 6 failed** — all 6 are `test_compare_versions.py` and
-are a **pre-existing hermeticity gap, not caused by the eval work**
-(on a box with ≥2 `vendor/forge*` profiles, `compare()`'s
-isolated-profile dispatch substitutes real profile runners for the
-injected FakeRunner, so real JVMs run and credit 0 games; the same
-tests pass 66/66 in a clean single-profile tree at the same HEAD).
-**PR #28 is MERGED** (`b529392`, 2026-07-25 evening) — `master` is the
-live tip again and the `feature/eval-fixes` era is closed (23 commits;
-work going forward: short-lived branches cut from master). The merged
-arc: eval overhaul (`25c1a54`), compare-runner hermeticity fix
-(`b4b5492`), bubble analysis (`c9914c2`), advisor wiring (`626f57a`),
-web audit backend (`122bf72`), audit UI verdict panel (`36498a7`),
-sim-job sidecar persist-before-done fix (`c607718`), and Archidekt as
-the third corpus source (`336ce2d`). **Fast lane GREEN: 2582 passed /
-0 failed** (the sidecar fix also killed the reattach flake). Everything
-is flag-gated behind `COMMANDER_BUILDER_CARD_SCORE` (default off).
-Auto-curate verdict wiring landed (`400bb6f`) — every advise surface
-is budget-aware — plus the tier-3 harness (`3ca8f57`). **Full retest
-2026-07-25 night: 2755 passed / 0 failed including the slow lane**;
-PR #28 CI green on all three Python versions. **A tier-3 PILOT is
-RUNNING detached** (relaunched ~19:35 local after the first attempt
-exposed two staging bugs — decks must live IN the Forge deck dir and
-carry Name= = filename, both fixed in `6163e8b`; a 4-game smoke then
-confirmed real attributed games): 3 B3 decks × 2 arms × 40 games/pod
-via `scripts/validate_card_score.py`. Clean JSON verdict lands at
-repo-root `_tier3_pilot_result.json` (`--out`); progress at
-`_tier3_pilot_progress.log`, stderr at `_tier3_pilot.log`. Staged
-`*__tier3_*` decks are auto-removed per deck. Expect several hours;
-do NOT start competing Forge work while it runs.
-⚠️ FP-002 note (2026-07-25 evening): the gauntlet soak is NOT running
-and the soak share `\\LLAMA\soak_inbox` (was `\\192.168.4.49\...`; DHCP
-moved the host to .92, so scripts now default to the hostname) is unreachable from
-box1 — the n=45 dataset is inaccessible until box2/the share returns;
-campaign paused pending operator. Active queue is now the top of
-[docs/future-plans.md](future-plans.md) (reordered 2026-07-25:
-active items first, shipped reference last).
-Prior update: 2026-07-23 (`master` @ `763bdfc` — **everything is
-merged**: PRs #13–#19 landed the ManaFoundry-parity six (#13), FP-014
-build-from-scratch (#14), the MIT license (#15), the revert-drift
-resolution fix (#16), the adversarial-review-carrying session branch
-(#17, #19), and the tree tidy-up (#18). The
-`feature/2026-04-28-session` era is **CLOSED** — `master` is 7 commits
-ahead of it and is the live tip. **FP-002 unblock fired**: the gauntlet
-margin dataset reached **n=45 of the ~80-deck gate** (10,360 games at
-min_games=40; docs previously recorded n=26). The 2026-07-23 re-analysis:
-mean margin −0.0133, verdicts 7 kept / 12 reverted / 26 neutral, and
-**no feature passes |t|≥2** — the n=26-era candidate signals
-(deficit_total, under_built_roles) collapsed toward zero as n grew; the
-A/B-only "hits" still fail to replicate in the unconfounded design. See
-the 2026-07-23 result block in
-[docs/future-plans.md](future-plans.md). A gauntlet soak
-(`--games 40 --append`, started 2026-07-23) is running toward the
-~80-deck predictor gate.) Prior milestones: 2026-07-21 — FP-014
-build-from-scratch first cut + the six ManaFoundry-parity features;
-2026-07-20 — session branch + all 40 adversarial-review fixes ported;
-2026-07-04 — stale PRs #9/#10 merged + looper-credit salvage fixed
-(`6156514`).
-**Phase status:** Phase 2 complete + FP-006 web GUI shipped +
-`commander-auto-curate` end-to-end loop (advisor → Claude curator →
-apply → Forge A/B sim → knowledge_log verdict) shipped. **FP-014
-(build-from-scratch deck assembly) merged** (PR #14; `commander-build`
-+ web "Build from scratch" tab; EDHREC-seeded, improve-loop is the quality
-path). **FP-003 (concurrent Forge sims) shipped**; **FP-002 (Phase-3 ML
-predictor) REOPENED, unblock fired at n=45/80** under the
-margin-regression framing — curation is empirically ~neutral across
-two designs (A/B + unconfounded gauntlet) and at n=45 **no pre-sim
-feature predicts margin**; the running gauntlet soak grows n toward the
-~80-deck gate where the question gets closed cleanly. See Parked plans +
-[docs/future-plans.md](future-plans.md).
+**Headlines (PRs #36–#59):**
+
+- **FP-002 is CLOSED — refuted (2026-07-30).** The n=93 re-check
+  (PR #57; 37,120 games) collapsed the last surviving feature —
+  `wincon_protection` fell to r=−0.055 (t=−0.53) and NOTHING clears
+  |t|≥2; the n=66 hit was the false positive the caveats predicted.
+  The follow-up substrate probe (PR #58: `margin_analysis --features
+  clusters|card_score|all`, run at n=102) did not overturn the closure
+  — no new-regressor signal either. Mean curator margin ≈ −0.01:
+  heuristic curation is net-neutral. No advisor prior ships; reopening
+  requires a genuinely new feature substrate, not more games. Full
+  result blocks in [future-plans.md](future-plans.md).
+- **FP-015 (`CardScore`): flag stays default-OFF.** The 2026-07-28
+  gated tier-3 run FAILED the gate — 6 paired decks, mean bubble
+  advantage +0.075, 95% CI [−0.159, +0.310] (includes zero). A larger
+  **19-deck tier-3 gated run is in flight; verdict pending** — the
+  flag stays off until a run clearly passes the gate policy (paired
+  95% t-interval + noise reference; PR #35).
+- **FP-016 replay-lite SHIPPED (PR #59)** — opt-in per-game log
+  persistence (`COMMANDER_BUILDER_KEEP_GAME_LOGS=1` / `--keep-logs`,
+  capped store), `replay_timeline.py` parser, and a "Replays" web
+  viewer — all from Forge's own sim stdout. FP-007 slice 5 stays
+  parked for state-level replay.
+- **FP-012: code complete; live shakedown pending.** The
+  budget-bounded UCB1 swap search (`commander-improve
+  --search-budget`, 2026-07-24) plus the forge_py screening gate
+  (`--screen`, PR #50 — screen, not judge; r≈0.898 vs Forge) are
+  shipped and unit-verified against injected sims only; the real Forge
+  shakedown is still pending.
+- **FP-014 corpus-norms steering landed (PR #49, flag-gated).**
+  `commander-corpus-themes` mines deck-corpus theme clusters + norms;
+  with `COMMANDER_BUILDER_CORPUS_NORMS=1`, `commander-build` blends
+  conservatively toward the measured population norms. Not yet
+  A/B-validated.
+- **Premade program (PRs #46–#48):** `[PREMADE]` deck role +
+  Moxfield/EDHREC popularity importers, heuristic v2 minting for
+  premade pairs, and `--premade-repair` (real `[Commander]` sections
+  for EDHREC premades). **79 premade decks on disk, 50 base+v2 soak
+  pairs** — this is the program that cleared FP-002's 80-pair gate
+  (PR #55) before the n=93 re-check closed the question.
+- **FP-010 EXE refreshed (PR #53)** — spec bundles the full package
+  `data/` dir and collects the whole package as hidden imports;
+  live-launch verified against everything shipped since the first
+  freeze.
+- **Soak state:** gauntlet mode on **both boxes** (`soak_pool --mode
+  gauntlet --games 40 --append`). Scripts default the soak-inbox share
+  to the `\\LLAMA` **hostname** (PR #54 — DHCP moved the box off its
+  old IP), and the failure-storm breaker (PR #38: backoff, circuit
+  breaker, row suppression at source) guards the row stream.
+- Also landed: WCAG 2.1 AA accessibility pass (PR #36), real deck
+  quantities through the advisor scoring seam (PR #37), tier-3 harness
+  hardening + noise-floor/CI gate (PRs #39, #35), deck-audit latency
+  breaker (PR #41), corpus TTL + Archidekt hardening (PR #40), pool
+  coverage/profile fidelity (PR #42), memo hygiene (PR #43), FP-015
+  boundary semantics (PR #44), Scryfall bulk-data snapshot path +
+  429 backoff (PRs #51/#52), foil-marker parse fix (PR #56).
 
 ---
 
 ## State of the tree
 
-- **Tests:** 2155 passing fast lane / 155 skipped (+slow with
-  `--run-slow`), ~170s offline.
-- **Branch:** `master` (`763bdfc`) is the live tip — PRs #13–#19 merged
-  every outstanding feature/fix branch (see the header). The long-lived
-  stacked-branch era (`feature/2026-04-28-session` → review-fix →
-  manafoundry-parity → fp014) is over; **working convention going
-  forward: short-lived branches cut from `master`**, PR'd back and
-  merged (current example: `chore/fp002-n45-refresh`).
+- **Tests:** 2965 passed / 158 skipped — the full offline suite
+  (`python -m pytest tests/ -q`), re-verified 2026-07-30 on this box.
+- **Branch:** `master` (`3e26552`, PR #59) is the live tip — every
+  branch through PR #59 is merged; nothing is in flight in the tree.
+  **Working convention: short-lived branches cut from `master`**,
+  PR'd back, squash-merged when CI is green.
+- **In-flight (outside the tree):** the 19-deck FP-015 tier-3 gated
+  run (verdict pending) and the gauntlet soaks on both boxes.
+
+The dated blocks below are historical session notes (details in
+[CHANGELOG.md](CHANGELOG.md)).
 
 **`feature/fp014-build-from-scratch` (2026-07-21, merged via PR #14):**
 the FP-014 build-from-scratch first cut, 4 commits on top of
@@ -309,192 +248,31 @@ documented at `tests/fixtures/real_oracles.py`.
 
 ## Open backlog (ranked)
 
-- ~~License is TBD~~ ✅ **MIT** (2026-07-21) — `LICENSE` at repo root,
-  `pyproject.toml` `license = "MIT"`.
+> Pruned 2026-07-30 — every previously listed item had shipped (their
+> entries live in [CHANGELOG.md](CHANGELOG.md) and the FP sections of
+> [future-plans.md](future-plans.md)). Current queue:
 
-### Active — promoted from Parked plans (2026-05-22)
+1. **FP-015 tier-3 verdict — PENDING.** The 19-deck tier-3 gated run
+   is in flight. On completion, apply the gate policy (paired 95%
+   t-interval vs the baseline arm + noise reference, PR #35) and
+   record the verdict in future-plans.md. `COMMANDER_BUILDER_CARD_SCORE`
+   stays default-off until a run clearly passes.
+2. **FP-012 live shakedown.** The `--search-budget` UCB1 search and
+   the `--screen` forge_py gate are unit-verified only. Once a box is
+   free, run a real searched improve round (with and without
+   `--screen`) against a plain greedy round; check the correlation log
+   for pruned-arm regret. Open questions in future-plans.md.
+3. **Corpus-norms A/B.** `COMMANDER_BUILDER_CORPUS_NORMS=1` steering
+   (PR #49) has never been validated empirically — A/B sim
+   norm-steered vs plain `commander-build` output before any thought
+   of a default flip.
+4. **EDHREC salt backfill — BLOCKED.** Backfilling `Salt=` metadata
+   for premade decks is blocked on EDHREC's bot-challenge pages; needs
+   a workaround or an alternative source.
 
-These three were unblocked this session (FP-003 concurrent sims shipped,
-curator now programmatic) and promoted out of *Parked plans* so they can
-be worked. Sized for a single session each.
-
-- ~~**A1. Finish FP-011 — web config GET/PUT.**~~ ✅ **Built 2026-05-22.**
-  New `config_store.py` (per-user `config.json` at
-  `%LOCALAPPDATA%\commander-builder\` on Windows, `~/.commander-builder/`
-  elsewhere; `COMMANDER_BUILDER_CONFIG` override) + `web/routes_config.py`
-  blueprint: `GET /api/config` returns the config with the token
-  **redacted** (`*_set` flag + last-4 `*_hint`, raw key never echoed);
-  `PUT /api/config` validates a sparse update (token shape mirrors
-  `scripts/scan_secrets.py`; unknown keys + bad values → 400 with nothing
-  persisted), merges, and writes owner-only (0o600). Minimal Settings
-  panel (native `<dialog>` + `settings.js`) wired into the topbar. 32
-  tests (25 store + endpoints via Flask test client). Web config GET/PUT
-  was the last open piece of FP-011 (secret-scan hook already shipped).
-  **Unified 2026-05-22:** config.json is now the single key store — the
-  audit endpoint resolves the BYO key `header → config.json → env`, and
-  the audit panel's key button opens the Settings dialog (no more
-  per-browser localStorage copy). Verified in Chrome.
-
-- ~~**A2. FP-012 first slice — unattended single-deck improve loop.**~~
-  ✅ **Built 2026-05-22.** `commander-improve --deck <id> --rounds N`
-  (`commander_builder/improve.py`). Greedy keep-if-better loop: composes
-  `commander-auto-curate --run-sim` per round, advances the base deck
-  only on a `kept` seat-attributed verdict, stops early on a no-op
-  (zero-change) round or an errored round. Fixed N, no bandit/Bayesian
-  search (those stay parked under the full FP-012). Bracket inferred from
-  the `[B<n>]` filename suffix. 15 tests (loop logic driven by an
-  injected `round_fn`, so no Forge/Anthropic in the suite).
-
-- ~~**A3. FP-001 bounded spike — LLM-piloted Forge AI (time-boxed).**~~
-  ✅ **Memo delivered 2026-05-22 — verdict NO-GO (as scoped) / GO
-  redirected + gated.** See [docs/fp001-llm-pilot-spike.md](archive/fp001-llm-pilot-spike.md).
-  Finding: you **cannot** pilot Forge 2.0.12's AI with an LLM — it's a
-  vendored compiled JAR run as a fire-and-forget subprocess with no
-  decision-injection seam (only read-stdout / kill-process), and there's
-  no Forge source to patch. The real LLM-pilot seam is **`forge_py`**'s
-  Python decision points, but that engine is absent here and not yet
-  mature (turn-by-turn/combat incomplete). The experiment (≥30 paired
-  games, Pearson r ≥ 0.90) is fully designed and the scaffolding
-  (`analyst.py` LLM client, `run_ab_simulation`, correlation log) is
-  ready, but there's no pilotable player to run it against today. Net: a
-  valuable negative result that prevents a 2–4 wk dead-end; FP-001 stays
-  parked with a precise unblock condition (see Parked plans). Optional
-  cheap follow-up: add a Pearson-r helper beside `correlation_summary`.
-  ✅ **Done 2026-05-22** — `forge_py_correlation.pearson_r()` +
-  `correlation_summary` now returns `pearson_r`/`pearson_n` against the
-  r ≥ 0.90 gate.
-
-### Tier 1 — Worth doing soon
-
-0. ~~**Curated real-oracle test fixture.**~~ ✅ Shipped.
-   `tests/fixtures/real_oracles.py` holds 10 verbatim-Scryfall card
-   entries covering every classifier role (`win_condition`, `wipe`,
-   `tutor`, `draw`, `ramp`). `tests/test_real_oracle_fixture.py`
-   self-tests via `EXPECTED_ROLE` so any new fixture entry must
-   declare its expected role and any regex regression breaks a
-   named parametrized test. Remaining synthetic-text classifier
-   tests are intentional degenerate cases (empty string,
-   "nothing-matches" text).
-
-0a. ~~**Move `_resolve_deck_path` into `web/_helpers.py`.**~~ ✅
-    Shipped during the 2026-05-13 blueprint refactor. Lives at
-    `web/_helpers.py:32`; the 5 blueprints + `web/app.py` import
-    it directly.
-
-0b. ~~**Structured per-recommendation debug logging.**~~ ✅ Shipped.
-    `_advisor_logging.log_decisions()` writes one line per rec to
-    `<deck_dir>.parent.parent/_audit_decisions.log`; gated by the
-    `COMMANDER_BUILDER_LOG_DECISIONS` env var so prod runs stay
-    quiet. Called from `improvement_advisor._advise_steps`.
-
-1. ~~**Wire `/api/forge_version` into the topbar badge.**~~ ✅ Shipped
-   in commit `1ac9d53`.
-
-2. ~~**Fix multi-jar selection bug in `detect_forge_version`.**~~ ✅
-   Shipped in commit `23fc108` (parsed-version sort).
-
-3. ~~**Pricing chart / query endpoint.**~~ ✅ Shipped.
-   `pricing_series_for_deck()` + `/api/pricing_series?deck=<id>` +
-   inline SVG sparkline on the deck dashboard (activates at ≥2
-   captured points; tooltip per dot; trend label with $ delta + %
-   change). 7 new tests.
-
-4. ~~**Reject negative `total_price_usd`.**~~ ✅ Shipped in commit
-   `43205d4`.
-
-5. ~~**Auto-refresh dashboard when knowledge_log gains rows.**~~ ✅
-   Shipped. Both `save_iteration` paths (post-sim verdict save +
-   audit-only "Save audit (no sim)") now trigger a soft-refresh of
-   the active deck on success so the iteration history /
-   verdict-breakdown / pricing-sparkline pick up the new row
-   without a manual reload.
-
-6. ~~**Per-archetype win-rate breakdown.**~~ ✅ Shipped.
-   `verdict_breakdown_for_deck()` + `/api/verdict_breakdown?deck=<id>` +
-   "Verdict by audit version" panel that activates at ≥5
-   iterations. Groups by `audit_version` with zero-padded
-   {kept, reverted, neutral, pending, total}. 8 new tests.
-
-7. ~~**Advisor: archetype-aware redundancy guard.**~~ ✅ Shipped.
-   New `_filter_for_saturation()` + `staples.ROLE_SATURATION_THRESHOLDS`
-   (ramp=12, draw=12, removal=10, wipe=6, protection=7, tutor=8,
-   finisher=14). Applies in `advise()` after both heuristic and
-   bracket_peers paths. Dropped adds surface as
-   `AdviceReport.skipped_for_saturation` → `/api/audit` payload →
-   UI summary line grouped by role. 16 new tests.
-
-8. ~~**Advisor: bracket-peers reference mode.**~~ ✅ Shipped in
-   commit `34dcfdb`. New `advise(source="bracket_peers")` path +
-   `/api/audit?source=bracket_peers` + UI 3-way selector. Pulls
-   top-5 highest-liked Moxfield decks for the same commander at
-   the same bracket and frequency-ranks the diff against the
-   user's deck. Falls back to EDHREC heuristic with
-   `fallback_reason` set when no references found. 20 new tests.
-
-### Tier 2 — Bigger but tractable
-
-7. ~~**Proposed-deck price in audit response.**~~ ✅ Shipped.
-   `/api/audit` returns `original_price_usd`, `proposed_price_usd`,
-   `n_priced_cards_proposed`. UI shows `$X → $Y (Δ)` headline above
-   the audit. SSE streaming endpoint emits the same fields.
-
-8. ~~**Card-image lazy fetcher (FP-008).**~~ ✅ **Already shipped**
-   (confirmed 2026-05-22; entry was stale). The suggestions panel
-   (`app.js` `renderAddRow`) renders lazy (`loading="lazy"`,
-   `decoding="async"`) thumbnails via `cardImageUrl()` → the local
-   `/api/card_image/<size>/<name>` route, with click-to-expand
-   (`openCardImageOverlay`). The route disk-caches Scryfall bytes
-   (`web/_image_cache.py`: quota eviction + transient-retry) and serves
-   `Cache-Control: …immutable`. Covered by `test_image_cache.py`.
-
-9. ~~**Oracle-text-first card-reference store (FP-009).**~~ ✅ **Built
-   2026-05-22.** New `oracle_store.py` — thin layers over the existing
-   `scryfall_client` snapshot cache (no new datastore): `card_reference()`
-   presentation alias, `check_errata()` (cached snapshot vs fresh Scryfall
-   oracle drift), and `bulk_refresh()` + `commander-oracle-refresh` CLI
-   (`--deck` / `--name` / `--all`, `--stale-days`, `--write`, `--json`).
-   Read-only by default; rewrites drifted snapshots only with `--write`.
-   17 tests (network stubbed). (`format_card_for_display` + `oracle_diff`
-   already covered the rest of the FP-009 surface.)
-
-### Tier 3 — Deferred until prerequisites exist
-
-10. ~~**`commander-iterate --auto-propose` programmatic.**~~ ✅
-    Shipped as the `commander-auto-curate` CLI (commits `b859463`,
-    `023134e`, plus 25+ refinement commits). Full advisor → Claude
-    curator → apply → optional Forge A/B sim pipeline with `--mode`
-    presets, color-identity filter, protected-card list, and
-    knowledge_log row writer. See [CHANGELOG.md](CHANGELOG.md)
-    2026-05-15/16 entry for the full breakdown.
-
-11. **Phase 3 ML training (FP-002).** 🔬 **REOPENED (2026-05-26) under the
-    margin-regression framing** the 2026-05-22 NOT-VIABLE note called for.
-    40-game soak rows now give a negative class (29 decks → 6 kept / 4
-    reverted / 19 neutral) and a signed margin target.
-    `scripts/margin_analysis.py` (pure stdlib) regresses it on deck-health
-    features in two designs (`--mode ab` + unconfounded `--mode gauntlet`):
-    curation is empirically ~neutral in both (mean +0.0009 / −0.0108) and
-    **no feature survives cross-validation** (the A/B `wincon_protection`
-    hit did not replicate in the gauntlet). Not yet a shippable model —
-    needs ~80+ unique decks. **Analysis-to-predictor step landed
-    (2026-05-27):** `margin_analysis.single_feature_ols(samples, feature)`
-    — pure-stdlib single-feature OLS + leave-one-out cross-validated RMSE
-    (the honest out-of-sample error), constant-feature safe. See Parked
-    plans + [docs/future-plans.md](future-plans.md).
-
-12. ~~**Concurrent Forge sims (FP-003).**~~ ✅ **Shipped** (2026-05-22,
-    `0f8f945`). `forge_runner.run_ab_batch(jobs, runners)` runs A/B sims
-    across cwd-isolated Forge profiles in parallel (≈2× throughput);
-    second profile at `vendor/forge2`, recreatable via
-    `scripts/setup_forge_profile.py`. The feasibility spike confirmed
-    separate `cwd`-isolated profiles avoid file-locking races.
-
-13. **Forge sim seed (FP-004).** No `--seed` flag in Forge 2.0.12.
-    Variance-via-game-count works fine today. Watch upstream releases.
-
-14. ~~**Settings UI + BYO LLM token (FP-011).**~~ ⬆️ **Promoted
-    2026-05-22** to *Active → A1* (web config GET/PUT). The secret-scan
-    hook already shipped; only the per-user config surface remains.
+Long-tail watch item: **FP-004 (Forge sim seed)** — no `--seed` in
+Forge 2.0.12; folded into the FP-001 Path-B fork as a free rider (see
+Parked plans).
 
 ---
 
@@ -541,10 +319,17 @@ proves worth having natively.
 
 ### FP-002 — Phase 3 ML predictor
 
-`ml_dataset.py` ready (25 features, deck-level train/eval split, no
-leakage). **Status: REOPENED under the margin-regression framing
-(2026-05-26); first result in — see
-[docs/future-plans.md](future-plans.md).**
+**Status: CLOSED — REFUTED (2026-07-30).** The premade pair program
+(PRs #46–#48) cleared the 80-pair gate (PR #55, n=66); the n=93
+re-check (PR #57) then collapsed the last surviving feature
+(`wincon_protection` → t=−0.53) with nothing at |t|≥2, and the
+substrate probe (PR #58: corpus-theme clusters + CardScore components
+as regressors, run at n=102) found no new signal either. No pre-sim
+deck-health feature predicts curation margin at practical n; no
+advisor prior ships. Reopening requires a genuinely new feature
+substrate, not more games on the same features. Full result blocks in
+[docs/future-plans.md](future-plans.md). The history below is kept
+for the record.
 
 The original *kept-vs-reverted classifier* was concluded NOT VIABLE on
 2026-05-22 because, after the A/B win-attribution fix (`e8777b6`), the
@@ -580,22 +365,20 @@ curation's expected gain is ~0; fix structure (F2 `under_built`) before
 curating. Covered by `tests/test_margin_analysis.py` (22 tests).
 
 **UPDATE 2026-07-23 — the ≥+10-deck unblock fired at gauntlet n=45**
-(10,360 games; a `--games 40 --append` soak keeps growing it toward the
-~80-deck gate). Re-analysis: mean margin −0.0133 (7 kept / 12 reverted /
+(10,360 games). Re-analysis: mean margin −0.0133 (7 kept / 12 reverted /
 26 neutral), **no feature at |t|≥2**, and the n=26-era candidate signals
 — including the "directionally-consistent" `deficit_total` /
 `under_built_roles` lever — **collapsed toward zero as n grew** (noise
 signature, not an effect gaining power). Full table + honest reading in
 [docs/future-plans.md](future-plans.md) "Result 2026-07-23".
 
-**Next (decided 2026-05-26): grow to ~80+ unique decks** to attempt a real
-out-of-sample predictor on the cross-validated `deficit_total` signal —
-acquire/curate ~30 more commanders, then a 40-game gauntlet soak
-(~12–18h on box1). Pipeline + commands in
-[docs/future-plans.md](future-plans.md). Separately, the
-low-N noise problem this analysis exposed is now **fixed at the source**:
-A/B verdicts below 20 decisive games record as `inconclusive`, not a
-confident kept/reverted (`_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT`).
+**FINAL (2026-07-29/30):** the 80-pair gate cleared at n=66 (PR #55,
+`wincon_protection` briefly the sole survivor), and the n=93 re-check
+(PR #57) refuted it — see the CLOSED status at the top of this
+section. Separately, the low-N noise problem this analysis exposed
+was **fixed at the source**: A/B verdicts below 20 decisive games
+record as `inconclusive`, not a confident kept/reverted
+(`_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT`).
 
 ### FP-003 — Concurrent Forge sims
 
@@ -630,11 +413,11 @@ browser") is met — verified end-to-end in Chrome this session. Plan +
 slice breakdown in [docs/future-plans.md](future-plans.md); the
 substrate is ~80% built (web shell, `oracle_store`, `mtg_cards/`,
 combo/rules), so this is navigation + a shared card-reference surface,
-not a rewrite. Card-reference panel (`/api/card`) shipped; cross-deck
-library search helper `_helpers.decks_containing_card(deck_dir, card_name)`
-landed 2026-05-27 (which of my decks run this card — sorted deck IDs,
-qty + `|SET|CN` stripped). Next: nav-shell / rules / library slices.
-Slices land behind the working app so `feature`/CI stay green.
+not a rewrite. **Slices 1–4 SHIPPED** (card-reference panel, nav
+shell, rules/combo lookup, library view — confirmed 2026-07-04).
+**Update 2026-07-30:** FP-016 replay-lite (PR #59) covers the
+practical 80% of slice 5 with log-based turn-by-turn replays; slice 5
+stays parked (with FP-001) for STATE-level replay only.
 
 ### FP-008 / FP-009 — Card images + oracle-text store
 
@@ -653,21 +436,22 @@ CommanderBuilder.exe`, Flask assets bundled). `commander_builder/desktop.py`
 `mtg_cards/` external (too big) — first-run downloader is the next slice.
 See [docs/future-plans.md](future-plans.md).
 
-JRE bootstrap piece landed 2026-05-27: `bootstrap._pick_jre_asset(release,
-system, machine)` selects the Temurin JRE archive for the caller's platform
-(mirrors `_pick_forge_jar_asset`), so first-run can auto-fetch a JRE.
-
-Remaining slices: first-run Forge/JRE/`mtg_cards` downloader, deck-dir
-picker, app icon + single-instance + graceful shutdown, installer, and a
-Windows CI build job.
+**All five remaining slices SHIPPED** (downloader + JRE extraction,
+deck-dir picker, window chrome, Inno Setup installer, Windows CI build
+job — confirmed 2026-07-04). **EXE refreshed 2026-07-29 (PR #53)**
+against everything since the first freeze: the spec now bundles the
+whole package `data/` dir and collects all of `commander_builder` as
+hidden imports; live-launch verified. See FP-010 in
+[docs/future-plans.md](future-plans.md).
 
 ### FP-011 — BYO LLM token
 
 Per-user config file with redacted GET / permissions-restricted PUT.
 Pre-commit hook scans staged diffs for `sk-ant-`, `Bearer `, JWT
-prefixes. **Status: PROMOTED 2026-05-22 → Active → A1.** Secret-scan hook
-shipped (`803debe`); the remaining web config GET/PUT surface is now an
-active backlog item.
+prefixes. ✅ **SHIPPED (2026-05-22).** Secret-scan hook (`803debe`)
+plus the web config GET/PUT surface + Settings panel (`config_store.py`
+/ `web/routes_config.py`; config.json is the single BYO-key store).
+See CHANGELOG 2026-05-22.
 
 ### FP-012 — Autonomous deck improvement agent
 
@@ -694,6 +478,16 @@ unattended multi-deck orchestration. North star, not done.
   Bayesian-opt over swap combinations)** stays parked behind a
   numpy-dependency + sim-cost decision. Designs in
   [fp012-next-slices.md](archive/fp012-next-slices.md).
+- **UPDATE 2026-07 — code complete; shakedown pending.** The full
+  budget-bounded UCB1 swap search shipped 2026-07-24
+  (`commander-improve --search-budget N`; `--search-budget 0` is
+  byte-identical greedy, pinned by test) and the **forge_py screening
+  gate** shipped via PR #50 (`--screen` /
+  `COMMANDER_BUILDER_FORGEPY_SCREEN=1` — prunes the arm pool before
+  any Forge games; SCREEN, NOT JUDGE: Forge remains the only verdict
+  engine). Both are unit-verified against injected sims only — the
+  **live Forge shakedown is still pending** (see Open backlog).
+  Details in [docs/future-plans.md](future-plans.md).
 
 ### FP-013 — Project-tuned LLM (moonshot)
 
@@ -704,8 +498,9 @@ iteration rows; realistic timeline 18–30 months out.
 
 ### FP-015 — Unified per-card scoring formula (`CardScore`)
 
-There is **no per-card score anywhere in the codebase**: the advisor
-orders adds by bucket insertion order then `(role_rank, trending_rank)`,
+Original gap analysis (pre-implementation; kept for rationale) —
+there was **no per-card score anywhere in the codebase**: the advisor
+ordered adds by bucket insertion order then `(role_rank, trending_rank)`,
 and orders **cuts alphabetically** (`_advisor_heuristic.py:490` concedes
 it). `inclusion_pct` / `synergy_pct` are boolean gates and rationale text
 only — they never enter a sort key. Combo membership, mana value, role
@@ -721,20 +516,24 @@ Plugs into `_advisor_heuristic._rank`, the cut loop,
 `deck_builder._fallback_candidates` (which decides the 99 on FP-014's
 weak no-average-deck path).
 
-**Status: IN PROGRESS — implementation staged on `feature/eval-fixes`
-(2026-07-25), uncommitted; resumed after the 2026-07-24/25 usage-limit
-interruptions.** It still ships
-**behind a flag** and gets validated as a *ranking*, not merged on face
-plausibility: top-k-by-score vs. k-by-current-bucket-order, both A/B
-simmed through `compare_versions`. **Explicitly not** validated by
-regression on margin — FP-002 already shows nothing clears |t| >= 2 at
-n=45, and a card scorer would fail that bar uninformatively. Framed
-throughout as a **ranking prior that shrinks the space Forge validates**,
-not a power rating (FP-014's "Forge-VALIDATED, not just heuristically
-scored" stance is preserved, not contradicted); it also gives FP-012's
-bandit a warm prior instead of a uniform one.
+**Status: SHIPPED behind the flag; flag default-OFF pending
+validation (2026-07-30).** The implementation merged via PR #28
+(`card_score.py`, `bubble_analysis.py`, every advise surface
+budget-aware) and is flag-gated behind `COMMANDER_BUILDER_CARD_SCORE`.
+Validation is by *ranking*, not face plausibility: arms A/B simmed
+through the tier-3 harness (`scripts/validate_card_score.py`) under
+the gate policy of PR #35 (paired 95% t-interval + noise reference).
+The 3-deck pilot (2026-07-26) was inconclusive; the **2026-07-28 gated
+run FAILED the gate** (6 paired decks, mean bubble advantage +0.075,
+95% CI [−0.159, +0.310]); a **19-deck gated run is in flight, verdict
+pending**. Framed throughout as a **ranking prior that shrinks the
+space Forge validates**, not a power rating (FP-014's
+"Forge-VALIDATED, not just heuristically scored" stance is preserved);
+it also gives FP-012's bandit a warm prior instead of a uniform one.
+Full result blocks in [docs/future-plans.md](future-plans.md).
 
-**Small independently-shippable prerequisites**, each worth doing alone:
+**Small independently-shippable prerequisites** (ALL FIVE SHIPPED —
+verified 2026-07-25; kept for the rationale), each worth doing alone:
 Scryfall-backed legality (`_CORE_BANS` at `web/routes_decks.py:885` is
 wrong in **both** directions post-2026-02-09 — it flags Coalition Victory
 and Panoptic Mirror as banned when both are on the *Game Changers* list,
@@ -746,6 +545,17 @@ of weight can never fire during `commander-build` bracket steering);
 `manabase_report()` to run the existing Karsten math on existing decks;
 an MV histogram; `finisher` in `ROLE_TARGETS`; and
 `combo_detection.one_piece_away()`. Full spec in
+[docs/future-plans.md](future-plans.md).
+
+### FP-016 — Replay-lite (turn-by-turn game replays)
+
+✅ **SHIPPED (2026-07-30, PR #59).** Opt-in per-game log persistence
+(`COMMANDER_BUILDER_KEEP_GAME_LOGS=1` / `--keep-logs`; capped store
+with oldest-run eviction), a pure log→timeline parser
+(`replay_timeline.py`, reusing the log_parser/game_analyzer regex
+vocabulary), and a "Replays" web viewer — all from the sim stdout
+Forge already emits. Deliberately COARSER than state-level replay;
+FP-007 slice 5 stays parked (with FP-001) for that. See FP-016 in
 [docs/future-plans.md](future-plans.md).
 
 ### Sister projects
@@ -818,8 +628,8 @@ For older decisions see [docs/architecture.md](architecture.md#key-decisions).
 
 - **Modules**: ~30 production (advisor split into orchestrator + 7
   sub-modules; web split into orchestrator + 5 blueprints + helpers)
-- **Tests**: ~1287 passing fast lane (+slow with `--run-slow`)
-- **Test wall time**: ~167s offline
+- **Tests**: 2965 passed / 158 skipped (full offline suite,
+  2026-07-30)
 - **CLI entry points**: 14
 - **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache
   (`MTG_CARDS_DIR` env var override available); ~32k per-card snapshots
