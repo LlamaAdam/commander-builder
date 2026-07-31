@@ -242,6 +242,34 @@ policy was designed not to trust. `COMMANDER_BUILDER_CARD_SCORE`
 stays default-off. Next escalation, if wanted: more decks (paired n
 drives the CI width down as sqrt(n)) rather than more games per deck.
 
+### Tier-3 GATED RESULT — 2026-07-31 (second gate FAIL at 9 paired decks; FP-015 validation concluded)
+
+The escalation ran: 19 B3 decks (9 [USER] incl. both FP2 decks + 10
+[PREMADE]), same config (bucket vs bubble, 60 games/pod, 2 null
+replicates), ~2 days wall (restarted once after an app reset; the
+PR #39 crash-tolerance and staged-deck cleanup both earned their keep).
+
+Result: **9 paired decks** — bubble 6 / bucket 3, mean bubble advantage
+**+0.088, 95% CI [−0.125, +0.302]** → **gate: fail** (CI spans zero).
+Null-noise reference: mean |margin| 0.345 (max 0.559). **10 decks
+skipped with identical staged arms — including all 8 EDHREC-average
+premades**: an average deck already contains the advisor's consensus
+recommendations, so both orderings stage the same swaps; only
+organically-built (Moxfield-sourced / [USER]) decks can differentiate
+the arms. That structurally caps paired n well below deck count.
+
+Honest read after two consecutive clean-gate fails (n=6 then n=9,
+mildly positive means both times, CIs spanning zero both times): if a
+bubble-first ordering advantage exists it is small (< ~0.1 mean margin)
+and would need ~25+ differentiable paired decks to resolve — poor
+return on Forge-hours. **FP-015's empirical validation is concluded:
+`COMMANDER_BUILDER_CARD_SCORE` stays default-off; the CardScore
+machinery remains available behind the flag for UI/verdict display
+where it is useful without a win-rate claim.** Reopen only with a
+fundamentally different design (e.g. per-swap A/B at scale via the
+FP-012 bandit + forge_py screen, which measures individual swaps
+instead of whole-ordering bundles).
+
 ## The gap
 
 There is **no per-card score anywhere in the codebase.** Card ordering is
