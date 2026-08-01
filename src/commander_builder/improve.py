@@ -264,6 +264,33 @@ def run_improve_loop(
     )
 
 
+def _safe_print(text: str = "", *, file=None, flush: bool = False) -> None:
+    """``print`` that survives consoles that can't encode the text.
+
+    Windows consoles frequently run cp1252 (or cp437), which cannot
+    represent characters like ``Δ`` (U+0394) used in the run summary —
+    a bare ``print`` there raises UnicodeEncodeError and kills the
+    process AFTER all the real work finished. Guard at the print site:
+    try the normal print, and on UnicodeEncodeError re-encode with
+    ``errors='replace'`` against the stream's own encoding so the
+    summary stays readable (unencodable chars become ``?``).
+
+    Deliberately NOT a global stdout reconfiguration (e.g.
+    ``sys.stdout.reconfigure``): downstream parsers consume this
+    process's stdout, and changing the stream's encoding could alter
+    bytes for every other write. Only the fallback path degrades, and
+    only for the offending line.
+    """
+    stream = file if file is not None else sys.stdout
+    try:
+        print(text, file=stream, flush=flush)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        safe = text.encode(encoding, errors="replace").decode(
+            encoding, errors="replace")
+        print(safe, file=stream, flush=flush)
+
+
 def _print_intent(intent: Intent) -> None:
     """Human-readable one-liner for the learned intent."""
     parts = [f"archetype={intent.archetype}"]
@@ -278,21 +305,27 @@ def _print_intent(intent: Intent) -> None:
         if len(intent.key_wincons) > 3:
             wc_preview += f" +{len(intent.key_wincons) - 3} more"
         parts.append(f"wincons=[{wc_preview}]")
-    print(f"[improve] intent: {'; '.join(parts)}", flush=True)
+    _safe_print(f"[improve] intent: {'; '.join(parts)}", flush=True)
 
 
 def _print_summary(result: ImproveResult) -> None:
-    """Human-readable run summary."""
-    print()
-    print(f"Improve run on {result.deck_id}")
-    print(f"  start deck:  {Path(result.start_deck).name}")
-    print(f"  final deck:  {Path(result.final_deck).name}")
-    print(
+    """Human-readable run summary.
+
+    Every line goes through ``_safe_print``: the per-round line contains
+    ``Δ`` (U+0394), which cp1252/cp437 Windows consoles cannot encode —
+    a bare ``print`` there crashed the whole run at the very end
+    (UnicodeEncodeError) after all the Forge/LLM work had completed.
+    """
+    _safe_print()
+    _safe_print(f"Improve run on {result.deck_id}")
+    _safe_print(f"  start deck:  {Path(result.start_deck).name}")
+    _safe_print(f"  final deck:  {Path(result.final_deck).name}")
+    _safe_print(
         f"  rounds:      {result.rounds_run}/{result.rounds_requested} run, "
         f"{result.rounds_kept} kept"
         + ("  (converged — a round proposed no changes)" if result.converged else "")
     )
-    print()
+    _safe_print()
     for rr in result.history:
         marker = "+" if rr.advanced else " "
         wr = ""
@@ -306,12 +339,12 @@ def _print_summary(result: ImproveResult) -> None:
             line += f"  iter#{rr.iteration_id}"
         if rr.error:
             line += f"  ERROR: {rr.error}"
-        print(line)
-    print()
+        _safe_print(line)
+    _safe_print()
     if result.final_deck != result.start_deck:
-        print(f"Best deck: {result.final_deck}")
+        _safe_print(f"Best deck: {result.final_deck}")
     else:
-        print("No round improved the deck; base unchanged.")
+        _safe_print("No round improved the deck; base unchanged.")
 
 
 # ---------------------------------------------------------------------------
@@ -388,17 +421,20 @@ def _make_swap_evaluator(state: dict, args):
 
 
 def _print_bandit_summary(deck_id: str, result, final_deck: Path) -> None:
-    print()
-    print(f"Bandit improve run on {deck_id} ({result.rounds_run} pulls, "
-          f"{result.accepted} accepted)")
-    print(f"  best swap:  {result.best_arm_key} (mean reward "
-          f"{result.best_arm_mean:+.2f})")
-    print(f"  final deck: {final_deck.name}")
-    print()
-    print("  Arm stats (by mean reward):")
+    # _safe_print throughout: arm keys embed card names, which can carry
+    # characters a cp1252/cp437 console can't encode (same failure mode
+    # as the Δ in _print_summary).
+    _safe_print()
+    _safe_print(f"Bandit improve run on {deck_id} ({result.rounds_run} pulls, "
+                f"{result.accepted} accepted)")
+    _safe_print(f"  best swap:  {result.best_arm_key} (mean reward "
+                f"{result.best_arm_mean:+.2f})")
+    _safe_print(f"  final deck: {final_deck.name}")
+    _safe_print()
+    _safe_print("  Arm stats (by mean reward):")
     for a in result.arm_stats:
         if a["pulls"]:
-            print(f"    {a['mean']:+.2f}  ({a['pulls']}x)  {a['key']}")
+            _safe_print(f"    {a['mean']:+.2f}  ({a['pulls']}x)  {a['key']}")
 
 
 def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:

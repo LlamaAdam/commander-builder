@@ -434,3 +434,60 @@ def test_main_still_requires_rounds_without_health(tmp_path, capsys):
     rc = improve_main([str(deck)])
     assert rc == 2
     assert "--rounds" in capsys.readouterr().out
+
+
+# --- _safe_print / summary encoding safety (Windows cp1252 consoles) ------
+
+import contextlib
+import io
+
+
+class _CP1252Stream(io.StringIO):
+    """Mimics a Windows cp1252 console: ``write`` raises
+    UnicodeEncodeError for text cp1252 can't represent (e.g. Δ), which
+    is exactly how the FP-012 shakedown crash manifested."""
+
+    encoding = "cp1252"
+
+    def write(self, s: str) -> int:
+        s.encode("cp1252")  # raises UnicodeEncodeError like a real console
+        return super().write(s)
+
+
+def test_safe_print_survives_stream_that_rejects_delta():
+    stream = _CP1252Stream()
+    improve._safe_print("margin (Δ+3)", file=stream)  # must not raise
+    out = stream.getvalue()
+    assert "+3" in out          # the payload survives...
+    assert "Δ" not in out       # ...with the char replaced, not the line lost
+    assert out.endswith("\n")
+
+
+def test_safe_print_passes_text_through_on_capable_stream():
+    stream = io.StringIO()  # StringIO accepts any str, like a UTF-8 console
+    improve._safe_print("(Δ+3)", file=stream)
+    assert stream.getvalue() == "(Δ+3)\n"
+
+
+def test_print_summary_survives_cp1252_console():
+    """Regression: the run summary's per-round Δ line killed the whole
+    improve run with UnicodeEncodeError on cp1252 stdout AFTER all the
+    work had completed. It must print (readably) instead."""
+    result = ImproveResult(
+        deck_id="deck", start_deck="/decks/a.dck", final_deck="/decks/v1.dck",
+        rounds_requested=1, rounds_run=1, rounds_kept=1, converged=False,
+        history=[RoundResult(
+            round=1, input_deck="/decks/a.dck", output_deck="/decks/v1.dck",
+            verdict="kept", advanced=True, iteration_id=7,
+            win_rate_old=0.40, win_rate_new=0.47, margin=3,
+            applied_adds=2, applied_cuts=2,
+        )],
+    )
+    stream = _CP1252Stream()
+    with contextlib.redirect_stdout(stream):
+        improve._print_summary(result)  # must not raise
+    out = stream.getvalue()
+    assert "round 1: kept" in out
+    assert "old=40% new=47%" in out
+    assert "+3" in out  # margin still readable where the Δ was
+    assert "Best deck: /decks/v1.dck" in out
