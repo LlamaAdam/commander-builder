@@ -28,7 +28,9 @@ isolated so a missing forge_py install never breaks the main flow.
 from __future__ import annotations
 
 import csv
+import os
 import random
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,16 +50,80 @@ class ForgePyABResult:
     error: Optional[str] = None  # set when the harness couldn't run
 
 
+def _forge_py_candidate_paths() -> list:
+    """sys.path candidates that could make ``import forge_py`` work.
+
+    Ordered by precedence:
+
+    1. ``FORGE_PY_DIR`` env var — points at the forge_py checkout root
+       OR directly at its ``src`` dir (both accepted: the checkout's
+       package lives under ``<checkout>/src/forge_py``). Explicit
+       operator intent, so it always wins over autodetection.
+    2. Sibling-checkout autodetect — the canonical layout is the
+       commander-builder repo and forge_py side by side (e.g.
+       ``C:/dev/commander-builder`` + ``C:/dev/forge_py``), so try
+       ``<repo_root>/../forge_py/src``.
+    """
+    candidates: list = []  # (path, source-label) pairs
+    env = os.environ.get("FORGE_PY_DIR")
+    if env:
+        base = Path(env)
+        candidates.append((base / "src", "FORGE_PY_DIR"))  # env = checkout root
+        candidates.append((base, "FORGE_PY_DIR"))          # env = src itself
+    # this file: <repo_root>/src/commander_builder/forge_py_correlation.py
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.append(
+        (repo_root.parent / "forge_py" / "src", "sibling-checkout autodetect"))
+    return candidates
+
+
 def _maybe_import_forge_py():
     """Import forge_py lazily so a missing install doesn't break
-    commander_builder. Returns ``None`` when unavailable."""
-    try:
+    commander_builder. Returns ``None`` when unavailable.
+
+    forge_py is normally NOT pip-installed — it lives in a sibling
+    checkout with the package under ``<checkout>/src``. A bare import
+    therefore always failed and the screening gate silently degraded to
+    unscreened. When the plain import fails, this now tries the
+    ``FORGE_PY_DIR`` override and then the sibling-checkout location,
+    inserting into ``sys.path`` ONLY when that actually makes the
+    import succeed (one loud stderr line says what was added). With
+    nothing found anywhere, behavior is exactly as before: return
+    ``None`` quietly and let callers degrade loudly (the pinned
+    keep-all message in forge_py_screen).
+    """
+    def _import():
         from forge_py.dck_parser import parse_dck
         from forge_py.card_tagger import tag_cards
         from forge_py.combat import run_multiplayer_game
         return parse_dck, tag_cards, run_multiplayer_game
+
+    try:
+        return _import()
     except ImportError:
-        return None
+        pass
+
+    for cand, source in _forge_py_candidate_paths():
+        if not (cand / "forge_py").is_dir():
+            continue
+        cand_str = str(cand)
+        already_on_path = cand_str in sys.path
+        if not already_on_path:
+            sys.path.insert(0, cand_str)
+        try:
+            deps = _import()
+        except ImportError:
+            if not already_on_path:
+                sys.path.remove(cand_str)
+            continue
+        if not already_on_path:
+            print(
+                f"[forge_py_correlation] forge_py not importable; added "
+                f"{cand_str} to sys.path ({source})",
+                file=sys.stderr, flush=True,
+            )
+        return deps
+    return None
 
 
 def run_forge_py_ab(

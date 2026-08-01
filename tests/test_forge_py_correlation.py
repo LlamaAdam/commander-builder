@@ -245,3 +245,123 @@ def test_cli_main_json_output(tmp_path, capsys):
     parsed = _json.loads(out)
     assert parsed["rows"] == 1
     assert parsed["agreement_rate"] == 1.0
+
+
+# --- _maybe_import_forge_py path resolution (sibling checkout / env) ------
+
+import sys
+
+import commander_builder.forge_py_correlation as fpc
+
+
+def _make_fake_forge_py(checkout: Path, marker: str = "fake-parse") -> Path:
+    """Create ``<checkout>/src/forge_py`` with the three modules
+    ``_maybe_import_forge_py`` needs. ``parse_dck`` returns ``marker``
+    so tests can tell WHICH fake got imported. Returns the checkout
+    root (package under its ``src``, matching the canonical layout)."""
+    pkg = checkout / "src" / "forge_py"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "dck_parser.py").write_text(
+        f"def parse_dck(path):\n    return {marker!r}\n", encoding="utf-8")
+    (pkg / "card_tagger.py").write_text(
+        "def tag_cards(names, cache=True):\n    return {}\n", encoding="utf-8")
+    (pkg / "combat.py").write_text(
+        "def run_multiplayer_game(decks, seed=0, fixed_seat_order=False):\n"
+        "    return None\n", encoding="utf-8")
+    return checkout
+
+
+@pytest.fixture
+def isolated_forge_py(monkeypatch):
+    """Guarantee the bare ``import forge_py`` fails: drop any cached
+    forge_py modules and strip sys.path entries that contain a forge_py
+    package (a real sibling checkout may exist on dev machines). Also
+    clears FORGE_PY_DIR. monkeypatch restores originals on teardown;
+    modules the test itself imported are purged here first."""
+    for name in list(sys.modules):
+        if name == "forge_py" or name.startswith("forge_py."):
+            monkeypatch.delitem(sys.modules, name)
+    clean = [p for p in sys.path if not (Path(p or ".") / "forge_py").is_dir()]
+    monkeypatch.setattr(sys, "path", clean)
+    monkeypatch.delenv("FORGE_PY_DIR", raising=False)
+    yield
+    for name in list(sys.modules):
+        if name == "forge_py" or name.startswith("forge_py."):
+            del sys.modules[name]
+
+
+def _point_repo_at(monkeypatch, tmp_path: Path) -> Path:
+    """Fake this module's on-disk location so sibling autodetect
+    resolves against ``tmp_path`` instead of the real dev tree."""
+    fake_repo = tmp_path / "commander-builder"
+    (fake_repo / "src" / "commander_builder").mkdir(parents=True)
+    monkeypatch.setattr(
+        fpc, "__file__",
+        str(fake_repo / "src" / "commander_builder" / "forge_py_correlation.py"))
+    return fake_repo
+
+
+def test_sibling_autodetect_makes_import_succeed(
+        tmp_path, monkeypatch, isolated_forge_py, capsys):
+    """Canonical layout: repo and forge_py side by side, package under
+    ``<checkout>/src``. The import must succeed with ONE loud stderr
+    line naming the path that was added."""
+    sibling = _make_fake_forge_py(tmp_path / "forge_py")
+    _point_repo_at(monkeypatch, tmp_path)
+
+    deps = fpc._maybe_import_forge_py()
+
+    assert deps is not None
+    parse_dck, tag_cards, run_game = deps
+    assert parse_dck(Path("x.dck")) == "fake-parse"
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1  # ONE loud line
+    assert str(sibling / "src") in err
+    assert "sibling-checkout autodetect" in err
+
+
+def test_forge_py_dir_override_wins_over_sibling(
+        tmp_path, monkeypatch, isolated_forge_py, capsys):
+    """FORGE_PY_DIR (pointing at a checkout root) beats the sibling."""
+    _make_fake_forge_py(tmp_path / "forge_py", marker="sibling-parse")
+    override = _make_fake_forge_py(tmp_path / "override", marker="override-parse")
+    _point_repo_at(monkeypatch, tmp_path)
+    monkeypatch.setenv("FORGE_PY_DIR", str(override))
+
+    deps = fpc._maybe_import_forge_py()
+
+    assert deps is not None
+    assert deps[0](Path("x.dck")) == "override-parse"
+    err = capsys.readouterr().err
+    assert str(override / "src") in err
+    assert "FORGE_PY_DIR" in err
+
+
+def test_forge_py_dir_accepts_src_directly(
+        tmp_path, monkeypatch, isolated_forge_py):
+    """FORGE_PY_DIR may also point straight at ``<checkout>/src``."""
+    override = _make_fake_forge_py(tmp_path / "override", marker="src-parse")
+    _point_repo_at(monkeypatch, tmp_path)  # no sibling under tmp_path/forge_py
+    monkeypatch.setenv("FORGE_PY_DIR", str(override / "src"))
+
+    deps = fpc._maybe_import_forge_py()
+
+    assert deps is not None
+    assert deps[0](Path("x.dck")) == "src-parse"
+
+
+def test_absent_everything_returns_none_quietly(
+        tmp_path, monkeypatch, isolated_forge_py, capsys):
+    """No install, no env var, no sibling: same quiet ``None`` as
+    before (callers own the loud degrade message), and sys.path is
+    left untouched."""
+    _point_repo_at(monkeypatch, tmp_path)
+    path_before = list(sys.path)
+
+    assert fpc._maybe_import_forge_py() is None
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == ""
+    assert sys.path == path_before
