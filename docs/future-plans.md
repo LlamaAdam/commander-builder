@@ -270,6 +270,41 @@ fundamentally different design (e.g. per-swap A/B at scale via the
 FP-012 bandit + forge_py screen, which measures individual swaps
 instead of whole-ordering bundles).
 
+### Addendum 2026-08-01 — per-swap validation harness BUILT (run pending)
+
+The reopening path named above is now built:
+`scripts/validate_card_score_perswap.py` measures **individual swaps**
+instead of whole-ordering bundles. Per deck it runs the advisor's
+candidate-add generation once (flag untouched — candidates are scored
+through the flag-independent internals, `card_score.deck_context` +
+`score_card`, never by flipping `COMMANDER_BUILDER_CARD_SCORE`), scores
+EVERY candidate, records the full ranked list, selects the top-K and
+bottom-K by CardScore (default 3/3), stages each as a SINGLE-swap deck
+(that add + the advisor's paired cut — held FIXED per deck at the
+top-ranked matchable cut, so within-deck margin differences are
+attributable to the add), and A/B sims each staged deck vs the
+unmodified base. This design sidesteps the identical-arms skip that ate
+10 of 19 decks (incl. all 8 EDHREC-average premades) in the 2026-07-31
+run: every deck with candidates and one matchable cut contributes 2K
+observations. Reuses the tier-3 machinery wholesale (compare seam,
+in-deck-dir staging, `Name=` restamping, try/finally cleanup,
+staged-text degeneracy skips, per-deck failure containment,
+`--null-replicates` noise reference).
+
+**GATE POLICY — pre-registered 2026-08-01, before any run:** CardScore
+is predictive iff (1) pooled Spearman rho between CardScore and
+measured per-swap margin is > 0 with one-sided permutation p < .05
+(pure-stdlib, tied ranks mid-ranked, 10k seeded shuffles), AND (2) the
+top-K group's mean margin exceeds the bottom-K group's (Welch t-based
+95% interval printed as context; the criterion is only the direction).
+Anything else: not predictive, FP-015 stays concluded. The noise
+reference is published context, not a criterion; the gate is one
+pre-registered conjunction and everything else in the summary is
+labeled exploratory / not multiplicity-corrected. 31 offline tests
+(`tests/test_validate_card_score_perswap.py`, injected
+advise/score/compare fns). **Run pending** — no Forge games have been
+played through this harness yet.
+
 ## The gap
 
 There is **no per-card score anywhere in the codebase.** Card ordering is

@@ -6,6 +6,33 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-01 — FP-015 per-swap validation harness (run pending)
+
+#### Added
+
+- **`feat(validation)`: `scripts/validate_card_score_perswap.py` — the
+  per-swap A/B harness the 2026-07-31 tier-3 conclusion named as
+  FP-015's only reopening path.** Measures individual swaps instead of
+  whole-ordering bundles: per deck, run the advisor's candidate-add
+  generation once, score every candidate with CardScore via the
+  flag-independent internals (`card_score.deck_context` + `score_card`;
+  `COMMANDER_BUILDER_CARD_SCORE` is never flipped), record the full
+  ranked list, select top-K/bottom-K (default 3/3), stage each as a
+  single-swap deck (the add + the advisor's top matchable cut, held
+  fixed per deck so margin differences are attributable to the add)
+  through the shared `_apply_swaps_to_dck` legality path, and A/B sim
+  each vs the unmodified base. Reuses the tier-3 harness machinery
+  (compare seam, in-deck-dir staging, `Name=` restamping, try/finally
+  staged-deck cleanup, staged-text degeneracy skips, per-deck failure
+  containment with partial-result summaries, `--null-replicates`).
+  Summary carries pure-stdlib Spearman (tied ranks mid-ranked, seeded
+  one-sided permutation p), a Welch t-based top-vs-bottom interval, a
+  multiple-testing honesty note, and the **pre-registered gate**:
+  predictive iff rho > 0 with p < .05 AND top-group mean margin >
+  bottom-group mean margin. 31 offline tests via injected
+  advise/score/compare fns. No sims run yet — the gated verdict awaits
+  the real 6-deck run.
+
 ### 2026-07-30 — Replay-lite: turn-by-turn game replays (FP-016)
 
 #### Added
