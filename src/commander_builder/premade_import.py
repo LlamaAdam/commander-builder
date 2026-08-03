@@ -58,6 +58,7 @@ The CLI never runs from here directly — ``commander-import --premade``
 
 from __future__ import annotations
 
+import http.client
 import re
 import time
 import urllib.parse
@@ -71,6 +72,7 @@ from .dck_meta import stamp_name_preserving_display
 from .dck_utils import (
     COMMANDER_DECK_SIZE,
     count_commander_cards,
+    count_main_cards,
     parse_card_line,
     section_card_names,
 )
@@ -162,11 +164,29 @@ def _existing_premade_ids(out_dir: Path) -> dict[str, Path]:
 def _premade_destination(deck_name: str, bracket: int, out_dir: Path) -> Path:
     """`[PREMADE] <safe name> [B<n>].dck` — deck_destination's shape with
     the premade role prefix (bracket 0/unknown falls back to `[B?]`,
-    matching the user/pool convention)."""
+    matching the user/pool convention).
+
+    Any trailing ` v<N>` token (``moxfield_import._VERSION_TOKEN``) is
+    STRIPPED from the sanitized stem core: ` v<N>` before the bracket tag
+    is the machine convention for version snapshots, so a pulled deck
+    literally NAMED "Something v2" would otherwise parse as a snapshot of
+    root "Something" — never mintable itself (``premade_mint`` only mints
+    unversioned bases) AND falsely marking a DISTINCT "Something" premade
+    as already covered. The pretty name survives in ``DisplayName=``
+    (``stamp_name_preserving_display``); if the stripped stem collides
+    with a different deck's file, the caller's ``_uniquify`` pass hands
+    out a ` (<n>)` counter — which is explicitly NOT a version token, so
+    the two decks keep separate lineages."""
+    core = _mox.safe_filename(deck_name)
+    while True:
+        vm = _mox._VERSION_TOKEN.match(core)
+        if vm is None:
+            break
+        core = vm.group("root").strip()
+    if not core:
+        core = "deck"
     bracket_suffix = f" [B{bracket}]" if bracket else " [B?]"
-    return out_dir / (
-        f"{PREMADE_PREFIX} {_mox.safe_filename(deck_name)}{bracket_suffix}.dck"
-    )
+    return out_dir / f"{PREMADE_PREFIX} {core}{bracket_suffix}.dck"
 
 
 def _insert_metadata_lines(dck_text: str, extra: list[str]) -> str:
@@ -275,29 +295,53 @@ def import_moxfield_premades(
             if any(c in taken for c in cmdrs):
                 continue
             likes = _likes_of(deck_json) or _likes_of(entry)
-            dck = _mox.to_dck(deck_json)
-            bracket = _mox.resolve_bracket(deck_json)
-            if not 1 <= bracket <= 5:
-                bracket = estimate_bracket(dck)["estimate"]
-            dck = _insert_metadata_lines(
-                dck, ["Source=moxfield", f"Likes={likes}"],
-            )
-            same_path = id_map.get(pid)
-            if same_path is not None:
-                # Same premade already on disk — refresh in place, with
-                # the filename's bracket tag kept honest.
-                dest = _mox._rename_for_bracket_drift(
-                    same_path, bracket, id_map=id_map,
+            try:
+                dck = _mox.to_dck(deck_json)
+                # Post-fetch validation: a deck with an EMPTY commanders
+                # board, or a mainboard off the 100-card invariant, would
+                # be written verbatim and stay permanently unusable — the
+                # advisor raises "no commanders found", and the premade
+                # repair path only covers EDHREC files. Skip with a
+                # reason instead of minting a broken file.
+                n_cmdr = count_commander_cards(dck)
+                n_main = count_main_cards(dck)
+                if n_cmdr == 0:
+                    print(f"  SKIP {pid}: fetched deck has no commanders")
+                    continue
+                if n_main != COMMANDER_DECK_SIZE - n_cmdr:
+                    print(
+                        f"  SKIP {pid}: illegal deck size ({n_main} main "
+                        f"+ {n_cmdr} commander(s) != {COMMANDER_DECK_SIZE})"
+                    )
+                    continue
+                bracket = _mox.resolve_bracket(deck_json)
+                if not 1 <= bracket <= 5:
+                    bracket = estimate_bracket(dck)["estimate"]
+                dck = _insert_metadata_lines(
+                    dck, ["Source=moxfield", f"Likes={likes}"],
                 )
-            else:
-                dest = _premade_destination(
-                    deck_json.get("name", pid), bracket, out_dir,
-                )
-                if dest.exists():
-                    # A DIFFERENT deck owns this sanitized name.
-                    dest = _mox._uniquify(dest)
-            dck = stamp_name_preserving_display(dck, dest.stem)
-            dest.write_text(dck, encoding="utf-8")
+                same_path = id_map.get(pid)
+                if same_path is not None:
+                    # Same premade already on disk — refresh in place, with
+                    # the filename's bracket tag kept honest.
+                    dest = _mox._rename_for_bracket_drift(
+                        same_path, bracket, id_map=id_map,
+                    )
+                else:
+                    dest = _premade_destination(
+                        deck_json.get("name", pid), bracket, out_dir,
+                    )
+                    if dest.exists():
+                        # A DIFFERENT deck owns this sanitized name.
+                        dest = _mox._uniquify(dest)
+                dck = stamp_name_preserving_display(dck, dest.stem)
+                dest.write_text(dck, encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001 — leg survives one deck
+                # Same containment stance as the fetch above: one bad
+                # deck (unwritable name, disk error, malformed payload)
+                # must not abort the whole leg.
+                print(f"  ERROR writing {pid}: {type(exc).__name__}: {exc}")
+                continue
             id_map[pid] = dest
             taken.update(cmdrs)
             print(f"  Wrote {dest.name} ({likes} likes, bracket {bracket})")
@@ -345,11 +389,22 @@ def _commander_card_names(commander_name: str) -> list[str]:
     name = (commander_name or "").strip()
     if "//" not in name:
         return [name] if name else []
-    if lookup_card(name) is not None:
+    try:
+        if lookup_card(name) is not None:
+            return [name]
+        halves = [h.strip() for h in name.split("//") if h.strip()]
+        if len(halves) >= 2 and all(
+            lookup_card(h) is not None for h in halves
+        ):
+            return halves
+    except (OSError, http.client.HTTPException):
+        # Offline / transient network failure (URLError and non-404
+        # HTTPError are OSError subclasses; BadStatusLine and friends
+        # are HTTPException). `lookup_card` only swallows 404s itself,
+        # so without this catch one 5xx on a partner-pair name raised
+        # out of the WHOLE pull/repair run. Degrade to the documented
+        # single-commander shape instead.
         return [name]
-    halves = [h.strip() for h in name.split("//") if h.strip()]
-    if len(halves) >= 2 and all(lookup_card(h) is not None for h in halves):
-        return halves
     return [name]
 
 
@@ -402,8 +457,9 @@ def import_edhrec_premades(
         # Explicit commander names (partner-aware): the average-deck
         # payload does NOT include the commander, so the shape must
         # inject it — see AverageDeck.to_moxfield_shape.
+        cmdr_names = _commander_card_names(name)
         dck = _mox.to_dck(deck.to_moxfield_shape(
-            commander_names=_commander_card_names(name),
+            commander_names=cmdr_names,
         ))
         bracket = estimate_bracket(dck)["estimate"]
         salt = _salt_for(name, salt_map)
@@ -419,7 +475,11 @@ def import_edhrec_premades(
             dest = _mox._rename_for_bracket_drift(existing, bracket)
         dck = stamp_name_preserving_display(dck, dest.stem)
         dest.write_text(dck, encoding="utf-8")
+        # Record EVERY commander of the written deck, not just the pair's
+        # front name — a partner pair "A // B" normalizes to "a" alone,
+        # which left "b" free to duplicate later in the same run.
         taken.add(_norm_commander(name))
+        taken.update(_norm_commander(n) for n in cmdr_names)
         print(f"  Wrote {dest.name} (salt {salt:.2f}, bracket {bracket})")
         rows.append({
             "name": dest.stem,
@@ -628,8 +688,10 @@ def repair_premades(out_dir: Path = DECK_OUT_DIR) -> int:
     file via ``repair_premade_text``. Idempotent — a repaired (or
     correctly written) file has commander cards and is skipped, so
     re-runs are no-ops. Returns the number of files that could NOT be
-    repaired (0 = success), mirroring the failure-count convention of
-    ``moxfield_import.main``.
+    FULLY repaired (0 = success), mirroring the failure-count convention
+    of ``moxfield_import.main`` — a rewrite that leaves the deck
+    size-illegal (no basics to rebalance through) keeps its retrofitted
+    ``[Commander]`` but counts as a failure, not a silent success.
     """
     repaired = 0
     failures = 0
@@ -656,6 +718,23 @@ def repair_premades(out_dir: Path = DECK_OUT_DIR) -> int:
             continue
         fixed = repair_premade_text(text, _commander_card_names(name))
         path.write_text(fixed, encoding="utf-8")
+        # Honesty check: repair_premade_text refuses to guess when the
+        # deck has no basic lands to rebalance through, so its output can
+        # still be size-illegal (e.g. a 99-main basic-less deck + partner
+        # insert -> 101 cards). The [Commander] retrofit is kept (strictly
+        # better than "no commanders found"), but stamping such a deck
+        # 'repaired' with exit 0 hid the residual — count it as a failure.
+        n_cmdr = count_commander_cards(fixed)
+        n_main = count_main_cards(fixed)
+        if n_main != COMMANDER_DECK_SIZE - n_cmdr:
+            print(
+                f"  WARN: {path.name} still size-illegal after repair "
+                f"({n_main} main + {n_cmdr} commander(s) != "
+                f"{COMMANDER_DECK_SIZE}); no basics to rebalance — fix "
+                f"manually."
+            )
+            failures += 1
+            continue
         repaired += 1
         print(f"  Repaired {path.name} (+[Commander] {name})")
     print(f"Premade repair: {repaired} repaired, {failures} failed.")
