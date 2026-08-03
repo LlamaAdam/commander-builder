@@ -334,16 +334,20 @@ def run_null_replicate(
     stem = deck_path.stem
     a = stage_dir / f"{stem}__tier3_nullA.dck"
     b = stage_dir / f"{stem}__tier3_nullB.dck"
-    a.write_text(rewrite_name(original_text, a.stem), encoding="utf-8")
-    b.write_text(rewrite_name(original_text, b.stem), encoding="utf-8")
     if compare_fn is None:
         from commander_builder.compare_versions import compare as compare_fn
     try:
+        a.write_text(rewrite_name(original_text, a.stem), encoding="utf-8")
+        b.write_text(rewrite_name(original_text, b.stem), encoding="utf-8")
         report = compare_fn(old_deck=a.name, new_deck=b.name,
                             bracket=bracket, games_per_pod=games,
                             deck_dir=stage_dir)
     finally:
-        for leftover in stage_dir.glob(f"{stem}__tier3_null*.dck"):
+        # Unlink the EXACT staged paths — never a stem-based glob:
+        # real stems contain [USER]/[B3] and pathlib.glob treats square
+        # brackets as character classes, matching nothing (the staged
+        # copies then leak permanently into the live deck dir).
+        for leftover in (a, b):
             try:
                 leftover.unlink()
             except OSError:
@@ -501,6 +505,7 @@ def run_deck(
     if compare_fn is None:
         from commander_builder.compare_versions import compare as compare_fn
     from commander_builder.dck_meta import rewrite_name
+    staged_paths: list[Path] = []
     try:
         for arm, (adds, cuts) in built.items():
             proposed, applied = previews[arm]
@@ -508,6 +513,7 @@ def run_deck(
                 arm_margins[arm] = None
                 continue
             staged = stage_dir / f"{stem}__tier3_{arm}.dck"
+            staged_paths.append(staged)
             # Name= MUST match the staged filename stem — log_parser
             # attributes wins by Forge's displayed deck name, and base +
             # arm sharing the original Name= would resurrect the
@@ -519,6 +525,8 @@ def run_deck(
             # from one deck_dir — with its Name= rewritten to the staged
             # stem for the same attribution reason as the arm deck.
             original_copy = stage_dir / f"{stem}__tier3_base.dck"
+            if original_copy not in staged_paths:
+                staged_paths.append(original_copy)
             original_copy.write_text(
                 rewrite_name(original_text, original_copy.stem),
                 encoding="utf-8")
@@ -541,8 +549,13 @@ def run_deck(
         # The staged decks live in the REAL deck dir (Forge
         # requirement) — remove them so they never pollute the deck
         # list / web UI, INCLUDING when a sim crashes mid-arm. The
-        # persisted compare reports remain the durable record.
-        for leftover in stage_dir.glob(f"{stem}__tier3_*.dck"):
+        # persisted compare reports remain the durable record. Unlink
+        # the EXACT paths recorded at staging time — never a glob built
+        # from the stem: real stems contain [USER]/[B3] and
+        # pathlib.glob treats square brackets as character classes,
+        # matching nothing (staged decks then leak permanently into the
+        # live deck dir).
+        for leftover in staged_paths:
             try:
                 leftover.unlink()
             except OSError:

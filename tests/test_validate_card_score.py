@@ -29,6 +29,21 @@ def rec(card, action):
     return SimpleNamespace(card=card, action=action)
 
 
+# Cleanup regression stem: REAL deck names carry square brackets
+# ([USER], [PREMADE], [B3]), which pathlib.glob treats as character
+# classes — the pre-fix stem-based cleanup glob matched nothing and
+# staged decks leaked into the live Forge deck dir forever.
+BRACKET_STEM = "[USER] Cleanup Deck [B3]"
+
+
+def staged_leftovers(stage_dir, stem, marker="__tier3_"):
+    """Leftover staged files, found WITHOUT the glob under test."""
+    if not stage_dir.is_dir():
+        return []
+    return [n for n in os.listdir(stage_dir)
+            if n.startswith(f"{stem}{marker}")]
+
+
 def make_advise(flag_orders):
     """advise() stub whose rec order depends on the flag env var."""
     def advise(deck_path, bracket):
@@ -105,7 +120,9 @@ def test_run_deck_dry_run_stops_before_sims(tmp_path):
 
 
 def test_run_deck_sims_both_arms_and_picks_winner(tmp_path):
-    deck = tmp_path / "t.dck"
+    # Bracketed stem on purpose: cleanup must survive [USER]/[B3]-style
+    # names, and the assertion must NOT reuse the glob under test.
+    deck = tmp_path / f"{BRACKET_STEM}.dck"
     deck.write_text(DECK_TEXT, encoding="utf-8")
     advise = make_advise({False: (["Bucket Add"], ["Cut Me"]),
                           True: (["Score Add"], ["Cut Me"])})
@@ -123,9 +140,12 @@ def test_run_deck_sims_both_arms_and_picks_winner(tmp_path):
     assert len(simmed) == 2
     assert row["winner"] == "score"
     assert row["score_margin"] > row["bucket_margin"]
-    # Staged decks are cleaned up (they live in the REAL deck dir) —
-    # the persisted compare reports are the durable record.
-    assert not list((tmp_path / "stage").glob("t__tier3_*.dck"))
+    # The staged decks really carried the bracketed stem…
+    assert all(name.startswith(f"{BRACKET_STEM}__tier3_")
+               for name in simmed)
+    # …and are cleaned up (they live in the REAL deck dir) — the
+    # persisted compare reports are the durable record.
+    assert staged_leftovers(tmp_path / "stage", BRACKET_STEM) == []
 
 
 def test_run_deck_noop_arm_records_none_margin(tmp_path):
@@ -263,7 +283,7 @@ def test_run_deck_bubble_arm_caps_bucket_arm_to_same_budget(tmp_path):
 
 
 def test_run_deck_bubble_arm_sims_and_picks_winner(tmp_path):
-    deck = tmp_path / "t.dck"
+    deck = tmp_path / f"{BRACKET_STEM}.dck"
     deck.write_text(DECK_TEXT, encoding="utf-8")
     advise = make_advise({False: (["Bucket Add"], ["Keep Me"]),
                           True: (["Bubble Add"], ["Cut Me"])})
@@ -284,7 +304,7 @@ def test_run_deck_bubble_arm_sims_and_picks_winner(tmp_path):
     assert len(simmed) == 2
     assert row["winner"] == "bubble"
     assert row["bubble_margin"] > row["bucket_margin"]
-    assert not list((tmp_path / "stage").glob("t__tier3_*.dck"))
+    assert staged_leftovers(tmp_path / "stage", BRACKET_STEM) == []
 
 
 def test_run_deck_skips_when_bubble_budget_is_zero(tmp_path):
@@ -539,7 +559,7 @@ def test_gate_floor_not_evaluated_from_a_single_replicate():
 
 
 def test_run_null_replicate_stages_two_copies_and_cleans_up(tmp_path):
-    deck = tmp_path / "t.dck"
+    deck = tmp_path / f"{BRACKET_STEM}.dck"
     deck.write_text(DECK_TEXT, encoding="utf-8")
     seen = {}
 
@@ -559,7 +579,25 @@ def test_run_null_replicate_stages_two_copies_and_cleans_up(tmp_path):
     assert abs(out["margin"] - 0.2) < 1e-9
     assert "nullA" in seen["names"][0] and "nullB" in seen["names"][1]
     assert seen["names_differ_in_meta_only"]
-    assert not list((tmp_path / "stage").glob("*__tier3_null*.dck"))
+    assert staged_leftovers(tmp_path / "stage", BRACKET_STEM) == []
+
+
+def test_run_null_replicate_cleans_up_when_the_sim_crashes(tmp_path):
+    """Crash path with a bracketed stem: both staged null copies must
+    be removed even when compare_fn raises."""
+    deck = tmp_path / f"{BRACKET_STEM}.dck"
+    deck.write_text(DECK_TEXT, encoding="utf-8")
+
+    def compare_fn(old_deck, new_deck, bracket, games_per_pod, deck_dir):
+        # Both copies exist mid-sim — later emptiness is cleanup.
+        assert (deck_dir / old_deck).is_file()
+        assert (deck_dir / new_deck).is_file()
+        raise RuntimeError("forge died mid-pod")
+
+    with pytest.raises(RuntimeError, match="forge died"):
+        vcs.run_null_replicate(deck, 3, 10, tmp_path / "stage",
+                               compare_fn=compare_fn)
+    assert staged_leftovers(tmp_path / "stage", BRACKET_STEM) == []
 
 
 # ── failure containment: one crashed deck must not vaporize the run ──
@@ -567,8 +605,10 @@ def test_run_null_replicate_stages_two_copies_and_cleans_up(tmp_path):
 
 def test_run_deck_cleans_staged_decks_when_a_sim_crashes(tmp_path):
     """The staged decks live in the REAL Forge deck dir (the web UI
-    lists it) — a mid-arm crash must not leave them behind."""
-    deck = tmp_path / "t.dck"
+    lists it) — a mid-arm crash must not leave them behind, INCLUDING
+    for real-shaped bracketed stems (the assertion must never reuse
+    the stem-glob whose bracket-as-character-class bug hid the leak)."""
+    deck = tmp_path / f"{BRACKET_STEM}.dck"
     deck.write_text(DECK_TEXT, encoding="utf-8")
     advise = make_advise({False: (["Bucket Add"], ["Cut Me"]),
                           True: (["Score Add"], ["Cut Me"])})
@@ -576,6 +616,10 @@ def test_run_deck_cleans_staged_decks_when_a_sim_crashes(tmp_path):
 
     def compare_fn(old_deck, new_deck, bracket, games_per_pod, deck_dir):
         calls.append(new_deck)
+        # The staged files exist mid-sim — the later emptiness is
+        # cleanup, not a failure to stage.
+        assert (deck_dir / old_deck).is_file()
+        assert (deck_dir / new_deck).is_file()
         if len(calls) == 2:
             raise RuntimeError("forge died mid-pod")
         return SimpleNamespace(
@@ -586,7 +630,7 @@ def test_run_deck_cleans_staged_decks_when_a_sim_crashes(tmp_path):
         vcs.run_deck(deck, 3, 5, 10, tmp_path / "stage",
                      advise_fn=advise, compare_fn=compare_fn)
     assert len(calls) == 2
-    assert not list((tmp_path / "stage").glob("t__tier3_*.dck"))
+    assert staged_leftovers(tmp_path / "stage", BRACKET_STEM) == []
 
 
 def test_main_contains_per_deck_failures_and_still_summarizes(

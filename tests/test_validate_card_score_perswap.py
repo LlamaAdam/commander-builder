@@ -30,6 +30,21 @@ DECK_TEXT = (
 )
 
 
+# Cleanup regression stem: REAL deck names carry square brackets
+# ([USER], [PREMADE], [B3]), which pathlib.glob treats as character
+# classes — the pre-fix stem-based cleanup glob matched nothing and
+# staged decks leaked into the live Forge deck dir forever.
+BRACKET_STEM = "[USER] Cleanup Deck [B3]"
+
+
+def staged_leftovers(stage_dir, stem, marker="__perswap_"):
+    """Leftover staged files, found WITHOUT the glob under test."""
+    if not stage_dir.is_dir():
+        return []
+    return [n for n in os.listdir(stage_dir)
+            if n.startswith(f"{stem}{marker}")]
+
+
 def rec(card, action, evidence=None):
     return SimpleNamespace(card=card, action=action,
                            evidence=evidence or {})
@@ -131,7 +146,9 @@ def test_run_deck_never_touches_the_flag(tmp_path, monkeypatch):
 
 
 def test_run_deck_sims_each_selected_swap_against_base(tmp_path):
-    deck = write_deck(tmp_path)
+    # Bracketed stem on purpose: cleanup must survive [USER]/[B3]-style
+    # names, and the assertion must NOT reuse the glob under test.
+    deck = write_deck(tmp_path, f"{BRACKET_STEM}.dck")
     advise = make_advise(["A1", "A2", "A3", "A4"], ["Cut Me", "Keep Me"])
     compare_fn = ok_compare({"_top": 7, "_bottom": 3})
     row = vps.run_deck(deck, 3, 1, 1, 10, tmp_path / "stage",
@@ -147,8 +164,10 @@ def test_run_deck_sims_each_selected_swap_against_base(tmp_path):
     assert bottom["margin"] == -0.4
     # Full ranked list is recorded, not just the selected swaps.
     assert [r["card"] for r in row["ranked"]] == ["A1", "A2", "A3", "A4"]
-    # Staged decks are cleaned up (they live in the REAL deck dir).
-    assert not list((tmp_path / "stage").glob("t__perswap_*.dck"))
+    # The staged decks really were written to the stage dir…
+    assert any(BRACKET_STEM in name for name in compare_fn.calls)
+    # …and cleaned up (they live in the REAL deck dir).
+    assert staged_leftovers(tmp_path / "stage", BRACKET_STEM) == []
 
 
 def test_run_deck_staged_names_and_texts_are_legal(tmp_path):
@@ -183,12 +202,19 @@ def test_run_deck_staged_names_and_texts_are_legal(tmp_path):
 
 
 def test_run_deck_cleans_staged_decks_when_a_sim_crashes(tmp_path):
-    deck = write_deck(tmp_path)
+    """Crash path with a REAL-shaped bracketed stem: the staged decks
+    (base + both swap arms) must still be removed, and the assertion
+    must not reuse the broken stem-glob that hid the leak."""
+    deck = write_deck(tmp_path, f"{BRACKET_STEM}.dck")
     advise = make_advise(["A1", "A2"], ["Cut Me"])
     calls = []
 
     def compare_fn(old_deck, new_deck, bracket, games_per_pod, deck_dir):
         calls.append(new_deck)
+        # The staged files exist mid-sim — the later emptiness is
+        # cleanup, not a failure to stage.
+        assert (deck_dir / old_deck).is_file()
+        assert (deck_dir / new_deck).is_file()
         if len(calls) == 2:
             raise RuntimeError("forge died mid-pod")
         return SimpleNamespace(
@@ -201,7 +227,7 @@ def test_run_deck_cleans_staged_decks_when_a_sim_crashes(tmp_path):
                      score_fn=score_by({"A1": 90.0, "A2": 10.0}),
                      compare_fn=compare_fn)
     assert len(calls) == 2
-    assert not list((tmp_path / "stage").glob("t__perswap_*.dck"))
+    assert staged_leftovers(tmp_path / "stage", BRACKET_STEM) == []
 
 
 def test_run_deck_degenerate_stage_is_skipped_not_simmed(tmp_path):

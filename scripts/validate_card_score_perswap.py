@@ -413,12 +413,14 @@ def run_deck(
     if compare_fn is None:
         from commander_builder.compare_versions import compare as compare_fn
     from commander_builder.dck_meta import rewrite_name
+    staged_paths: list[Path] = []
     try:
         # Base staged ONCE per deck. Name= MUST match the staged
         # filename stem — log_parser attributes wins by Forge's
         # displayed deck name (the pre-e8777b6 attribution bug parsed
         # 0 games when base and arm shared a Name=).
         base_copy = stage_dir / f"{stem}__perswap_base.dck"
+        staged_paths.append(base_copy)
         base_copy.write_text(rewrite_name(original_text, base_copy.stem),
                              encoding="utf-8")
         for i, swap in enumerate(swaps):
@@ -427,6 +429,7 @@ def run_deck(
                 continue
             staged = stage_dir / (
                 f"{stem}__perswap_{i:02d}_{swap['group']}.dck")
+            staged_paths.append(staged)
             staged.write_text(rewrite_name(proposed, staged.stem),
                               encoding="utf-8")
             sim = compare_fn(
@@ -446,8 +449,12 @@ def run_deck(
         # Staged decks live in the REAL deck dir (Forge requirement) —
         # remove them so they never pollute the deck list / web UI,
         # INCLUDING when a sim crashes mid-swap. The persisted compare
-        # reports remain the durable record.
-        for leftover in stage_dir.glob(f"{stem}__perswap_*.dck"):
+        # reports remain the durable record. Unlink the EXACT paths
+        # recorded at staging time — never a glob built from the stem:
+        # real stems contain [USER]/[B3] and pathlib.glob treats square
+        # brackets as character classes, matching nothing (staged decks
+        # then leak permanently into the live deck dir).
+        for leftover in staged_paths:
             try:
                 leftover.unlink()
             except OSError:
