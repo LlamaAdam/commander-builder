@@ -646,7 +646,7 @@ def test_compute_deck_health_returns_all_five_signals(monkeypatch):
     result = deck_health.compute_deck_health(deck)
     assert set(result.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill", "role_targets",
+        "wincon_protection", "self_mill", "role_targets", "consistency",
     }
     # Each signal has its expected shape.
     assert "count" in result["mdfc"]
@@ -688,6 +688,153 @@ def test_compute_deck_health_realistic_deck_signals(monkeypatch):
     assert health["mana_sinks"]["count"] == 1
     # Spell density: Genesis Wave is the only Sorcery; 1 / 6 = 0.166
     assert health["spell_density"]["ratio"] == pytest.approx(1 / 6, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# consistency_signal -- the wired opening-hand signal (2026-08)
+# ---------------------------------------------------------------------------
+#
+# The consistency MODULE's math is pinned by tests/test_consistency.py;
+# these tests pin the WIRING: the deck_health projection reproduces
+# hand-checkable probabilities on a known deck, honors the None outage
+# contract, and is strictly additive (old fields + grade untouched).
+
+def _consistency_fake_lookup(monkeypatch):
+    """Offline Scryfall stub for the consistency-signal tests. The
+    consistency module never looks up basic Forests
+    (staples.is_basic_land short-circuits) but the OTHER health signals
+    do, so the stub classifies them properly; everything else is a
+    cheap green sorcery, and the commander is a {1}{G} legend."""
+    def _fake(name, **_kw):
+        if name.lower() == "test commander":
+            return {
+                "name": name,
+                "type_line": "Legendary Creature — Elf Druid",
+                "mana_cost": "{1}{G}", "color_identity": ["G"],
+                "oracle_text": "",
+            }
+        if "forest" in name.lower():
+            return {
+                "name": name, "type_line": "Basic Land — Forest",
+                "mana_cost": "", "color_identity": ["G"],
+                "oracle_text": "", "produced_mana": ["G"],
+            }
+        return {
+            "name": name, "type_line": "Sorcery",
+            "mana_cost": "{G}", "color_identity": ["G"],
+            "oracle_text": "",
+        }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+
+
+# 38-land / 61-spell canonical 99 -- the same shape the consistency
+# module's own suite uses, so every probability below is hand-checkable
+# against the closed-form hypergeometric.
+_CONSISTENCY_DECK = (
+    "[metadata]\nName=X\n"
+    "[Commander]\n1 Test Commander\n"
+    "[Main]\n38 Forest\n61 Green Ritual\n"
+)
+
+
+def test_consistency_signal_matches_hand_checked_probabilities(monkeypatch):
+    """The wired signal reproduces the numbers the closed-form layer
+    predicts for a 38-land 99: E[lands in 7] = 7*38/99 exactly, and
+    p_keepable_7 = P(2 <= lands <= 5) = at_least(2) - at_least(6)."""
+    from commander_builder.consistency import hypergeom_at_least
+
+    _consistency_fake_lookup(monkeypatch)
+    sig = deck_health.consistency_signal(_CONSISTENCY_DECK)
+    assert sig is not None
+    assert sig["avg_lands_in_7"] == pytest.approx(7 * 38 / 99, abs=0.1)
+    closed = (
+        hypergeom_at_least(99, 38, 7, 2) - hypergeom_at_least(99, 38, 7, 6)
+    )
+    assert sig["p_keepable_7"] == pytest.approx(closed, abs=0.04)
+    # mulligan_rate is 1 - p_keepable_7 by definition under the module's
+    # keep policy -- an exact identity, not a sampled one.
+    assert sig["mulligan_rate"] == pytest.approx(
+        1 - sig["p_keepable_7"], abs=1e-12,
+    )
+    # A mono-green 38-Forest manabase casts a {1}{G} commander on curve
+    # nearly always, and can never be color screwed.
+    assert sig["p_commander_on_curve"] > 0.8
+    assert sig["p_color_screw"] == 0.0
+    # Provenance fields the tile's tooltip renders.
+    assert sig["convention"] == "on_play"
+    assert sig["trials"] == deck_health._CONSISTENCY_TRIALS
+    assert sig["seed"] == deck_health._CONSISTENCY_SEED
+    assert sig["lookup_failures"] == 0
+
+
+def test_consistency_signal_is_deterministic(monkeypatch):
+    """Fixed seed at the call site: the same deck text yields the
+    identical dict on every audit (the consistency module's regression
+    requirement, honored by the wiring)."""
+    _consistency_fake_lookup(monkeypatch)
+    a = deck_health.consistency_signal(_CONSISTENCY_DECK)
+    b = deck_health.consistency_signal(_CONSISTENCY_DECK)
+    assert a == b
+
+
+def test_consistency_signal_none_on_outage(monkeypatch):
+    """The standard outage contract: a majority of card lines failing
+    to resolve (or the lookup layer raising outright) degrades to None
+    -- never a fabricated 0% keepable."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("down")),
+    )
+    deck = "[Main]\n1 Mystery A\n1 Mystery B\n1 Mystery C\n"
+    assert deck_health.consistency_signal(deck) is None
+    # Same through the aggregator: the key is present, its value None.
+    assert deck_health.compute_deck_health(deck)["consistency"] is None
+
+
+def test_consistency_signal_none_on_empty_deck(monkeypatch):
+    _consistency_fake_lookup(monkeypatch)
+    assert deck_health.consistency_signal("") is None
+
+
+def test_compute_deck_health_consistency_is_strictly_additive(monkeypatch):
+    """THE wiring contract: the new key rides alongside the existing
+    signals without changing a single one of them, and the letter grade
+    ignores it entirely (fold-in would silently re-grade every deck --
+    see the module docstring's consistency bullet)."""
+    _consistency_fake_lookup(monkeypatch)
+    # staples binds lookup_card by value at import; patch its copy too
+    # so role_target_report stays offline (same seam test_web_app uses).
+    import commander_builder.staples as _staples
+    monkeypatch.setattr(
+        _staples, "lookup_card",
+        lambda name, **_kw: {"name": name, "type_line": "Sorcery",
+                             "mana_cost": "{G}", "oracle_text": ""},
+    )
+    health = deck_health.compute_deck_health(_CONSISTENCY_DECK)
+    assert isinstance(health.get("consistency"), dict)
+    legacy = {k: v for k, v in health.items() if k != "consistency"}
+    # Every pre-wiring field equals the individually-computed signal --
+    # the aggregator added a key, it did not touch the others.
+    assert legacy == {
+        "mdfc": deck_health.count_mdfc_lands(_CONSISTENCY_DECK),
+        "spell_density": deck_health.compute_spell_density(_CONSISTENCY_DECK),
+        "mana_sinks": deck_health.count_mana_sinks(_CONSISTENCY_DECK),
+        "wincon_protection": deck_health.count_wincon_protection(
+            _CONSISTENCY_DECK),
+        "self_mill": deck_health.count_self_mill_enablers(_CONSISTENCY_DECK),
+        "role_targets": deck_health._role_targets_signal(_CONSISTENCY_DECK),
+    }
+    # The grade is identical whether or not the health dict carries the
+    # new key: consistency is reported, never graded.
+    with_key = deck_health.compute_health_grade(
+        _CONSISTENCY_DECK, health=health,
+    )
+    without_key = deck_health.compute_health_grade(
+        _CONSISTENCY_DECK, health=legacy,
+    )
+    assert with_key == without_key
 
 
 # ---------------------------------------------------------------------------

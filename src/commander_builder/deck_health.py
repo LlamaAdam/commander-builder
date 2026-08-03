@@ -20,10 +20,20 @@ deck-building gap analysis:
   - Self-mill enablement (Stitcher's Supplier / Satyr Wayfinder /
     Buried Alive / Hermit Druid -- the graveyard-FUEL side, distinct
     from the graveyard-PAYOFF side the theme detector already finds)
+  - Opening-hand consistency (2026-08 wiring of ``consistency.py`` --
+    keepable-opener / mulligan-rate / land-drop / commander-on-curve
+    probabilities from that module's seeded Monte Carlo). ADDITIVE
+    ONLY, by decision: the signal is REPORTED alongside the others but
+    deliberately NOT folded into ``compute_health_grade`` -- adding a
+    component (or reweighting an existing one) would silently re-grade
+    every deck the day the wiring landed, which is exactly the kind of
+    unattributable drift the grade's pinned calibration tests exist to
+    prevent. If it ever earns a grade weight, that goes in as its own
+    reviewed, test-repinned change.
 
 Single public entry: ``compute_deck_health(deck_text)``. Returns one
 dict the ``/api/audit`` endpoint inlines under ``deck_health``. The
-audit-panel UI renders four/five tiles from that dict.
+audit-panel UI renders one tile per top-level key.
 
 Architecture:
 
@@ -546,6 +556,75 @@ def count_mana_sinks(deck_text: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Consistency signal -- opening-hand math from consistency.py (2026-08)
+# ---------------------------------------------------------------------------
+
+#: Trial count for the consistency signal's seeded Monte Carlo. Smaller
+#: than ``consistency.DEFAULT_TRIALS`` (10k) because this runs inside a
+#: synchronous audit request: 2000 trials puts the standard error near
+#: 1.1pp at p=0.5, already below what a percent-formatted tile can
+#: display, at a fifth of the CPU cost.
+_CONSISTENCY_TRIALS = 2_000
+
+#: Fixed seed so the tile is deterministic: same deck text ⇒ identical
+#: numbers on every audit. The consistency module's own determinism
+#: contract (``random.Random(seed)`` only), honored at this call site.
+_CONSISTENCY_SEED = 0
+
+
+def consistency_signal(deck_text: str) -> Optional[dict]:
+    """Deck-health signal: opening-hand consistency via ``consistency.py``.
+
+    A compact projection of ``consistency.opening_hand_stats`` -- the
+    keepable-opener / mulligan / land-drop / commander-on-curve numbers
+    the audit panel's tile renders, quoted at that module's documented
+    default convention (on the play, the harsher read). The commander
+    comes from the deck's own ``[Commander]`` section; card data routes
+    through the same disk-cached ``_lookup_card_safe`` path as every
+    other Scryfall-typed signal here (it is ``opening_hand_stats``'s
+    default lookup).
+
+    Returns ``None`` under the standard outage contract (empty deck, or
+    a MAJORITY of card lines unresolved -- ``opening_hand_stats`` applies
+    the same majority-failure guard as ``compute_spell_density``), and
+    on any unexpected exception: an unavailable signal must degrade to
+    ``None``, never a fabricated 0.0 and never a traceback out of the
+    audit path. Below the outage threshold ``lookup_failures`` rides
+    along so the UI can annotate a pessimistically-biased reading.
+
+    ``p_commander_on_curve`` is independently ``None`` inside an
+    otherwise-available signal when the commander itself can't be
+    resolved (that module's per-metric contract).
+
+    ADDITIVE ONLY: reported alongside the other signals, deliberately
+    NOT an input to ``compute_health_grade`` -- see the module
+    docstring's consistency bullet for the re-grading rationale.
+    """
+    try:
+        from .consistency import opening_hand_stats
+        stats = opening_hand_stats(
+            deck_text, trials=_CONSISTENCY_TRIALS, seed=_CONSISTENCY_SEED,
+        )
+    except Exception:  # noqa: BLE001 -- degrade, never break the panel
+        return None
+    if stats is None:
+        return None
+    return {
+        "p_keepable_7": stats["p_keepable_7"],
+        "mulligan_rate": stats["mulligan_rate"],
+        "avg_lands_in_7": stats["avg_lands_in_7"],
+        "p_3_lands_by_t3": stats["p_3_lands_by_t3"],
+        "p_5_lands_by_t5": stats["p_5_lands_by_t5"],
+        "p_commander_on_curve": stats["p_commander_on_curve"],
+        "p_color_screw": stats["p_color_screw"],
+        "convention": stats["convention"],
+        "trials": stats["trials"],
+        "seed": stats["seed"],
+        "lookup_failures": stats["lookup_failures"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Aggregator -- the single public entry the audit route calls
 # ---------------------------------------------------------------------------
 
@@ -579,6 +658,11 @@ def compute_deck_health(deck_text: str) -> dict:
         # template minimums (ramp/draw/removal/wipe/protection). The
         # complement of the saturation guard, which flags excess.
         "role_targets": _role_targets_signal(deck_text),
+        # Opening-hand consistency (consistency.py, wired 2026-08).
+        # Schema-additive: a new reported key, NOT a grade input --
+        # compute_health_grade must keep ignoring it (see module
+        # docstring). None under the outage contract.
+        "consistency": consistency_signal(deck_text),
     }
 
 

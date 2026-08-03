@@ -6,6 +6,33 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-03 — Consistency signal wired into deck health + audit panel
+
+#### Added
+
+- **`feat(consistency)`: wire the orphaned `consistency.py` (built
+  2026-07-25 per REVIEW-2026-07-24 §2.1, previously zero importers)
+  into its intended consumers.** New
+  `deck_health.consistency_signal(deck_text)` — a compact projection of
+  `consistency.opening_hand_stats` (keepable-opener %, mulligan rate,
+  avg lands in 7, 3-by-t3 / 5-by-t5 land drops, commander-on-curve,
+  color screw; quoted on the play) at 2,000 trials / seed 0 so the
+  audit stays fast and deterministic; card data rides the same
+  disk-cached `_lookup_card_safe` path and the same majority-failure
+  outage contract (unavailable ⇒ `None`, never a fabricated 0.0) as
+  the other Scryfall-typed signals. Surfaced as a new `consistency` key
+  in `compute_deck_health` → the `/api/audit` `deck_health` payload →
+  a new "Consistency" tile in the deck-health panel (same tile markup +
+  sr-only state-text a11y conventions; explicit "unavailable" tile on
+  `None`, same as mana sinks). **ADDITIVE ONLY, by decision:** the
+  signal is reported alongside the existing ones and deliberately NOT
+  folded into `compute_health_grade` — a new grade component would
+  silently re-grade every deck; existing signals, scores, and grades
+  are byte-unchanged (pinned by test), and the payload change is
+  schema-additive per the FP-015 precedent (new key, existing keys
+  untouched). `consistency.py` moves from unwired to wired in
+  `docs/architecture.md`'s module table.
+
 ### 2026-08-01 — FP-015 per-swap validation harness (run pending)
 
 #### Added
