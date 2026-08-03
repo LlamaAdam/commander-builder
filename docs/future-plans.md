@@ -12,8 +12,12 @@
 
 # FP-015 — Unified per-card scoring formula (`CardScore`)
 
-**Status: IN PROGRESS — implemented on `feature/eval-fixes`,
-committed 2026-07-25 as `25c1a54`.** The spec below (2026-07-24) was
+**Status (2026-08-03): SHIPPED behind default-off flag; whole-ordering
+validation CONCLUDED (gate FAIL 2026-07-28 and 2026-07-31 — see the
+dated GATED RESULT sections); per-swap validation harness BUILT
+(PR #63) with its gated run IN FLIGHT — the flag's fate rides on that
+result. `COMMANDER_BUILDER_CARD_SCORE` remains default-off.**
+Original implementation note (2026-07-25): The spec below (2026-07-24) was
 implemented alongside the build-order items from
 `docs/archive/REVIEW-2026-07-24.md`: `card_score.py`
 (flag-gated, default off), `deck_legality.py`, `consistency.py`,
@@ -626,9 +630,13 @@ both cached and both currently unread) are all shipped and tested.
 
 # FP-002 (reframed) — curator margin regression
 
-**Status: REOPENED → first result in (2026-05-26) → n=45 gauntlet re-run
-(2026-07-23) → 80-pair gate CLEARED 2026-07-29 (see "Result 2026-07-29"
-below).**
+**Status: CLOSED — REFUTED (2026-07-30). Full chain: REOPENED →
+first result (2026-05-26) → n=45 re-run (2026-07-23) → 80-pair gate
+CLEARED (2026-07-29) → n=93 re-check refuted the sole surviving
+feature (2026-07-30, "Result 2026-07-30" below) → substrate probe at
+n=102 found no signal in theme clusters or CardScore components
+either (PR #58). Reopening requires a genuinely new regressor family,
+not more games.**
 
 ## Result 2026-07-29 — gate cleared; one stable feature survives
 
@@ -873,6 +881,12 @@ feature -> margin correlation (|r| desc):
 
 # FP-002 deck-generation plan — toward a real margin predictor
 
+**Status: COMPLETE and superseded (2026-08-03 note). The pool grew to
+79 premades / 50 minted pairs (PRs #46-#48) and the 80-pair gate
+cleared — then FP-002 itself closed refuted (see above), so no further
+pool growth is planned for this purpose. The premade pool remains in
+service for gauntlet soaks and validation runs.**
+
 **Goal (your call, 2026-05-26):** grow the soak deck set from ~13 unique
 commanders to **~80+ unique decks**, so the margin regression in
 `scripts/margin_analysis.py` has enough rows (the unit of analysis is the
@@ -944,10 +958,15 @@ is a curation choice (which 30 commanders) better made with you.
 
 # FP-012 — budget-bounded UCB1 swap search in the improve loop (full slice)
 
-**Status: SHIPPED 2026-07-24 (code + tests); empirical validation
-PENDING post-soak.** The full-slice search deliberately shipped without
-a live Forge shakedown — the gauntlet soak owns the CPU — so the design
-below is unit-verified against injected sims only. Post-soak, run a
+**Status: SHIPPED 2026-07-24 (code + tests); forge_py screening gate
+added (PR #50); empirical shakedown COMPLETE 2026-08-02/03 — the
+screen engaged live (4 candidates → kept 2 / pruned 2, scores logged),
+Forge judged the survivors, and the verdict machinery correctly
+reverted a swap that lost 47%→40% (knowledge-log iteration #33).
+End-to-end validated; screening halves Forge spend per search round.**
+Original shipping note: the full-slice search deliberately shipped without
+a live Forge shakedown — the gauntlet soak owned the CPU — so the design
+below was unit-verified against injected sims only. Post-soak, run a
 real `--search-budget` improve round and compare against a plain greedy
 round before trusting it with overnight budgets.
 
@@ -1065,8 +1084,11 @@ duplicated.
 
 # FP-014 — Build-from-scratch deck assembly
 
-**Status: SHIPPED — first cut (2026-07-21, `feature/fp014-build-from-scratch`,
-unmerged pending PR).** Four commits (`76f1ca7` core assembler + the
+**Status: SHIPPED and MERGED (first cut PR #14, 2026-07-21; second cut
+2026-07-27 — partner-pair support + full Karsten per-CMC manabase;
+corpus-norms steering added 2026-07-31 behind
+`COMMANDER_BUILDER_CORPUS_NORMS`, empirical A/B of that flag still
+pending).** Original first-cut note: four commits (`76f1ca7` core assembler + the
 `commander-build` CLI, `d02fc62` color-source manabase, `dd818b1`
 lift/bracket/collection personalization, `545b2db` web `POST /api/build_deck`
 + `GET /api/build_job/<id>` + a "Build from scratch" tab + a
@@ -1263,7 +1285,7 @@ read-once per build; `deck_pricing` single deck walk.
 
 # FP-016 — Replay-lite: turn-by-turn game replays from Forge's own logs
 
-**Status: SHIPPED (2026-07-30) — slices 1–3 + docs.** Turn-by-turn game
+**Status: SHIPPED (merged 2026-08-01, PR #59) — slices 1–3 + docs.** Turn-by-turn game
 review built on the sim stdout Forge ALREADY emits, not on `forge_py`
 game state. This partially unparks FP-007 slice 5: it covers the
 practical 80% (what happened each turn, who lost when and why, who won)
