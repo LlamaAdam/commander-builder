@@ -38,14 +38,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Opt all JavaScript actions into the Node 24 runtime. GitHub is
-# removing Node 20 from runners on 2026-09-16; until ``actions/checkout``
-# and ``actions/setup-python`` ship versions that target Node 24
-# natively, this env var keeps us on the supported runtime without
-# a deprecation warning on every run. See AGENT_BACKLOG #005's
-# ``new_during_work`` notes.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+# Action majors are pinned to the Node 24-native releases
+# (checkout@v5, setup-python@v6). The interim
+# ``FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`` env override (used while the
+# Node-20-era majors were the latest) is gone: forcing Node 24 onto
+# v4/v5 actions is what emitted the "Node.js 20 is deprecated ...
+# forced to run on Node.js 24" annotation on every run.
 
 jobs:
   test:
@@ -56,10 +54,10 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -92,7 +90,7 @@ jobs:
     # (dependency resolution).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Scan all tracked files for secrets
         # --all enumerates via `git ls-files -z`, so only committed

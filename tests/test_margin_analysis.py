@@ -2,9 +2,14 @@
 regression (regress curator improvement margin on deck features).
 
 Pure-logic tests: row aggregation, Pearson, verdict banding, and the
-deck-file join. No Forge, no network, no card DB (deck_health degrades
-to zeros offline, which is fine -- we test the join + stats, not the
-specific health numbers).
+deck-file join. No Forge, no network, no card DB -- we test the join +
+stats, not the specific health numbers, so an autouse fixture pins
+``compute_deck_health`` to a deterministic stub. The REAL function
+resolves card types through ``scryfall_client.lookup_card``, which
+consults the live network plus mutable cross-run state (the shared
+disk snapshot dir and a process-wide memo), so two ``main()`` calls in
+one test could resolve differently -- the PR #63 CI flake in
+``test_default_features_output_is_byte_identical``.
 """
 from __future__ import annotations
 
@@ -15,6 +20,55 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import margin_analysis as ma  # noqa: E402
+
+
+# A fully-RESOLVED deck-health shape covering every key deck_features
+# reads. Constant across decks on purpose: these tests assert on the
+# join + stats, never on real health numbers.
+_HEALTH_STUB = {
+    "spell_density": {"non_permanent_count": 3, "total_main_count": 11,
+                      "ratio": 3 / 11, "lookup_failures": 0},
+    "mana_sinks": {"count": 2},
+    "wincon_protection": {"count": 1},
+    "self_mill": {"count": 0},
+    "mdfc": {"count": 1},
+    "role_targets": {
+        "roles": {"ramp": {"count": 1, "target": 10, "base_target": 10,
+                           "commander_credit": 0, "deficit": 9},
+                  "draw": {"count": 0, "target": 8, "base_target": 8,
+                           "commander_credit": 0, "deficit": 8}},
+        "under_built": ["ramp", "draw"],
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_deck_health(monkeypatch):
+    """Pin ``compute_deck_health`` to a pure deterministic stub.
+
+    ``deck_features`` resolves the function from the module at call time
+    (``from commander_builder.deck_health import compute_deck_health``
+    inside the function body), so patching the module attribute is the
+    established seam -- same pattern as the ``score_deck`` /
+    ``assign_cluster`` stubs used elsewhere in this file.
+
+    Why autouse: the real function type-classifies cards through
+    ``scryfall_client.lookup_card`` -- live network plus two layers of
+    cross-run mutable state (the shared disk snapshot dir and the
+    process-wide lookup memo, which persists ACROSS the multiple
+    ``main()`` calls inside one test). On CI that made
+    ``test_default_features_output_is_byte_identical`` flake: a
+    transient lookup failure degraded one deck's features in run 1
+    while run 2 resolved from the freshly warmed memo/disk cache, so
+    the two runs' bytes differed. Stubbing the seam makes every test in
+    this file offline-deterministic by construction; the byte-identical
+    assertion itself (the --features flag-off contract) is unchanged.
+    """
+    import copy
+
+    from commander_builder import deck_health as _dh
+    monkeypatch.setattr(_dh, "compute_deck_health",
+                        lambda deck_text: copy.deepcopy(_HEALTH_STUB))
 
 
 def _row(a, b, games, wa, wb, status="done"):
