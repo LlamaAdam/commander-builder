@@ -246,6 +246,17 @@ def test_replays_js_wired_and_served(client):
     assert "/api/replay/" in js
 
 
+def test_replays_js_joins_seats_by_seat_number(client):
+    # Review vs f35ac27, finding 4: the seat header used to zip
+    # meta.decks with the players array by POSITION — a seat absent from
+    # a partial log shifted every later label onto the wrong deck. The
+    # join must key off the player's real ``seat`` number (meta.decks is
+    # positional in seat order: seat N = decks[N-1]).
+    js = client.get("/static/replays.js").data.decode("utf-8")
+    assert "playerBySeat" in js
+    assert "players[i]" not in js
+
+
 def test_nav_js_knows_replays_section(client):
     js = client.get("/static/nav.js").data.decode("utf-8")
     assert '"replays"' in js

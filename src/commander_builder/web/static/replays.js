@@ -179,11 +179,30 @@
     wrap.appendChild(el("h2", { style: "margin-top:0;" },
       ["Replay — game " + game]));
 
-    // Seats / decks header.
+    // Seats / decks header. meta.decks is positional in SEAT order (seat
+    // N = decks[N-1]) while players carry their real 1-based seat numbers
+    // from the parsed log — and a seat can be absent from a partial log
+    // entirely. Join by seat number, never by array position: a positional
+    // zip shifts every label after a missing seat onto the wrong deck.
     const seatList = el("ul", { class: "replay-seats" }, []);
-    (meta.decks || players.map((p) => p.name)).forEach((d, i) => {
-      const p = players[i];
-      const bits = ["Seat " + (i + 1) + ": " + fmtDeck(d)];
+    const playerBySeat = {};
+    players.forEach((p) => {
+      if (p && p.seat != null) playerBySeat[p.seat] = p;
+    });
+    const decks = meta.decks || [];
+    const seats = decks.map(function (_d, i) { return i + 1; });
+    players.forEach((p) => {
+      if (p && p.seat != null && seats.indexOf(p.seat) === -1) {
+        seats.push(p.seat);
+      }
+    });
+    seats.sort((a, b) => a - b);
+    seats.forEach((seat) => {
+      const p = playerBySeat[seat];
+      const deckName = decks[seat - 1] != null
+        ? decks[seat - 1]
+        : (p ? p.name : "?");
+      const bits = ["Seat " + seat + ": " + fmtDeck(deckName)];
       if (p && p.eliminated) {
         bits.push(" — eliminated (" + (p.loss_reason || "unknown reason") + ")");
       } else if (p && p.ending_life != null) {
