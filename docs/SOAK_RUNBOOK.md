@@ -172,3 +172,11 @@ Get-CimInstance Win32_Process -Filter "name='python.exe'" |
   ? { $_.CommandLine -like '*soak_pool*' } | % { Stop-Process -Id $_.ProcessId -Force }
 Get-Process java -ErrorAction SilentlyContinue | Stop-Process -Force
 ```
+
+## Hung-loop rows
+
+`loop_unattributed` rows (and pre-2026-07-24 rows marked `done` with a
+"loop at game N" error) are a known, benign censoring mode — see
+[docs/loop-rate-investigation-2026-08.md](loop-rate-investigation-2026-08.md)
+for the two-marker fold, rates, and how to inspect individual hung games
+via replay capture.
