@@ -30,6 +30,7 @@ stub in tests; nothing here talks to Scryfall directly.
 from __future__ import annotations
 
 import gzip
+import http.client
 import json
 import shutil
 import sys
@@ -37,6 +38,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -206,6 +208,9 @@ def bulk_refresh(
     retry budget degrades loudly (stderr line + ``status="http_error"``
     in its result) and the run CONTINUES with the next card — a long
     ``--all --write`` pass must never die mid-run to one 429.
+    Network-level failures below HTTP (DNS blip, connection reset —
+    ``URLError``/``OSError``/``http.client.HTTPException``) get the same
+    containment with ``status="network_error"``.
 
     Returns a summary ``{checked, changed, refreshed, skipped, errors,
     results}`` where ``results`` is the per-card ``check_errata`` dict
@@ -241,8 +246,24 @@ def bulk_refresh(
             )
             res = {"name": name, "status": "http_error", "changed": False,
                    "error": f"HTTP {exc.code}"}
+        except (OSError, http.client.HTTPException) as exc:
+            # Network-level failure below HTTP: DNS blip, connection
+            # reset, TLS hiccup (URLError is an OSError subclass;
+            # RemoteDisconnected is both). _call_with_retry deliberately
+            # propagates these (no point backing off a dead network), but
+            # ONE flaky card must not kill a long --all --write pass —
+            # the same "never raises" contract as the 429 path above.
+            print(
+                f"[oracle] giving up on {name!r}: "
+                f"{type(exc).__name__}: {exc} — continuing with the "
+                f"next card",
+                file=sys.stderr, flush=True,
+            )
+            res = {"name": name, "status": "network_error",
+                   "changed": False,
+                   "error": f"{type(exc).__name__}: {exc}"}
         if res["status"] in ("not_cached", "corrupt", "upstream_404",
-                             "http_error"):
+                             "http_error", "network_error"):
             errors += 1
         if res.get("changed"):
             changed += 1
@@ -291,6 +312,12 @@ BULK_FRESH_DAYS = 7.0
 # ``.part`` temp files from a killed download.
 _BULK_FILE_GLOBS = ("oracle-cards-*.jsonl.gz", "oracle-cards-*.json")
 
+#: A ``*.part`` temp file older than this is an interrupted download
+#: (the full ~150MB stream takes minutes, not hours) and gets cleaned
+#: up on the next bulk-file scan. Younger ones are left alone — they
+#: may belong to a download in progress in another process.
+_PART_STALE_SEC = 6 * 3600.0
+
 
 def bulk_data_dir() -> Path:
     """Directory the bulk oracle-cards file downloads into.
@@ -306,10 +333,22 @@ def bulk_data_dir() -> Path:
 def find_fresh_bulk_file(max_age_days: float = BULK_FRESH_DAYS) -> Optional[Path]:
     """Newest local bulk file (``oracle-cards-*.jsonl.gz`` or the legacy
     ``oracle-cards-*.json``) younger than ``max_age_days``, or ``None``
-    when there isn't one (missing dir, no files, all stale)."""
+    when there isn't one (missing dir, no files, all stale).
+
+    Also sweeps stale ``*.part`` temp files left by interrupted
+    downloads (older than ``_PART_STALE_SEC``) — they're never
+    reusable, and letting them pile up in the bulk dir invites someone
+    to mistake one for a real export."""
     d = bulk_data_dir()
     if not d.is_dir():
         return None
+    now = time.time()
+    for part in d.glob("*.part"):
+        try:
+            if now - part.stat().st_mtime > _PART_STALE_SEC:
+                part.unlink()
+        except OSError:
+            pass  # another process may have grabbed/removed it; harmless
     best: Optional[Path] = None
     best_mtime = 0.0
     for pattern in _BULK_FILE_GLOBS:
@@ -406,6 +445,18 @@ def download_bulk_oracle(
     return dest
 
 
+class BulkFileCorruptError(RuntimeError):
+    """A local bulk file failed to decompress or parse.
+
+    ``find_fresh_bulk_file`` reuses any <``BULK_FRESH_DAYS``-day bulk
+    file with no content validation, so a corrupt/truncated cached copy
+    would otherwise surface as a raw ``gzip``/``json`` traceback on
+    every run for a week (unless the operator knows ``--force-bulk``).
+    A dedicated type lets the CLI quarantine the bad file and print a
+    recovery hint instead.
+    """
+
+
 def _load_bulk_cards(bulk_path: Path) -> list[dict]:
     """Parse a local bulk file into a list of card dicts.
 
@@ -413,27 +464,35 @@ def _load_bulk_cards(bulk_path: Path) -> list[dict]:
     gzip-compressed, one card object per line; decompressed as a stream,
     never fully in memory as text) and ``.jsonl`` parse per line; anything
     else is the legacy plain JSON array. Non-dict entries and blank lines
-    are dropped. Raises ``RuntimeError`` on a plain file that isn't an
-    array, ``ValueError``/``OSError`` propagate for corrupt payloads.
+    are dropped. Raises ``BulkFileCorruptError`` (a ``RuntimeError``)
+    when the file won't decompress/parse or a plain file isn't an array.
     """
     p = Path(bulk_path)
     lower = p.name.lower()
-    if lower.endswith(".jsonl.gz") or lower.endswith(".jsonl"):
-        opener = gzip.open if lower.endswith(".gz") else open
-        cards: list[dict] = []
-        with opener(p, "rt", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    cards.append(obj)
-        return cards
-    with open(p, encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        if lower.endswith(".jsonl.gz") or lower.endswith(".jsonl"):
+            opener = gzip.open if lower.endswith(".gz") else open
+            cards: list[dict] = []
+            with opener(p, "rt", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        cards.append(obj)
+            return cards
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (ValueError, EOFError, OSError, zlib.error) as exc:
+        # ValueError: bad JSON / UnicodeDecodeError; EOFError: truncated
+        # gzip stream; OSError: gzip.BadGzipFile (bad magic) and read
+        # errors; zlib.error: mid-stream decompression corruption.
+        raise BulkFileCorruptError(
+            f"failed to read bulk file {p}: "
+            f"{type(exc).__name__}: {exc}") from exc
     if not isinstance(data, list):
-        raise RuntimeError(f"bulk file is not a JSON array: {bulk_path}")
+        raise BulkFileCorruptError(f"bulk file is not a JSON array: {bulk_path}")
     return [c for c in data if isinstance(c, dict)]
 
 
@@ -506,7 +565,10 @@ def write_snapshots_from_bulk(
       not fatal.
     - ``everything=True``: ignore ``names`` and write ALL cards (~35k
       files) — each under its full-name slug, multi-face cards also under
-      their front-face slug so deck-file names hit.
+      their front-face slug, and any name whose diacritic-folded form
+      slugs differently (``Lim-Dûl's Vault`` → ``lim_dul_s_vault``) also
+      under that folded slug — so deck-file names hit, exactly as they
+      do on the ``names`` path (which writes under the requested name).
 
     Returns ``{"written": int, "missing": [str, ...], "targets": int}``.
     """
@@ -530,12 +592,24 @@ def write_snapshots_from_bulk(
             if not (isinstance(name, str) and name.strip()):
                 continue
             targets += 1
-            _write(name, card)
-            written += 1
+            # Alias set: full name, front-face name (DFC / split /
+            # adventure — deck files name those by the front face), and
+            # the diacritic-folded form of each (deck files say
+            # "Lim-Dul's Vault"; the canonical name is "Lim-Dûl's
+            # Vault", which slugs differently). Dedupe by cache path so
+            # each distinct file is written (and counted) once.
+            aliases = [name]
             front = _front_face_name(card)
-            if front and (scryfall_client._cache_path(front)
-                          != scryfall_client._cache_path(name)):
-                _write(front, card)
+            if front:
+                aliases.append(front)
+            aliases.extend(_fold_name(a) for a in list(aliases))
+            seen_paths: set[Path] = set()
+            for alias in aliases:
+                path = scryfall_client._cache_path(alias)
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                _write(alias, card)
                 written += 1
     else:
         index = _bulk_name_index(cards)
@@ -602,10 +676,27 @@ def _main_from_bulk(args, names: Optional[list[str]]) -> int:
               flush=True)
         return 2
 
-    summary = write_snapshots_from_bulk(
-        names, bulk_path=bulk_path,
-        everything=bool(args.everything),
-    )
+    try:
+        summary = write_snapshots_from_bulk(
+            names, bulk_path=bulk_path,
+            everything=bool(args.everything),
+        )
+    except BulkFileCorruptError as exc:
+        # A corrupt/truncated cached bulk file would otherwise be reused
+        # (and traceback) for BULK_FRESH_DAYS. Quarantine it so the next
+        # run re-downloads, and tell the operator exactly that.
+        moved = ""
+        corrupt = bulk_path.with_name(bulk_path.name + ".corrupt")
+        try:
+            bulk_path.replace(corrupt)
+            moved = f" (moved aside to {corrupt})"
+        except OSError:
+            pass
+        print(f"ERROR: bulk file appears corrupt or truncated{moved}: "
+              f"{exc}", flush=True)
+        print("Re-run the command to download a fresh copy "
+              "(or pass --force-bulk).", flush=True)
+        return 2
     summary["bulk_file"] = str(bulk_path)
 
     if args.json:
@@ -651,7 +742,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Rewrite the snapshot for any drifted card "
                         "(default: report only). Implied by --from-bulk.")
     p.add_argument("--stale-days", type=float, default=None, metavar="N",
-                   help="Skip snapshots younger than N days.")
+                   help="Skip snapshots younger than N days. Ignored "
+                        "under --from-bulk, which always rewrites every "
+                        "target from the bulk file (freshness there is "
+                        "governed by the bulk file's own age; see "
+                        "--force-bulk).")
     p.add_argument("--from-bulk", action="store_true",
                    help="Populate snapshots from Scryfall's oracle_cards "
                         "bulk export (ONE ~150MB rate-limit-exempt GET) "

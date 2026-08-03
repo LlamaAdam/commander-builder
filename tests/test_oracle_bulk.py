@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import email.message
 import gzip
+import http.client
 import io
 import json
 import os
@@ -198,6 +199,27 @@ def test_download_ignores_leftover_part_files_for_freshness(cache_dir):
     assert dest.name == f"oracle-cards-{time.strftime('%Y%m%d')}.jsonl.gz"
 
 
+def test_scan_sweeps_stale_part_files_keeps_recent_ones(cache_dir):
+    """Interrupted downloads leave *.part files behind; the freshness
+    scan cleans up stale ones. A RECENT .part may belong to a download
+    in progress in another process and is left alone."""
+    d = oracle_store.bulk_data_dir()
+    d.mkdir(parents=True)
+    real = d / "oracle-cards-20990101.jsonl.gz"
+    real.write_bytes(b"whatever")
+    stale_part = d / "oracle-cards-20200101.jsonl.gz.part"
+    stale_part.write_bytes(b"partial")
+    old = time.time() - oracle_store._PART_STALE_SEC - 60
+    os.utime(stale_part, (old, old))
+    live_part = d / "oracle-cards-20990102.jsonl.gz.part"
+    live_part.write_bytes(b"streaming")
+
+    found = oracle_store.find_fresh_bulk_file()
+    assert found == real
+    assert not stale_part.exists()   # swept
+    assert live_part.exists()        # in-progress download untouched
+
+
 def test_download_redownloads_when_local_copy_stale(cache_dir):
     d = oracle_store.bulk_data_dir()
     d.mkdir(parents=True)
@@ -272,6 +294,28 @@ def test_load_bulk_cards_plain_json_non_array_raises(tmp_path):
     p = tmp_path / "b.json"
     p.write_text("{}", encoding="utf-8")
     with pytest.raises(RuntimeError, match="not a JSON array"):
+        oracle_store._load_bulk_cards(p)
+
+
+def test_load_bulk_cards_garbage_gz_raises_corrupt_error(tmp_path):
+    p = tmp_path / "b.jsonl.gz"
+    p.write_bytes(b"this is not gzip data at all")
+    with pytest.raises(oracle_store.BulkFileCorruptError):
+        oracle_store._load_bulk_cards(p)
+
+
+def test_load_bulk_cards_truncated_gz_raises_corrupt_error(tmp_path):
+    whole = _gz_jsonl([SOL_RING, CULTIVATE, DELVER])
+    p = tmp_path / "b.jsonl.gz"
+    p.write_bytes(whole[: len(whole) // 2])  # killed download / bad disk
+    with pytest.raises(oracle_store.BulkFileCorruptError):
+        oracle_store._load_bulk_cards(p)
+
+
+def test_load_bulk_cards_bad_json_raises_corrupt_error(tmp_path):
+    p = tmp_path / "b.json"
+    p.write_text('[{"name": "Sol R', encoding="utf-8")  # truncated JSON
+    with pytest.raises(oracle_store.BulkFileCorruptError):
         oracle_store._load_bulk_cards(p)
 
 
@@ -362,6 +406,22 @@ def test_write_snapshots_everything_writes_all_plus_face_alias(
     assert scryfall_client.lookup_card("Delver of Secrets", cache_only=True)
     assert scryfall_client.lookup_card(
         "Delver of Secrets // Insectile Aberration", cache_only=True)
+
+
+def test_write_snapshots_everything_writes_folded_alias(cache_dir, tmp_path):
+    """--everything must leave the store as usable as a names-path build:
+    deck files spell it Lim-Dul's Vault (folded slug lim_dul_s_vault),
+    but the canonical name slugs to lim_d_l_s_vault — without the folded
+    alias those decks still miss offline after a full build."""
+    vault = {"name": "Lim-Dûl's Vault", "oracle_text": "..."}
+    bulk = _write_bulk(tmp_path, [vault])
+    summary = oracle_store.write_snapshots_from_bulk(
+        None, bulk_path=bulk, everything=True)
+    # Canonical slug + folded alias slug = 2 files.
+    assert summary["written"] == 2
+    card = scryfall_client.lookup_card("Lim-Dul's Vault", cache_only=True)
+    assert card is not None and card["name"] == "Lim-Dûl's Vault"
+    assert scryfall_client.lookup_card("Lim-Dûl's Vault", cache_only=True)
 
 
 def test_bulk_name_index_full_name_beats_face_name():
@@ -496,6 +556,37 @@ def test_bulk_refresh_survives_persistent_429(cache_dir, monkeypatch, capsys):
     assert by_name["B"]["status"] == "ok"
     err = capsys.readouterr().err
     assert "giving up on 'A'" in err and "HTTP 429" in err
+
+
+@pytest.mark.parametrize("exc", [
+    urllib.error.URLError("dns blip"),          # below-HTTP network failure
+    ConnectionResetError("peer reset"),         # plain OSError subclass
+    http.client.HTTPException("bad status line"),
+])
+def test_bulk_refresh_survives_network_error_mid_pass(
+        cache_dir, monkeypatch, capsys, exc):
+    """A URLError (DNS blip, connection reset) is NOT an HTTPError — before
+    the fix it propagated straight through bulk_refresh's per-card
+    containment and killed a long --all --write pass mid-run."""
+    _snapshot("A", "old-a")
+    _snapshot("B", "old-b")
+
+    def flaky_network(name, cache=True):
+        if name == "A":
+            raise exc
+        return {"name": name, "oracle_text": "old-b"}
+
+    monkeypatch.setattr(scryfall_client, "lookup_card", flaky_network)
+    summary = oracle_store.bulk_refresh(["A", "B"], sleep=lambda s: None)
+    # A degraded loudly; the run CONTINUED and still checked B.
+    assert summary["checked"] == 2
+    assert summary["errors"] == 1
+    by_name = {r["name"]: r for r in summary["results"]}
+    assert by_name["A"]["status"] == "network_error"
+    assert type(exc).__name__ in by_name["A"]["error"]
+    assert by_name["B"]["status"] == "ok"
+    err = capsys.readouterr().err
+    assert "giving up on 'A'" in err and "continuing" in err
 
 
 def test_bulk_refresh_recovers_after_transient_429(cache_dir, monkeypatch):
@@ -654,3 +745,21 @@ def test_cli_from_bulk_download_failure_degrades_to_rc2(
     rc = oracle_store.main(["--from-bulk", "--name", "Sol Ring"])
     assert rc == 2
     assert "bulk download failed" in capsys.readouterr().out
+
+
+def test_cli_from_bulk_corrupt_cached_file_quarantined_rc2(
+        cache_dir, tmp_path, monkeypatch, capsys):
+    """A corrupt/truncated cached bulk file must NOT traceback (or keep
+    being reused for a week): friendly message, file renamed *.corrupt
+    so the next run re-downloads, nonzero exit."""
+    bulk = tmp_path / "oracle-cards-20260801.jsonl.gz"
+    bulk.write_bytes(b"garbage, not gzip")
+    monkeypatch.setattr(oracle_store, "download_bulk_oracle",
+                        lambda *, force=False: bulk)
+    rc = oracle_store.main(["--from-bulk", "--name", "Sol Ring"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "corrupt or truncated" in out
+    assert "Re-run" in out
+    assert not bulk.exists()  # quarantined away from the freshness scan
+    assert (tmp_path / "oracle-cards-20260801.jsonl.gz.corrupt").exists()
