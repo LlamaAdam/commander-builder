@@ -114,6 +114,10 @@ _EMPTY_DECK_HEALTH = {
     "wincon_protection": {"count": 0, "cards": []},
     "self_mill": {"count": 0, "cards": []},
     "role_targets": {"roles": {}, "under_built": []},
+    # Consistency's unavailable shape IS None (the outage contract, same
+    # as spell_density/mana_sinks when their lookups fail) -- the UI
+    # renders an explicit "unavailable" tile for it.
+    "consistency": None,
 }
 
 

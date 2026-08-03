@@ -8,7 +8,7 @@
 //
 // Exposes:
 //   renderDeckHealthTiles(health, grade)
-//                                 — 5-tile row from /api/audit's
+//                                 — tile row from /api/audit's
 //                                   deck_health block; when a
 //                                   health_grade payload is passed,
 //                                   the row is wrapped with the
@@ -29,6 +29,8 @@
 //   Mana sinks               — X-cost spells for late-game flood
 //   Wincon protection        — Silence / Veil / Grand Abolisher class
 //   Self-mill enablement     — Stitcher's Supplier / Satyr Wayfinder
+//   Consistency              — keepable-opener % from consistency.py's
+//                              seeded opening-hand simulation
 //
 // Each tile shows a count + label and surfaces the contributing card
 // names in a hover tooltip. Tiles with zero entries render dimmed so
@@ -194,6 +196,57 @@ function renderDeckHealthTiles(health, grade) {
           : (under.length === 0 ? "good"
           : (under.length <= 2 ? "neutral" : "warn")),
   }));
+
+  // Consistency tile (2026-08 wiring of consistency.py). DISPLAY-ONLY:
+  // this signal is deliberately not folded into the letter grade (see
+  // deck_health.consistency_signal), so nothing here can shift a grade.
+  // Three states, mirroring the mana-sinks tile's null handling:
+  //   * key absent (legacy server payload) — render nothing, so old
+  //     payloads keep their exact pre-wiring row;
+  //   * null — the outage contract (empty deck or majority of card
+  //     lookups failed): explicit "unavailable" tile, never a
+  //     confident-looking 0%;
+  //   * dict — keepable-opener headline + mulligan-rate subline, full
+  //     profile in the tooltip.
+  const cs = health.consistency;
+  if (cs === null) {
+    row.appendChild(renderHealthTile({
+      label: "Consistency",
+      value: "—",
+      tooltip: "Consistency signal unavailable (empty deck or card data "
+        + "could not be resolved for a majority of its lines).",
+      flavor: "muted",
+    }));
+  } else if (cs !== undefined) {
+    const csPct = (p) => (p == null ? "unavailable" : `${Math.round(p * 100)}%`);
+    const csMisses = cs.lookup_failures || 0;
+    row.appendChild(renderHealthTile({
+      label: "Consistency",
+      value: csPct(cs.p_keepable_7),
+      sub: `mulligan ${csPct(cs.mulligan_rate)}`,
+      tooltip: `Opening-hand consistency (seeded simulation, `
+        + `${cs.trials} trials, quoted on the play — the harsher read):\n`
+        + `Keepable 7 (2-5 lands): ${csPct(cs.p_keepable_7)}\n`
+        + `Mulligan rate: ${csPct(cs.mulligan_rate)}\n`
+        + `Avg lands in opening 7: ${(cs.avg_lands_in_7 || 0).toFixed(2)}\n`
+        + `3 lands by turn 3: ${csPct(cs.p_3_lands_by_t3)}\n`
+        + `5 lands by turn 5: ${csPct(cs.p_5_lands_by_t5)}\n`
+        + `Commander on curve: ${csPct(cs.p_commander_on_curve)}\n`
+        + `Color screw by turn 3: ${csPct(cs.p_color_screw)}\n\n`
+        + `Ramp is not modelled, so the commander and land figures are `
+        + `floors, not estimates.`
+        + (csMisses
+          ? `\n\n${csMisses} card lookup${csMisses === 1 ? "" : "s"} failed — `
+            + `unresolved cards simulate as non-lands, so these numbers `
+            + `read low.`
+          : ""),
+      // Display-only thresholds: a healthy 36-38 land Commander deck
+      // keeps ~80-90% of its openers under the 2-5 land rule; under
+      // ~65% the deck is mulling more than a third of its games.
+      flavor: cs.p_keepable_7 >= 0.8 ? "good"
+            : (cs.p_keepable_7 >= 0.65 ? "neutral" : "warn"),
+    }));
+  }
 
   // Grade header wrap: keep the bare-row return for legacy payloads so
   // older servers (no health_grade field) render byte-identically.

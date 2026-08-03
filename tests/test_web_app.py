@@ -396,6 +396,29 @@ def test_static_js_serves(client):
         resp.close()
 
 
+def test_static_deck_health_ui_has_consistency_tile(client):
+    """The tile renderer ships the Consistency tile (2026-08 wiring of
+    consistency.py): reads the payload's ``consistency`` key, renders
+    an explicit unavailable state on the None outage shape (same
+    convention as the mana-sinks tile), and quotes the keepable-opener
+    headline. The warn/good sr-only state text comes free from
+    renderHealthTile, which test_static_css_has_a11y_rules pins the
+    .sr-only utility for."""
+    resp = client.get("/static/deck_health_ui.js")
+    try:
+        assert resp.status_code == 200
+        js = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    assert "health.consistency" in js
+    assert js.count('label: "Consistency"') == 2  # unavailable + data tiles
+    assert "Consistency signal unavailable" in js
+    assert "p_keepable_7" in js
+    assert "mulligan_rate" in js
+    # The grade must not read this tile: display-only by decision.
+    assert "not folded into the letter grade" in js
+
+
 def test_health_reports_ok_and_deck_count(client):
     resp = client.get("/api/health")
     assert resp.status_code == 200
@@ -3484,10 +3507,10 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     body = resp.get_json()
     health = body.get("deck_health")
     assert health is not None
-    # All 5 top-level keys present (UI tile renderer needs each).
+    # All top-level keys present (UI tile renderer needs each).
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill", "role_targets",
+        "wincon_protection", "self_mill", "role_targets", "consistency",
     }
     # Named-card signals picked up correctly.
     assert health["mdfc"]["count"] == 1
@@ -3496,6 +3519,17 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     assert "Silence" in health["wincon_protection"]["cards"]
     assert health["self_mill"]["count"] == 1
     assert "Stitcher's Supplier" in health["self_mill"]["cards"]
+    # Consistency signal (2026-08 wiring): computed, well-shaped, and
+    # carrying the probabilities the tile renders. 35 cards / 32 lands
+    # means nearly every opening 7 holds 2+ lands, so the keepable
+    # probability is high -- but the exact-value math is pinned by
+    # test_deck_health / test_consistency; here we pin the plumbing.
+    cons = health["consistency"]
+    assert cons is not None
+    for key in ("p_keepable_7", "mulligan_rate", "p_3_lands_by_t3",
+                "p_5_lands_by_t5", "p_color_screw"):
+        assert 0.0 <= cons[key] <= 1.0, key
+    assert cons["convention"] == "on_play"
     # Combo/bracket assessment present + well-shaped (this deck has no
     # infinite combos, so it's clean + within bracket).
     combo = body.get("combo_assessment")
@@ -3538,12 +3572,20 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     # Still has all keys (UI needs them).
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
-        "wincon_protection", "self_mill", "role_targets",
+        "wincon_protection", "self_mill", "role_targets", "consistency",
     }
     # Scryfall-dependent signals honor the outage contract: None, not
     # a fabricated zero. The UI renders these as "unavailable" tiles.
     assert health["mana_sinks"] is None
     assert health["spell_density"] is None
+    # Consistency is MORE outage-tolerant than the type-based signals:
+    # basic lands never need Scryfall (staples.is_basic_land
+    # short-circuits), so this 35-Forest deck stays below the
+    # majority-failure threshold -- the signal computes from the basics,
+    # simulates the 5 unresolved Cultivates pessimistically as
+    # non-lands, and surfaces the misses for the tile's annotation.
+    assert health["consistency"] is not None
+    assert health["consistency"]["lookup_failures"] == 5
 
 
 def test_audit_endpoint_surfaces_health_grade(
