@@ -601,6 +601,13 @@ FP-007 slice 5 stays parked (with FP-001) for that. See FP-016 in
 
 For older decisions see [docs/architecture.md](architecture.md#key-decisions).
 
+- **2026-08-03 — Hung-loop rate investigation CLOSED: cross-box
+  contention NOT DETECTED** (deliberately not "refuted"). Loop rows
+  carry two writer-vintage markers that must both be folded; the
+  post-07-24 rate jump is measurement honesty from `d07409e`, and
+  censoring is benign. Full record:
+  [docs/loop-rate-investigation-2026-08.md](loop-rate-investigation-2026-08.md).
+
 - **2026-05-14 — Synthetic test text is insufficient.** The chrome-
   audit follow-up caught 9 classifier bugs that all passed
   hand-written unit tests because the synthetic oracle text happened
