@@ -76,6 +76,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Versioned like lift_matrix.v1.json — bumping the suffix orphans stale
 # artifacts instead of migrating them. data/ (repo root) is the derived-
 # data landing zone; the dir is created on first write.
+#
+# NOTE (2026-08): the ``_facts`` counting fixes (voltron no longer
+# double-counts Equipment; DFC subtype parsing is per-face and deduped)
+# shift cluster assignment for some decks — regenerating an existing
+# artifact with ``commander-corpus-themes`` is recommended so the stored
+# norms reflect the corrected counts.
 DEFAULT_NORMS_PATH = REPO_ROOT / "data" / "corpus_theme_norms.v1.json"
 
 # Same shape as COMMANDER_BUILDER_CARD_SCORE (FP-015): the builder
@@ -346,17 +352,37 @@ def _facts(entries, lookup, commander_keys: Optional[set[str]] = None) -> dict:
                 curve[bucket] += qty
         if "creature" in type_line:
             # Subtypes follow the em-dash: "Creature — Goblin Warrior".
-            for part in re.split(r"[—-]", card.get("type_line") or "", 1)[1:]:
-                for subtype in part.replace("//", " ").split():
-                    if subtype[:1].isupper():
-                        tribes[subtype] += qty
+            # DFCs are handled one FACE at a time (split on "//" first):
+            # splitting the whole line on its first dash used to leave the
+            # back face's "Creature" card-type token in the subtype list
+            # and count subtypes both faces share twice. Faces dedupe into
+            # a set so a card contributes each subtype at most once, and
+            # only creature faces speak (an MDFC's land face is no tribe).
+            subtypes: set[str] = set()
+            for face in (card.get("type_line") or "").split("//"):
+                if "creature" not in face.lower():
+                    continue
+                for part in re.split(r"[—-]", face, 1)[1:]:
+                    for subtype in part.split():
+                        if subtype[:1].isupper():
+                            subtypes.add(subtype)
+            for subtype in sorted(subtypes):
+                tribes[subtype] += qty
         if "artifact" in type_line:
             artifact_count += qty
         if "enchantment" in type_line:
             enchantment_count += qty
-        if "equipment" in type_line or "aura" in type_line:
+        # Voltron's two halves — the Equipment/Aura type line here, the
+        # "equipped creature ..." oracle patterns in _THEME_MOTIFS — must
+        # count a card ONCE: every real Equipment card's own text matches
+        # the oracle half too, and counting both silently halved the
+        # documented MOTIF_MIN bar (~4 Equipment looked like 8 motif hits).
+        is_voltron_type = "equipment" in type_line or "aura" in type_line
+        if is_voltron_type:
             motifs["voltron"] += qty
         for theme, patterns in _THEME_MOTIFS:
+            if theme == "voltron" and is_voltron_type:
+                continue  # already counted via the type line above
             if any(p.search(oracle) for p in patterns):
                 motifs[theme] += qty
         if (not is_commander and key not in seen_keys
@@ -788,6 +814,16 @@ def norms_steer(
     max_swaps: int = MAX_NORMS_SWAPS,
 ) -> tuple[list[str], list[str]]:
     """Nudge the shell's role mix toward the cluster's blended targets.
+
+    TAXONOMY CONTRACT: ``role_of`` must speak the SAME taxonomy the
+    cluster medians were computed with — ``staples.role_bucket`` (base
+    taxonomy; the ``win_condition`` → ``finisher`` fold happens here,
+    mirroring ``profile_deck``). An extended-taxonomy classifier is a
+    bug, not an option: ``classify_role_extended`` files lands-matter
+    payoffs under a ``land_payoff`` bucket the corpus side doesn't have,
+    so the shell reads phantom draw deficits and the untargeted
+    ``land_payoff`` bucket becomes the preferred eviction donor —
+    exactly the on-theme cards the steer must protect.
 
     Net-zero swap engine, same invariant contract as the FP-014.3 stages
     (deck_builder re-validates via ``_revalidate_swaps`` regardless):

@@ -75,6 +75,23 @@ _add("Sig Ramp Rock", "Artifact", "{T}: Add one mana of any color.",
      [], "{2}", 2.0)
 _add("Off Color Sig", "Enchantment",
      "At the beginning of your upkeep, draw a card.", ["G"], "{2}{G}", 3.0)
+# Equipment whose own oracle text matches the voltron ORACLE motif too —
+# the double-count regression shape (type half + oracle half).
+for _i in range(8):
+    _add(f"Test Blade {_i}", "Artifact — Equipment",
+         "Equipped creature gets +2/+0. Equip {1}", [], "{1}", 1.0)
+# Transforming DFC with a shared subtype across faces — the type-line
+# split regression shape.
+_add("Moon Prowler", "Creature — Human Werewolf // Creature — Werewolf",
+     "Haste.", ["R"], "{1}{R}", 2.0)
+# Landfall payoffs: role_bucket → draw (base taxonomy), but
+# classify_role_extended → land_payoff — the taxonomy-mismatch
+# regression shape (review vs f35ac27, finding 1).
+for _i in range(20):
+    _add(f"Landfall Charm {_i}", "Enchantment",
+         "Landfall — Whenever a land enters the battlefield under your "
+         "control, you may draw a card.",
+         ["R"], "{1}{R}", 2.0)
 
 
 def _fake_lookup(name):
@@ -156,6 +173,43 @@ def test_profile_unresolved_cards_counted_not_fatal(tmp_path):
     assert p.unresolved == 1
     assert p.role_counts.get("threat") == 1  # commander excluded from roles
     assert p.land_count == 1  # basics resolve without any lookup
+
+
+def test_voltron_motif_counts_each_equipment_once(tmp_path):
+    # Regression (review vs f35ac27): Equipment used to count TWICE —
+    # once via the type line, once via the "equipped creature" oracle
+    # motif — silently halving the documented MOTIF_MIN bar (~4
+    # Equipment classified as voltron instead of 8).
+    mains = ([f"Test Blade {i}" for i in range(5)]
+             + [f"Zap {i}" for i in range(4)] + ["Mountain"] * 30)
+    deck = _write_deck(tmp_path / "Blades.dck", "Grix, Goblin Boss", mains)
+    p = ct.profile_deck(deck, _fake_lookup)
+    assert p.motifs.get("voltron") == 5          # once per card, not 10
+    label, _reason = ct._classify(p)
+    assert label != "voltron-equipment"          # 5 < MOTIF_MIN (8)
+
+
+def test_voltron_cluster_still_reachable_at_documented_bar(tmp_path):
+    mains = ([f"Test Blade {i}" for i in range(8)]
+             + [f"Zap {i}" for i in range(4)] + ["Mountain"] * 30)
+    deck = _write_deck(tmp_path / "Blades8.dck", "Grix, Goblin Boss", mains)
+    p = ct.profile_deck(deck, _fake_lookup)
+    assert p.motifs.get("voltron") == 8
+    label, reason = ct._classify(p)
+    assert label == "voltron-equipment"
+    assert "voltron" in reason
+
+
+def test_dfc_subtypes_split_per_face_and_deduped(tmp_path):
+    # Regression (review vs f35ac27): splitting the whole DFC type line
+    # on its first dash left the back face's "Creature" card-type token
+    # in the subtype list and counted the shared Werewolf subtype twice.
+    deck = _write_deck(tmp_path / "Wolf.dck", "Grix, Goblin Boss",
+                       ["Moon Prowler", "Mountain"])
+    p = ct.profile_deck(deck, _fake_lookup)
+    assert p.tribes.get("Werewolf") == 1   # shared across faces → once
+    assert p.tribes.get("Human") == 1
+    assert "Creature" not in p.tribes      # a card type is not a tribe
 
 
 def test_file_role_prefixes():
@@ -318,11 +372,15 @@ def test_blended_land_target_blends_and_clamps():
 
 
 def _role_of(nm):
+    # norms_steer's taxonomy contract: role_bucket — the SAME rule the
+    # cluster medians are computed with. (classify_role_extended here was
+    # the f35ac27 taxonomy-mismatch bug: its land_payoff bucket doesn't
+    # exist on the corpus side.)
     card = _fake_lookup(nm)
     if not card:
         return "unknown"
-    from commander_builder.staples import classify_role_extended
-    return classify_role_extended(card["oracle_text"], card["type_line"])
+    from commander_builder.staples import role_bucket
+    return role_bucket(card["oracle_text"], card["type_line"])
 
 
 def _mv_of(nm):
@@ -386,6 +444,28 @@ def test_norms_steer_never_overshoots_target():
     new, notes = ct.norms_steer(
         nonlands, label="x", cluster=cluster, role_of=_role_of,
         ci_ok=lambda nm: True, reserved_keys=set(), mv_of=_mv_of,
+    )
+    assert new == nonlands and notes == []
+
+
+def test_norms_steer_no_phantom_deficit_for_land_payoffs():
+    # Regression (review vs f35ac27, finding 1): with an extended-taxonomy
+    # role_of the 20 landfall draw engines read as ``land_payoff`` — an
+    # untargeted bucket (maximal donor surplus) — while ``draw`` read 0,
+    # a phantom deficit. The steer then evicted exactly the on-theme
+    # cards. Under the shared role_bucket taxonomy the payoffs ARE the
+    # draw count, the target is met, and the steer is a clean no-op.
+    nonlands = ([f"Landfall Charm {i}" for i in range(20)]
+                + [f"Goblin Grunt {i}" for i in range(10)])
+    cluster = {
+        "role_medians": {"draw": 10},  # blended target = (10+10)/2 = 10
+        "cmc_mean_median": 2.0,
+        "signature_cards": [{"card": "Sig Draw Engine"}],
+    }
+    new, notes = ct.norms_steer(
+        nonlands, label="lands-matter", cluster=cluster,
+        role_of=_role_of, ci_ok=lambda nm: True, reserved_keys=set(),
+        mv_of=_mv_of,
     )
     assert new == nonlands and notes == []
 
@@ -524,6 +604,57 @@ def test_builder_steers_toward_injected_norms(_offline_ci):
     # ...but the off-color signature card never enters a mono-R deck.
     assert "Off Color Sig" not in mains
     # Invariants hold end to end.
+    assert count_main_cards(result.text) == 99
+
+
+def test_builder_lands_matter_shell_keeps_land_payoffs(_offline_ci):
+    # End-to-end regression (review vs f35ac27, finding 1): the builder
+    # used to count the shell with classify_role_extended while the mined
+    # medians use role_bucket — a lands-matter shell's landfall payoffs
+    # fell into the extended-only land_payoff bucket, the steer saw a
+    # phantom draw deficit, and preferentially evicted the on-theme
+    # cards for the cluster's signature draw card. One taxonomy on both
+    # sides: the draw target is already met, nothing moves.
+    from types import SimpleNamespace
+    from commander_builder.edhrec_client import CardEntry
+    seed = (["Grix, Goblin Boss"]
+            + [f"Landfall Charm {i}" for i in range(20)]
+            + [f"Goblin Grunt {i}" for i in range(10)]  # Goblin 11 < tribal bar
+            + [f"Test Signet {i}" for i in range(12)]
+            + [f"Zap {i}" for i in range(12)]
+            + ["Command Tower", "Mountain", "Mountain"])
+    avg = SimpleNamespace(cards=[CardEntry(name=n) for n in seed])
+    norms = {
+        "version": 1,
+        "n_decks": 10,
+        "clusters": {
+            "lands-matter": {
+                "n_decks": 6,
+                "role_medians": {"draw": 10},
+                "land_median": 35,
+                "cmc_mean_median": 2.0,
+                "signature_cards": [{"card": "Sig Draw Engine"}],
+            },
+        },
+    }
+    result = deck_builder._assemble(
+        "Grix, Goblin Boss", 3,
+        fetch_avg=lambda c, b: avg,
+        fetch_page=lambda c: None,
+        resolve_ci=lambda n: "R",
+        lookup=_fake_lookup,
+        name="Grix Lands",
+        enable_lift=False,
+        enable_steer=False,
+        corpus_norms=norms,
+    )
+    assert result.corpus_cluster == "lands-matter"
+    mains = main_card_quantities(result.text)
+    # Every landfall payoff survives; the signature draw card is NOT
+    # swapped in over them (the role_bucket draw count meets the target).
+    assert all(mains.get(f"Landfall Charm {i}") == 1 for i in range(20))
+    assert "Sig Draw Engine" not in mains
+    assert not any("Landfall Charm" in n for n in result.corpus_notes)
     assert count_main_cards(result.text) == 99
 
 

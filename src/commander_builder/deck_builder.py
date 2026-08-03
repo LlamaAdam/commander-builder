@@ -84,6 +84,7 @@ from .staples import (
     classify_role_extended,
     detect_tribal_type,
     is_basic_land,
+    role_bucket,
 )
 from .web.deck_text_ops import _pad_main_to_target
 
@@ -1057,6 +1058,30 @@ def _personalize(
             )
         return _role_cache[k]
 
+    _corpus_role_cache: dict[str, str] = {}
+
+    def corpus_role_of(nm: str) -> str:
+        # Corpus-taxonomy twin of ``role_of``, for the norms steer ONLY.
+        # The mined cluster medians are computed with ``staples.
+        # role_bucket`` (base taxonomy + the documented win_condition
+        # promotion), so the steer must count THIS shell with the same
+        # rule — see norms_steer's taxonomy contract. Feeding it
+        # ``classify_role_extended`` filed lands-matter payoffs under a
+        # ``land_payoff`` bucket the corpus side doesn't have: the shell
+        # read phantom draw deficits and preferentially evicted its own
+        # on-theme cards.
+        k = name_key(nm)
+        if k not in _corpus_role_cache:
+            try:
+                card = lookup(nm) or {}
+            except Exception:  # noqa: BLE001
+                card = {}
+            _corpus_role_cache[k] = role_bucket(
+                card.get("oracle_text", "") or "",
+                card.get("type_line", "") or "",
+            )
+        return _corpus_role_cache[k]
+
     def ci_ok(nm: str) -> bool:
         # ci is None → identity unresolved → enforce_color_identity passes
         # everything through (same degrade as the base assembler).
@@ -1117,7 +1142,7 @@ def _personalize(
         try:
             new, corpus_swap_notes = corpus_themes.norms_steer(
                 nonlands, label=corpus_label, cluster=corpus_cluster,
-                role_of=role_of, ci_ok=ci_ok, reserved_keys=reserved,
+                role_of=corpus_role_of, ci_ok=ci_ok, reserved_keys=reserved,
                 mv_of=mv_of,
             )
             nonlands, ok = _revalidate_swaps(nonlands, new, reserved, ci_ok)

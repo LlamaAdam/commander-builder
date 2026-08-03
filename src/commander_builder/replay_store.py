@@ -22,10 +22,16 @@ Hard requirements honored here:
 - **Bounded storage.** The repo once grew a 39GB log directory; unbounded
   growth is forbidden. Total replays-dir size is capped (default
   ~500MB, ``COMMANDER_BUILDER_REPLAY_CAP_MB`` overrides) with
-  oldest-run eviction at write time. The in-flight run is never evicted;
-  if it alone reaches the cap, recording STOPS for the rest of the
-  process (``cap_reached`` is flagged in its index) rather than growing
-  without bound.
+  oldest-run eviction at write time. Eviction never touches the CALLER'S
+  in-flight run, and skips any run with recent write activity (newest
+  mtime within ``RECENT_RUN_GRACE_SEC``) — the caller's run id only
+  protects against THIS process; the mtime guard is what keeps a
+  concurrent process's in-flight run safe. If the caller's run alone
+  reaches the cap, recording STOPS for the rest of the process
+  (``cap_reached`` is flagged in its index) rather than growing without
+  bound. A failed eviction (Windows file locks, permissions) is logged
+  loudly and skipped, so the directory can temporarily exceed the cap
+  until a later write retries.
 - **Thread safety.** Parallel pods (compare_versions' threaded dispatch,
   run_ab_parallel's chunk threads) all funnel through one process-global
   run whose lock serializes file-number allocation and index writes —
@@ -37,13 +43,17 @@ Hard requirements honored here:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import shutil
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 ENV_KEEP_LOGS = "COMMANDER_BUILDER_KEEP_GAME_LOGS"
 ENV_REPLAY_DIR = "COMMANDER_BUILDER_REPLAY_DIR"
@@ -52,6 +62,14 @@ ENV_CAP_MB = "COMMANDER_BUILDER_REPLAY_CAP_MB"
 DEFAULT_CAP_MB = 500
 INDEX_NAME = "index.json"
 _TRUTHY = ("1", "true", "yes", "on")
+
+# A run whose newest file (or dir) mtime is this recent is presumed to be
+# ANOTHER process's in-flight run and is never evicted: ``keep_run_id``
+# only protects the calling process's own run, but parallel soaks /
+# compares each hold their own process-global run in the same root.
+# 30 min comfortably exceeds the gap between two writes of a live run
+# (one sim's games land in a single ``record_stdout`` call).
+RECENT_RUN_GRACE_SEC = 30 * 60
 
 
 def replays_enabled() -> bool:
@@ -94,19 +112,58 @@ def _dir_size(path: Path) -> int:
     return total
 
 
+def _newest_mtime(path: Path) -> float:
+    """Newest mtime among ``path`` itself and its direct children.
+
+    The activity signal for the eviction grace period: a live run's dir
+    or its newest ``game_<n>.log`` / ``index.json`` was written moments
+    ago. Direct children suffice — run dirs are flat. Best-effort: stat
+    failures contribute nothing (0.0 == "ancient").
+    """
+    newest = 0.0
+    try:
+        newest = path.stat().st_mtime
+    except OSError:
+        pass
+    try:
+        for child in path.iterdir():
+            try:
+                newest = max(newest, child.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return newest
+
+
 def enforce_retention(
     root: Path,
     cap_bytes: int,
     keep_run_id: Optional[str] = None,
+    now: Optional[float] = None,
 ) -> list[str]:
     """Evict oldest run dirs until the replays root fits under ``cap_bytes``.
 
     Run ids are timestamp-prefixed, so name order == age order; foreign
     directories an operator dropped in sort wherever their name lands and
-    are treated the same (this dir belongs to the store). The in-flight
-    run (``keep_run_id``) is never evicted. Returns the evicted run ids.
-    Best-effort: unreadable/undeletable entries are skipped, never raised.
+    are treated the same (this dir belongs to the store).
+
+    THE REAL GUARANTEE (not "the in-flight run is never evicted"):
+
+    * The CALLER'S run (``keep_run_id``) is never evicted — but that id
+      only names this process's run.
+    * Any run with recent write activity (newest mtime within
+      ``RECENT_RUN_GRACE_SEC`` of ``now``) is skipped too — that is what
+      protects ANOTHER process's in-flight run sharing this root.
+      ``now`` defaults to wall-clock time; tests inject a fake clock.
+    * A failed eviction (Windows file locks, permissions) is logged
+      loudly, skipped, and NOT counted as reclaimed — total size can
+      therefore exceed the cap until a later write retries.
+
+    Returns the evicted run ids. Never raises.
     """
+    if now is None:
+        now = time.time()
     if not root.is_dir():
         return []
     try:
@@ -121,11 +178,18 @@ def enforce_retention(
             break
         if keep_run_id is not None and d.name == keep_run_id:
             continue
+        if now - _newest_mtime(d) < RECENT_RUN_GRACE_SEC:
+            continue  # recently active: presume a live run, never evict.
         try:
             shutil.rmtree(d)
             evicted.append(d.name)
             total -= sizes[d]
-        except OSError:
+        except OSError as exc:
+            logger.warning(
+                "replay retention: failed to evict %s (%s) — replays dir "
+                "may exceed its %d-byte cap until a later write retries",
+                d, exc, cap_bytes,
+            )
             continue
     return evicted
 

@@ -15,7 +15,9 @@ Hard requirements pinned here:
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,7 @@ from commander_builder.replay_store import (
     ENV_KEEP_LOGS,
     ENV_REPLAY_DIR,
     INDEX_NAME,
+    RECENT_RUN_GRACE_SEC,
     ReplayRun,
     enforce_retention,
     maybe_record_sim,
@@ -254,12 +257,20 @@ def test_index_integrity_under_concurrent_writes(replay_env):
 # Retention cap
 # ---------------------------------------------------------------------------
 
-def _fake_run(root: Path, name: str, size: int) -> Path:
+def _fake_run(root: Path, name: str, size: int,
+              age_sec: float = 2 * 60 * 60) -> Path:
+    """A stale run dir: mtimes are backdated past the eviction grace
+    window by default so retention tests exercise real eviction; pass
+    ``age_sec=0`` for a recently-active (protected) run."""
     d = root / name
     d.mkdir(parents=True)
     (d / "game_1.log").write_bytes(b"x" * size)
     (d / INDEX_NAME).write_text('{"run": "%s", "games": []}' % name,
                                 encoding="utf-8")
+    if age_sec:
+        stamp = time.time() - age_sec
+        for p in (d / "game_1.log", d / INDEX_NAME, d):
+            os.utime(p, (stamp, stamp))
     return d
 
 
@@ -291,6 +302,55 @@ def test_enforce_retention_under_cap_is_noop(tmp_path):
     _fake_run(root, "20250101T000000Z_1_aaaaaa", 100)
     assert enforce_retention(root, cap_bytes=10_000) == []
     assert (root / "20250101T000000Z_1_aaaaaa").exists()
+
+
+def test_enforce_retention_skips_recently_active_runs(tmp_path):
+    # Review vs f35ac27, finding 3a: ``keep_run_id`` only protects the
+    # CALLING process's run — a run another process is writing right now
+    # must survive too. Recent write activity (mtime grace window) is
+    # the tell: the freshly-written run is skipped, the stale one goes.
+    root = tmp_path / "replays"
+    _fake_run(root, "20250101T000000Z_1_stale1", 4000)
+    _fake_run(root, "20250201T000000Z_9_live99", 4000, age_sec=0)  # fresh
+    evicted = enforce_retention(root, cap_bytes=1000)
+    assert evicted == ["20250101T000000Z_1_stale1"]
+    assert (root / "20250201T000000Z_9_live99").exists()
+
+
+def test_enforce_retention_fake_clock_seam(tmp_path):
+    # The ``now`` parameter is the deterministic clock: with ``now``
+    # inside the grace window nothing is evicted; advancing the same
+    # clock past the window evicts.
+    root = tmp_path / "replays"
+    d = _fake_run(root, "20250101T000000Z_1_aaaaaa", 4000, age_sec=0)
+    written_at = d.stat().st_mtime
+    assert enforce_retention(
+        root, cap_bytes=1000, now=written_at + 60) == []
+    assert d.exists()
+    evicted = enforce_retention(
+        root, cap_bytes=1000, now=written_at + RECENT_RUN_GRACE_SEC + 60)
+    assert evicted == ["20250101T000000Z_1_aaaaaa"]
+    assert not d.exists()
+
+
+def test_enforce_retention_logs_failed_eviction(tmp_path, monkeypatch, caplog):
+    # Review vs f35ac27, finding 3c: a swallowed rmtree failure (Windows
+    # file locks) used to be silent while the dir sat over its cap — it
+    # must log one loud line per failed eviction, and still not raise.
+    root = tmp_path / "replays"
+    _fake_run(root, "20250101T000000Z_1_aaaaaa", 4000)
+    monkeypatch.setattr(
+        replay_store.shutil, "rmtree",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("locked")),
+    )
+    with caplog.at_level("WARNING", logger="commander_builder.replay_store"):
+        evicted = enforce_retention(root, cap_bytes=1000)
+    assert evicted == []
+    assert (root / "20250101T000000Z_1_aaaaaa").exists()
+    warnings = [r for r in caplog.records
+                if "failed to evict" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "20250101T000000Z_1_aaaaaa" in warnings[0].getMessage()
 
 
 def test_record_evicts_old_runs_at_write_time(replay_env, monkeypatch):
