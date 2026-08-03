@@ -348,29 +348,52 @@ def find_top_liked_decks_for_commander(
     return decks
 
 
+# C0 control characters (newlines, tabs, NULs, ...) inside web-sourced
+# field values. The `.dck` format is LINE-oriented: a card or deck NAME
+# containing "\n[Main]\n99 Mountain" would mint REAL section headers and
+# card lines when rendered (`iter_section_lines` happily concatenates
+# same-named sections, so the injected block merges into the deck).
+# Collapse each run to a single space — the result is an inert, odd name
+# on ONE line instead of extra deck structure.
+_C0_CONTROLS = re.compile(r"[\x00-\x1f]+")
+
+
+def _clean_field(value: str) -> str:
+    """Neutralize C0 control chars in one rendered `.dck` field value."""
+    return _C0_CONTROLS.sub(" ", value).strip()
+
+
 def card_line(entry: dict) -> str:
     """Render one Forge `.dck` card line: `<qty> <Name>|<SET>|<CN>`.
 
     Set + collector number are pipe-separated suffixes Forge uses to pick the
     exact printing. They're optional — Forge falls back to any printing if the
     set code is unknown — so we include them when available.
+
+    Every field is passed through ``_clean_field``: an embedded newline in
+    a web-sourced card name must never mint additional deck lines.
     """
     qty = entry.get("quantity", 1)
     card = entry.get("card", {})
-    name = card.get("name", "<UNKNOWN>")
-    set_code = (card.get("set") or "").upper()
+    name = _clean_field(card.get("name", "<UNKNOWN>"))
+    set_code = _clean_field((card.get("set") or "")).upper()
     cn = card.get("cn") or ""
     parts = [name]
     if set_code:
         parts.append(set_code)
     if cn:
-        parts.append(str(cn))
+        parts.append(_clean_field(str(cn)))
     return f"{qty} {'|'.join(parts)}"
 
 
 def to_dck(deck_json: dict) -> str:
-    """Convert a Moxfield deck JSON to Forge `.dck` text."""
-    name = deck_json.get("name", "Untitled")
+    """Convert a Moxfield deck JSON to Forge `.dck` text.
+
+    The deck name is control-char-neutralized (``_clean_field``) for the
+    same reason card names are: ``Name=`` is one metadata LINE, and a
+    web-sourced name embedding ``\\n[Main]\\n...`` would otherwise inject
+    real sections into the render."""
+    name = _clean_field(deck_json.get("name", "Untitled"))
     public_id = deck_json.get("publicId", "")
     boards = deck_json.get("boards", {})
 
@@ -641,10 +664,24 @@ def _existing_moxfield_ids(
     }
 
 
+# Cap for sanitized filename stems. Windows rejects path COMPONENTS over
+# 255 chars, and deck names are author-controlled web input — a 300-char
+# Moxfield deck name must not abort an import leg with an OSError at
+# write time. 120 leaves generous headroom for every decoration this
+# codebase adds around the stem: role prefix (`[PREMADE] `), ` v<N>`
+# version token, ` (<n>)` uniquify counter, ` [B<n>]` bracket tag, and
+# the `.dck` suffix.
+_MAX_STEM_LEN = 120
+
+
 def safe_filename(name: str) -> str:
     cleaned = INVALID_FN.sub("_", name)
     cleaned = NON_ASCII.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(".")
+    if len(cleaned) > _MAX_STEM_LEN:
+        # Re-strip after the cut: truncation can expose a trailing
+        # space/dot that the first pass already scrubbed.
+        cleaned = cleaned[:_MAX_STEM_LEN].strip().rstrip(".")
     return cleaned or "deck"
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from commander_builder.dck_utils import count_main_cards
 from commander_builder.moxfield_import import (
     _uniquify,
     card_line,
@@ -48,6 +49,17 @@ def test_safe_filename_falls_back_to_deck_when_fully_stripped():
 
 def test_safe_filename_collapses_whitespace():
     assert safe_filename("Foo   Bar    Baz") == "Foo Bar Baz"
+
+
+def test_safe_filename_caps_stem_length():
+    # Author-controlled names can exceed Windows' 255-char path-component
+    # limit once prefixes/tags are added; the sanitized stem is capped.
+    assert safe_filename("A" * 300) == "A" * 120
+    # The cut can expose trailing whitespace/dots — re-stripped.
+    assert safe_filename("A" * 119 + " B") == "A" * 119
+    assert safe_filename("A" * 119 + ".B") == "A" * 119
+    # Short names pass through untouched.
+    assert safe_filename("A" * 120) == "A" * 120
 
 
 def test_resolve_bracket_prefers_confirmed():
@@ -117,6 +129,38 @@ def test_to_dck_omits_moxfield_when_no_public_id():
     deck = {"name": "X", "boards": {"mainboard": {"cards": {}}}}
     text = to_dck(deck)
     assert "Moxfield=" not in text
+
+
+def test_card_line_neutralizes_control_chars_in_name():
+    # .dck is line-oriented: an embedded newline in a web-sourced card
+    # name would mint REAL deck lines ("\n[Main]\n99 Mountain" injection).
+    entry = {"quantity": 1, "card": {"name": "Evil\n[Main]\n99 Mountain"}}
+    assert card_line(entry) == "1 Evil [Main] 99 Mountain"
+
+
+def test_to_dck_newline_in_card_name_mints_no_extra_lines():
+    deck = {
+        "name": "Injected",
+        "boards": {
+            "commanders": {"cards": {
+                "c": {"quantity": 1, "card": {"name": "Cmdr"}}}},
+            "mainboard": {"cards": {
+                "m": {"quantity": 1,
+                      "card": {"name": "Innocent\n[Main]\n99 Mountain"}},
+            }},
+        },
+    }
+    text = to_dck(deck)
+    assert count_main_cards(text) == 1            # not 100
+    assert "\n99 Mountain" not in text
+
+
+def test_to_dck_newline_in_deck_name_stays_one_metadata_line():
+    deck = {"name": "X\n[Main]\n99 Mountain",
+            "boards": {"mainboard": {"cards": {}}}}
+    text = to_dck(deck)
+    assert "Name=X [Main] 99 Mountain" in text
+    assert count_main_cards(text) == 0
 
 
 def test_uniquify_returns_path_when_free(tmp_path):

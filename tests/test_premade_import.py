@@ -16,6 +16,8 @@ test_edhrec_top). Covers:
 """
 from __future__ import annotations
 
+import http.client
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,9 @@ from commander_builder.premade_import import (
 
 def _deck_json(pid: str, name: str, commander: str,
                bracket: int | None = None, likes: int = 0) -> dict:
+    # 99-card mainboard: the importer's post-fetch validation skips any
+    # deck off the `main == 100 - commanders` invariant, so the stub must
+    # be size-legal like every real Moxfield deck.
     d = {
         "publicId": pid,
         "name": name,
@@ -58,6 +63,8 @@ def _deck_json(pid: str, name: str, commander: str,
                 "m2": {"quantity": 1,
                        "card": {"name": "Arcane Signet", "set": "abc",
                                 "cn": "3"}},
+                "m3": {"quantity": 97,
+                       "card": {"name": "Mountain", "set": "abc", "cn": "4"}},
             }},
         },
     }
@@ -826,3 +833,202 @@ def test_cli_premade_repair_flag_runs_repair(monkeypatch):
 def test_cli_premade_repair_failure_propagates(monkeypatch):
     monkeypatch.setattr(premade_import, "repair_premades", lambda **_kw: 2)
     assert moxfield_import.main(["--premade-repair"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Robustness — post-fetch validation, offline degrade, version-token stems,
+# long/hostile names, write containment, repair honesty, partner diversity
+# ---------------------------------------------------------------------------
+
+def test_moxfield_premades_skip_deck_with_no_commanders(
+        tmp_path, monkeypatch, capsys):
+    """A fetched deck with an EMPTY commanders board must be skipped with
+    a reason — written verbatim it would be permanently unusable (the
+    advisor raises 'no commanders found' and the repair path only covers
+    EDHREC files)."""
+    rows = [_search_row("p1", "Cmdr Broken", 900),
+            _search_row("p2", "Cmdr Ok", 100)]
+    broken = _deck_json("p1", "Broken", "Cmdr Broken", 3, 900)
+    broken["boards"]["commanders"]["cards"] = {}
+    decks = {"p1": broken, "p2": _deck_json("p2", "Ok", "Cmdr Ok", 3, 100)}
+    _stub_moxfield(monkeypatch, rows, decks)
+    out = import_moxfield_premades(count=1, out_dir=tmp_path, sleep_sec=0)
+    assert [Path(r["path"]).name for r in out] == ["[PREMADE] Ok [B3].dck"]
+    assert "SKIP p1: fetched deck has no commanders" in \
+        capsys.readouterr().out
+    assert not (tmp_path / "[PREMADE] Broken [B3].dck").exists()
+
+
+def test_moxfield_premades_skip_illegal_main_count(
+        tmp_path, monkeypatch, capsys):
+    """Decks off the `main == 100 - commanders` invariant (98 or 101)
+    are skipped with a reason; the ranking backfills."""
+    rows = [_search_row("p1", "Cmdr Short", 900),
+            _search_row("p2", "Cmdr Long", 800),
+            _search_row("p3", "Cmdr Ok", 100)]
+    short = _deck_json("p1", "Short", "Cmdr Short", 3, 900)
+    short["boards"]["mainboard"]["cards"]["m3"]["quantity"] = 96   # 98 main
+    long_ = _deck_json("p2", "Long", "Cmdr Long", 3, 800)
+    long_["boards"]["mainboard"]["cards"]["m3"]["quantity"] = 99   # 101 main
+    decks = {"p1": short, "p2": long_,
+             "p3": _deck_json("p3", "Ok", "Cmdr Ok", 3, 100)}
+    _stub_moxfield(monkeypatch, rows, decks)
+    out = import_moxfield_premades(count=1, out_dir=tmp_path, sleep_sec=0)
+    assert [Path(r["path"]).name for r in out] == ["[PREMADE] Ok [B3].dck"]
+    printed = capsys.readouterr().out
+    assert ("SKIP p1: illegal deck size "
+            "(98 main + 1 commander(s) != 100)") in printed
+    assert ("SKIP p2: illegal deck size "
+            "(101 main + 1 commander(s) != 100)") in printed
+    assert [p.name for p in tmp_path.glob("*.dck")] == \
+        ["[PREMADE] Ok [B3].dck"]
+
+
+@pytest.mark.parametrize("exc", [
+    urllib.error.URLError("connection refused"),
+    urllib.error.HTTPError("https://x", 503, "unavailable", {}, None),
+    http.client.BadStatusLine("garbage"),
+])
+def test_commander_card_names_network_failure_degrades(monkeypatch, exc):
+    """Non-404 network failures on the partner-vs-DFC lookup degrade to
+    the documented single-commander shape instead of raising out of the
+    whole pull/repair."""
+    def _down(name, **_kw):
+        raise exc
+    monkeypatch.setattr(premade_import, "lookup_card", _down)
+    pair = "Alpha One // Beta Two"
+    assert _commander_card_names(pair) == [pair]
+
+
+def test_edhrec_pull_survives_partner_lookup_network_failure(
+        tmp_path, monkeypatch):
+    """A partner-pair EDHREC commander + a dead network must not abort
+    the pull: the pair degrades to one [Commander] line and the walk
+    continues to the next candidate."""
+    def _down(name, **_kw):
+        raise urllib.error.URLError("offline")
+    monkeypatch.setattr(premade_import, "lookup_card", _down)
+    pair = "Alpha One // Beta Two"
+    _stub_edhrec(
+        monkeypatch,
+        commanders=[CardEntry(name=pair, num_decks=900),
+                    CardEntry(name="Cmdr Next", num_decks=800)],
+        salt={},
+    )
+    out = import_edhrec_premades(count=2, out_dir=tmp_path)
+    assert len(out) == 2
+    text = Path(out[0]["path"]).read_text(encoding="utf-8")
+    assert count_commander_cards(text) == 1
+    assert f"1 {pair}" in text.split("[Commander]")[1].split("[Main]")[0]
+
+
+def test_premade_destination_strips_trailing_version_token(tmp_path):
+    """A deck literally NAMED 'Something v2' must not mint a stem that
+    parses as a version snapshot of root 'Something'."""
+    assert _premade_destination("Hot Deck v2", 3, tmp_path).name == \
+        "[PREMADE] Hot Deck [B3].dck"
+    # Stacked tokens all strip; non-token names pass through untouched.
+    assert _premade_destination("Foo v2 v3", 3, tmp_path).name == \
+        "[PREMADE] Foo [B3].dck"
+    assert _premade_destination("v2", 3, tmp_path).name == \
+        "[PREMADE] v2 [B3].dck"
+
+
+def test_v2_named_premade_mintable_and_distinct_root_not_blocked(
+        tmp_path, monkeypatch):
+    """The confounded pair: a pulled deck named 'Foo v2' plus a DISTINCT
+    deck named 'Foo'. Both must land as mintable BASES — the first under
+    a version-token-free stem (pretty name kept in DisplayName=), the
+    second under a uniquify counter (a different deck, not a version)."""
+    from commander_builder.premade_mint import premade_bases_without_v2
+    rows = [_search_row("p1", "Cmdr A", 900),
+            _search_row("p2", "Cmdr B", 800)]
+    decks = {"p1": _deck_json("p1", "Foo v2", "Cmdr A", 3, 900),
+             "p2": _deck_json("p2", "Foo", "Cmdr B", 3, 800)}
+    _stub_moxfield(monkeypatch, rows, decks)
+    out = import_moxfield_premades(count=2, out_dir=tmp_path, sleep_sec=0)
+    names = [Path(r["path"]).name for r in out]
+    assert names == ["[PREMADE] Foo [B3].dck", "[PREMADE] Foo (2) [B3].dck"]
+    # Neither file reads as an already-minted v2: both are coverage-free
+    # bases for premade_mint.
+    bases = premade_bases_without_v2(tmp_path)
+    assert sorted(p.name for p in bases) == sorted(names)
+    # The pretty Moxfield name survives in DisplayName=.
+    text = (tmp_path / "[PREMADE] Foo [B3].dck").read_text(encoding="utf-8")
+    assert "DisplayName=Foo v2" in text
+
+
+def test_moxfield_premades_long_author_name_written_not_fatal(
+        tmp_path, monkeypatch):
+    """A 300+ char author-controlled deck name lands under a truncated
+    filename instead of aborting the leg with a Windows path OSError."""
+    long_name = "Very Long Deck Name " * 20        # ~400 chars
+    rows = [_search_row("p1", "Cmdr A", 900)]
+    decks = {"p1": _deck_json("p1", long_name, "Cmdr A", 3, 900)}
+    _stub_moxfield(monkeypatch, rows, decks)
+    out = import_moxfield_premades(count=1, out_dir=tmp_path, sleep_sec=0)
+    assert len(out) == 1
+    dest = Path(out[0]["path"])
+    assert dest.exists()
+    assert len(dest.name) < 255
+
+
+def test_moxfield_premades_write_error_contained_leg_continues(
+        tmp_path, monkeypatch, capsys):
+    """A per-deck failure AFTER the fetch (render/stamp/write) is
+    contained like a fetch failure: logged, and the leg moves on."""
+    rows = [_search_row("p1", "Cmdr Bad", 900),
+            _search_row("p2", "Cmdr Ok", 100)]
+    decks = {"p1": _deck_json("p1", "Bad", "Cmdr Bad", 3, 900),
+             "p2": _deck_json("p2", "Ok", "Cmdr Ok", 3, 100)}
+    _stub_moxfield(monkeypatch, rows, decks)
+    real_stamp = premade_import.stamp_name_preserving_display
+
+    def _flaky(dck, stem):
+        if "Bad" in stem:
+            raise OSError("disk exploded")
+        return real_stamp(dck, stem)
+
+    monkeypatch.setattr(
+        premade_import, "stamp_name_preserving_display", _flaky)
+    out = import_moxfield_premades(count=2, out_dir=tmp_path, sleep_sec=0)
+    assert [Path(r["path"]).name for r in out] == ["[PREMADE] Ok [B3].dck"]
+    assert "ERROR writing p1: OSError: disk exploded" in \
+        capsys.readouterr().out
+
+
+def test_repair_reports_residual_size_illegal_deck(tmp_path, capsys):
+    """Repair honesty: a basic-less deck the rebalance cannot fix keeps
+    its retrofitted [Commander] but is reported as a FAILURE (nonzero
+    return), never stamped 'repaired' with exit 0."""
+    p = _broken_edhrec_premade(
+        tmp_path, main_lines=["1 Sol Ring", "1 Arcane Signet"])
+    assert repair_premades(out_dir=tmp_path) == 1
+    text = p.read_text(encoding="utf-8")
+    assert count_commander_cards(text) == 1        # retrofit still applied
+    assert count_main_cards(text) == 2             # residually short
+    printed = capsys.readouterr().out
+    assert "still size-illegal after repair" in printed
+    assert "0 repaired, 1 failed" in printed
+
+
+def test_edhrec_partner_pair_blocks_both_names_same_run(
+        tmp_path, monkeypatch):
+    """Diversity records BOTH partner names: after 'Alpha One // Beta
+    Two' is written, a same-run 'Beta Two' candidate is skipped and the
+    ranking backfills."""
+    _stub_partner_lookup(monkeypatch, {"Alpha One", "Beta Two"})
+    _stub_edhrec(
+        monkeypatch,
+        commanders=[
+            CardEntry(name="Alpha One // Beta Two", num_decks=900),
+            CardEntry(name="Beta Two", num_decks=800),
+            CardEntry(name="Cmdr Other", num_decks=700),
+        ],
+        salt={},
+    )
+    out = import_edhrec_premades(count=2, out_dir=tmp_path)
+    assert [r["name"] for r in out] == [
+        "[PREMADE] EDHREC Alpha One __ Beta Two [B2]",
+        "[PREMADE] EDHREC Cmdr Other [B2]",
+    ]
