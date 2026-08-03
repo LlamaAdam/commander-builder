@@ -23,9 +23,9 @@ from pathlib import Path
 
 import pytest
 
-# scripts/ isn't a package and isn't on sys.path by default; same import
-# convention as test_merge_soak.py / test_detune_deck.py.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+# scripts/experiments/ isn't a package and isn't on sys.path by default;
+# the script under test lives next to this file.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import soak_throughput  # noqa: E402
 

@@ -11,9 +11,9 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 4 — Phase 3 (future): learned predictor                  │
-│    ml_dataset.py    (feature schema + train/eval split)         │
-│    [trainer.py]     (NOT BUILT — needs 200+ iterations first)   │
+│  Layer 4 — Phase 3 learned predictor: NOT BUILT                 │
+│    (FP-002 closed-refuted 2026-07-30; the 25-feature schema's   │
+│     executable record is scripts/experiments/ml_dataset.py)     │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -126,7 +126,6 @@ layers never import higher.
 | `report` | Markdown rendering of one deck's iteration lineage; cross-deck recent-iterations summary | Mutating the log. Read-only. |
 | `revert_to` | Restore deck to a previous iteration's snapshot blob; emits Moxfield push blob | Push step. User pastes. |
 | `export` | JSON dump/restore of knowledge_log (full / per-deck / recent-N filter); skip-existing semantics | Schema validation. Trusts the dump. |
-| `ml_dataset` | Phase 3 feature schema (25 cols) + extraction + deck-level train/eval split | Training. No trainer until 200+ iterations. |
 | `doctor` | 10 environment checks; GREEN/YELLOW/RED status; `--json` output | Fixing problems. Reports only. |
 | `status` | Decks-per-bracket, curated pools, recent reports, knowledge_log stats | The work itself. Pure observation. |
 | `deck_dashboard` | Stat tiles, mana curve, categories, theme tags (incl. tribal type), suggested adds, est. price, inferred bracket | Mutation. The web app's audit endpoint does. |

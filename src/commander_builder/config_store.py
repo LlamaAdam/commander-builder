@@ -19,7 +19,7 @@ Token-safety contract (the reason this module exists):
     trip can't accidentally re-submit (or leak) the real key.
   * ``validate_update`` checks a supplied token against the same
     credential-shape pattern the pre-commit secret scanner uses
-    (``scripts/scan_secrets.py``), rejecting malformed values so a typo
+    (``scripts/pre_commit_secret_scan.py``), rejecting malformed values so a typo
     doesn't silently disable Claude.
   * ``save_config`` writes the file owner-only (chmod 0o600 on Unix;
     best-effort no-op on Windows, where the app binds to 127.0.0.1 and
@@ -52,7 +52,7 @@ ALLOWED_KEYS = SECRET_KEYS | _INT_KEYS | _STR_KEYS
 # ~/Documents/CommanderBuilder/decks elsewhere.
 _DECK_DIR_ENV_VAR = "COMMANDER_BUILDER_DECK_DIR"
 
-# Mirrors the anthropic-key pattern in ``scripts/scan_secrets.py``
+# Mirrors the anthropic-key pattern in ``scripts/pre_commit_secret_scan.py``
 # (kept in sync by hand — scripts/ isn't an importable package). Used to
 # validate a token supplied via PUT before we persist it.
 _ANTHROPIC_KEY_RE = re.compile(r"^sk-ant-[A-Za-z0-9_\-]{16,}$")

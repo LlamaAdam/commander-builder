@@ -125,7 +125,8 @@ _CATEGORY_CONSEQUENCE: dict[str, str] = {
 # instant speed, not a card count.
 #
 # WHERE THE NUMBERS COME FROM. The bracket-3 column is the reference
-# column and is transcribed from REVIEW.md's coverage-matrix table
+# column and is transcribed from the coverage-matrix table in
+# docs/archive/REVIEW-2026-07-24.md
 # (creature 4, artifact/enchantment 2, graveyard 1, stack 0, wipe 2,
 # instant share 40%); the others are that column moved along the two
 # axes that actually change with bracket:

@@ -138,7 +138,8 @@ def test_every_bracket_defines_every_category():
 
 
 def test_minimums_tighten_with_bracket():
-    """The reference column is bracket 3 (REVIEW.md's table). Higher
+    """The reference column is bracket 3 (the table in
+    docs/archive/REVIEW-2026-07-24.md). Higher
     brackets demand more of the rows that decide fast games."""
     assert minimums_for_bracket(3)["creature_removal"] == 4
     assert minimums_for_bracket(3)["artifact_enchantment"] == 2

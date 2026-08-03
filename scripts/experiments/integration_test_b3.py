@@ -23,6 +23,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
+# ml_dataset moved out of the package (FP-002 closed); it lives next to
+# this script now.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from commander_builder.analyst import (  # noqa: E402
     AnalystConfig,
@@ -37,7 +40,7 @@ from commander_builder.knowledge_log import (  # noqa: E402
     stats_summary,
     update_verdict,
 )
-from commander_builder.ml_dataset import (  # noqa: E402
+from ml_dataset import (  # noqa: E402
     build_dataset,
     dataset_summary,
     extract_features,

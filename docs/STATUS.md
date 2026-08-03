@@ -8,10 +8,31 @@
 > of what landed lives in [CHANGELOG.md](CHANGELOG.md); architecture +
 > conventions live in [docs/architecture.md](architecture.md).
 
-**Last updated:** 2026-07-30 (docs sync) — `master` @ `3e26552`
-(PR #59) is the live tip. PRs #36–#59 all landed via short-lived
-branches PR'd to `master`. Full offline suite: **2965 passed / 158
-skipped** (re-verified on this box for this sync).
+**Last updated:** 2026-08-03 (repo tidy) — `master` @ `74d258e`
+(PR #68) is the live tip. PRs #36–#68 all landed via short-lived
+branches PR'd to `master`. Full offline suite: **3002 passed / 158
+skipped** (re-verified on this box; the repo tidy moved 40 tests
+belonging to one-off scripts out of the collected suite — master
+before the tidy was 3042/158).
+
+**Headlines since the 2026-07-30 sync (PRs #60–#68):**
+
+- **FP-015 tier-3 validation CONCLUDED — flag stays OFF (PR #61).**
+  The second gated run (9 paired decks) also failed the gate;
+  whole-ordering bundle validation is exhausted. The named reopening
+  path is per-swap measurement, and **PR #63 built that harness**
+  (`scripts/validate_card_score_perswap.py`: per-swap A/B with a
+  pre-registered gate — Spearman rho > 0, p < .05, top-K beats
+  bottom-K; 31 offline tests). The gated per-swap RUN is still
+  pending (see Open backlog).
+- **Review-fix wave (PRs #64–#68):** hermetic deck_health stub kills
+  the margin-analysis byte-identical flake (#64), staged-deck cleanup
+  no longer leaks on bracketed stems in both harnesses (#65), seven
+  premade-pipeline robustness fixes (#66), four oracle-bulk-path
+  robustness fixes (#67), four corpus-norms / replay-retention /
+  replay-viewer fixes (#68).
+- Also: docs sync to master @ `3e26552` (PR #60); encoding-safe
+  improve summary + forge_py sibling/env import resolution (PR #62).
 
 **Headlines (PRs #36–#59):**
 
@@ -27,10 +48,10 @@ skipped** (re-verified on this box for this sync).
   result blocks in [future-plans.md](future-plans.md).
 - **FP-015 (`CardScore`): flag stays default-OFF.** The 2026-07-28
   gated tier-3 run FAILED the gate — 6 paired decks, mean bubble
-  advantage +0.075, 95% CI [−0.159, +0.310] (includes zero). A larger
-  **19-deck tier-3 gated run is in flight; verdict pending** — the
-  flag stays off until a run clearly passes the gate policy (paired
-  95% t-interval + noise reference; PR #35).
+  advantage +0.075, 95% CI [−0.159, +0.310] (includes zero). The
+  follow-up 9-paired-deck run also failed (PR #61) — tier-3
+  whole-ordering validation is concluded; see the PRs #60–#68
+  headlines above for the per-swap path.
 - **FP-016 replay-lite SHIPPED (PR #59)** — opt-in per-game log
   persistence (`COMMANDER_BUILDER_KEEP_GAME_LOGS=1` / `--keep-logs`,
   capped store), `replay_timeline.py` parser, and a "Replays" web
@@ -74,14 +95,15 @@ skipped** (re-verified on this box for this sync).
 
 ## State of the tree
 
-- **Tests:** 2965 passed / 158 skipped — the full offline suite
-  (`python -m pytest tests/ -q`), re-verified 2026-07-30 on this box.
-- **Branch:** `master` (`3e26552`, PR #59) is the live tip — every
-  branch through PR #59 is merged; nothing is in flight in the tree.
+- **Tests:** 3002 passed / 158 skipped — the full offline suite
+  (`python -m pytest tests/ -q`), re-verified 2026-08-03 on this box.
+- **Branch:** `master` (`74d258e`, PR #68) is the live tip — every
+  branch through PR #68 is merged; nothing is in flight in the tree.
   **Working convention: short-lived branches cut from `master`**,
   PR'd back, squash-merged when CI is green.
-- **In-flight (outside the tree):** the 19-deck FP-015 tier-3 gated
-  run (verdict pending) and the gauntlet soaks on both boxes.
+- **In-flight (outside the tree):** the FP-015 per-swap gated run
+  (harness shipped in PR #63; run pending) and the gauntlet soaks on
+  both boxes.
 
 The dated blocks below are historical session notes (details in
 [CHANGELOG.md](CHANGELOG.md)).
@@ -252,11 +274,13 @@ documented at `tests/fixtures/real_oracles.py`.
 > entries live in [CHANGELOG.md](CHANGELOG.md) and the FP sections of
 > [future-plans.md](future-plans.md)). Current queue:
 
-1. **FP-015 tier-3 verdict — PENDING.** The 19-deck tier-3 gated run
-   is in flight. On completion, apply the gate policy (paired 95%
-   t-interval vs the baseline arm + noise reference, PR #35) and
-   record the verdict in future-plans.md. `COMMANDER_BUILDER_CARD_SCORE`
-   stays default-off until a run clearly passes.
+1. **FP-015 per-swap gated run — PENDING.** Tier-3 whole-ordering
+   validation concluded with a second gate fail (9 paired decks,
+   PR #61); the flag stays default-off. The per-swap harness
+   (`scripts/validate_card_score_perswap.py`, PR #63) is built with a
+   pre-registered gate but has run no sims yet — run the real 6-deck
+   pass and record the verdict in future-plans.md.
+   `COMMANDER_BUILDER_CARD_SCORE` flips only on a clear gate pass.
 2. **FP-012 live shakedown.** The `--search-budget` UCB1 search and
    the `--screen` forge_py gate are unit-verified only. Once a box is
    free, run a real searched improve round (with and without
@@ -525,8 +549,11 @@ through the tier-3 harness (`scripts/validate_card_score.py`) under
 the gate policy of PR #35 (paired 95% t-interval + noise reference).
 The 3-deck pilot (2026-07-26) was inconclusive; the **2026-07-28 gated
 run FAILED the gate** (6 paired decks, mean bubble advantage +0.075,
-95% CI [−0.159, +0.310]); a **19-deck gated run is in flight, verdict
-pending**. Framed throughout as a **ranking prior that shrinks the
+95% CI [−0.159, +0.310]); the follow-up **9-paired-deck run also
+failed (PR #61) — tier-3 whole-ordering validation is CONCLUDED**.
+The only reopening path is per-swap measurement; that harness shipped
+via PR #63 (`scripts/validate_card_score_perswap.py`, pre-registered
+gate, run pending). Framed throughout as a **ranking prior that shrinks the
 space Forge validates**, not a power rating (FP-014's
 "Forge-VALIDATED, not just heuristically scored" stance is preserved);
 it also gives FP-012's bandit a warm prior instead of a uniform one.
@@ -628,8 +655,8 @@ For older decisions see [docs/architecture.md](architecture.md#key-decisions).
 
 - **Modules**: ~30 production (advisor split into orchestrator + 7
   sub-modules; web split into orchestrator + 5 blueprints + helpers)
-- **Tests**: 2965 passed / 158 skipped (full offline suite,
-  2026-07-30)
+- **Tests**: 3002 passed / 158 skipped (full offline suite,
+  2026-08-03)
 - **CLI entry points**: 14
 - **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache
   (`MTG_CARDS_DIR` env var override available); ~32k per-card snapshots

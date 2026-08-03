@@ -14,7 +14,8 @@
 
 **Status: IN PROGRESS — implemented on `feature/eval-fixes`,
 committed 2026-07-25 as `25c1a54`.** The spec below (2026-07-24) was
-implemented alongside the REVIEW.md build-order items: `card_score.py`
+implemented alongside the build-order items from
+`docs/archive/REVIEW-2026-07-24.md`: `card_score.py`
 (flag-gated, default off), `deck_legality.py`, `consistency.py`,
 `interaction.py`, commander-aware `deck_health`, and the
 bracket-caller plumbing, plus ~4,400 lines of new tests (work was
@@ -1199,6 +1200,62 @@ per-CMC Karsten source model. The first cut leans on the seed for coherence
 and hands the rest to the improve loop; closing that gap — genuine
 synthesis for commanders with no published average deck — is the remaining
 FP-014 research.
+
+---
+
+# Performance backlog — carried from the 2026-07-25 optimization audit
+
+Carried forward when the audit was archived to
+`docs/archive/OPTIMIZATION_AUDIT_2026-07-25.md` (see it for full evidence,
+line references, and measurements). Already landed and NOT repeated here:
+the audit's low-risk "IMPLEMENTED" batch (`5dbb1f9`), P1+P3 Scryfall lookup
+memo + offline-contract fix (#33), P4 collection-bias screening (#34), and
+the follow-up memo-hygiene fixes (#43). Still unshipped:
+
+**Tier 1**
+- **P2. `card_score.DeckContext.without()` memo inheritance** — cut scoring
+  re-derives every deck-level report per candidate (O(n²)); simulated fix
+  measured 7.8× on a 99-card cut ordering.
+- **P5. Forge `compare()` game-chunking** — second parallelism axis so a
+  40-game comparison uses more than pod-count workers (~2.4× wall-clock);
+  also switch worker sizing to physical cores.
+- **P6. `meta_test` reference-loop parallelism** — currently single-core
+  (~46 min for 5 refs × 5 games); expected 4-6×.
+
+**Tier 2**
+- **P7.** `run_ab_simulation` batches games into 2 JVM invocations instead
+  of one JVM per game (measure startup cost from soak rows first).
+- **P8.** `CardsLoader` DFC index from `zf.namelist()` (no full-zip
+  decompression) + cached default loader.
+- **P9.** Per-game stall watchdog in pods (kill on no new `Game Result:`
+  line in 180 s) instead of whole-pod timeout.
+- **P10.** `deck_health` shared per-audit lookup memo (mostly subsumed by
+  P1; zero-risk standalone).
+- **P11.** `knowledge_log` `init_db` gating + single connection + batched
+  `collect_user_decks_summary`.
+- **P12.** `run_matchup` parallel dispatch + `keep_partial_output=True`
+  (the blocking path's timeout salvage is likely dead code — also Bug 3).
+- **P13.** consistency Monte Carlo micro-opts (~40 % off
+  `opening_hand_stats`) — deferred until a production consumer imports
+  `consistency`.
+
+**Tier 3 (cleanups / latent cliffs)** — lazy imports for CLI cold start;
+one TTL-cached `salt_scores_cached()` replacing 3 duplicated salt-cache
+paths; single shared `DeckContext` per advisor audit; `_mod_combo`
+inverted index; `lift_swaps` synergy memo (+ first direct tests);
+log-parser prefix dispatch/prefilters; gate `forge_log_tail` read on
+failure; `iter_cached_names` single-field parse; collection file
+read-once per build; `deck_pricing` single deck walk.
+
+**Open bugs from the audit (not perf)**
+1. WotC Game Changers scrape broken in production — every process serves
+   the bundled `_FALLBACK` list; parser needs updating for the current
+   page structure, and the divergence alarm only goes to stderr.
+2. Mixed snapshot schema in the shared oracle cache dir — trimmed
+   `forge_py` snapshots lack `prices`, silently dropping cards from
+   `deck_pricing` totals.
+3. `tests/conftest.py` has no network-blocking autouse fixture — unpatched
+   lookup paths can still make live HTTP calls in tests.
 
 ---
 
