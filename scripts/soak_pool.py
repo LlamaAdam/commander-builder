@@ -24,7 +24,7 @@ source while it's open — see the class docstring for the 2026-07-24
 incident this guards against.
 
 Usage:
-  python scripts/soak_pool.py --hours 24 --min 4 --max 12 --start 8 --games 10
+  python scripts/soak_pool.py --mode gauntlet --hours 24 --min 4 --max 12 --start 12 --games 40 --append
 """
 from __future__ import annotations
 
@@ -671,8 +671,9 @@ def main(argv=None) -> int:
     p.add_argument("--min", type=int, default=4)
     p.add_argument("--max", type=int, default=6)
     p.add_argument("--start", type=int, default=6)
-    p.add_argument("--games", type=int, default=5,
-                   help="Phase-1 games/sim (fast, banks the FP-002 row gate).")
+    p.add_argument("--games", type=int, default=40,
+                   help="Games per sim (default 40 — operator directive: "
+                        "40-game sims for high-confidence verdicts; never 5).")
     p.add_argument("--phase2-games", type=int, default=40,
                    help="Phase-2 games/sim (high-confidence verdict pass).")
     p.add_argument("--phase2-after", type=int, default=200,

@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 # scripts/ isn't a package and isn't on sys.path by default; same import
-# convention as test_detune_deck.py / test_margin_analysis.py.
+# convention as test_margin_analysis.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import merge_soak  # noqa: E402

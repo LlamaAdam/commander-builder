@@ -10,7 +10,7 @@ from pathlib import Path
 
 _SPEC = importlib.util.spec_from_file_location(
     "build_fp002_deckset",
-    Path(__file__).resolve().parent.parent / "scripts" / "build_fp002_deckset.py",
+    Path(__file__).resolve().parent / "build_fp002_deckset.py",
 )
 mod = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(mod)

@@ -1,4 +1,15 @@
-"""Phase 3 dataset shape — the bridge from knowledge_log rows to ML training.
+"""FP-002 Phase-3 25-feature schema record.
+
+FP-002 was closed-refuted 2026-07-30 (see docs/future-plans.md); no trainer
+will be built on this schema. Kept here as the schema's executable record —
+it still runs (given ``src/`` on ``sys.path``) and documents exactly what
+the Phase-3 feature vector contained.
+
+Original module docstring follows.
+
+---
+
+Phase 3 dataset shape — the bridge from knowledge_log rows to ML training.
 
 Phase 2 records every iteration as a `knowledge_log.Iteration`. Phase 3 trains
 a model that predicts swap outcomes (`kept` / `reverted` / `neutral`) from
@@ -23,10 +34,16 @@ We're nowhere near that yet. This module is forward scaffolding.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Optional
 
-from .knowledge_log import Iteration
+# Standalone module (no longer inside the commander_builder package):
+# put src/ on sys.path so the knowledge_log import keeps working.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
+from commander_builder.knowledge_log import Iteration  # noqa: E402
 
 
 # Feature schema — the columns a Phase 3 model trains against.
