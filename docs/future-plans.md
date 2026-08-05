@@ -1121,8 +1121,18 @@ duplicated.
 **Status: SHIPPED and MERGED (first cut PR #14, 2026-07-21; second cut
 2026-07-27 — partner-pair support + full Karsten per-CMC manabase;
 corpus-norms steering added 2026-07-31 behind
-`COMMANDER_BUILDER_CORPUS_NORMS`, empirical A/B of that flag still
-pending).** Original first-cut note: four commits (`76f1ca7` core assembler + the
+`COMMANDER_BUILDER_CORPUS_NORMS`; A/B'd 2026-08-05 — see below).**
+
+**Corpus-norms A/B result (2026-08-05, n=2 commanders):** built
+Lathril and Talrand with the flag off and on, 40-game head-to-heads.
+Talrand: norms-ON won 33–27 (+0.10). Lathril: norms-ON LOST 24–35
+(−0.19) — though its entire card delta was one swap (a Forest for
+Prowess of the Fair), so most of that margin is noise. Verdict at this
+n: **inconclusive, leaning slightly negative; the flag stays
+default-off.** Structural observation: norms steering barely perturbs
+EDHREC-seeded builds (the seed already matches population norms); its
+real leverage would be on the fallback role-target shells, which is
+where any future test should focus. No further Forge spend planned. Original first-cut note: four commits (`76f1ca7` core assembler + the
 `commander-build` CLI, `d02fc62` color-source manabase, `dd818b1`
 lift/bracket/collection personalization, `545b2db` web `POST /api/build_deck`
 + `GET /api/build_job/<id>` + a "Build from scratch" tab + a
