@@ -476,6 +476,48 @@ def _measured(rows: list) -> list[dict]:
     return out
 
 
+def gate_verdict(spearman: Optional[dict], contrast: Optional[dict],
+                 measured_count: int) -> dict[str, str]:
+    """The pre-registered 2026-08-01 gate, rendered verbatim.
+
+    Extracted (pure move, byte-identical strings) so the pooled
+    analysis (``scripts/pool_perswap_results.py``) applies the EXACT
+    same verdict logic as the single-run summary — any drift between
+    the two would invalidate the pre-registration.
+    """
+    gate: dict[str, str] = {}
+    if spearman is None:
+        gate["spearman"] = (
+            f"not evaluated (need >= {MIN_SPEARMAN_N} measured swaps "
+            f"with non-constant scores and margins; have "
+            f"{measured_count})")
+    elif spearman["rho"] > 0 and spearman["p_value"] < 0.05:
+        gate["spearman"] = (f"pass (rho {spearman['rho']:+.3f}, "
+                            f"p {spearman['p_value']:.4f})")
+    else:
+        gate["spearman"] = (
+            f"fail (rho {spearman['rho']:+.3f}, "
+            f"p {spearman['p_value']:.4f} — needs rho > 0 and p < .05)")
+    if contrast is None:
+        gate["group_contrast"] = ("not evaluated (need >= 1 measured "
+                                  "swap in each of top and bottom)")
+    elif contrast["diff"] > 0:
+        gate["group_contrast"] = (
+            f"pass (top mean {contrast['top_mean']:+.3f} > bottom mean "
+            f"{contrast['bottom_mean']:+.3f})")
+    else:
+        gate["group_contrast"] = (
+            f"fail (top mean {contrast['top_mean']:+.3f} <= bottom "
+            f"mean {contrast['bottom_mean']:+.3f})")
+    if all(v.startswith("pass") for v in gate.values()):
+        gate["overall"] = "pass — CardScore is predictive per policy"
+    elif any(v.startswith("not evaluated") for v in gate.values()):
+        gate["overall"] = "not evaluated (a criterion lacks data)"
+    else:
+        gate["overall"] = "fail — CardScore is not shown predictive"
+    return gate
+
+
 def build_summary(rows: list, null_rows: list) -> dict:
     """Aggregate per-swap rows into the gated summary (pure; tested)."""
     measured = _measured(rows)
@@ -520,36 +562,7 @@ def build_summary(rows: list, null_rows: list) -> dict:
     failed_nulls = [{"deck": r.get("deck"), "error": r["failed"]}
                     for r in null_rows if r.get("failed")]
 
-    gate: dict[str, str] = {}
-    if spearman is None:
-        gate["spearman"] = (
-            f"not evaluated (need >= {MIN_SPEARMAN_N} measured swaps "
-            f"with non-constant scores and margins; have "
-            f"{len(measured)})")
-    elif spearman["rho"] > 0 and spearman["p_value"] < 0.05:
-        gate["spearman"] = (f"pass (rho {spearman['rho']:+.3f}, "
-                            f"p {spearman['p_value']:.4f})")
-    else:
-        gate["spearman"] = (
-            f"fail (rho {spearman['rho']:+.3f}, "
-            f"p {spearman['p_value']:.4f} — needs rho > 0 and p < .05)")
-    if contrast is None:
-        gate["group_contrast"] = ("not evaluated (need >= 1 measured "
-                                  "swap in each of top and bottom)")
-    elif contrast["diff"] > 0:
-        gate["group_contrast"] = (
-            f"pass (top mean {contrast['top_mean']:+.3f} > bottom mean "
-            f"{contrast['bottom_mean']:+.3f})")
-    else:
-        gate["group_contrast"] = (
-            f"fail (top mean {contrast['top_mean']:+.3f} <= bottom "
-            f"mean {contrast['bottom_mean']:+.3f})")
-    if all(v.startswith("pass") for v in gate.values()):
-        gate["overall"] = "pass — CardScore is predictive per policy"
-    elif any(v.startswith("not evaluated") for v in gate.values()):
-        gate["overall"] = "not evaluated (a criterion lacks data)"
-    else:
-        gate["overall"] = "fail — CardScore is not shown predictive"
+    gate = gate_verdict(spearman, contrast, len(measured))
 
     return {
         "rows": rows,

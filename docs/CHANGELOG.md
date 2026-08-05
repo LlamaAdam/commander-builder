@@ -6,6 +6,42 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-05 — FP-015 pooled per-swap analysis, committed BLIND
+
+#### Added
+
+- **`feat(validation)`: `scripts/pool_perswap_results.py` — the
+  two-box pooling step of the FP-015 per-swap pre-registration,
+  COMMITTED BLIND: written, tested and merged BEFORE any real per-swap
+  result file was read (pre-unblinding), so the pooled analysis cannot
+  be shaped by the data.** Takes two or more
+  `validate_card_score_perswap.py --out` summaries (one per arm),
+  extracts each arm's measured swaps with the harness's own
+  `_measured` predicate (skipped swaps and failed decks excluded
+  exactly as the single-run summary excludes them), tags each swap
+  with its `source_file`, and applies the pre-registered 2026-08-01
+  gate to the POOLED swaps. All statistics are IMPORTED from the
+  single-run harness, never reimplemented — tie-correct Spearman
+  (`spearman_test`, seeded one-sided permutation p at 10,000
+  shuffles), Welch top-vs-bottom contrast (`group_contrast`), and the
+  verbatim verdict strings (`gate_verdict`, newly extracted from
+  `build_summary` as a pure move so both scripts share one gate) —
+  because drift between single-run and pooled math would invalidate
+  the pre-registration. Prints per-arm counts, pooled n, pooled
+  rho/p, the group contrast with its Welch interval, the gate verdict
+  verbatim, and the multiple-testing honesty line (one pre-registered
+  conjunction; per-arm breakdowns exploratory). Tests are synthetic
+  hand-computed fixtures only (ties in both scores and margins, a
+  skipped swap, a failed deck, N=3 arms, malformed-file errors).
+
+#### Changed
+
+- `docs/loop-rate-investigation-2026-08.md`: one clarifying line at
+  the era-split rates naming the denominator convention (May box2b
+  17.2% is per-ROW, 31/180; the share tool's comparison instruction
+  is per-SIM, 31/165 = 18.8%; folded identically per box, so no
+  conclusion changes — but the two must not be mixed).
+
 ### 2026-08-03 — Consistency signal wired into deck health + audit panel
 
 #### Added
