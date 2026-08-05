@@ -310,6 +310,45 @@ def test_run_deck_dry_run_shape_and_no_sims(tmp_path):
     json.dumps(row)
 
 
+def test_build_summary_dry_run_label():
+    """The summary is self-identifying: dry_run true iff --dry-run.
+
+    (2026-08-05 incident: a dry-run --out file on a shared path was
+    pooled as if it were a completed arm — the label is what lets
+    pool_perswap_results.py refuse it.)
+    """
+    assert vps.build_summary([], [])["dry_run"] is False
+    assert vps.build_summary([], [], dry_run=False)["dry_run"] is False
+    assert vps.build_summary([], [], dry_run=True)["dry_run"] is True
+
+
+def test_main_out_labels_dry_run_true_and_real_false(tmp_path, capsys,
+                                                     monkeypatch):
+    deck = write_deck(tmp_path)
+    monkeypatch.setattr(
+        vps, "run_deck",
+        lambda p, *a, dry_run=False, **k: (
+            {"deck": p.name, "skipped": "dry run", "swaps": []}
+            if dry_run else
+            {"deck": p.name, "swaps": [
+                swap("T1", 90.0, 0.2, "top", deck=p.name)]}))
+
+    out_dry = tmp_path / "dry.json"
+    assert vps.main([str(deck), "--dry-run", "--out", str(out_dry)]) == 0
+    dry = json.loads(out_dry.read_text(encoding="utf-8"))
+    assert dry["dry_run"] is True
+    # The human summary line calls the dry run out loudly.
+    printed = capsys.readouterr().out
+    assert "DRY RUN" in printed
+    assert "must not be pooled" in printed
+
+    out_real = tmp_path / "real.json"
+    assert vps.main([str(deck), "--out", str(out_real)]) == 0
+    real = json.loads(out_real.read_text(encoding="utf-8"))
+    assert real["dry_run"] is False
+    assert "DRY RUN" not in capsys.readouterr().out
+
+
 # ── Spearman math on hand-checked fixtures ──
 
 

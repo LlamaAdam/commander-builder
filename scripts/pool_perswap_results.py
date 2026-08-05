@@ -38,10 +38,16 @@ criteria only makes it stricter). Per-arm breakdowns printed here are
 exploratory and NOT multiplicity-corrected; an interesting-looking
 single-arm number is not a finding.
 
+INPUT GUARDS (added 2026-08-05 after a dry-run file was pooled as an
+arm — see docs/future-plans.md, FP-015 FINAL correction): a file whose
+top-level ``dry_run`` is true is refused outright, and a file
+contributing zero measured swaps is refused unless
+``--allow-empty-arm`` is passed (which prints a prominent caveat).
+
 Usage::
 
     python scripts/pool_perswap_results.py ARM1.json ARM2.json [ARM3 ...]
-        [--out pooled.json] [--json]
+        [--out pooled.json] [--json] [--allow-empty-arm]
 """
 
 from __future__ import annotations
@@ -78,7 +84,7 @@ class ResultFileError(ValueError):
     """A result file is missing, unreadable, or not a per-swap summary."""
 
 
-def load_arm(path: Path) -> dict:
+def load_arm(path: Path, allow_empty_arm: bool = False) -> dict:
     """One arm's counts + measured swaps, each tagged with its source.
 
     Measured/skipped/failed are derived from the rows with the SAME
@@ -86,6 +92,18 @@ def load_arm(path: Path) -> dict:
     swap-level ``skipped`` markers; row-level ``failed`` / ``skipped``)
     rather than trusting the file's own aggregate fields — a truncated
     or hand-edited file cannot smuggle in counts its rows don't back.
+
+    GUARDS (2026-08-05 incident: a collaborator's --dry-run file,
+    written to a shared --out path, was pooled as if it were a
+    completed arm — it contributed 0 measured swaps and the gate
+    silently ran over the other arm alone):
+
+    * a file whose top-level ``dry_run`` is true is REFUSED outright —
+      no override exists, dry-run output is never arm data;
+    * a file contributing ZERO measured swaps is refused unless
+      ``allow_empty_arm`` — it may be unlabeled legacy dry-run output
+      (files written before the ``dry_run`` field existed carry no
+      label) or a genuinely empty arm, and only a human can tell.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -95,6 +113,13 @@ def load_arm(path: Path) -> dict:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ResultFileError(f"{path}: not valid JSON ({exc})") from exc
+    if isinstance(data, dict) and data.get("dry_run") is True:
+        raise ResultFileError(
+            f"{path}: this file is DRY-RUN output (top-level "
+            f"dry_run=true) — a dry run simulates no games and is NOT "
+            f"a completed arm; it must never be pooled. Re-run the "
+            f"per-swap harness without --dry-run to produce real arm "
+            f"data. (There is no override for this refusal.)")
     rows = data.get("rows") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         raise ResultFileError(
@@ -117,6 +142,18 @@ def load_arm(path: Path) -> dict:
             raise ResultFileError(
                 f"{path}: measured swap {s.get('card')!r} has a "
                 f"non-numeric card_score/margin")
+    if not measured and not allow_empty_arm:
+        raise ResultFileError(
+            f"{path}: contributes ZERO measured swaps. Two "
+            f"possibilities: (1) it is unlabeled legacy DRY-RUN output "
+            f"(files written before the top-level dry_run field "
+            f"existed carry no label), in which case it must not be "
+            f"pooled — re-run the arm for real; or (2) it is a "
+            f"genuinely empty arm (every deck/swap skipped or failed). "
+            f"Pooling an empty arm silently evaluates the gate over "
+            f"the other arm(s) alone. If you have verified it is a "
+            f"real completed arm, re-run with --allow-empty-arm to "
+            f"admit it (a caveat will be printed).")
     return {
         "file": path.name,
         "path": str(path),
@@ -179,6 +216,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--out", default=None,
                         help="also write the pooled summary JSON here")
+    parser.add_argument("--allow-empty-arm", action="store_true",
+                        help="admit a result file contributing zero "
+                             "measured swaps (refused by default: an "
+                             "empty arm may be unlabeled legacy "
+                             "dry-run output, and pooling it silently "
+                             "evaluates the gate over the other "
+                             "arm(s) alone); a labeled dry-run file "
+                             "is refused regardless")
     args = parser.parse_args(argv)
 
     if len(args.results) < 2:
@@ -187,12 +232,27 @@ def main(argv: Optional[list[str]] = None) -> int:
               file=sys.stderr)
         return 2
     try:
-        arms = [load_arm(Path(p)) for p in args.results]
+        arms = [load_arm(Path(p), allow_empty_arm=args.allow_empty_arm)
+                for p in args.results]
     except ResultFileError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     summary = build_pooled_summary(arms)
+    empty_arms = [arm["file"] for arm in summary["arms"]
+                  if arm["measured_swaps"] == 0]
+    caveat = None
+    if args.allow_empty_arm and empty_arms:
+        caveat = ("CAVEAT: --allow-empty-arm admitted arm(s) with ZERO "
+                  f"measured swaps: {', '.join(empty_arms)} — the "
+                  "pooled gate is effectively evaluated over the "
+                  "remaining arm(s) alone; make sure the empty file(s) "
+                  "are genuinely empty arms and not unlabeled dry-run "
+                  "output.")
+        # Prominent in every mode: stderr always, plus a top-level
+        # field so the --out / --json record carries it too.
+        print(caveat, file=sys.stderr)
+    summary["empty_arm_caveat"] = caveat
     if args.out:
         Path(args.out).write_text(json.dumps(summary, indent=2),
                                   encoding="utf-8")
@@ -205,6 +265,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"{arm['skipped_decks']} skipped decks / "
                   f"{arm['failed_decks']} failed decks over "
                   f"{arm['decks']} decks")
+        if summary["empty_arm_caveat"]:
+            print(summary["empty_arm_caveat"])
         print(f"pooled n: {summary['pooled_measured_swaps']} measured "
               f"swaps (top {summary['swaps_by_group']['top']} / bottom "
               f"{summary['swaps_by_group']['bottom']})")
