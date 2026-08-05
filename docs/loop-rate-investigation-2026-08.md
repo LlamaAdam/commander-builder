@@ -39,6 +39,11 @@ both markers as of 2026-08-03.
    - **May (old writer)**: box1 5.4% (7/130) vs box2b 17.2% (31/180),
      p = 0.0027 — a real gap, but attributable only to old-writer
      abort/attribution behavior that can no longer be observed.
+   - Denominator convention: the rates above are per-ROW (May box2b
+     17.2% = 31/180 rows); the share tool's comparison instruction
+     quotes the same loops per-SIM (31/165 = 18.8%). Both boxes are
+     folded identically within each convention, so no conclusion
+     changes — but do not mix the two denominators in one comparison.
 3. **Censoring is benign.** Loop rows are not clustered by deck
    (permutation test, 20k shuffles: p = 0.64 box1, p = 0.91 box2b) and
    are symmetric across base/v2 — dropping every loop row moves
