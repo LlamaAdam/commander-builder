@@ -247,6 +247,30 @@ policy was designed not to trust. `COMMANDER_BUILDER_CARD_SCORE`
 stays default-off. Next escalation, if wanted: more decks (paired n
 drives the CI width down as sqrt(n)) rather than more games per deck.
 
+### FP-015 FINAL — 2026-08-05: per-swap pooled gate FAIL; three designs agree; closed
+
+The per-swap reopening path ran as a two-box pre-registered study:
+box1 (6 [USER] B3 decks, 36 measured single swaps) and box2b (6
+disjoint [USER] B3 decks) with the pooled analysis code committed
+BLIND to master before unblinding (`scripts/pool_perswap_results.py`,
+PR #73) and both arms held unread until both completed.
+
+Pooled verdict (seed 20260801, reproducible from the two result
+files): **Spearman rho = −0.090, one-sided permutation p = 0.7048;
+top-vs-bottom contrast +0.011 [−0.135, +0.156] → gate FAIL.** The
+rho is *negative* — not a power shortfall. Caveat recorded honestly:
+box2b's arm contributed 0 measured swaps (30 staged swaps skipped
+across all 6 decks — under diagnosis as a possible paired-cut staging
+defect on imported/POP lists), so the pooled n is box1's arm alone.
+The verdict is unaffected: a negative rho cannot be rescued by
+added n under a one-sided gate.
+
+**FP-015 is CLOSED.** Whole-ordering (twice) and per-swap designs all
+fail their pre-registered gates. `COMMANDER_BUILDER_CARD_SCORE`
+remains default-off permanently; the CardScore machinery stays
+available behind the flag for display/verdict UI only, with no
+win-rate claim. No further validation designs are planned.
+
 ### Tier-3 GATED RESULT — 2026-07-31 (second gate FAIL at 9 paired decks; FP-015 validation concluded)
 
 The escalation ran: 19 B3 decks (9 [USER] incl. both FP2 decks + 10
