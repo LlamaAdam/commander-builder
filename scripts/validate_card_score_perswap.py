@@ -518,8 +518,18 @@ def gate_verdict(spearman: Optional[dict], contrast: Optional[dict],
     return gate
 
 
-def build_summary(rows: list, null_rows: list) -> dict:
-    """Aggregate per-swap rows into the gated summary (pure; tested)."""
+def build_summary(rows: list, null_rows: list,
+                  dry_run: bool = False) -> dict:
+    """Aggregate per-swap rows into the gated summary (pure; tested).
+
+    ``dry_run`` labels the summary itself: a dry-run's --out file is
+    otherwise shaped exactly like a completed arm's (rows, gate, the
+    lot), and the 2026-08-05 incident showed a dry-run file written to
+    a shared --out path being pooled as if it were arm data. The
+    top-level ``dry_run`` key makes the file self-identifying so the
+    pooled analysis can refuse it. Backward compatible: absence of the
+    key means unknown/legacy, not false.
+    """
     measured = _measured(rows)
     scores = [s["card_score"] for s in measured]
     margins = [s["margin"] for s in measured]
@@ -565,6 +575,7 @@ def build_summary(rows: list, null_rows: list) -> dict:
     gate = gate_verdict(spearman, contrast, len(measured))
 
     return {
+        "dry_run": bool(dry_run),
         "rows": rows,
         "null_rows": null_rows,
         "decks": len(rows),
@@ -668,7 +679,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                   "failed":
                                   f"{type(exc).__name__}: {exc}"})
 
-    summary = build_summary(rows, null_rows)
+    summary = build_summary(rows, null_rows, dry_run=args.dry_run)
     if args.out:
         Path(args.out).write_text(json.dumps(summary, indent=2),
                                   encoding="utf-8")
@@ -722,7 +733,10 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"{summary['swaps_by_group']['bottom']}) / "
               f"{summary['skipped_swaps']} skipped swaps / "
               f"{summary['skipped_decks']} skipped decks / "
-              f"{summary['failed']} failed over {summary['decks']} decks")
+              f"{summary['failed']} failed over {summary['decks']} decks"
+              + (" — DRY RUN: no games were simulated; this file is "
+                 "NOT arm data and must not be pooled"
+                 if summary["dry_run"] else ""))
     return 0
 
 

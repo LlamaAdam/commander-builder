@@ -38,14 +38,22 @@ def swap(card, score, group, margin=None, skipped=None, source="edhrec"):
     return s
 
 
-def write_result(tmp_path, name, rows):
-    """A result file shaped like the harness's --out summary."""
+def write_result(tmp_path, name, rows, dry_run=None):
+    """A result file shaped like the harness's --out summary.
+
+    ``dry_run=None`` omits the key (legacy files, written before the
+    2026-08-05 labeling, carry no label); True/False writes it the way
+    ``build_summary`` now does.
+    """
     p = tmp_path / name
-    p.write_text(json.dumps({
+    data = {
         "rows": rows,
         "decks": len(rows),
         "gate": {"overall": "single-run gate, ignored by pooling"},
-    }, indent=2), encoding="utf-8")
+    }
+    if dry_run is not None:
+        data["dry_run"] = dry_run
+    p.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return p
 
 
@@ -286,3 +294,105 @@ def test_cli_missing_file_clean_error(tmp_path, capsys):
                     str(tmp_path / "nope.json")])
     assert rc == 2
     assert "cannot read" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Dry-run / empty-arm guards (2026-08-05 incident: a collaborator's
+# --dry-run file on a shared --out path was pooled as a completed arm).
+# ---------------------------------------------------------------------------
+
+
+def dry_run_rows():
+    """Rows shaped like a run_deck dry run: swaps staged, none simmed."""
+    return [{"deck": "DR1.dck", "bracket": 3, "paired_cut": "Cut D",
+             "skipped": "dry run", "swaps": [
+                 swap("DR hi", 9.0, "top", skipped="dry run"),
+                 swap("DR lo", 1.0, "bottom", skipped="dry run"),
+             ]}]
+
+
+def test_cli_rejects_labeled_dry_run_file(tmp_path, capsys):
+    bad = write_result(tmp_path, "box2b.json", dry_run_rows(),
+                       dry_run=True)
+    rc = pool.main([str(arm_a(tmp_path)), str(bad)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "box2b.json" in err
+    assert "DRY-RUN" in err
+    assert "never be pooled" in err
+
+
+def test_cli_labeled_dry_run_refused_even_with_allow_empty_arm(
+        tmp_path, capsys):
+    bad = write_result(tmp_path, "box2b.json", dry_run_rows(),
+                       dry_run=True)
+    rc = pool.main([str(arm_a(tmp_path)), str(bad),
+                    "--allow-empty-arm"])
+    assert rc == 2
+    assert "DRY-RUN" in capsys.readouterr().err
+
+
+def test_cli_accepts_labeled_real_output(tmp_path, capsys):
+    # dry_run: false — a labeled REAL arm pools exactly like before.
+    a = write_result(tmp_path, "arm_a.json", [
+        {"deck": "A1.dck", "swaps": [
+            swap("Top A1", 9.0, "top", margin=0.5),
+            swap("Top A2", 8.0, "top", margin=0.25),
+            swap("Bot A1", 2.0, "bottom", margin=-0.25),
+        ]}], dry_run=False)
+    b = write_result(tmp_path, "arm_b.json", [
+        {"deck": "B1.dck", "swaps": [
+            swap("Top B1", 7.0, "top", margin=0.25),
+            swap("Bot B1", 2.0, "bottom", margin=-0.5),
+        ]}], dry_run=False)
+    rc = pool.main([str(a), str(b), "--json"])
+    assert rc == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["pooled_measured_swaps"] == 5
+
+
+def test_cli_rejects_unlabeled_zero_measured_arm(tmp_path, capsys):
+    # No dry_run key at all — a legacy dry-run and a genuinely empty
+    # arm are indistinguishable; the refusal must name both and the
+    # override.
+    bad = write_result(tmp_path, "empty.json", dry_run_rows())
+    rc = pool.main([str(arm_a(tmp_path)), str(bad)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "empty.json" in err
+    assert "ZERO measured swaps" in err
+    assert "DRY-RUN" in err            # possibility 1: unlabeled legacy
+    assert "genuinely empty" in err    # possibility 2: real empty arm
+    assert "--allow-empty-arm" in err  # the override, by name
+
+
+def test_cli_allow_empty_arm_admits_with_caveat(tmp_path, capsys):
+    empty = write_result(tmp_path, "empty.json", dry_run_rows())
+    out = tmp_path / "pooled.json"
+    rc = pool.main([str(arm_a(tmp_path)), str(empty),
+                    "--allow-empty-arm", "--out", str(out)])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Prominent caveat: on stderr, in the human output, and in the
+    # written JSON record.
+    assert "CAVEAT" in captured.err
+    assert "empty.json" in captured.err
+    caveat_lines = [ln for ln in captured.out.splitlines()
+                    if ln.startswith("CAVEAT")]
+    assert len(caveat_lines) == 1
+    assert "remaining arm(s) alone" in caveat_lines[0]
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert "empty.json" in written["empty_arm_caveat"]
+    # The gate really did run over arm_a's 3 measured swaps alone.
+    assert written["pooled_measured_swaps"] == 3
+    assert [a["measured_swaps"] for a in written["arms"]] == [3, 0]
+
+
+def test_cli_allow_empty_arm_no_caveat_when_no_arm_is_empty(
+        tmp_path, capsys):
+    rc = pool.main([str(arm_a(tmp_path)), str(arm_b(tmp_path)),
+                    "--allow-empty-arm", "--json"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "CAVEAT" not in captured.err
+    assert json.loads(captured.out)["empty_arm_caveat"] is None

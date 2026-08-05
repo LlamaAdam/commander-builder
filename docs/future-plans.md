@@ -258,12 +258,22 @@ PR #73) and both arms held unread until both completed.
 Pooled verdict (seed 20260801, reproducible from the two result
 files): **Spearman rho = −0.090, one-sided permutation p = 0.7048;
 top-vs-bottom contrast +0.011 [−0.135, +0.156] → gate FAIL.** The
-rho is *negative* — not a power shortfall. Caveat recorded honestly:
-box2b's arm contributed 0 measured swaps (30 staged swaps skipped
-across all 6 decks — under diagnosis as a possible paired-cut staging
-defect on imported/POP lists), so the pooled n is box1's arm alone.
-The verdict is unaffected: a negative rho cannot be rescued by
-added n under a one-sided gate.
+rho is *negative* — not a power shortfall. Caveat recorded honestly,
+and CORRECTED later the same day (2026-08-05): box2b's arm
+contributed 0 measured swaps (30 staged swaps skipped across all 6
+decks). At unblinding time this was recorded as a possible paired-cut
+staging defect on imported/POP lists; the file was subsequently
+identified as `--dry-run` output from box2b's machine, written to the
+shared `--out` path — NOT a completed arm at all. The registered
+pooled run therefore mechanically evaluated box1's arm alone (n = 36
+measured swaps); the gate verdict above (FAIL; negative rho) stands
+as box1's registered result. box2b's arm, if recovered or re-run,
+will be analyzed independently as a replication — not folded into the
+already-unblinded registered decision. The verdict over box1's data
+is unaffected: a negative rho cannot be rescued by added n under a
+one-sided gate. Guards against a recurrence (dry-run labeling in the
+harness `--out`; pooled-side refusal of dry-run and zero-measured
+inputs) landed with this correction — see CHANGELOG 2026-08-05.
 
 **FP-015 is CLOSED.** Whole-ordering (twice) and per-swap designs all
 fail their pre-registered gates. `COMMANDER_BUILDER_CARD_SCORE`

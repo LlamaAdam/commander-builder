@@ -6,6 +6,40 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-05 — Dry-run arm guard + FP-015 record correction
+
+#### Added
+
+- **`guard(validation)`: dry-run result files are now
+  self-identifying, and the pooled analysis refuses them.** Incident
+  (2026-08-05): a collaborating machine's
+  `validate_card_score_perswap.py --dry-run` output, written to a
+  shared `--out` path, was byte-shape-indistinguishable from a
+  completed arm's result file; `pool_perswap_results.py` accepted it
+  (contributing 0 measured / 30 skipped swaps) and a pre-registered
+  unblinding fired on the false premise that both arms were complete.
+  Two gaps closed: (1) the per-swap harness's `--out` JSON gains a
+  top-level `dry_run: true/false` field (true iff `--dry-run`;
+  absence means unknown/legacy) and the human summary line calls out
+  a dry run loudly; (2) the pooled script REFUSES any input whose
+  top-level `dry_run` is true (loud error naming the file, exit 2, no
+  override), and refuses any input contributing zero measured swaps
+  unless `--allow-empty-arm` is passed — the error names both
+  possibilities (unlabeled legacy dry-run vs genuinely empty arm) and
+  the override; when the override admits an empty arm, a prominent
+  caveat line is printed (stderr + human output) and recorded as
+  `empty_arm_caveat` in the pooled JSON.
+
+#### Changed
+
+- `docs/future-plans.md` (FP-015 FINAL, 2026-08-05): record
+  corrected — box2b's file was later identified as dry-run output,
+  not a completed arm; the registered pooled run therefore
+  mechanically evaluated box1's arm alone (n = 36 measured swaps).
+  The gate verdict (FAIL; negative rho) stands as box1's registered
+  result; box2b's arm, if recovered or re-run, will be analyzed
+  independently as a replication.
+
 ### 2026-08-05 — FP-015 pooled per-swap analysis, committed BLIND
 
 #### Added
