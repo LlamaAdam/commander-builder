@@ -310,10 +310,30 @@ def build_dashboard(
     deck_card_names = [n for n, _ in main_with_qty]
     total_main = sum(q for _, q in main_with_qty)
 
-    # Commander section.
+    # Commander section. The lookup is guarded with the SAME degrade
+    # contract the per-card loop below uses: a Scryfall outage (429,
+    # 5xx, URLError) yields ``commander_data = None``, which downstream
+    # renders the honest "name known, details unavailable" tile —
+    # empty ``type_line`` / ``color_identity``, byte-identical to the
+    # shape an unresolvable commander name has always produced. One
+    # loud log line (same format as the legality / salt / bracket
+    # probes) so an empty commander tile is traceable to its cause.
+    # Before this guard the exception escaped ``build_dashboard`` and
+    # turned /api/dashboard and /api/dashboard/core into a 500 — the
+    # whole page died for one uncached card.
     commander_names = _parse_commander_names_from_dck(deck_path)
     primary_commander = commander_names[0] if commander_names else ""
-    commander_data = lookup_card(primary_commander) if primary_commander else None
+    commander_data = None
+    if primary_commander:
+        try:
+            commander_data = lookup_card(primary_commander)
+        except Exception as exc:  # noqa: BLE001 — dashboard must not fail on commander lookup
+            print(
+                f"[dashboard] commander lookup failed for "
+                f"{primary_commander!r} "
+                f"({type(exc).__name__}: {exc}); skipping",
+                flush=True,
+            )
     color_identity = []
     if commander_data:
         color_identity = list(commander_data.get("color_identity") or [])

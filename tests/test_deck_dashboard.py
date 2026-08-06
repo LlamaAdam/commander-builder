@@ -692,3 +692,241 @@ def test_build_dashboard_handles_salt_list_fetch_failure(tmp_path, monkeypatch):
     # Graceful degradation: count is 0, list is empty.
     assert result.legality["salt_cards_count"] == 0
     assert result.legality["salt_cards"] == []
+
+
+# ---------------------------------------------------------------------------
+# Scryfall-outage degradation on the COMMANDER lookup
+# ---------------------------------------------------------------------------
+#
+# The per-card [Main] loop has always been wrapped in the module's
+# degrade path, but the commander lookup that precedes it was bare: an
+# uncached Scryfall 429 / 5xx / URLError escaped ``build_dashboard`` and
+# turned /api/dashboard and /api/dashboard/core into an HTTP 500 for the
+# whole page. These tests pin the guard AND pin that the happy path is
+# byte-identical to what the unguarded code produced.
+
+_PIN_CARDS = {
+    "Omnath, Locus of Creation": {
+        "type_line": "Legendary Creature — Elemental Incarnation",
+        "oracle_text": (
+            "Landfall — Whenever a land enters under your control..."
+        ),
+        "color_identity": ["W", "U", "R", "G"],
+        "cmc": 4.0,
+        "prices": {"usd": "6.00"},
+    },
+    "Forest": {
+        "type_line": "Basic Land — Forest",
+        "oracle_text": "{T}: Add {G}.",
+        "cmc": 0.0,
+        "prices": {"usd": "0.05"},
+    },
+    "Lotus Cobra": {
+        "type_line": "Creature — Snake",
+        "oracle_text": "Whenever a land enters the battlefield under your "
+                       "control, add one mana of any color.",
+        "cmc": 2.0,
+        "prices": {"usd": "8.00"},
+    },
+    "Cultivate": {
+        "type_line": "Sorcery",
+        "oracle_text": "Search your library for up to two basic land cards.",
+        "cmc": 3.0,
+        "prices": {"usd": "0.50"},
+    },
+    "Wrath of God": {
+        "type_line": "Sorcery",
+        "oracle_text": "Destroy all creatures.",
+        "cmc": 4.0,
+        "prices": {"usd": "5.00"},
+    },
+    "Lightning Bolt": {
+        "type_line": "Instant",
+        "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+        "cmc": 1.0,
+        "prices": {"usd": "1.50"},
+    },
+}
+
+# The EXACT payload ``build_dashboard`` emits for ``_write_pin_deck`` with
+# every probe stubbed. Frozen so a future guard/refactor in this module
+# can't quietly change what a healthy request returns.
+_PIN_EXPECTED = {
+    "bracket_estimate": {"estimate": 3, "pinned": True},
+    "categories": {
+        "draw": 0, "land_payoff": 1, "ramp": 1, "removal": 1,
+        "win_condition": 0, "wipe": 1,
+    },
+    "commander": {
+        "color_identity": ["W", "U", "R", "G"],
+        "name": "Omnath, Locus of Creation",
+        "type_line": "Legendary Creature — Elemental Incarnation",
+    },
+    "deck_progress": {"current": 42, "target": 100},
+    "legality": {
+        "all_legal": True,
+        "deck_size_ok": False,
+        "deck_target": 100,
+        "deck_total": 42,
+        "illegal_cards": [],
+        "in_deck_game_changers": [],
+        "n_game_changers": 0,
+        "n_illegal": 0,
+        "salt_cards": [{"name": "Wrath of God", "score": 3.45}],
+        "salt_cards_count": 1,
+    },
+    "mana_curve": [(0, 0), (1, 1), (2, 1), (3, 1), (4, 1), (5, 0), (6, 0)],
+    "moxfield_url": "https://moxfield.com/decks/abc123",
+    "stat_tiles": {
+        "avg_cmc": 2.5,
+        "bracket": 3,
+        "bracket_name": "Upgraded",
+        "est_price_usd": 15.0,
+        "inferred_bracket": 3,
+        "lands": 37,
+        "n_game_changers": 0,
+        "n_priced_cards": 4,
+        "power_level": 3,
+    },
+    "suggested_adds": [],
+    "theme_tags": ["Midrange"],
+}
+
+
+def _write_pin_deck(tmp_path: Path) -> Path:
+    p = tmp_path / "pin.dck"
+    p.write_text(
+        "[metadata]\nMoxfield=abc123\n"
+        "[Commander]\n1 Omnath, Locus of Creation\n"
+        "[Main]\n"
+        + ("1 Forest\n" * 37)
+        + "1 Lotus Cobra\n1 Cultivate\n1 Wrath of God\n1 Lightning Bolt\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _stub_probes(monkeypatch):
+    """Freeze the three network/data probes build_dashboard fans out to,
+    so the pinned payload is a function of the deck file alone."""
+    monkeypatch.setattr(
+        "commander_builder.game_changers.load_game_changers",
+        lambda *a, **kw: {"Rhystic Study"},
+    )
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.fetch_salt_list",
+        lambda *a, **kw: {"wrath of god": 3.45},
+    )
+    monkeypatch.setattr(
+        "commander_builder.bracket_estimator.estimate_bracket",
+        lambda *a, **kw: {"estimate": 3, "pinned": True},
+    )
+
+
+def _http_error(code: int):
+    """A urllib HTTPError with an explicit empty body.
+
+    The explicit ``BytesIO`` keeps HTTPError from allocating its own
+    SpooledTemporaryFile, which would ResourceWarning at GC time.
+    """
+    import io
+    import urllib.error
+    return urllib.error.HTTPError(
+        url="https://api.scryfall.com/cards/named", code=code,
+        msg="Too Many Requests", hdrs=None, fp=io.BytesIO(b""),
+    )
+
+
+def test_build_dashboard_happy_path_payload_is_pinned(tmp_path, monkeypatch):
+    """Healthy Scryfall -> the exact payload, byte for byte.
+
+    This is the regression fence for the outage guard: adding the
+    try/except around the commander lookup must not perturb ANY key of
+    a successful response.
+    """
+    deck = _write_pin_deck(tmp_path)
+    _stub_probes(monkeypatch)
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", _PIN_CARDS.get,
+    )
+
+    assert build_dashboard(deck, bracket=3).to_dict() == _PIN_EXPECTED
+
+
+@pytest.mark.parametrize("failure", ["http429", "http503", "urlerror"])
+def test_build_dashboard_degrades_when_commander_lookup_fails(
+    tmp_path, monkeypatch, capsys, failure,
+):
+    """A Scryfall outage on the COMMANDER lookup degrades, never raises.
+
+    ``build_dashboard`` is called unguarded by /api/dashboard and
+    /api/dashboard/core — an escaping exception there is an HTTP 500 for
+    the entire page. The honest degraded state keeps the commander NAME
+    (it comes from the .dck, no network needed) and reports the Scryfall
+    detail as unavailable: empty ``type_line`` / ``color_identity``,
+    exactly the shape an unresolvable commander has always produced.
+    Every other panel is untouched.
+    """
+    import urllib.error
+
+    deck = _write_pin_deck(tmp_path)
+    _stub_probes(monkeypatch)
+
+    def flaky(name):
+        if name == "Omnath, Locus of Creation":
+            if failure == "urlerror":
+                raise urllib.error.URLError("connection refused")
+            raise _http_error(429 if failure == "http429" else 503)
+        return _PIN_CARDS.get(name)
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", flaky,
+    )
+
+    result = build_dashboard(deck, bracket=3)
+
+    # Honest tile state: name kept, Scryfall-sourced detail blank.
+    assert result.commander == {
+        "name": "Omnath, Locus of Creation",
+        "type_line": "",
+        "color_identity": [],
+    }
+    # Nothing else moved — the outage is contained to the one panel.
+    expected = dict(_PIN_EXPECTED)
+    expected["commander"] = result.commander
+    assert result.to_dict() == expected
+
+    # One loud log line, in the module's established probe format.
+    out = capsys.readouterr().out
+    assert "[dashboard] commander lookup failed" in out
+    assert "Omnath, Locus of Creation" in out
+
+
+def test_build_dashboard_survives_total_scryfall_outage(tmp_path, monkeypatch):
+    """EVERY lookup raising — commander AND the per-card loop — still
+    yields a payload rather than an exception. Pins that the new
+    commander guard and the pre-existing loop guard compose."""
+    deck = _write_pin_deck(tmp_path)
+    _stub_probes(monkeypatch)
+
+    def always_429(name):
+        raise _http_error(429)
+
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", always_429,
+    )
+
+    result = build_dashboard(deck, bracket=3)
+
+    assert result.commander["name"] == "Omnath, Locus of Creation"
+    assert result.commander["type_line"] == ""
+    assert result.commander["color_identity"] == []
+    # No card resolved, so no curve/price/role data is fabricated.
+    assert result.stat_tiles["lands"] == 0
+    assert result.stat_tiles["avg_cmc"] == 0.0
+    assert result.stat_tiles["est_price_usd"] == 0.0
+    assert all(v == 0 for v in result.categories.values())
+    # Deck-file-sourced facts survive an outage untouched.
+    assert result.deck_progress == {"current": 42, "target": 100}
+    assert result.moxfield_url == "https://moxfield.com/decks/abc123"
+    assert json.loads(json.dumps(result.to_dict()))  # still serializable
