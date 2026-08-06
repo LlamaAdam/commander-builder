@@ -34,6 +34,11 @@ candidate substrate:
     (bubble_analysis.score_deck: total, role_fit, mana_fit, salt_fit,
     reference_alignment) as continuous regressors. Called through the
     internal entry directly -- no env flag is flipped.
+  * tournament -- FP-017 cEDH tournament card statistics (edhtop16) projected
+    onto the base deck. **Bracket-5 decks only** and **cache-only** (no
+    network inside a regression loop): a non-B5 deck reports every feature as
+    None, exactly like any other unavailable component. Exploratory: the
+    source describes bracket-5 humans and has never passed a gate.
   * all        -- every family, each reported with its own multiple-testing
     honesty line (features tested + expected false positives at p<.05),
     because FP-002's history shows exactly how a lone |t|>=2 hit misleads.
@@ -63,7 +68,8 @@ NEUTRAL_BAND = 0.05  # |margin| <= this -> "neutral"
 
 # Candidate feature substrates (FP-002 closure: reopening requires NEW
 # regressors). "deck_health" is the original family and the default.
-FEATURE_FAMILIES = ("deck_health", "clusters", "card_score", "all")
+FEATURE_FAMILIES = ("deck_health", "clusters", "card_score", "tournament",
+                    "all")
 
 # A corpus-theme cluster only gets its own one-vs-rest indicator with at
 # least this many member decks; thinner clusters lump into "other" (the
@@ -436,6 +442,101 @@ def card_score_features(deck_text: str,
     return feats
 
 
+# --------------------------------------------------------------------------- #
+# Candidate substrate 3: FP-017 cEDH tournament card statistics
+# --------------------------------------------------------------------------- #
+# WHY this substrate exists: FP-002 (deck_health) and FP-015 (CardScore) both
+# failed their gates, and one diagnosis is that every feature we had was
+# EDHREC-derived *deckbuilding preference* with no human *win* data behind it.
+# edhtop16 aggregates cEDH tournament results -- real humans actually winning
+# games -- so it is a genuinely NEW substrate rather than more of the same.
+#
+# Two hard limits, both enforced in code below rather than in prose:
+#   1. BRACKET 5 ONLY. cEDH card statistics must not silently inform B2-B4
+#      analysis; a non-B5 deck reports every feature as None.
+#   2. CACHE-ONLY. No network fetch inside a regression loop (same rule as
+#      card_score_features' `corpus=None`). Nothing cached -> None, which the
+#      report renders as "unavailable", never as zero.
+# It remains EXPLORATORY. Nothing here is a predictor until it passes a gate.
+TOURNAMENT_FEATURES: list[str] = [
+    "tt_coverage",            # share of the deck the stats even cover
+    "tt_mean_presence",       # mean tournament play rate of covered cards
+    "tt_staple_share",        # share of deck cards at >= 50% presence
+    "tt_fringe_share",        # share of deck cards at <= 10% presence
+    "tt_mean_card_winrate",   # mean entry win rate of the covered cards
+]
+
+#: A card at or above this tournament presence is a cEDH staple.
+TOURNAMENT_STAPLE_FLOOR = 0.5
+#: ...and at or below this, fringe among winning lists.
+TOURNAMENT_FRINGE_CEILING = 0.1
+
+
+def tournament_features(deck_text: str, filename: str = "",
+                        lookup=None) -> dict[str, Optional[float]]:
+    """FP-017 tournament card statistics projected onto one deck.
+
+    ``lookup(commander)`` defaults to
+    ``edhtop16_client.load_cached_card_stats`` -- the cache-only entry that
+    NEVER touches the network. Injectable so tests run offline on synthetic
+    rows.
+
+    Returns all-None unless the deck is tagged ``[B5]``: the FP-017 scope
+    gate, mirrored from ``bubble_analysis``' corpus-side gate so neither
+    consumer can drift.
+    """
+    feats: dict[str, Optional[float]] = {n: None for n in TOURNAMENT_FEATURES}
+    mb = _BRACKET_RE.search(filename)
+    bracket = int(mb.group(1)) if mb else None
+    try:
+        from commander_builder.edhtop16_client import CEDH_BRACKET
+    except Exception:
+        return feats
+    if bracket != CEDH_BRACKET:
+        return feats  # scope gate: cEDH stats describe bracket 5 only
+    try:
+        from commander_builder import dck_utils
+        if lookup is None:
+            from commander_builder.edhtop16_client import (
+                load_cached_card_stats as lookup)
+        commanders = dck_utils.section_card_names(deck_text, "Commander")
+        stats: dict = {}
+        for cmdr in commanders:
+            stats = lookup(cmdr) or {}
+            if stats:
+                break
+        main = [n for n in dck_utils.section_card_names(deck_text, "Main")]
+        if not main:
+            return feats
+        covered = []
+        wrs = []
+        for name in main:
+            rec = stats.get(name.strip().lower())
+            if rec is None:
+                continue
+            covered.append(float(rec.presence))
+            wr = rec.mean_entry_win_rate
+            if wr is not None:
+                wrs.append(float(wr))
+        feats["tt_coverage"] = len(covered) / len(main)
+        if not covered:
+            # Coverage 0 is a real, honest measurement; the rates over an
+            # empty set are not.
+            return feats
+        feats["tt_mean_presence"] = sum(covered) / len(covered)
+        feats["tt_staple_share"] = (
+            sum(1 for p in covered if p >= TOURNAMENT_STAPLE_FLOOR)
+            / len(main))
+        feats["tt_fringe_share"] = (
+            sum(1 for p in covered if p <= TOURNAMENT_FRINGE_CEILING)
+            / len(main))
+        if wrs:
+            feats["tt_mean_card_winrate"] = sum(wrs) / len(wrs)
+    except Exception:
+        pass
+    return feats
+
+
 def _featurize(deck_text: str, filename: str,
                features: str) -> tuple[dict, Optional[str]]:
     """(numeric features, cluster label) for the selected substrate(s).
@@ -450,6 +551,8 @@ def _featurize(deck_text: str, filename: str,
         cluster = assign_cluster(deck_text)
     if features in ("card_score", "all"):
         feats.update(card_score_features(deck_text, filename))
+    if features in ("tournament", "all"):
+        feats.update(tournament_features(deck_text, filename))
     return feats, cluster
 
 
@@ -788,6 +891,53 @@ def analyze_card_score(samples: list[Sample]) -> dict:
     }
 
 
+def analyze_tournament(samples: list[Sample]) -> dict:
+    """FP-017 cEDH tournament card statistics vs curator margin.
+
+    Same per-feature-n discipline as ``analyze_card_score`` (None means
+    "unavailable", never 0), plus an explicit ``n_bracket5`` count: the
+    scope gate means a soak made entirely of B3 decks yields n_avail 0
+    everywhere, and the report must say WHY rather than looking broken.
+    Exploratory by construction -- see the module docstring."""
+    n_b5 = sum(1 for s in samples
+               if s.features.get("tt_coverage") is not None)
+    out: list[dict] = []
+    n_tested = 0
+    n_hits = 0
+    for fname in TOURNAMENT_FEATURES:
+        xs: list[float] = []
+        ys: list[float] = []
+        for s in samples:
+            v = s.features.get(fname)
+            if v is not None:
+                xs.append(float(v))
+                ys.append(s.margin)
+        n_avail = len(xs)
+        r = pearson(xs, ys) if n_avail >= 3 else None
+        t = t_stat(r, n_avail) if r is not None else None
+        if r is not None:
+            n_tested += 1
+            if t is not None and abs(t) >= 2.0:
+                n_hits += 1
+        out.append({
+            "feature": fname,
+            "n_avail": n_avail,
+            "pearson_r": None if r is None else round(r, 3),
+            "t_stat": None if t is None else round(t, 2),
+        })
+    out.sort(key=lambda d: abs(d["pearson_r"] or 0.0), reverse=True)
+    return {
+        "features": out,
+        "n_bracket5_decks": n_b5,
+        "n_decks": len(samples),
+        "scope_note": (
+            "cEDH tournament data describes BRACKET-5 humans only; decks "
+            "not tagged [B5] are excluded by design, not by accident. "
+            "Exploratory source, not a validated predictor."),
+        "multiple_testing": _honesty(n_tested, n_hits),
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -808,7 +958,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="feature substrate to regress margin on: deck_health "
                          "(default; the original 10 features, byte-identical "
                          "output), clusters (corpus-theme labels, one-vs-rest), "
-                         "card_score (FP-015 deck-level components), or all.")
+                         "card_score (FP-015 deck-level components), "
+                         "tournament (FP-017 cEDH card stats; BRACKET-5 decks "
+                         "only, cache-only, exploratory), or all.")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of text")
     args = ap.parse_args(argv)
 
@@ -852,6 +1004,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             report["cluster_analysis"] = analyze_clusters(samples)
         if args.features in ("card_score", "all"):
             report["card_score_analysis"] = analyze_card_score(samples)
+        if args.features in ("tournament", "all"):
+            report["tournament_analysis"] = analyze_tournament(samples)
 
     if args.json:
         print(json.dumps(report, indent=2))
@@ -920,6 +1074,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                 stat = "r=  NA   (no variance or n<3)"
             print(f"    {f['feature']:<24} n={f['n_avail']:>3}  {stat}")
         print(_honesty_line("card_score", cs["multiple_testing"]))
+    if "tournament_analysis" in report:
+        ta = report["tournament_analysis"]
+        print("\n  FP-017 cEDH tournament card stats -> margin "
+              f"(bracket-5 decks: {ta['n_bracket5_decks']}/{ta['n_decks']}):")
+        if not ta["n_bracket5_decks"]:
+            print("    no bracket-5 decks in this sample — every feature is "
+                  "unavailable BY DESIGN (cEDH data is gated to B5)")
+        for f in ta["features"]:
+            r, t = f["pearson_r"], f["t_stat"]
+            if r is not None:
+                star = "*" if (t is not None and abs(t) >= 2.0) else " "
+                stat = f"r={r:+.3f}  t={t if t is not None else 'NA':>6}  {star}"
+            elif f["n_avail"] == 0:
+                stat = "unavailable (computed for 0 decks)"
+            else:
+                stat = "r=  NA   (no variance or n<3)"
+            print(f"    {f['feature']:<24} n={f['n_avail']:>3}  {stat}")
+        print(_honesty_line("tournament", ta["multiple_testing"]))
+        print(f"    scope: {ta['scope_note']}")
     if skipped:
         print(f"\n  skipped {len(skipped)} pair(s): "
               + "; ".join(skipped[:6]) + ("..." if len(skipped) > 6 else ""))

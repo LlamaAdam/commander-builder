@@ -15,10 +15,11 @@ decks. What the operator actually wants is:
    clearly better candidate. Those are the easy, low-regret swaps.
 3. **Ground both in what good decks look like** — the top-liked
    Moxfield builds for the commander, EDHREC's average deck, and
-   EDHREC's salt list. (A third reference site can plug into the
-   injectable ``fetch_decks`` seam later — Archidekt is the obvious
-   candidate; nothing here hard-codes Moxfield's shape beyond the
-   extractor it borrows.)
+   EDHREC's salt list, Archidekt's top-viewed builds, and — for
+   BRACKET 5 ONLY — edhtop16's cEDH tournament lists (FP-017). The
+   tournament source is gated to bracket 5 by construction: it
+   describes what tournament humans win with, which is not what a B2-B4
+   deck should be measured against.
 
 Same honesty contract as ``card_score``: every number here is a
 heuristic prior, not a verdict — Forge A/B sims remain the arbiter.
@@ -134,9 +135,17 @@ class ReferenceCorpus:
 
     ``partial_sources`` names the deck-content sources that came back
     empty at build time (``"moxfield"`` / ``"archidekt"`` /
-    ``"edhrec_average"``). Non-empty means this corpus is degraded —
-    the cache layer expires it at ``PARTIAL_CACHE_TTL_HOURS`` instead
-    of the full TTL, and callers/logs can see why support() is thin.
+    ``"edhrec_average"`` / ``"edhtop16"``). Non-empty means this corpus
+    is degraded — the cache layer expires it at
+    ``PARTIAL_CACHE_TTL_HOURS`` instead of the full TTL, and
+    callers/logs can see why support() is thin. A source that was
+    deliberately NOT consulted is not "partial": ``edhtop16`` only ever
+    appears here for a bracket-5 build (see ``tournament_decks``).
+
+    ``tournament_decks`` counts how many of ``deck_card_keys`` came
+    from the FP-017 cEDH tournament source. It is 0 for every
+    bracket that is not 5 — by construction, not by luck — so a B2-B4
+    corpus can be asserted clean of tournament data.
     """
 
     commander: str
@@ -147,6 +156,7 @@ class ReferenceCorpus:
     salt_map: dict[str, float] = field(default_factory=dict)
     fetched_at: float = 0.0
     partial_sources: tuple[str, ...] = ()
+    tournament_decks: int = 0
 
     @property
     def n_decks(self) -> int:
@@ -204,6 +214,7 @@ class ReferenceCorpus:
             "salt_map": self.salt_map,
             "fetched_at": self.fetched_at,
             "partial_sources": list(self.partial_sources),
+            "tournament_decks": self.tournament_decks,
         }
 
     @classmethod
@@ -220,6 +231,7 @@ class ReferenceCorpus:
                       for k, v in (payload.get("salt_map") or {}).items()},
             fetched_at=float(payload.get("fetched_at", 0.0)),
             partial_sources=tuple(payload.get("partial_sources") or ()),
+            tournament_decks=int(payload.get("tournament_decks") or 0),
         )
 
 
@@ -278,6 +290,22 @@ def _default_fetch_extra_lists(commander: str, bracket: Optional[int],
         return []      # it never sinks the build
 
 
+def _default_fetch_tournament_lists(commander: str, bracket: Optional[int],
+                                    n: int) -> list[list[str]]:
+    """edhtop16 — the corpus' FOURTH source (FP-017), bracket 5 ONLY.
+
+    ``edhtop16_client.fetch_top_decklists`` refuses any bracket other
+    than 5 without issuing a request; the caller gates too. Both layers
+    on purpose: this is the one source whose leakage would be silent
+    and wrong (a B3 deck told to look like a cEDH list).
+    """
+    from .edhtop16_client import fetch_top_decklists
+    try:
+        return fetch_top_decklists(commander, bracket=bracket, n=n)
+    except Exception:  # noqa: BLE001 — a dead source shrinks the corpus,
+        return []      # it never sinks the build
+
+
 def build_reference_corpus(
     commander: str,
     bracket: Optional[int] = None,
@@ -291,6 +319,8 @@ def build_reference_corpus(
     fetch_salt: Optional[Callable[[], dict[str, float]]] = None,
     fetch_extra_lists: Optional[Callable[[str, Optional[int], int],
                                          list[list[str]]]] = None,
+    fetch_tournament_lists: Optional[Callable[[str, Optional[int], int],
+                                              list[list[str]]]] = None,
 ) -> Optional[ReferenceCorpus]:
     """Fetch (or load cached) reference data for ``commander``.
 
@@ -306,6 +336,15 @@ def build_reference_corpus(
     Archidekt top-viewed decks (plain card-name lists, capped at its own
     smaller request budget) and merges into the same reference pool —
     ``support()`` is denominatored over ALL merged decks.
+
+    ``fetch_tournament_lists(commander, bracket, n)`` is the FP-017
+    cEDH source (edhtop16). **It is consulted ONLY when
+    ``bracket == 5``** — never for an unknown bracket, never for B1-B4.
+    cEDH lists describe bracket-5 humans; merging them into a casual
+    corpus would silently redefine "what good decks look like" for
+    decks that will never be played that way. When the gate is closed
+    the source is not fetched at all and does NOT count as a partial
+    source (nothing failed — we chose not to ask).
 
     Partial builds: every source degrades to empty on failure, so
     "some sources empty, some not" usually means a transient outage —
@@ -374,6 +413,33 @@ def build_reference_corpus(
     if len(deck_sets) == n_before_extra:
         empty_sources.append("archidekt")
 
+    # FP-017 fourth source — cEDH tournament lists, BRACKET 5 ONLY.
+    # The gate is a plain equality check on purpose: `bracket` is
+    # Optional[int] and "unknown" must not open it.
+    from .edhtop16_client import CEDH_BRACKET as _CEDH_BRACKET
+    from .edhtop16_client import DEFAULT_N as _EDHTOP16_N
+    tournament_decks = 0
+    if bracket == _CEDH_BRACKET:
+        tourney_lists = (fetch_tournament_lists
+                         or _default_fetch_tournament_lists)(
+            commander, bracket, min(n, _EDHTOP16_N),
+        )
+        for names in tourney_lists or []:
+            keys = set()
+            for name in names:
+                k = _key(name)
+                keys.add(k)
+                display.setdefault(k, name)
+            if keys:
+                deck_sets.append(frozenset(keys))
+                tournament_decks += 1
+        if tournament_decks == 0:
+            # Asked and got nothing => genuinely degraded, so it earns a
+            # partial-source mark and the short TTL (PR #40 rule). The
+            # gated-off case never reaches here, so a B3 corpus is never
+            # marked partial for a source it deliberately skipped.
+            empty_sources.append("edhtop16")
+
     avg_names = (fetch_average or _default_fetch_average)(commander)
     avg_keys = set()
     for name in avg_names or []:
@@ -406,6 +472,7 @@ def build_reference_corpus(
                                ).items()},
         fetched_at=time.time(),
         partial_sources=tuple(empty_sources),
+        tournament_decks=tournament_decks,
     )
     if cache:
         try:

@@ -6,6 +6,60 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-05 — FP-017: cEDH tournament results as a fourth corpus source
+
+#### Added
+
+- **`edhtop16_client.py`** — importer for edhtop16.com's public,
+  unauthenticated **GraphQL** API (`/api/graphql`; probed live
+  2026-08-05, no HTML scraping). Pulls top-performing commanders with
+  their tournament statistics (`count`, `conversionRate`, `winRate`,
+  `topCuts`, `metaShare`), their top-finishing entries with full
+  maindecks and standings, and derives per-card presence across those
+  winning lists (`card_presence`). One POST carries a commander's
+  stats *and* ~20 complete decklists, so this source costs 1 request
+  per commander rather than Archidekt's ~26.
+  House client conventions throughout: injectable
+  `fetch_json(url, payload)` seam, `.cache/edhtop16/` at a 24h TTL,
+  **no-cache-on-empty** (the site is Cloudflare-fronted and answers an
+  unknown commander with HTTP 200 + GraphQL `errors`, so a 200 is not
+  proof of data), 429/5xx retry with `Retry-After` honored and clamped,
+  deterministic 4xx never retried, loud degrade to empty on failure.
+  Per-card presence is withheld below 8 entries — "we don't know" must
+  never render as "nobody plays it".
+- **Fourth reference-corpus source, gated to bracket 5.**
+  `build_reference_corpus` gains a `fetch_tournament_lists` seam,
+  consulted **only** when `bracket == 5` (`bracket=None` is refused
+  too). The gate is enforced in the client as well, so no consumer can
+  route around it. Honors the PR #40 partial-source rule: asked and got
+  nothing marks `edhtop16` partial and takes the 1h TTL; gated off is
+  NOT partial (nothing failed — we chose not to ask). New
+  `ReferenceCorpus.tournament_decks` counts merged tournament lists, so
+  a B2-B4 corpus is assertably clean of cEDH data.
+- **`scripts/margin_analysis.py --features tournament`** — exploratory
+  regressor lane over FP-017 card statistics
+  (`tt_coverage`, `tt_mean_presence`, `tt_staple_share`,
+  `tt_fringe_share`, `tt_mean_card_winrate`), following the PR #58
+  `card_score` pattern with the same multiple-testing honesty output.
+  Cache-only (no network inside a regression loop) and bracket-5-gated;
+  a sample with no B5 decks reports every feature unavailable and says
+  why, instead of looking broken.
+- **`commander-tournament`** CLI (leaderboard mode / per-commander
+  mode). Every output path prints the scope note.
+
+#### Notes
+
+- **Scope and honesty (docs/future-plans.md FP-017):** bracket-5
+  humans only; **no claim that any of it transfers to casual
+  brackets**; **exploratory data source, NOT a predictor** — nothing
+  here has passed a gate, presence rates are sampled
+  best-finish-first and are soaked in selection bias. The reason for
+  the caution is on the record: FP-015 whole-ordering failed its gate
+  twice, FP-015 per-swap failed with a *negative* rho, and FP-002
+  closed REFUTED at n=93 after an n=66 false positive. Wiring this
+  into recommendations without its own pre-registered gate is
+  explicitly not planned.
+
 ### 2026-08-05 — Adaptive change budget (`--mode auto`)
 
 #### Added
