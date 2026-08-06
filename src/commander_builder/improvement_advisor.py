@@ -1195,6 +1195,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Legacy alias for --source claude.",
     )
     p.add_argument(
+        "--mode",
+        choices=["polish", "overhaul", "free", "rebuild", "auto"],
+        default=None,
+        help=(
+            "Adaptive change budget: cap the printed recommendations "
+            "to a tier's add/cut budget (polish=5+5, overhaul=15+15, "
+            "rebuild=30+30, free=unbounded). 'auto' resolves the tier "
+            "from the deck's 0-100 health score at run time (>=75 "
+            "keep, 55-74 polish, 35-54 overhaul, <35 rebuild; score "
+            "unavailable falls back to polish with a note). Default: "
+            "no capping — output identical to previous releases. The "
+            "score only sizes the budget; whether a change stays is "
+            "still the Forge A/B verdict's call."
+        ),
+    )
+    p.add_argument(
         "--claude-model", default=None,
         help=(
             "When --source claude, pick the Anthropic tier. Default "
@@ -1340,6 +1356,37 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
     except Exception:  # noqa: BLE001 — advice must print regardless
         health_grade = None
+    # Adaptive change budget (--mode). Opt-in: absent flag = no capping,
+    # no extra output — byte-identical to previous releases. 'auto'
+    # resolves the tier from the health grade computed above (same
+    # 0-100 score the report header prints), with the documented polish
+    # fallback when the score is unavailable. The recommendations list
+    # is trimmed IN the report so the printed text and any --output
+    # manifest agree on what was advised.
+    if args.mode:
+        from .change_budget import (
+            TIER_CAPS,
+            format_auto_mode_line,
+            resolve_tier,
+            trim_recommendations,
+        )
+        if args.mode == "auto":
+            _hg_score = (
+                health_grade.get("score")
+                if isinstance(health_grade, dict) else None
+            )
+            _tier = resolve_tier(_hg_score)
+            _max_adds, _max_cuts = _tier.max_adds, _tier.max_cuts
+            print(format_auto_mode_line(_tier))
+        else:
+            _max_adds, _max_cuts = TIER_CAPS[args.mode]
+            print(
+                f"mode: {args.mode} -> up to {_max_adds} adds "
+                f"and {_max_cuts} cuts",
+            )
+        report.recommendations = trim_recommendations(
+            report.recommendations, _max_adds, _max_cuts,
+        )
     text = _format_report_text(
         report,
         bracket_estimate=bracket_estimate,

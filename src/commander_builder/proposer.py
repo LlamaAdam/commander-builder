@@ -755,6 +755,23 @@ def auto_propose(
             "If it has many misalignments, propose more. Match the "
             "proposal size to the deck's actual needs."
         ),
+        # Adaptive-budget tiers (change_budget.resolve_tier). "keep"
+        # arrives only via --mode auto on a healthy deck; "rebuild"
+        # via auto on a failing deck or an explicit --mode rebuild.
+        "keep": (
+            "MODE: KEEP. The deck's health score says it is already "
+            "well-constructed. Propose at most a couple of clearly "
+            "superior swaps -- zero changes is the expected answer "
+            "unless something is obviously better."
+        ),
+        "rebuild": (
+            "MODE: REBUILD. The deck's construction score is poor -- "
+            "a substantial rebuild is justified, so use the wide "
+            "budget to fix structural problems (missing ramp/draw/"
+            "removal, weak win conditions, incoherent themes). The "
+            "cap is still a ceiling, not a target: propose only "
+            "changes you'd genuinely make."
+        ),
     }
     mode_hint = _MODE_HINTS.get(mode, _MODE_HINTS["polish"])
 

@@ -64,6 +64,14 @@ _SOURCE_LABEL = {
     "bracket_peers": "Bracket-peers",
 }
 
+# Valid ``?mode=`` values for the adaptive change budget (mirrors the
+# commander-auto-curate --mode choices; "keep" is auto-resolved only,
+# never requested directly). Client-side mirror: app.js
+# _AUDIT_MODE_OPTIONS.
+_AUDIT_MODE_OPTIONS = frozenset(
+    {"polish", "overhaul", "free", "rebuild", "auto"},
+)
+
 
 def _resolve_byo_key(header_value: str) -> str:
     """Resolve the effective BYO Anthropic key for an audit request.
@@ -236,6 +244,7 @@ def _build_audit_payload(
     bracket: int,
     requested: str,
     byo_key: str,
+    mode: "str | None" = None,
 ) -> dict:
     """Assemble the full audit response shared by the sync ``/api/audit``
     endpoint and the SSE ``/api/audit/stream`` ``complete`` event.
@@ -247,7 +256,21 @@ def _build_audit_payload(
     mis-named the diagnosis field ``rationale`` (the UI reads
     ``diagnosis`` on both paths, so the streamed diagnosis never
     rendered). Both bugs are fixed by routing both endpoints through here.
+
+    ``mode`` (optional, validated at the endpoints): adaptive change
+    budget. When set, the report's recommendations are capped to the
+    tier's add/cut budget before proposed-text assembly; ``"auto"``
+    resolves the tier from the deck's health score (the same one the
+    payload's ``health_grade`` carries). ``None`` (default) = no
+    capping — payload lists identical to previous behavior.
     """
+    # Health signals + grade, computed up front (pure functions of the
+    # original text) so the adaptive-budget resolution below and the
+    # payload's health_grade/suggested_mode fields share one reading.
+    health_signals = _compute_deck_health_safe(original)
+    health_grade = _compute_health_grade_safe(original, health_signals)
+    from ..change_budget import suggested_mode_payload
+    suggested_mode = suggested_mode_payload(health_grade.get("score"))
     # FP-015 verdict pass (flag-gated, fail-quiet). Living HERE — not in
     # the endpoints — keeps the sync and SSE payloads identical (the
     # 2026-06 warning-asymmetry lesson). When COMMANDER_BUILDER_CARD_SCORE
@@ -271,6 +294,24 @@ def _build_audit_payload(
             )
     except Exception:  # noqa: BLE001 — the audit must render regardless
         pass
+    # Adaptive change budget: cap the recommendation lists to the
+    # requested tier BEFORE proposed-text assembly so the applied
+    # swaps, pricing, and payload lists all reflect the budgeted set
+    # (the same ordering contract as the FP-015 verdict trim above).
+    # "auto" uses the health-derived suggestion computed up top.
+    applied_mode = None
+    if mode:
+        try:
+            from ..change_budget import TIER_CAPS, trim_recommendations
+            applied_mode = (
+                suggested_mode["mode"] if mode == "auto" else mode
+            )
+            _max_adds, _max_cuts = TIER_CAPS[applied_mode]
+            report.recommendations = trim_recommendations(
+                report.recommendations, _max_adds, _max_cuts,
+            )
+        except Exception:  # noqa: BLE001 — the audit must render regardless
+            applied_mode = None
     proposed_text, added, removed, kept = _apply_swaps_to_dck(
         original, report.recommendations,
     )
@@ -342,9 +383,8 @@ def _build_audit_payload(
     warning = _fallback_warning(
         requested, actual_source, fallback_reason, byo_key,
     )
-    # Health signals computed once; the letter grade aggregates them
-    # (plus the land-count walk) without recomputing the signal set.
-    health_signals = _compute_deck_health_safe(original)
+    # health_signals / health_grade were computed at the top of this
+    # function (one reading shared with the suggested-mode resolution).
     return {
         "deck": deck_id,
         "bracket": bracket,
@@ -395,7 +435,14 @@ def _build_audit_payload(
         "deck_health": health_signals,
         # At-a-glance letter grade over the deck_health signals
         # (ManaFoundry parity). Rendered as the tile row's header.
-        "health_grade": _compute_health_grade_safe(original, health_signals),
+        "health_grade": health_grade,
+        # Adaptive change budget: the tier the health score suggests
+        # ({"mode", "health_score", "fallback"} — always present) and
+        # the tier actually APPLIED to this payload's lists (None
+        # unless the request passed ?mode=...). The score only sizes
+        # the budget; the A/B verdict still decides what stays.
+        "suggested_mode": suggested_mode,
+        "curation_mode": applied_mode,
         "combo_assessment": _assess_combos_safe(original, bracket),
         # FP-015 whole-deck verdict + bubble cards. The keys are ALWAYS
         # present — None/[] unless the card-score flag is on and the
@@ -501,6 +548,16 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
         # improvement_advisor (Sonnet today). Most-cost-effective
         # value: "claude-haiku-4-5" (~3-5x cheaper than Sonnet).
         claude_model = (request.args.get("model") or "").strip() or None
+        # Adaptive change budget (?mode=...). Optional; absent = no
+        # capping (previous behavior). Whitelist mirrors the CLI's
+        # --mode choices; "auto" resolves from the health score inside
+        # _build_audit_payload.
+        mode = (request.args.get("mode") or "").strip().lower() or None
+        if mode and mode not in _AUDIT_MODE_OPTIONS:
+            return jsonify({
+                "error": "mode must be one of "
+                         + ", ".join(sorted(_AUDIT_MODE_OPTIONS)),
+            }), 400
 
         try:
             from ..improvement_advisor import advise as _advise, DEFAULT_CLAUDE_MODEL
@@ -533,6 +590,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
             bracket=bracket,
             requested=requested,
             byo_key=byo_key,
+            mode=mode,
         ))
 
     @bp.route("/api/audit/stream")
@@ -607,6 +665,14 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
         owned_raw = (request.args.get("owned_only") or "").strip().lower()
         owned_only = owned_raw in ("1", "true", "yes")
         claude_model = (request.args.get("model") or "").strip() or None
+        # Adaptive change budget — same param + whitelist as the sync
+        # endpoint so the client can switch endpoints by URL alone.
+        mode = (request.args.get("mode") or "").strip().lower() or None
+        if mode and mode not in _AUDIT_MODE_OPTIONS:
+            return jsonify({
+                "error": "mode must be one of "
+                         + ", ".join(sorted(_AUDIT_MODE_OPTIONS)),
+            }), 400
 
         # --- Stream generator -----------------------------------------
         def event_stream():
@@ -665,6 +731,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                             bracket=bracket,
                             requested=requested,
                             byo_key=byo_key,
+                            mode=mode,
                         ))
                         continue
                     # Intermediate phases (diagnosis / manabase / primary)

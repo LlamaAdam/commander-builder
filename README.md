@@ -111,8 +111,15 @@ commander-advise --user "[USER] My Deck v1 [B3].dck" --bracket 3
 # A/B sim with empirical kept/reverted/neutral verdict written back to
 # the knowledge_log. ~$0.20-$0.50 in Anthropic + ~5-15 min Forge per run.
 commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --run-sim
-# Polish (default, 5+5 swaps), overhaul (15+15), or free (unbounded).
+# Polish (default, 5+5 swaps), overhaul (15+15), free (unbounded),
+# rebuild (30+30 + optional Karsten manabase rebuild), or auto — the
+# adaptive change budget: the deck's 0-100 health score picks the tier
+# (>=75 keep, 55-74 polish, 35-54 overhaul, <35 rebuild). Opt-in on
+# purpose (bigger budgets multiply curator + Forge cost). The score
+# only sizes the budget; the A/B verdict still decides what stays.
+# --mode auto also works on commander-advise and commander-improve.
 commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --mode overhaul
+commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --mode auto
 
 # Old-vs-new head-to-head A/B sim
 commander-compare \
