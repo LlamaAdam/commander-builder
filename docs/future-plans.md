@@ -1743,3 +1743,57 @@ Library/Settings nav, `/api/health` ok, `/api/decks` lists decks with
 `type` fields, `/api/dashboard?deck=…` returns the full payload,
 `/api/library?card=Sol+Ring` cross-deck search works, and
 `/api/rules/game_changers` serves the bundled fallback offline.
+
+**EXE refreshed 2026-08-05** against `master` @ `d084ddf` — the
+2026-07-29 freeze had frozen the app at roughly PR #53 and ~25 PRs had
+landed since. Now included:
+
+- **FP-016 replay-lite** — `web/routes_replays.py` blueprint,
+  `static/replays.js`, and the Replays nav section. The old EXE 404'd
+  `/api/replays`; this one serves it.
+- **Consistency deck-health tile** (`static/deck_health_ui.js`).
+- **Adaptive change budget** — `change_budget.py` plus the audit UI's
+  Mode select (rendered from `static/app.js`).
+- **Web UX batch** — `/api/dashboard/core` +
+  `/api/dashboard/section/<name>` progressive load and the sidebar deck
+  filter.
+- **FP-017** — `edhtop16_client.py` and the `commander-tournament`
+  entry point.
+- **Dashboard outage guard** (PR #79).
+
+**No spec changes were needed.** The 2026-07-29 collection strategy
+absorbed all of the above by construction, and this rebuild is the
+evidence that the strategy — not just its then-current output — is what
+holds:
+
+- `collect_submodules("commander_builder")` picked up every new
+  first-party module with no edit. Verified against the frozen archive:
+  **102 of 102** `src/commander_builder/**.py` modules are in the PYZ,
+  including `change_budget`, `edhtop16_client`, `web.routes_replays`,
+  `replay_store`, and `replay_timeline`.
+- Bundling the whole `web/static/` + `web/templates/` dirs picked up
+  `replays.js` with no edit. All 9 static assets and `index.html` ship;
+  SHA-256 of the served `app.js`, `replays.js`, `nav.js`,
+  `deck_health_ui.js` and `app.css` match the repo files (i.e. the EXE
+  serves the CURRENT bundle, not a stale one).
+- No new **package** data files landed — `src/commander_builder/data/`
+  still holds only `oracle_diff_buckets.json` — so the whole-dir `datas`
+  entry needed no change either.
+- The repo-root `data/` exclusion still holds: nothing added since
+  reads a repo-root artifact without a fallback. `replay_store` writes
+  under `~/.commander-builder/replays/` (user home, not `_MEIPASS`), so
+  replays resolve correctly from a frozen build.
+- The only PyInstaller "missing module" warnings are the expected
+  optional/delayed ones — `anthropic`, `psutil`, `fcntl` (POSIX),
+  `forge_py.*` (external sibling repo, same deliberate exclusion as the
+  Forge JAR) — all guarded at their import sites.
+
+Live-launch verified again (`dist/CommanderBuilder/CommanderBuilder.exe`,
+ephemeral port): `GET /` serves the shell containing the sidebar
+deck-filter markup and the Replays section; `/api/health` ok with
+`deck_dir` = `%USERPROFILE%\Documents\CommanderBuilder\decks`;
+`/api/decks` lists 258 user+premade decks and `?all=1` lists all 492
+`.dck` files in that library; **`/api/replays` → 200** with 7 recorded
+runs; `/api/dashboard/core?deck=…` → 200 advertising
+`deferred_sections: [lift_picks, pricing]`, and both
+`/api/dashboard/section/<name>?deck=…` fetches → 200 `status: ok`.

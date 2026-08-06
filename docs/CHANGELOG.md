@@ -6,6 +6,37 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-05 — FP-010: desktop EXE rebuilt against current master
+
+#### Changed
+
+- **Desktop EXE refreshed** (`python scripts/build_desktop.py`) against
+  `master` @ `d084ddf`. The previous freeze (2026-07-29) had pinned the
+  packaged app at roughly PR #53; the rebuild picks up ~25 PRs' worth of
+  surface — FP-016 replay-lite (`web/routes_replays.py`,
+  `static/replays.js`, Replays nav), the consistency deck-health tile,
+  the adaptive change budget (`change_budget.py` + the audit Mode
+  select), the progressive-dashboard/sidebar-filter web UX batch
+  (`/api/dashboard/core`, `/api/dashboard/section/<name>`), FP-017
+  (`edhtop16_client.py`), and the dashboard outage guard.
+- **`packaging/commander-builder.spec` needed no changes** — this is a
+  docs-only commit. The 2026-07-29 collect-everything strategy
+  (`collect_submodules("commander_builder")` + whole-dir `datas` for
+  `web/static`, `web/templates`, `data/`) absorbed every new module and
+  asset automatically. Confirmed rather than assumed: 102 of 102
+  first-party modules are present in the frozen PYZ, all 9 static assets
+  ship, and the served `app.js` / `replays.js` / `nav.js` /
+  `deck_health_ui.js` / `app.css` are SHA-256 identical to the repo
+  files (no stale bundle). No new package-data files landed, and the
+  documented repo-root `data/` exclusion still holds.
+- **Live-probe verified** against the frozen server: `/` serves the
+  current shell (sidebar deck-filter markup + Replays section),
+  `/api/health` ok on the `Documents\CommanderBuilder\decks` library,
+  `/api/decks` 258 user+premade (`?all=1` → all 492 `.dck`),
+  **`/api/replays` → 200** (the old EXE 404'd it), and
+  `/api/dashboard/core` → 200 with both deferred sections fetching
+  `status: ok`.
+
 ### 2026-08-05 — FP-017: cEDH tournament results as a fourth corpus source
 
 #### Added
