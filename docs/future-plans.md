@@ -10,6 +10,141 @@
 
 # ── ACTIVE / WORK NEEDED ──────────────────────────────────────────────
 
+# FP-017 — cEDH tournament results as a fourth corpus source (edhtop16)
+
+**Status (2026-08-05): importer SHIPPED. Exploratory data source, NOT a
+predictor. No gate has been run on it and none is claimed.**
+
+## SCOPE AND HONESTY NOTE — read this before using any number from it
+
+This is the part that matters more than the code:
+
+1. **Bracket-5 humans only.** edhtop16 aggregates cEDH tournament
+   results. Every statistic it yields describes what people registered
+   and won with in competitive events. **No claim is made that any of
+   it transfers to casual brackets.** A B2-B4 deck is not trying to do
+   what a cEDH deck is doing, and "the winning lists all run Force of
+   Will" is advice about a different game. The importer therefore gates
+   itself to bracket 5 *in code, in two places* — the client
+   (`fetch_top_decklists` refuses any bracket != 5 without issuing a
+   request) and the corpus builder (`build_reference_corpus` only
+   consults the source when `bracket == 5`) — with tests asserting a
+   B3 corpus build contains zero tournament decks. `bracket=None` is
+   refused too: an unknown bracket is not a bracket-5 bracket.
+2. **Exploratory source, not a predictor.** Nothing here has passed a
+   pre-registered gate. Presence rates are a *play rate among
+   top-finishing entries*, sampled best-finish-first, so they are
+   soaked in selection bias: "strong players brought it and did well"
+   is not "this card would raise your win rate". Per-card win rates are
+   confounded by the deck the card sits in. These are descriptive
+   statistics about a population, full stop.
+3. **Why we are this careful: three prior gate failures.** FP-015
+   whole-ordering failed twice (2026-07-28 n=6, 2026-07-31 n=9), the
+   FP-015 per-swap design failed (2026-08-05, pooled rho = −0.090,
+   p = 0.7048 — *negative*, not underpowered), and FP-002 closed
+   REFUTED at n=93 after an n=66 false positive that looked exactly
+   like signal. The pattern in all three: a plausible heuristic, an
+   honest gate, a fail. FP-017 gets the same treatment or it does not
+   ship as a predictor.
+
+## WHY it is worth importing anyway
+
+The FP-002 closure named the only honest reopening path: a **new
+feature substrate**, not more games on the same features. One diagnosis
+of why every prior attempt failed is that all of our signals were
+EDHREC-derived — they encode human *deckbuilding preference* (what
+people put in decks) with no human *win* data to anchor them.
+Preference and performance are different quantities, and we were
+regressing performance on preference.
+
+cEDH tournament aggregators are the only large-scale source of real
+humans actually winning games. That makes edhtop16 a genuinely
+different substrate rather than a fourth flavor of the same one. It may
+still fail a gate. But it fails for a new reason, which is worth
+something.
+
+## WHAT the API actually offers (probed live 2026-08-05)
+
+edhtop16.com serves a public, unauthenticated **GraphQL** API at
+`/api/graphql`. No HTML scraping is performed or needed. Introspected
+schema facts the client depends on:
+
+- `commanders(first:, sortBy: CommandersSortBy!, timePeriod:
+  TimePeriod!, minEntries:, minTournamentSize:, colorId:, after:)` →
+  `CommanderConnection`. `CommandersSortBy` ∈ {CONVERSION, POPULARITY,
+  TOP_CUTS, WINRATE}; `TimePeriod` ∈ {ALL_TIME, ONE_MONTH,
+  THREE_MONTHS, SIX_MONTHS, ONE_YEAR, POST_BAN}.
+- `Commander.stats(filters: CommanderStatsFilters!)` → `{count,
+  conversionRate, winRate, topCuts, metaShare}`. The `filters` argument
+  is **required** — a bare `stats` is a query error.
+- `Commander.entries(first:, sortBy: EntrySortBy, filters:
+  EntriesFilter!)` → `EntryConnection`. `EntriesFilter` **requires**
+  both `timePeriod` and `minEventSize`.
+- `Entry` → `{standing, wins, losses, draws, winRate, decklist,
+  maindeck {name}, tournament {name TID size tournamentDate topCut}}`.
+- Also present, unused so far: `Commander.staples`,
+  `Commander.cardWinrateStats(cardName)` (with/without-card conversion
+  split), `Card.playRateLastYear`, `tournaments`, `player`,
+  `monthlySeatWinRates`, `leaderboard`.
+
+Cost profile: **one POST** returns a commander's aggregate stats *and*
+~20 full 98-card maindecks in ~6.5s — no N+1 detail fetch, unlike the
+Archidekt source. That is why this source's request budget is 1/commander
+while Archidekt's is ~26.
+
+Failure shapes: the site is behind Cloudflare, and an unknown commander
+comes back as **HTTP 200 + `{"errors": [...], "data": {"commander":
+null}}`**. A 200 is therefore not proof of data, which is precisely the
+case the house NO-CACHE-ON-EMPTY convention exists for.
+
+## WHAT SHIPPED
+
+- `src/commander_builder/edhtop16_client.py` — house client
+  conventions: injectable `fetch_json(url, payload)` seam, disk cache
+  under `.cache/edhtop16/` at a 24h TTL, **no-cache-on-empty** (an
+  empty parse is warned loudly and never written), 429/5xx retry with
+  `Retry-After` honored and clamped (the PR #40 pattern, reusing
+  `edhrec_client._parse_retry_after` / `MAX_RETRY_AFTER_SEC`),
+  deterministic 4xx never retried, loud degrade to empty on failure.
+  Records: `CommanderStats`, `TournamentEntry`, `CardTournamentStats`.
+  `card_presence()` is pure and refuses to report below
+  `MIN_ENTRIES_FOR_PRESENCE` (8) — "we don't know" must never render
+  as "nobody plays it".
+- Corpus integration: a fourth source in `bubble_analysis`'
+  `build_reference_corpus`, behind the bracket-5 gate, honoring the
+  PR #40 partial-source rule (asked-and-got-nothing marks `edhtop16`
+  partial and takes the 1h TTL; gated-off is **not** partial — nothing
+  failed, we chose not to ask). `ReferenceCorpus.tournament_decks`
+  records how many merged decks came from this source, so a clean B3
+  corpus is assertable.
+- `scripts/margin_analysis.py --features tournament` — an exploratory
+  regressor lane following the PR #58 `card_score` pattern, with the
+  same multiple-testing honesty output. **Cache-only** (no network in a
+  regression loop, same rule as `card_score_features`' `corpus=None`)
+  and bracket-5-gated, so a soak made entirely of B3 decks reports
+  every feature unavailable *and says why*.
+- CLI: `commander-tournament` (leaderboard mode / per-commander mode);
+  every output path prints the scope note.
+
+## HOW to run a real import
+
+```bash
+# top cEDH commanders by top-cut conversion, last 6 months, events 60+
+commander-tournament --sort-by CONVERSION --time-period SIX_MONTHS -n 25
+
+# one commander: aggregate stats + top-finishing decklists + card presence
+commander-tournament "Kinnan, Bonder Prodigy" -n 20 --min-event-size 60
+```
+
+## NOT planned
+
+Wiring tournament presence into the advisor's recommendations for any
+bracket, or into `CardScore`, without its own pre-registered gate.
+Given FP-015's and FP-002's records, the prior on "this new heuristic
+signal predicts margin" should be low.
+
+---
+
 # FP-015 — Unified per-card scoring formula (`CardScore`)
 
 **Status (2026-08-03): SHIPPED behind default-off flag; whole-ordering

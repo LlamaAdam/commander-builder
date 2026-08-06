@@ -615,3 +615,184 @@ def test_features_all_reports_every_family(tmp_path, capsys, monkeypatch):
     assert "multiple-testing honesty (clusters)" in out
     assert "CardScore deck-level component" in out
     assert "multiple-testing honesty (card_score)" in out
+
+
+# --------------------------------------------------------------------------- #
+# FP-017 --features tournament (cEDH card stats; BRACKET-5 ONLY, cache-only)
+# --------------------------------------------------------------------------- #
+
+_B5_DECK = ("[metadata]\nName=T\n[Commander]\n1 Kinnan, Bonder Prodigy|S|1\n"
+            "[Main]\n1 Sol Ring|C|1\n1 Mana Crypt|C|1\n1 Storm Crow|C|1\n"
+            "1 Never Played|C|1\n")
+
+
+def _tt_stats(mapping):
+    """{name: (presence, mean_entry_win_rate)} -> the client's record shape."""
+    from commander_builder.edhtop16_client import CardTournamentStats
+    return {k.lower(): CardTournamentStats(name=k, presence=p,
+                                           mean_entry_win_rate=w)
+            for k, (p, w) in mapping.items()}
+
+
+def test_tournament_features_project_card_stats_onto_a_b5_deck():
+    seen = []
+
+    def lookup(cmdr):
+        seen.append(cmdr)
+        return _tt_stats({"Sol Ring": (0.9, 0.55), "Mana Crypt": (0.8, 0.45),
+                          "Storm Crow": (0.05, 0.30)})
+
+    feats = ma.tournament_features(_B5_DECK, "[USER] D [B5].dck",
+                                   lookup=lookup)
+    assert seen == ["Kinnan, Bonder Prodigy"]     # commander drives the lookup
+    # 3 of the 4 maindeck cards are covered by the stats table.
+    assert feats["tt_coverage"] == pytest.approx(3 / 4)
+    assert feats["tt_mean_presence"] == pytest.approx((0.9 + 0.8 + 0.05) / 3)
+    assert feats["tt_staple_share"] == pytest.approx(2 / 4)   # >= 0.5
+    assert feats["tt_fringe_share"] == pytest.approx(1 / 4)   # <= 0.1
+    assert feats["tt_mean_card_winrate"] == pytest.approx(
+        (0.55 + 0.45 + 0.30) / 3)
+
+
+@pytest.mark.parametrize("tag", ["[B1]", "[B2]", "[B3]", "[B4]", ""])
+def test_tournament_features_gated_off_outside_bracket_5(tag):
+    """The scope gate: cEDH stats must not inform non-B5 analysis, and an
+    UNTAGGED deck (unknown bracket) is refused too."""
+    def lookup(cmdr):
+        pytest.fail("the bracket gate must fire before any stats lookup")
+
+    feats = ma.tournament_features(_B5_DECK, "[USER] D %s.dck" % tag,
+                                   lookup=lookup)
+    assert feats == {n: None for n in ma.TOURNAMENT_FEATURES}
+
+
+def test_tournament_features_uncached_commander_is_unavailable_not_zero():
+    feats = ma.tournament_features(_B5_DECK, "[USER] D [B5].dck",
+                                   lookup=lambda c: {})
+    # Coverage 0 is a real measurement; the rates over an empty set are not.
+    assert feats["tt_coverage"] == pytest.approx(0.0)
+    for k in ("tt_mean_presence", "tt_staple_share", "tt_fringe_share",
+              "tt_mean_card_winrate"):
+        assert feats[k] is None
+
+
+def test_tournament_features_survive_a_seam_failure():
+    def boom(cmdr):
+        raise RuntimeError("cache unreadable")
+    feats = ma.tournament_features(_B5_DECK, "[USER] D [B5].dck", lookup=boom)
+    assert feats == {n: None for n in ma.TOURNAMENT_FEATURES}
+
+
+def test_tournament_default_lookup_is_the_cache_only_entry(monkeypatch):
+    """No network inside a regression loop -- same rule as card_score's
+    corpus=None."""
+    import commander_builder.edhtop16_client as et
+    monkeypatch.setattr(et, "_http_post_json", lambda u, p: pytest.fail(
+        "--features tournament must never hit the network"))
+    calls = []
+
+    def fake(c, *a, **k):
+        calls.append(c)
+        return {}
+    monkeypatch.setattr(et, "load_cached_card_stats", fake)
+    ma.tournament_features(_B5_DECK, "[USER] D [B5].dck")
+    assert calls == ["Kinnan, Bonder Prodigy"]
+
+
+def test_analyze_tournament_uses_per_feature_availability():
+    samples = [
+        ma.Sample(deck="d%d" % i, margin=0.1 * i, games=40,
+                  features={"tt_coverage": float(i),
+                            "tt_mean_presence": (float(i) if i < 3 else None),
+                            "tt_mean_card_winrate": None})
+        for i in range(6)
+    ]
+    rep = ma.analyze_tournament(samples)
+    by_name = {f["feature"]: f for f in rep["features"]}
+    assert by_name["tt_coverage"]["n_avail"] == 6
+    assert by_name["tt_coverage"]["pearson_r"] == pytest.approx(1.0)
+    assert by_name["tt_mean_presence"]["n_avail"] == 3
+    assert by_name["tt_mean_card_winrate"]["n_avail"] == 0
+    assert by_name["tt_mean_card_winrate"]["pearson_r"] is None
+    assert rep["n_bracket5_decks"] == 6 and rep["n_decks"] == 6
+    assert "BRACKET-5" in rep["scope_note"]
+    mt = rep["multiple_testing"]
+    assert mt["features_tested"] == 2
+    assert mt["expected_false_positives_p05"] == pytest.approx(0.1)
+
+
+def test_analyze_tournament_counts_zero_b5_decks():
+    samples = [ma.Sample(deck="d", margin=0.1, games=40,
+                         features={n: None for n in ma.TOURNAMENT_FEATURES})]
+    rep = ma.analyze_tournament(samples)
+    assert rep["n_bracket5_decks"] == 0
+    assert rep["multiple_testing"]["features_tested"] == 0
+
+
+def test_features_tournament_lane_end_to_end(tmp_path, capsys, monkeypatch):
+    """Synthetic soak rows over B5 decks: the lane reports, with honesty."""
+    import json
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    decks = tmp_path / "decks"
+    decks.mkdir()
+    for name in ("[USER] A [B5].dck", "[USER] B [B5].dck"):
+        (decks / name).write_text(_B5_DECK, encoding="utf-8")
+    rows = [_row("[USER] A [B5].dck", "[USER] A v2 [B5].dck", 40, 4, 16),
+            _row("[USER] B [B5].dck", "[USER] B v2 [B5].dck", 40, 16, 4)]
+    (inbox / "x_throughput.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    import commander_builder.edhtop16_client as et
+    monkeypatch.setattr(et, "load_cached_card_stats", lambda c, *a, **k:
+                        _tt_stats({"Sol Ring": (0.9, 0.55),
+                                   "Mana Crypt": (0.8, 0.45)}))
+    rc = ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                  "--min-games", "40", "--features", "tournament"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "cEDH tournament card stats -> margin" in out
+    assert "bracket-5 decks: 2/2" in out
+    assert "multiple-testing honesty (tournament)" in out
+    assert "BRACKET-5 humans only" in out
+    # The deck_health family is NOT reported for this lane.
+    assert "feature -> margin correlation" not in out
+
+
+def test_features_tournament_says_why_when_no_b5_decks(tmp_path, capsys):
+    inbox, decks = _fixture_inbox(tmp_path)      # [B4] decks
+    rc = ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                  "--min-games", "40", "--features", "tournament"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "bracket-5 decks: 0/2" in out
+    assert "BY DESIGN" in out
+
+
+def test_features_all_includes_the_tournament_family(tmp_path, capsys,
+                                                     monkeypatch):
+    import commander_builder.bubble_analysis as ba
+    inbox, decks = _fixture_inbox(tmp_path)
+    monkeypatch.setattr(ma, "assign_cluster", lambda text: "mill")
+
+    class _Stub:
+        total = 50.0
+        components = {"role_fit": {"value": 0.5}, "mana_fit": {"value": None},
+                      "salt_fit": {"value": None},
+                      "reference_alignment": {"value": None}}
+    monkeypatch.setattr(ba, "score_deck", lambda **kw: _Stub())
+    assert ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                    "--min-games", "40", "--features", "all"]) == 0
+    out = capsys.readouterr().out
+    assert "cEDH tournament card stats -> margin" in out
+    assert "multiple-testing honesty (tournament)" in out
+
+
+def test_tournament_lane_is_absent_from_the_default_report(tmp_path, capsys):
+    import json
+    inbox, decks = _fixture_inbox(tmp_path)
+    assert ma.main(["--inbox", str(inbox), "--decks", str(decks),
+                    "--min-games", "40", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert "tournament_analysis" not in report
+    assert set(report) == _DEFAULT_REPORT_KEYS

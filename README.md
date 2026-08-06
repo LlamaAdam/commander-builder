@@ -155,6 +155,12 @@ commander-push "[USER] My Deck v2 [B3].dck"
 # Compare your deck to consensus meta-references at a bracket
 commander-meta-test "[USER] My Deck [B3].dck" --bracket 3
 
+# Import cEDH tournament results from edhtop16 (FP-017): top commanders by
+# conversion rate, or one commander's winning decklists + per-card presence.
+# BRACKET-5 data only — exploratory source, NOT a validated predictor.
+commander-tournament                                  # top commanders
+commander-tournament "Kinnan, Bonder Prodigy" -n 20   # lists + card presence
+
 # Inspect or revert any historical iteration (revert backs up the live
 # deck first and prints the backup path)
 commander-history --deck-id <publicId>

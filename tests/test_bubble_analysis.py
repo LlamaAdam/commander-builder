@@ -346,6 +346,126 @@ def test_legacy_cache_payload_defaults_to_not_partial():
 
 
 # ---------------------------------------------------------------------------
+# FP-017 — cEDH tournament source, BRACKET-5 GATE
+# ---------------------------------------------------------------------------
+
+def tournament_kwargs(tourney_lists, **over):
+    """All other sources healthy; the tournament seat is the variable."""
+    calls = []
+
+    def tourney(c, b, n):
+        calls.append((c, b, n))
+        return list(tourney_lists)
+
+    kwargs = dict(fetch_decks=lambda c, b, n: [moxfield_deck_json("Sol Ring")],
+                  fetch_average=lambda c: ["Impact Tremors"],
+                  fetch_salt=lambda: {},
+                  fetch_extra_lists=lambda c, b, n: [["Skirk Prospector"]],
+                  fetch_tournament_lists=tourney)
+    kwargs.update(over)
+    return kwargs, calls
+
+
+@pytest.mark.parametrize("bracket", [None, 1, 2, 3, 4])
+def test_b1_b4_corpus_never_contains_tournament_data(ref_cache, bracket):
+    """The load-bearing gate: cEDH data must NOT silently inform B2-B4.
+
+    Not merely "the merge produced nothing" — the source is never even
+    asked, so a B3 build cannot pick up tournament cards through any
+    code path, including a future fetcher that ignores its bracket arg.
+    """
+    kwargs, calls = tournament_kwargs([["Force of Will", "Mana Crypt"]])
+    corpus = build_reference_corpus("Krenko, Mob Boss", bracket=bracket,
+                                    **kwargs)
+    assert calls == []                       # never consulted
+    assert corpus.tournament_decks == 0
+    assert corpus.n_decks == 2               # moxfield + archidekt only
+    merged = set().union(*corpus.deck_card_keys)
+    assert "force of will" not in merged and "mana crypt" not in merged
+    # ...and a source we deliberately skipped is NOT "partial": nothing
+    # failed, so the corpus keeps its full TTL.
+    assert "edhtop16" not in corpus.partial_sources
+
+
+def test_bracket5_corpus_merges_tournament_lists(ref_cache):
+    kwargs, calls = tournament_kwargs(
+        [["Force of Will", "Mana Crypt"], ["Force of Will"]])
+    corpus = build_reference_corpus("Kinnan, Bonder Prodigy", bracket=5,
+                                    **kwargs)
+    assert len(calls) == 1 and calls[0][1] == 5
+    assert corpus.tournament_decks == 2
+    assert corpus.n_decks == 4               # 1 moxfield + 1 archidekt + 2
+    merged = set().union(*corpus.deck_card_keys)
+    assert {"force of will", "mana crypt"} <= merged
+    assert corpus.display_names["force of will"] == "Force of Will"
+    assert corpus.partial_sources == ()
+
+
+def test_bracket5_support_is_denominatored_over_all_merged_decks(ref_cache):
+    kwargs, _calls = tournament_kwargs([["Sol Ring"]] * 12)
+    corpus = build_reference_corpus("Kinnan, Bonder Prodigy", bracket=5,
+                                    **kwargs)
+    assert corpus.n_decks == 14
+    # Sol Ring: 1 moxfield deck + 12 tournament lists out of 14.
+    assert corpus.support("Sol Ring") == pytest.approx(13 / 14)
+
+
+def test_bracket5_empty_tournament_source_is_partial(ref_cache, capsys):
+    """Asked and got nothing => genuinely degraded (PR #40 rule)."""
+    kwargs, calls = tournament_kwargs([])
+    first = build_reference_corpus("Kinnan, Bonder Prodigy", bracket=5,
+                                   **kwargs)
+    assert len(calls) == 1
+    assert "edhtop16" in first.partial_sources
+    assert first.tournament_decks == 0
+    assert "edhtop16" in capsys.readouterr().err
+    # Cached at the SHORT ttl, so the next hour's run retries.
+    build_reference_corpus("Kinnan, Bonder Prodigy", bracket=5, **kwargs)
+    assert len(calls) == 1                    # still inside the short TTL
+    _age_cache(ref_cache, ba.PARTIAL_CACHE_TTL_HOURS + 1)
+    build_reference_corpus("Kinnan, Bonder Prodigy", bracket=5, **kwargs)
+    assert len(calls) == 2
+
+
+def test_bracket5_tournament_only_corpus_still_builds(ref_cache):
+    kwargs, _calls = tournament_kwargs(
+        [["Force of Will"]],
+        fetch_decks=lambda c, b, n: [],
+        fetch_average=lambda c: [],
+        fetch_extra_lists=lambda c, b, n: [])
+    corpus = build_reference_corpus("Kinnan, Bonder Prodigy", bracket=5,
+                                    **kwargs)
+    assert corpus is not None and corpus.tournament_decks == 1
+    assert set(corpus.partial_sources) == {"moxfield", "archidekt",
+                                           "edhrec_average"}
+
+
+def test_default_tournament_fetcher_is_gated_at_the_client_too():
+    """Second layer: even a caller that bypasses build_reference_corpus'
+    gate gets nothing from the default fetcher off-bracket."""
+    from commander_builder import edhtop16_client as et
+
+    def boom(url, payload):
+        pytest.fail("the client-side gate must fire before any request")
+
+    for bracket in (None, 3, 4):
+        assert et.fetch_top_decklists("X", bracket=bracket,
+                                      fetch_json=boom) == []
+
+
+def test_tournament_decks_survives_dict_round_trip():
+    corpus = ReferenceCorpus(commander="X", bracket=5, deck_card_keys=(),
+                             tournament_decks=7)
+    assert ReferenceCorpus.from_dict(corpus.to_dict()).tournament_decks == 7
+
+
+def test_legacy_cache_payload_defaults_to_zero_tournament_decks():
+    payload = make_corpus(n_decks=12).to_dict()
+    payload.pop("tournament_decks")
+    assert ReferenceCorpus.from_dict(payload).tournament_decks == 0
+
+
+# ---------------------------------------------------------------------------
 # score_deck
 # ---------------------------------------------------------------------------
 
