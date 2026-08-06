@@ -7044,3 +7044,79 @@ def test_done_status_never_precedes_sidecar_persist(client, monkeypatch):
     assert ("persist", "done") in events
     assert ("set", "done") in events
     assert events.index(("persist", "done")) < events.index(("set", "done"))
+
+
+# ---------------------------------------------------------------------------
+# Scryfall outage on the commander lookup -> degraded 200, never a 500
+# ---------------------------------------------------------------------------
+#
+# ``build_dashboard`` is called unguarded by both dashboard routes, so an
+# exception escaping it is an HTTP 500 for the WHOLE page. The commander
+# lookup used to be the one bare network call in that function; these
+# tests pin that both routes now serve the honest degraded payload.
+
+
+def _scryfall_outage(exc_factory):
+    """A lookup that fails for the fixture commander and works for the
+    rest of the deck — the realistic shape of an uncached 429."""
+    def _lookup(name: str):
+        if "Cmdr" in name:
+            raise exc_factory()
+        if "Forest" in name:
+            return {
+                "type_line": "Basic Land — Forest",
+                "oracle_text": "({T}: Add {G}.)",
+                "cmc": 0.0,
+                "color_identity": ["G"],
+                "prices": {"usd": "0.05"},
+            }
+        return {
+            "type_line": "Sorcery",
+            "oracle_text": "Search your library for up to two basic land cards...",
+            "cmc": 3.0,
+            "color_identity": ["G"],
+            "prices": {"usd": "1.50"},
+        }
+    return _lookup
+
+
+def _scryfall_429():
+    import io
+    import urllib.error
+    return urllib.error.HTTPError(
+        url="https://api.scryfall.com/cards/named", code=429,
+        msg="Too Many Requests", hdrs=None, fp=io.BytesIO(b""),
+    )
+
+
+def _scryfall_urlerror():
+    import urllib.error
+    return urllib.error.URLError("connection refused")
+
+
+@pytest.mark.parametrize("route", ["/api/dashboard", "/api/dashboard/core"])
+@pytest.mark.parametrize(
+    "exc_factory", [_scryfall_429, _scryfall_urlerror],
+    ids=["http429", "urlerror"],
+)
+def test_dashboard_routes_degrade_on_commander_lookup_outage(
+    client, monkeypatch, route, exc_factory,
+):
+    """An uncached Scryfall 429 / URLError on the commander is a 200 with
+    the commander tile blank, not a 500 for the entire dashboard."""
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card",
+        _scryfall_outage(exc_factory),
+    )
+    resp = client.get(f"{route}?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # Honest commander tile: the name comes from the .dck (no network),
+    # the Scryfall-sourced detail reads as unavailable.
+    assert body["commander"] == {
+        "name": "Test Cmdr", "type_line": "", "color_identity": [],
+    }
+    # Every other panel still rendered from the cards that did resolve.
+    assert body["stat_tiles"]["lands"] >= 35
+    assert body["deck_progress"]["target"] == 100
+    assert body["categories"]
