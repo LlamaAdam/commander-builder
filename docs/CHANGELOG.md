@@ -6,6 +6,34 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-05 — Adaptive change budget (`--mode auto`)
+
+#### Added
+
+- **Adaptive change budget** (`change_budget.py`): the deck-level
+  0-100 health score now decides HOW MUCH to change; the empirical
+  Forge A/B verdict still decides what stays (the FP-002/FP-015
+  honest division of labor — the score carries no win-rate claim).
+  `resolve_tier`: >=75 → keep (0-2), 55-74 → polish (5+5), 35-54 →
+  overhaul (15+15), <35 → NEW `rebuild` tier (30+30); score
+  unavailable → polish fallback with a printed note.
+- `--mode auto` on `commander-advise`, `commander-auto-curate`, and
+  `commander-improve`: resolves the tier from the deck's health score
+  at run time and prints e.g. `auto mode: overhaul (health 42/100)`.
+  Opt-in, NOT the default (budget escalation multiplies curator +
+  Forge cost); explicit modes and default runs are unchanged.
+- `rebuild` tier: 30+30 through the existing proposer/curator
+  plumbing, plus a manabase-rebuild step (default on for rebuild
+  only; `--no-manabase-rebuild` opts out) that recomputes the land
+  mix via the FP-014 Karsten per-CMC model and stages balanced,
+  land-count-neutral swaps through the same legality path and A/B
+  verdict machinery as every other change.
+- Web audit: `suggested_mode` payload field (rendered as "suggested
+  mode: <tier> (health N/100)" in the health-grade header) and a
+  Mode select in the audit controls with an "Auto" option
+  (`?mode=polish|overhaul|free|rebuild|auto`; absent = no capping,
+  previous behavior).
+
 ### 2026-08-05 — Dry-run arm guard + FP-015 record correction
 
 #### Added

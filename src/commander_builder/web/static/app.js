@@ -913,6 +913,31 @@ function setOwnedOnlyPref(v) {
   catch (_e) { /* ignore */ }
 }
 
+// Adaptive change budget — audit mode preference. Mirrors the
+// server-side whitelist in routes_audit._AUDIT_MODE_OPTIONS; "" means
+// "no cap" (the default, byte-identical to pre-feature audits).
+// "auto" asks the server to resolve the tier from the deck's health
+// score (the suggestion rendered next to the health-grade tile).
+const _AUDIT_MODE_KEY = "cb.audit.mode";
+const _AUDIT_MODE_OPTIONS = [
+  { value: "", label: "Default (no cap)" },
+  { value: "auto", label: "Auto (use health suggestion)" },
+  { value: "polish", label: "Polish (5+5)" },
+  { value: "overhaul", label: "Overhaul (15+15)" },
+  { value: "rebuild", label: "Rebuild (30+30)" },
+  { value: "free", label: "Free (uncapped)" },
+];
+
+function getAuditModePref() {
+  try {
+    const v = localStorage.getItem(_AUDIT_MODE_KEY) || "";
+    return _AUDIT_MODE_OPTIONS.some((o) => o.value === v) ? v : "";
+  } catch (_e) { return ""; }
+}
+function setAuditModePref(v) {
+  try { localStorage.setItem(_AUDIT_MODE_KEY, v); } catch (_e) { /* ignore */ }
+}
+
 const _AUDIT_SOURCE_OPTIONS = [
   {
     value: "heuristic",
@@ -1306,6 +1331,13 @@ async function loadAdvise(sourceOverride) {
     if (getOwnedOnlyPref()) {
       url += `&owned_only=1`;
     }
+    // Adaptive change budget: cap the audit's recommendation lists to
+    // the selected tier ("auto" = let the server resolve the tier from
+    // the deck's health score). Empty pref = no param = no capping.
+    const modePref = getAuditModePref();
+    if (modePref) {
+      url += `&mode=${encodeURIComponent(modePref)}`;
+    }
     const headers = {};
     if (keyFinal) headers["X-Anthropic-API-Key"] = keyFinal;
     // EventSource doesn't support custom headers (the BYO Claude
@@ -1442,6 +1474,42 @@ function renderAuditBackendRow(body) {
   });
   selectLabel.appendChild(selector);
   row.appendChild(selectLabel);
+
+  // Mode selector — adaptive change budget for the *next* audit.
+  // "Auto" uses the server's health-derived suggestion (rendered next
+  // to the health-grade tile as "suggested mode: ..."). Label-wrapped
+  // like the Source select so the control has an accessible name
+  // (PR #36 conventions).
+  const modeLabel = el("label",
+    { style: "font-size: 12px; display: flex; gap: 4px; "
+           + "align-items: center;",
+      title: "How many changes the audit may propose. Auto sizes the "
+           + "budget from the deck's 0-100 health score (>=75 keep, "
+           + "55-74 polish, 35-54 overhaul, <35 rebuild). The score "
+           + "only sizes the budget — the A/B sim still decides what "
+           + "stays. Default: no cap (previous behavior)." });
+  modeLabel.appendChild(document.createTextNode("Mode:"));
+  const modeSelect = el("select",
+    { style: "font-size: 12px; padding: 2px 6px;" });
+  const currentMode = getAuditModePref();
+  const suggested = body.suggested_mode;
+  for (const opt of _AUDIT_MODE_OPTIONS) {
+    let label = opt.label;
+    // Fold the live suggestion into the Auto option's label so the
+    // user can see what Auto would do before picking it.
+    if (opt.value === "auto" && suggested && !suggested.fallback) {
+      label = `Auto — suggested: ${suggested.mode} `
+            + `(health ${suggested.health_score}/100)`;
+    }
+    const o = el("option", { value: opt.value }, label);
+    if (opt.value === currentMode) o.selected = true;
+    modeSelect.appendChild(o);
+  }
+  modeSelect.addEventListener("change", () => {
+    setAuditModePref(modeSelect.value);
+  });
+  modeLabel.appendChild(modeSelect);
+  row.appendChild(modeLabel);
 
   // Model dropdown — only meaningful when Claude is selected, but
   // always visible so users discover it. The Haiku option is the
@@ -1620,7 +1688,9 @@ function renderAuditResult(container, body) {
   // header: one letter grade aggregating the signals below it.
   if (body.deck_health) {
     container.appendChild(
-      renderDeckHealthTiles(body.deck_health, body.health_grade),
+      renderDeckHealthTiles(
+        body.deck_health, body.health_grade, body.suggested_mode,
+      ),
     );
   }
 

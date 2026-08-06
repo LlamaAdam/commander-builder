@@ -96,13 +96,35 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "stdout is serialized so the NDJSON stream "
                         "stays parseable.")
     p.add_argument(
-        "--mode", choices=["polish", "overhaul", "free"], default="polish",
+        "--mode",
+        choices=["polish", "overhaul", "free", "rebuild", "auto"],
+        default="polish",
         help=(
             "Curation intensity preset (default 'polish'). "
             "polish=5 adds + 5 cuts (safe for unattended overnight runs). "
             "overhaul=15 + 15 (deliberate major revision). "
             "free=unbounded (trust Claude to pick the right count). "
+            "rebuild=30 + 30 plus an optional Karsten manabase rebuild "
+            "(see --no-manabase-rebuild). "
+            "auto=resolve the tier from the deck's 0-100 health score "
+            "at run time (>=75 keep, 55-74 polish, 35-54 overhaul, "
+            "<35 rebuild; score unavailable falls back to polish). "
+            "Auto is opt-in, NOT the default: escalating the budget "
+            "multiplies curator + Forge A/B cost, and that spend is "
+            "the operator's call. The score only sizes the budget — "
+            "what stays is still decided by the A/B verdict. "
             "Override individual caps with --max-adds / --max-cuts."
+        ),
+    )
+    p.add_argument(
+        "--no-manabase-rebuild", action="store_true",
+        help=(
+            "In the 'rebuild' tier (explicit or auto-resolved), skip "
+            "the Karsten manabase-rebuild step. The step is ON by "
+            "default for rebuild only: it recomputes the land mix via "
+            "the FP-014 per-CMC model and stages the land swaps "
+            "through the same legality + A/B path as every other "
+            "change. No effect in other modes."
         ),
     )
     # Defaults are None so we can tell whether the user passed an
@@ -266,15 +288,35 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         print(f"ERROR: deck not found: {args.deck_path}", flush=True)
         return 2
 
+    # Adaptive change budget (--mode auto): resolve the tier from the
+    # deck's health score BEFORE the caps below, so the rest of the
+    # pipeline sees a concrete mode. The score only sizes the budget;
+    # the A/B verdict still decides what stays (change_budget module
+    # docstring). Score unavailable -> polish fallback with a printed
+    # note, never a crash. The disclosure line goes to stderr under
+    # --json so the NDJSON stream on stdout stays parseable.
+    requested_mode = args.mode
+    auto_tier = None
+    if args.mode == "auto":
+        from .change_budget import format_auto_mode_line, resolve_tier_for_deck
+        auto_tier = resolve_tier_for_deck(
+            args.deck_path.read_text(encoding="utf-8"),
+        )
+        args.mode = auto_tier.mode
+        print(
+            f"      {format_auto_mode_line(auto_tier)}",
+            file=sys.stderr if args.json else sys.stdout, flush=True,
+        )
+
     # Resolve effective caps from the mode preset + any explicit
     # overrides. The preset is the discoverable default ("I want a
     # polish run / overhaul / let Claude decide") and the explicit
     # flags are the fine-tune for users who want a specific number.
-    _MODE_CAPS = {
-        "polish":   (5,   5),    # conservative; safe for unattended
-        "overhaul": (15,  15),   # deliberate major revision
-        "free":     (999, 999),  # effectively unbounded
-    }
+    # Cap values live in change_budget.TIER_CAPS (single source of
+    # truth shared with --mode auto resolution and the web audit's
+    # suggested-mode tile); polish/overhaul/free are byte-identical
+    # to the historical presets.
+    from .change_budget import TIER_CAPS as _MODE_CAPS
     preset_adds, preset_cuts = _MODE_CAPS[args.mode]
     effective_max_adds = args.max_adds if args.max_adds is not None else preset_adds
     effective_max_cuts = args.max_cuts if args.max_cuts is not None else preset_cuts
@@ -438,6 +480,41 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         print(f"ERROR: {exc}", flush=True)
         return 3
 
+    # Rebuild tier: optional Karsten manabase-rebuild step (default ON
+    # for rebuild only; --no-manabase-rebuild opts out). The plan's
+    # balanced land swaps are appended to the curator's proposal so
+    # they ride the SAME legality path (apply_proposal_to_deck) and the
+    # same A/B verdict as every other change. Fail-quiet: a plan that
+    # can't be made (outage, unresolvable identity) skips the step with
+    # a note rather than sinking the curation run.
+    manabase_rebuild: Optional[dict] = None
+    if args.mode == "rebuild" and not args.no_manabase_rebuild:
+        try:
+            from .change_budget import plan_manabase_rebuild
+            _mb_plan = plan_manabase_rebuild(
+                args.deck_path.read_text(encoding="utf-8"),
+            )
+        except Exception:  # noqa: BLE001 — the step is optional by design
+            _mb_plan = None
+        if _mb_plan and _mb_plan["adds"]:
+            proposal.adds.extend(_mb_plan["adds"])
+            proposal.cuts.extend(_mb_plan["cuts"])
+            manabase_rebuild = {
+                "adds": _mb_plan["adds"], "cuts": _mb_plan["cuts"],
+            }
+            if not args.json:
+                print(
+                    f"      manabase rebuild: staged "
+                    f"{len(_mb_plan['adds'])} land swap(s) via the "
+                    f"Karsten per-CMC model", flush=True,
+                )
+        elif not args.json:
+            print(
+                "      manabase rebuild: no land changes planned "
+                "(already at target, or land data unavailable)",
+                flush=True,
+            )
+
     # Step 3: apply (or dry-run).
     if not args.json:
         verb = "would write" if args.dry_run else "writing"
@@ -492,11 +569,27 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
               "to update with the result).", flush=True)
 
     if args.json:
+        # Adaptive-budget keys are CONDITIONAL, not always-present-null:
+        # the feature's contract is that default runs (no --mode auto /
+        # rebuild) stay byte-identical, and an always-present key would
+        # change every existing consumer's bytes. Additive only when
+        # the feature actually ran.
+        _budget_keys: dict = {}
+        if requested_mode == "auto":
+            _budget_keys["requested_mode"] = "auto"
+            _budget_keys["auto_health_score"] = (
+                auto_tier.health_score if auto_tier else None
+            )
+        if args.mode == "rebuild":
+            # None when the step was skipped (--no-manabase-rebuild) or
+            # produced no plan; the adds/cuts lists when it staged swaps.
+            _budget_keys["manabase_rebuild"] = manabase_rebuild
         print(json.dumps({
             "input_deck": str(args.deck_path),
             "output_deck": str(out_path),
             "dry_run": args.dry_run,
             "mode": args.mode,
+            **_budget_keys,
             # FP-015 whole-deck verdict. The key is ALWAYS present —
             # null when COMMANDER_BUILDER_CARD_SCORE is off or the
             # verdict pass failed. Flag-off gating is behavioral, not

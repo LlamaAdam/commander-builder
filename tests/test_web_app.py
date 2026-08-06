@@ -3653,6 +3653,123 @@ def test_audit_endpoint_surfaces_health_grade(
         assert set(comp.keys()) == {"score", "weight", "available"}
 
 
+def test_audit_payload_carries_suggested_mode(client, monkeypatch, deck_dir):
+    """The audit payload always carries ``suggested_mode`` — the
+    adaptive-change-budget tier the health score maps to — with the
+    documented shape. With Scryfall down the grade is N/A (score None)
+    and the suggestion is the polish fallback, flagged as such."""
+    from types import SimpleNamespace
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    # Force the grade into its N/A shape (score None) — the route's
+    # _compute_health_grade_safe catches the raise and returns the
+    # empty grade, which must map to the polish fallback.
+    monkeypatch.setattr(
+        "commander_builder.deck_health.compute_health_grade",
+        lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("down")),
+    )
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    sug = body["suggested_mode"]
+    assert set(sug.keys()) == {"mode", "health_score", "fallback"}
+    assert sug["mode"] == "polish"
+    assert sug["health_score"] is None
+    assert sug["fallback"] is True
+    # No ?mode= param -> nothing was applied.
+    assert body["curation_mode"] is None
+
+
+def _fake_advise_many_recs(monkeypatch, n_adds=8, n_cuts=8):
+    from types import SimpleNamespace
+
+    from commander_builder.improvement_advisor import SwapRecommendation
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=(
+                [SwapRecommendation(
+                    card=f"Web Add {i:02d}", action="add", reason="r",
+                ) for i in range(n_adds)]
+                + [SwapRecommendation(
+                    card="Forest", action="cut", reason="r",
+                ) for _ in range(n_cuts)]
+            ),
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic",
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+
+
+def test_audit_mode_param_trims_recommendations(client, monkeypatch):
+    """``?mode=polish`` caps the payload's add/cut lists to the tier
+    budget (5+5) and reports the applied tier as ``curation_mode``;
+    the same request without the param is untrimmed (previous
+    behavior)."""
+    _fake_advise_many_recs(monkeypatch)
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert len(body["added"]) == 8
+    assert body["curation_mode"] is None
+
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&mode=polish")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert len(body["added"]) == 5
+    assert len(body["removed"]) == 5
+    assert body["curation_mode"] == "polish"
+
+
+def test_audit_mode_auto_applies_the_suggested_tier(client, monkeypatch):
+    """``?mode=auto`` resolves the tier from the payload's own health
+    suggestion — whatever tier is suggested is the tier applied."""
+    _fake_advise_many_recs(monkeypatch)
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&mode=auto")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["curation_mode"] == body["suggested_mode"]["mode"]
+
+
+def test_audit_mode_param_rejects_unknown_values(client):
+    resp = client.get("/api/audit?deck=Alpha&bracket=3&mode=yolo")
+    assert resp.status_code == 400
+    assert "mode" in resp.get_json()["error"]
+
+
+def test_static_js_has_audit_mode_control(client):
+    """The audit controls ship the Mode select with the Auto option,
+    and the health-grade header renders the suggested-mode line."""
+    resp = client.get("/static/app.js")
+    try:
+        js = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    assert "cb.audit.mode" in js
+    assert "Auto (use health suggestion)" in js
+    assert "getAuditModePref" in js
+
+    resp = client.get("/static/deck_health_ui.js")
+    try:
+        js = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    assert "suggested mode:" in js
+    assert "suggested-mode-line" in js
+
+
 def test_audit_endpoint_surfaces_protected_cards_from_metadata(
     client, monkeypatch, deck_dir,
 ):

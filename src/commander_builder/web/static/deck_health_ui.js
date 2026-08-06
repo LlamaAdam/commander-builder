@@ -40,7 +40,12 @@
 // at-a-glance letter aggregating these signals. When present the tile
 // row gets a panel header with the big letter + score + top reasons;
 // when absent (legacy servers) the bare row renders exactly as before.
-function renderDeckHealthTiles(health, grade) {
+// `suggestion` (optional) is /api/audit's suggested_mode payload —
+// the adaptive-change-budget tier the health score maps to
+// ({mode, health_score, fallback}). Rendered as a one-line
+// "suggested mode: ..." note inside the grade header. Absent (legacy
+// servers) the header renders exactly as before.
+function renderDeckHealthTiles(health, grade, suggestion) {
   const row = el("div", {
     class: "deck-health-row",
     style: "display: grid; "
@@ -252,7 +257,7 @@ function renderDeckHealthTiles(health, grade) {
   // older servers (no health_grade field) render byte-identically.
   if (grade && grade.grade) {
     const panel = el("div", { class: "deck-health-panel" });
-    panel.appendChild(renderHealthGradeHeader(grade));
+    panel.appendChild(renderHealthGradeHeader(grade, suggestion));
     panel.appendChild(row);
     return panel;
   }
@@ -265,7 +270,10 @@ function renderDeckHealthTiles(health, grade) {
 // points beneath. Letter colors reuse the tile flavor palette so the
 // header and the tiles read as one system: A/B green (good), C blue
 // (neutral), D amber (warn), F red (bad), N/A slate (muted).
-function renderHealthGradeHeader(grade) {
+// `suggestion` (optional): the adaptive-change-budget tier suggested
+// by this score — plain text (not color-coded) so the information is
+// available to every reader (WCAG 1.4.1, PR #36 conventions).
+function renderHealthGradeHeader(grade, suggestion) {
   const letterColors = {
     "A": "#4ade80",
     "B": "#4ade80",
@@ -327,6 +335,25 @@ function renderHealthGradeHeader(grade) {
       "div",
       { class: "muted", style: "font-size: 12px;" },
       "Signals unavailable (Scryfall unreachable or empty deck).",
+    ));
+  }
+  // Adaptive change budget: what this score suggests for the audit's
+  // Mode control. The score only sizes the budget — the A/B sim still
+  // decides what stays (the honest FP-002/FP-015 division of labor).
+  if (suggestion && suggestion.mode) {
+    const sugText = suggestion.fallback || suggestion.health_score == null
+      ? `suggested mode: ${suggestion.mode} (health unavailable — `
+        + `defaulting to polish)`
+      : `suggested mode: ${suggestion.mode} `
+        + `(health ${suggestion.health_score}/100)`;
+    col.appendChild(el(
+      "div",
+      { class: "muted suggested-mode-line", style: "font-size: 12px;",
+        title: "Pick 'Auto' in the audit's Mode control to use this "
+             + "suggestion. The health score sizes the change budget "
+             + "only; whether a change stays is decided by the A/B "
+             + "sim." },
+      sugText,
     ));
   }
   wrap.appendChild(col);

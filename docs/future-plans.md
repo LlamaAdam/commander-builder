@@ -1116,6 +1116,48 @@ duplicated.
 
 ---
 
+# Adaptive change budget (`--mode auto`) — SHIPPED 2026-08-05
+
+**The honest framing first:** per the FP-002 and FP-015 closures,
+heuristic scores carry NO win-rate claim. The deck-health score
+(`deck_health.compute_health_grade`, 0-100, descriptive — "this is a
+bad combination of cards") is therefore allowed to decide exactly one
+thing: **how much to change**. **What stays is still decided by the
+empirical Forge A/B verdict**, unchanged. The score picks the budget;
+the sims pick the keeps.
+
+**Why:** curation intensity was manually selected (`--mode
+polish|overhaul|free`), so a 30/100 deck got the same timid 5-card
+polish as a 70/100 deck unless the operator remembered to escalate.
+
+**What shipped** (`change_budget.py` + wiring):
+
+- `resolve_tier(score)`: >=75 → `keep` (0-2 swaps, the existing
+  bubble-analysis keep semantics); 55-74 → `polish` (5+5); 35-54 →
+  `overhaul` (15+15); <35 → **new `rebuild` tier** (30+30). Score
+  unavailable (outage / empty deck) → polish fallback with a printed
+  note, never a crash, never an escalation on missing data.
+- `--mode auto` on `commander-advise`, `commander-auto-curate`, and
+  `commander-improve` resolves the tier at run time and prints
+  `auto mode: overhaul (health 42/100)`. **Opt-in, NOT the default**:
+  budget escalation multiplies curator + Forge A/B cost, and that
+  spend is the operator's call. Explicit modes are unchanged; default
+  runs are byte-identical.
+- `rebuild` tier: 30+30 through the existing proposer/curator
+  plumbing, plus an optional manabase-rebuild step (default on for
+  rebuild only; `--no-manabase-rebuild` opts out) that recomputes the
+  land mix via the FP-014 Karsten per-CMC model
+  (`change_budget.plan_manabase_rebuild`, reusing
+  `deck_builder_manabase` the way commander-build does, applied to the
+  existing deck's colors/curve) and stages balanced land swaps through
+  the same legality path (`apply_proposal_to_deck`) and the same A/B
+  verdict as every other change. Land-count-neutral by construction.
+- Web audit: `suggested_mode` payload field rendered next to the
+  health-grade tile ("suggested mode: overhaul (health 42/100)") and
+  an "Auto" option in the audit controls' Mode select (`?mode=`).
+
+---
+
 # FP-014 — Build-from-scratch deck assembly
 
 **Status: SHIPPED and MERGED (first cut PR #14, 2026-07-21; second cut

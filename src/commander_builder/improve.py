@@ -126,6 +126,8 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
         "--sim-games", str(args.sim_games),
         "--sim-margin", str(args.sim_margin),
     ]
+    if getattr(args, "no_manabase_rebuild", False):
+        argv += ["--no-manabase-rebuild"]
     if args.sim_fillers:
         argv += ["--sim-fillers", args.sim_fillers]
     if args.db_path:
@@ -508,8 +510,19 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                    help="Target bracket (1-5). Default: inferred from the "
                         "deck filename's [B<n>] suffix.")
     # Pass-through curation / sim controls (mirror commander-auto-curate).
-    p.add_argument("--mode", choices=["polish", "overhaul", "free"],
-                   default="polish", help="Curation intensity (default polish).")
+    p.add_argument("--mode",
+                   choices=["polish", "overhaul", "free", "rebuild", "auto"],
+                   default="polish",
+                   help="Curation intensity (default polish). 'auto' "
+                        "resolves the tier from the deck's health score "
+                        "each round (opt-in — escalated budgets multiply "
+                        "curator + Forge cost); 'rebuild' is 30+30 with "
+                        "an optional Karsten manabase rebuild. Both are "
+                        "forwarded to commander-auto-curate per round.")
+    p.add_argument("--no-manabase-rebuild", action="store_true",
+                   help="Forwarded to commander-auto-curate: skip the "
+                        "Karsten manabase-rebuild step in the rebuild "
+                        "tier. No effect in other modes.")
     p.add_argument("--source", default="heuristic",
                    choices=["heuristic", "bracket_peers", "claude"],
                    help="Advisor backend (default heuristic).")
