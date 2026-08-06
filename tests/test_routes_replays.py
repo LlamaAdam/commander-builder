@@ -261,3 +261,82 @@ def test_nav_js_knows_replays_section(client):
     js = client.get("/static/nav.js").data.decode("utf-8")
     assert '"replays"' in js
     assert "replays-main" in js
+
+
+# ---------------------------------------------------------------------------
+# Turn-count labelling: rounds vs player turns
+# ---------------------------------------------------------------------------
+
+def test_list_replays_exposes_both_turn_counters(client):
+    """The run list carries the disambiguated counters so the sidebar
+    can label a game without guessing which counter ``end_turn`` holds
+    (see replay_timeline's turn-count convention)."""
+    runs = client.get("/api/replays").get_json()["runs"]
+    games = runs[0]["games"]           # multi_game.log: 3 chunks
+    for g in games:
+        assert "end_round" in g
+        assert "player_turns" in g
+    # The draw game is exactly the reported bug shape: an outcome line
+    # reporting round 21 over a timeline that lists 3 player turns. Both
+    # numbers are now carried separately instead of collapsing into one
+    # ambiguous "turns" field.
+    assert games[1]["end_round"] == 21
+    assert games[1]["player_turns"] == 3
+    assert games[1]["end_turn"] == 21   # legacy: outcome line wins
+    # Truncated game: no outcome line, so no authoritative round number,
+    # but the player turns that WERE logged are still counted.
+    assert games[2]["end_round"] is None
+    assert games[2]["player_turns"] == 2
+    # Single-game run from the pod fixture, where both counters agree.
+    old = runs[1]["games"][0]
+    assert old["end_round"] == 8
+    assert old["player_turns"] == 8
+
+
+def test_list_replays_tolerates_pre_split_index(client, seeded_root):
+    """Runs indexed before the counters were split have neither key. The
+    endpoint must serve them as None (the UI then falls back to the
+    legacy end_turn) instead of 500-ing on a KeyError."""
+    idx = seeded_root / "20250101T000000Z_1_aaaaaa" / INDEX_NAME
+    data = json.loads(idx.read_text(encoding="utf-8"))
+    for game in data["games"]:
+        game.pop("end_round", None)
+        game.pop("player_turns", None)
+    idx.write_text(json.dumps(data), encoding="utf-8")
+
+    runs = client.get("/api/replays").get_json()["runs"]
+    old = next(r for r in runs if r["run"] == "20250101T000000Z_1_aaaaaa")
+    game = old["games"][0]
+    assert game["end_round"] is None
+    assert game["player_turns"] is None
+    assert game["end_turn"] == 8   # legacy field still carries a number
+
+
+def test_get_replay_timeline_carries_both_counters(client):
+    result = client.get(
+        "/api/replay/20250101T000000Z_1_aaaaaa/1").get_json()["timeline"]["result"]
+    assert result["end_round"] == 8
+    assert result["player_turns"] == 8
+
+
+def test_replays_js_labels_turn_counters_unambiguously(client):
+    """The winner line used to read "ended turn 12" above a timeline
+    listing turns 1..22. Every rendered turn number now carries its unit,
+    and both counters are printed when both are known."""
+    resp = client.get("/static/replays.js")
+    try:
+        js = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    assert "function turnCountLabel(" in js
+    assert '"round " + round' in js
+    assert 'pturns + " player turns"' in js
+    # The bare, ambiguous label is gone from the result line...
+    assert '" · ended turn "' not in js
+    assert '" · ended " + turnTxt' in js
+    # ...and from the per-turn disclosure summaries.
+    assert '"Player turn " + t.turn' in js
+    assert '"Turn " + t.turn' not in js
+    # Legacy runs (no end_round/player_turns in their index) still get a
+    # labelled number rather than nothing.
+    assert 'src.end_turn + " turns"' in js

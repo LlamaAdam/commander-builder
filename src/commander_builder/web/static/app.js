@@ -111,29 +111,175 @@ async function loadHealth() {
   }
 }
 
+// --- Deck sidebar: filter / type / sort -------------------------------
+// A real install carries a few hundred decks and the sidebar used to
+// render every one of them as a flat alphabetical <li> list with no way
+// to find anything. The full list is fetched ONCE into `_allDecks` and
+// every control below re-renders from that array — filtering costs no
+// requests, so it can be as responsive as typing.
+//
+// Deliberately NOT persisted across reloads: a remembered filter that
+// hides the deck you are looking for is worse than no filter at all.
+let _allDecks = [];
+let _deckFilterText = "";
+let _deckTypeFilter = "all";
+let _deckSort = "name";
+let _deckFilterTimer = null;
+
+const _DECK_FILTER_DEBOUNCE_MS = 150;
+
+// Deck type ordering for the "type" sort — the decks you actively
+// iterate on first, filler last.
+const _DECK_TYPE_ORDER = { user: 0, premade: 1, pool: 2 };
+
+function _deckBracket(d) {
+  // Declared bracket from the filename's [Bn] tag. Unbracketed decks
+  // sort last (99) rather than first, so "sort by bracket" surfaces the
+  // decks that actually declared one.
+  const m = String(d.id || "").match(/\[B(\d)\]/);
+  return m ? parseInt(m[1], 10) : 99;
+}
+
+function _filteredDecks() {
+  const needle = _deckFilterText.trim().toLowerCase();
+  const rows = _allDecks.filter((d) => {
+    if (_deckTypeFilter !== "all" && d.type !== _deckTypeFilter) return false;
+    if (!needle) return true;
+    // Substring match on the DISPLAY name (what the row shows). The id
+    // is also matched so a user who types "[B4]" — visible in the name
+    // only for some decks — still finds their deck.
+    return String(d.name || "").toLowerCase().includes(needle)
+      || String(d.id || "").toLowerCase().includes(needle);
+  });
+  const byName = (a, b) =>
+    String(a.name || "").localeCompare(String(b.name || ""),
+      undefined, { sensitivity: "base" });
+  if (_deckSort === "bracket") {
+    rows.sort((a, b) => (_deckBracket(a) - _deckBracket(b)) || byName(a, b));
+  } else if (_deckSort === "type") {
+    rows.sort((a, b) =>
+      ((_DECK_TYPE_ORDER[a.type] ?? 9) - (_DECK_TYPE_ORDER[b.type] ?? 9))
+      || byName(a, b));
+  } else {
+    rows.sort(byName);
+  }
+  return rows;
+}
+
+function renderDeckList() {
+  const list = $("deck-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const rows = _filteredDecks();
+  const count = $("deck-filter-count");
+  if (count) {
+    // Live region: keyboard/screen-reader users get told the list
+    // changed size, which is otherwise a purely visual event.
+    count.textContent = _allDecks.length
+      ? (rows.length === _allDecks.length
+          ? `${_allDecks.length} decks`
+          : `${rows.length} of ${_allDecks.length} decks`)
+      : "";
+  }
+  if (!_allDecks.length) {
+    list.appendChild(el("li", { class: "muted" }, "No decks found."));
+    return;
+  }
+  if (!rows.length) {
+    list.appendChild(el("li", { class: "muted" }, "No decks match that filter."));
+    return;
+  }
+  for (const d of rows) {
+    // tabindex/role/keydown: deck rows are the app's primary nav but
+    // were click-only <li>s — invisible to keyboard users (WCAG 2.1.1).
+    const li = el("li", {
+      "data-id": d.id,
+      "data-type": d.type || "",
+      tabindex: "0",
+      role: "button",
+    }, d.name);
+    // Re-rendering must not lose the selection: the active deck keeps
+    // its highlight AND its aria-current when it survives the filter.
+    if (_activeDeckId && d.id === _activeDeckId) {
+      li.classList.add("active");
+      li.setAttribute("aria-current", "true");
+    }
+    li.addEventListener("click", () => selectDeck(d.id, li));
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        selectDeck(d.id, li);
+      }
+    });
+    list.appendChild(li);
+  }
+}
+
+function wireDeckFilters() {
+  const input = $("deck-filter-input");
+  if (input) {
+    input.addEventListener("input", () => {
+      // Debounced: re-rendering a few hundred rows on every keystroke
+      // makes fast typing feel laggy.
+      if (_deckFilterTimer) clearTimeout(_deckFilterTimer);
+      _deckFilterTimer = setTimeout(() => {
+        _deckFilterTimer = null;
+        _deckFilterText = input.value;
+        renderDeckList();
+      }, _DECK_FILTER_DEBOUNCE_MS);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      // Escape clears the filter (and cancels any pending debounce) —
+      // stopPropagation so it doesn't also reach a document-level
+      // handler that would close a drawer/modal.
+      e.stopPropagation();
+      if (_deckFilterTimer) {
+        clearTimeout(_deckFilterTimer);
+        _deckFilterTimer = null;
+      }
+      input.value = "";
+      _deckFilterText = "";
+      renderDeckList();
+    });
+  }
+  const typeWrap = document.querySelector(".deck-type-filter");
+  if (typeWrap) {
+    typeWrap.addEventListener("click", (e) => {
+      const btn = e.target.closest ? e.target.closest(".deck-type-btn") : null;
+      if (!btn) return;
+      _deckTypeFilter = btn.dataset.type || "all";
+      // aria-pressed mirrors the .active class so the segmented control
+      // announces which segment is chosen (WCAG 4.1.2).
+      typeWrap.querySelectorAll(".deck-type-btn").forEach((b) => {
+        const on = b === btn;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      renderDeckList();
+    });
+  }
+  const sort = $("deck-sort-select");
+  if (sort) {
+    sort.addEventListener("change", () => {
+      _deckSort = sort.value || "name";
+      renderDeckList();
+    });
+  }
+}
+
 async function loadDecks() {
   const list = $("deck-list");
   list.innerHTML = "";
   try {
-    const { decks } = await fetchJSON("/api/decks");
-    if (!decks.length) {
-      list.appendChild(el("li", { class: "muted" }, "No decks found."));
-      return;
-    }
-    for (const d of decks) {
-      // tabindex/role/keydown: deck rows are the app's primary nav but
-      // were click-only <li>s — invisible to keyboard users (WCAG 2.1.1).
-      const li = el("li", { "data-id": d.id, tabindex: "0", role: "button" }, d.name);
-      li.addEventListener("click", () => selectDeck(d.id, li));
-      li.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          selectDeck(d.id, li);
-        }
-      });
-      list.appendChild(li);
-    }
+    // ``all=1`` so the Pool segment has something to show. The type
+    // filter — not the request — is what narrows the list now.
+    const { decks } = await fetchJSON("/api/decks?all=1");
+    _allDecks = decks || [];
+    renderDeckList();
   } catch (e) {
+    _allDecks = [];
+    list.innerHTML = "";
     list.appendChild(el("li", { class: "muted" }, "Error: " + e.message));
   }
 }
@@ -330,8 +476,14 @@ async function selectDeck(deckId, li, opts) {
     }
   }
   try {
+    // Progressive load: `/api/dashboard/core` skips the two slow
+    // attachments (printing savings — ~1 Scryfall printings round-trip
+    // per card on a cold cache — and the lift-picks corpus scan) that
+    // used to keep a freshly imported premade deck on a bare "Loading…"
+    // for up to ~90s. Those tiles render as skeletons and are filled by
+    // loadDashboardSections() below.
     const [data, iters] = await Promise.all([
-      fetchJSON(`/api/dashboard?deck=${encodeURIComponent(deckId)}`),
+      fetchJSON(`/api/dashboard/core?deck=${encodeURIComponent(deckId)}`),
       fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
     ]);
     // Stale-response guard: if the user clicked another deck while
@@ -342,6 +494,9 @@ async function selectDeck(deckId, li, opts) {
     // deck A's data. Same check the audit auto-kick below already does.
     if (_activeDeckId !== deckId) return;
     renderDashboard(data, iters.iterations || []);
+    // Fill the deferred tiles. Not awaited — the dashboard is already
+    // on screen and each section resolves into its own skeleton.
+    loadDashboardSections(deckId, data.deferred_sections);
     // Auto-kick a fast heuristic audit so the user sees recs
     // immediately instead of hunting for the "Run audit" button.
     // Forced to "heuristic" regardless of the user's source pref:
@@ -2412,7 +2567,13 @@ function renderDashboard(data, iterations) {
   // explainable estimator payload (ManaFoundry parity) — estimated
   // vs declared with expandable reasons.
   tiles.appendChild(bracketTile(t, data.bracket_estimate));
-  tiles.appendChild(priceTile(t, data.printing_savings));
+  // A core payload omits the deferred keys entirely; the full
+  // /api/dashboard payload always carries them (possibly as the empty
+  // fallback shape). `undefined` is therefore the reliable "still
+  // loading" signal — and `null`/empty stays "nothing to show".
+  tiles.appendChild(priceTile(
+    t, data.printing_savings, data.printing_savings === undefined,
+  ));
   tiles.appendChild(tile(
     "Deck progress",
     `${data.deck_progress?.current ?? 0} / ${data.deck_progress?.target ?? 100}`,
@@ -2477,11 +2638,24 @@ function renderDashboard(data, iterations) {
 
   // Lift picks (ManaFoundry parity — "Lift Web"). Cards that co-occur
   // with this deck's cards across the locally harvested corpus far
-  // more often than chance predicts. Backend attaches `lift_picks`
-  // fail-quiet (same contract as printing_savings), so absence /
-  // empty picks just skips the panel (liftPicksPanel returns null).
-  const liftPanel = liftPicksPanel(data.lift_picks);
-  if (liftPanel) dash.appendChild(liftPanel);
+  // more often than chance predicts. Deferred on a core payload (the
+  // corpus scan walks every .dck in the deck dir): the slot renders a
+  // skeleton and loadDashboardSections fills, empties, or marks it
+  // unavailable. On the full payload it renders inline as before —
+  // absence / empty picks just skips the panel.
+  const liftSlot = el("div", { id: "dash-section-lift_picks" });
+  if (data.lift_picks === undefined) {
+    renderSectionSkeleton(
+      liftSlot, "Scanning deck corpus for lift picks…", "Lift picks",
+    );
+    dash.appendChild(liftSlot);
+  } else {
+    const liftPanel = liftPicksPanel(data.lift_picks);
+    if (liftPanel) {
+      liftSlot.appendChild(liftPanel);
+      dash.appendChild(liftSlot);
+    }
+  }
 
   // Iteration history
   if (iterations.length) {
@@ -2569,6 +2743,104 @@ function renderDashboard(data, iterations) {
   if (iterations.length >= 2) {
     loadPricingSparkline(_activeDeckId, dash);
   }
+}
+
+
+// --- Progressive dashboard sections -----------------------------------
+// `/api/dashboard/core` paints instantly; the slow attachments arrive
+// here, one request per section, and swap themselves into the skeleton
+// slot renderDashboard already laid out. Per the outage convention used
+// throughout the app (see deck_health_ui's "…unavailable" tiles) a
+// failed section renders an inline unavailable state in ITS OWN slot and
+// nothing else on the page is affected.
+//
+// Slot ids are `dash-section-<name>`, where <name> is exactly the string
+// the server advertises in `deferred_sections` — so adding a section
+// server-side needs no client-side name table.
+
+function _sectionSlot(name) {
+  return document.getElementById("dash-section-" + name);
+}
+
+// `title` (optional) wraps the placeholder in a titled panel so a
+// whole-panel section keeps its heading while loading; tile-level slots
+// pass no title and get the bare line.
+function renderSectionSkeleton(slot, label, title) {
+  // aria-busy + a polite status line: sighted users get the shimmer,
+  // screen-reader users get told this region is still loading.
+  slot.setAttribute("aria-busy", "true");
+  slot.innerHTML = "";
+  const line = el("p", { class: "muted section-skeleton", role: "status" }, label);
+  slot.appendChild(title ? panel(title, line) : line);
+}
+
+function renderSectionUnavailable(slot, label, title) {
+  slot.setAttribute("aria-busy", "false");
+  slot.innerHTML = "";
+  const line = el("p", { class: "muted section-unavailable" }, label);
+  slot.appendChild(title ? panel(title, line) : line);
+}
+
+// Fill one slot from a section response. Split out from the fetch loop
+// so the render path is testable/readable on its own.
+function applyDashboardSection(name, body) {
+  const slot = _sectionSlot(name);
+  if (!slot) return;
+  slot.setAttribute("aria-busy", "false");
+  const data = (body && body.data) || {};
+  const failed = !body || body.status !== "ok";
+  if (name === "pricing") {
+    if (failed) {
+      renderSectionUnavailable(slot, "Printing prices unavailable.");
+      return;
+    }
+    slot.innerHTML = "";
+    renderPricingSavings(slot, data.printing_savings);
+    return;
+  }
+  if (name === "lift_picks") {
+    if (failed) {
+      renderSectionUnavailable(
+        slot, "Lift picks unavailable (corpus scan failed).", "Lift picks",
+      );
+      return;
+    }
+    slot.innerHTML = "";
+    const built = liftPicksPanel(data.lift_picks);
+    // No picks is not an outage — it's an ordinary empty result (small
+    // corpus). Drop the slot entirely, matching the pre-split behavior
+    // where the panel simply never rendered.
+    if (built) slot.appendChild(built);
+    else slot.remove();
+    return;
+  }
+  // Unknown section name (server advertised something this client
+  // predates): leave whatever is in the slot rather than guessing.
+}
+
+async function loadDashboardSections(deckId, sections, bracket) {
+  if (!deckId) return;
+  const names = (sections && sections.length)
+    ? sections
+    // Server didn't advertise (old build / full payload): nothing to do.
+    : [];
+  const qs = `deck=${encodeURIComponent(deckId)}`
+    + (bracket != null ? `&bracket=${encodeURIComponent(bracket)}` : "");
+  // Fired in parallel — the sections are independent, and a slow
+  // pricing probe must not delay lift picks.
+  await Promise.all(names.map(async (name) => {
+    let body = null;
+    try {
+      body = await fetchJSON(`/api/dashboard/section/${encodeURIComponent(name)}?${qs}`);
+    } catch (_e) {
+      body = null;  // network/HTTP failure -> the unavailable state
+    }
+    // Stale-response guard, same contract as selectDeck: a section that
+    // resolves after the user moved on must not paint into the new
+    // deck's dashboard.
+    if (_activeDeckId !== deckId) return;
+    applyDashboardSection(name, body);
+  }));
 }
 
 
@@ -3020,12 +3292,16 @@ function bracketTile(t, estimate) {
     try {
       const [data, iters] = await Promise.all([
         fetchJSON(
-          `/api/dashboard?deck=${encodeURIComponent(deckId)}&bracket=${newBracket}`,
+          `/api/dashboard/core?deck=${encodeURIComponent(deckId)}`
+          + `&bracket=${newBracket}`,
         ),
         fetchJSON(`/api/iterations?deck=${encodeURIComponent(deckId)}`),
       ]);
       if (_activeDeckId !== deckId) return;
       renderDashboard(data, iters.iterations || []);
+      // Same progressive fill as the initial load — a bracket change
+      // must not reintroduce the long blocking wait.
+      loadDashboardSections(deckId, data.deferred_sections, newBracket);
     } catch (e) {
       if (_activeDeckId !== deckId) return;
       dash.innerHTML = `<p class="empty-state">Error: ${e.message}</p>`;
@@ -3675,8 +3951,11 @@ function renderBuildSummary(container, result) {
   const loadBtn = el("button", { class: "advise-btn" }, "Load deck");
   loadBtn.addEventListener("click", () => {
     hideModal("new-deck-modal");
+    // The row can be absent when the sidebar filter hides the freshly
+    // built deck. selectDeck tolerates a null row (highlight() no-ops),
+    // so load it anyway rather than making the button silently dead.
     const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
-    if (li) selectDeck(result.id, li);
+    selectDeck(result.id, li);
   });
   actions.appendChild(loadBtn);
 
@@ -3696,7 +3975,7 @@ function renderBuildSummary(container, result) {
   tuneBtn.addEventListener("click", () => {
     hideModal("new-deck-modal");
     const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
-    if (li) selectDeck(result.id, li, { improveAfterLoad: true });
+    selectDeck(result.id, li, { improveAfterLoad: true });  // null row OK
   });
   actions.appendChild(tuneBtn);
   wrap.appendChild(actions);
@@ -3728,14 +4007,31 @@ function tile(label, value, sub) {
 // "Save up to $X" teaser. <details> matches the existing lazy-expand
 // pattern (proposed-deck preview, iteration graph): zero JS state,
 // keyboard-accessible for free.
-function priceTile(t, savings) {
+function priceTile(t, savings, deferred) {
+  // The Est. price NUMBER comes from the core payload (already-cached
+  // Scryfall oracle data) and paints immediately. Only the cheaper-
+  // printings breakdown is slow — it needs a separate per-card printings
+  // cache that is cold for a freshly imported deck — so it lives in its
+  // own progressive slot underneath.
   const tl = tile(
     "Est. price",
     t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",
     t.n_priced_cards != null ? `${t.n_priced_cards} priced cards` : null,
   );
+  const slot = el("div", { id: "dash-section-pricing" });
+  tl.appendChild(slot);
+  if (deferred) renderSectionSkeleton(slot, "Checking cheaper printings…");
+  else renderPricingSavings(slot, savings);
+  return tl;
+}
+
+// Render the cheaper-printings disclosure into `slot` (empties it
+// first). No savings — offline, or nothing worth swapping — leaves the
+// slot empty, i.e. the plain tile this used to be.
+function renderPricingSavings(slot, savings) {
+  slot.innerHTML = "";
   if (!savings || !savings.count || !(savings.suggestions || []).length) {
-    return tl; // Offline / nothing worth swapping — plain tile.
+    return;
   }
   const details = el("details", { style: "margin-top: 6px;" });
   details.appendChild(el(
@@ -3936,6 +4232,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (bulkImport) bulkImport.addEventListener("click", bulkImportFromTextarea);
   const buildRun = $("new-build-run");
   if (buildRun) buildRun.addEventListener("click", buildFromScratch);
+  // Deck-sidebar filter / type / sort controls.
+  wireDeckFilters();
 });
 
 loadHealth();

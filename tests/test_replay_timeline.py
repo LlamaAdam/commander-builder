@@ -250,3 +250,59 @@ def test_timeline_is_json_serializable():
     for name in ("complete_game.log", "truncated_game.log", "multi_game.log"):
         for chunk in split_games(_read(name)):
             json.dumps(parse_timeline(chunk["text"]))
+
+
+# ---------------------------------------------------------------------------
+# Turn-count convention: rounds vs player turns
+# ---------------------------------------------------------------------------
+#
+# The Replays UI showed "ended turn 12" directly above a timeline listing
+# turns 1..22 with nothing to say why. Two different counters:
+# ``Game Outcome: Turn N`` is the ROUND counter, while each ``Turn:`` line
+# is one PLAYER turn. The parser now emits both under unambiguous names
+# and leaves the overloaded ``end_turn`` alone for existing consumers.
+
+def _pod_log(player_turns: int, outcome_round: int) -> str:
+    """Synthetic pod log: ``player_turns`` Turn: lines closed by a
+    Game Outcome round number that deliberately disagrees with them."""
+    seats = ["Alpha Ramp [B3]", "Beta Control [B3]"]
+    lines = [
+        "Turn: Turn %d (Ai(%d)-%s)" % (n, (n - 1) % 2 + 1, seats[(n - 1) % 2])
+        for n in range(1, player_turns + 1)
+    ]
+    lines.append("Game Outcome: Turn %d" % outcome_round)
+    lines.append(
+        "Game Result: Game 1 ended in 90000 ms. Ai(1)-Alpha Ramp [B3] has won!"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def test_round_and_player_turn_counters_are_separate():
+    tl = parse_timeline(_pod_log(player_turns=22, outcome_round=12))
+    result = tl["result"]
+    assert result["end_round"] == 12          # Game Outcome line
+    assert result["player_turns"] == 22       # one per Turn: line
+    assert len(tl["turns"]) == 22
+    # Legacy field keeps its old meaning (outcome line wins) so the
+    # replay index and /api/replays consumers are untouched.
+    assert result["end_turn"] == 12
+
+
+def test_end_round_is_none_without_an_outcome_line():
+    """A truncated log has no authoritative round number. end_round must
+    stay None rather than silently borrowing the max Turn: value the way
+    the legacy end_turn fallback does — otherwise the UI would print a
+    fabricated round count."""
+    tl = parse_timeline(_read("truncated_game.log"))
+    assert tl["result"]["end_round"] is None
+    assert tl["result"]["player_turns"] == 3
+    assert tl["result"]["end_turn"] == 3      # legacy max-Turn fallback
+
+
+def test_counters_agree_when_the_log_agrees():
+    """The fixture pod log numbers its Turn: lines the same way its
+    outcome line does, so both counters land on 8 — the labels stay
+    unambiguous even when the numbers match."""
+    tl = parse_timeline(_read("complete_game.log"))
+    assert tl["result"]["end_round"] == 8
+    assert tl["result"]["player_turns"] == 8

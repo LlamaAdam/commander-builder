@@ -54,14 +54,47 @@
   // Run list (sidebar)
   // -----------------------------------------------------------------------
 
+  // TURN-COUNT CONVENTION. A Forge log carries two different counters
+  // and the UI used to print the ambiguous word "turn" for both, so a
+  // winner line reading "ended turn 12" sat directly above a timeline
+  // listing turns 1..22 with nothing to explain the gap:
+  //
+  //   * `end_round`    — Forge's authoritative `Game Outcome: Turn N`
+  //                      line. That is the ROUND counter.
+  //   * `player_turns` — how many individual player turns the timeline
+  //                      actually lists (one entry per logged `Turn:`
+  //                      line). In a pod each round contributes one per
+  //                      surviving seat, so this runs ahead of rounds.
+  //
+  // Both come from replay_timeline.parse_timeline (see its docstring
+  // for the authoritative definition). We always print the unit next to
+  // the number and, when both are known, print both — an unlabeled
+  // number is exactly the bug being fixed here.
+  //
+  // `end_turn` is the legacy field: the outcome-line value when present,
+  // otherwise the highest `Turn:` number seen. Because it silently
+  // switches between the two counters it is only used as a last-resort
+  // fallback for replay runs indexed before the split, and even then it
+  // is labelled with the neutral word "turns".
+  function turnCountLabel(src) {
+    if (!src) return "";
+    const round = src.end_round;
+    const pturns = src.player_turns;
+    const parts = [];
+    if (round != null) parts.push("round " + round);
+    if (pturns != null) parts.push(pturns + " player turns");
+    if (parts.length) return parts.join(" · ");
+    return src.end_turn != null ? src.end_turn + " turns" : "";
+  }
+
   function gameLabel(g) {
     let outcome;
     if (g.truncated) outcome = "truncated";
     else if (g.is_draw && !g.winner_name) outcome = "draw";
     else if (g.winner_name) outcome = "won by " + fmtDeck(g.winner_name);
     else outcome = "no winner";
-    const turns = g.end_turn != null ? ", " + g.end_turn + " turns" : "";
-    return "Game " + g.game + " — " + outcome + turns;
+    const turns = turnCountLabel(g);
+    return "Game " + g.game + " — " + outcome + (turns ? ", " + turns : "");
   }
 
   function renderRunList(container, data) {
@@ -223,7 +256,9 @@
     } else {
       resultTxt = "Result: unknown";
     }
-    if (result.end_turn != null) resultTxt += " · ended turn " + result.end_turn;
+    // "ended round 12 · 22 player turns" — never a bare "ended turn N".
+    const turnTxt = turnCountLabel(result);
+    if (turnTxt) resultTxt += " · ended " + turnTxt;
     if (result.duration_ms != null) {
       resultTxt += " · " + (result.duration_ms / 1000).toFixed(1) + "s";
     }
@@ -249,8 +284,11 @@
     turns.forEach((t) => {
       const hasElim = (t.events || []).some((ev) => ev.type === "elimination");
       const life = lifeSummary(t, players);
+      // Each row is ONE player's turn — `t.turn` is the number off that
+      // `Turn:` log line, i.e. the player-turn counter, not the round
+      // counter in the result line above. Say so in the label.
       const summary = el("summary", {}, [
-        "Turn " + t.turn + " — " + fmtDeck(t.active),
+        "Player turn " + t.turn + " — " + fmtDeck(t.active),
         hasElim ? el("span", { class: "replay-elim" }, [" ☠ elimination"]) : null,
         life ? el("span", { class: "muted" }, ["  ·  " + life]) : null,
       ]);
