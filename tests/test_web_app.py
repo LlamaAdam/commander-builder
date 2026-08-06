@@ -357,6 +357,136 @@ def test_root_has_a11y_markup(client):
     assert "aria-label" in tag
 
 
+def test_root_has_deck_filter_markup(client):
+    """The deck sidebar ships a finder: search input, a type segmented
+    control over the `type` field /api/decks returns, and a sort select.
+    A flat list of a few hundred decks is otherwise unnavigable."""
+    resp = client.get("/")
+    body = resp.data.decode("utf-8")
+    assert 'id="deck-filters"' in body
+    assert 'id="deck-filter-input"' in body
+    assert 'id="deck-sort-select"' in body
+
+    # Search input: labelled, points at the list it filters, and is a
+    # real type=search (so the UA clear affordance comes for free).
+    idx = body.index('id="deck-filter-input"')
+    tag = body[body.rindex("<", 0, idx):body.index(">", idx)]
+    assert 'type="search"' in tag
+    assert 'aria-label="Filter decks by name"' in tag
+    assert 'aria-controls="deck-list"' in tag
+    assert 'for="deck-filter-input"' in body
+
+    # Type control: a labelled group of toggle buttons, one per value
+    # _list_decks emits (plus "all"), with aria-pressed state.
+    assert 'class="deck-type-filter"' in body
+    group_idx = body.index('class="deck-type-filter"')
+    group = body[group_idx:body.index("</div>", group_idx)]
+    assert 'role="group"' in body[body.rindex("<", 0, group_idx):
+                                  body.index(">", group_idx)]
+    assert 'aria-label="Deck type"' in body[body.rindex("<", 0, group_idx):
+                                            body.index(">", group_idx)]
+    for deck_type in ("all", "user", "premade", "pool"):
+        assert 'data-type="%s"' % deck_type in group, deck_type
+    assert group.count('aria-pressed="true"') == 1   # exactly one selected
+    assert group.count('aria-pressed="false"') == 3
+
+    # Sort select is labelled and offers the three documented orders.
+    sort_idx = body.index('id="deck-sort-select"')
+    sort_tag = body[body.rindex("<", 0, sort_idx):body.index(">", sort_idx)]
+    assert "aria-label" in sort_tag
+    assert 'for="deck-sort-select"' in body
+    for order in ("name", "bracket", "type"):
+        assert 'value="%s"' % order in body, order
+
+    # The result count is a live region — a filter that silently
+    # shortens the list tells sighted users only.
+    count_idx = body.index('id="deck-filter-count"')
+    count_tag = body[body.rindex("<", 0, count_idx):body.index(">", count_idx)]
+    assert 'aria-live="polite"' in count_tag
+
+
+def test_static_js_has_deck_filter_behavior(client):
+    """app.js filters client-side over one fetch, debounces typing,
+    clears on Escape, and preserves the PR #36 deck-row a11y contract
+    (tabindex/role/Enter/Space + aria-current on the selected row)
+    across re-renders."""
+    resp = client.get("/static/app.js")
+    try:
+        js = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    # One fetch of the whole list — including pool decks, so the Pool
+    # segment has data to show.
+    assert '"/api/decks?all=1"' in js
+    assert "function renderDeckList()" in js
+    assert "function wireDeckFilters()" in js
+    assert "_DECK_FILTER_DEBOUNCE_MS" in js
+    assert "setTimeout(" in js
+    # Escape clears the filter.
+    assert 'e.key !== "Escape"' in js
+    # Deck rows keep their keyboard contract after a re-render.
+    assert 'tabindex: "0"' in js
+    assert 'role: "button"' in js
+    assert 'e.key === "Enter" || e.key === " "' in js
+    # ...and the selected row keeps its highlight + aria-current when it
+    # survives the filter (highlight() only runs on click).
+    assert 'li.setAttribute("aria-current", "true")' in js
+    # Sort orders.
+    assert '_deckSort === "bracket"' in js
+    assert '_deckSort === "type"' in js
+
+
+def test_static_js_has_progressive_dashboard_load(client):
+    """The dashboard paints from /api/dashboard/core and fills the slow
+    tiles from per-section fetches, with skeleton and per-tile
+    unavailable states and the same stale-deck guard selectDeck uses."""
+    resp = client.get("/static/app.js")
+    try:
+        js = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    assert "/api/dashboard/core?deck=" in js
+    assert "/api/dashboard/section/" in js
+    assert "function loadDashboardSections(" in js
+    assert "function applyDashboardSection(" in js
+    assert "function renderSectionSkeleton(" in js
+    assert "function renderSectionUnavailable(" in js
+    # Slot ids are derived from the server-advertised section names.
+    assert '"dash-section-" + name' in js
+    assert 'id: "dash-section-pricing"' in js
+    assert 'id: "dash-section-lift_picks"' in js
+    # Per-tile outage copy (the established "…unavailable" convention).
+    assert "Printing prices unavailable." in js
+    assert "Lift picks unavailable" in js
+    # Loading placeholders announce themselves rather than being a
+    # purely visual shimmer.
+    assert 'aria-busy", "true"' in js
+    assert 'role: "status"' in js
+    # A section that resolves after a deck switch must not paint.
+    assert "if (_activeDeckId !== deckId) return;" in js
+
+
+def test_static_css_has_deck_filter_and_section_states(client):
+    """Stylesheet ships the finder controls (with a visible focus ring
+    on every one) and the progressive-load states, including the
+    reduced-motion opt-out for the pulsing skeleton."""
+    resp = client.get("/static/app.css")
+    try:
+        css = resp.data.decode("utf-8")
+    finally:
+        resp.close()
+    assert ".deck-filters" in css
+    assert ".deck-type-btn" in css
+    assert ".deck-type-btn.active" in css
+    assert ".deck-filter-input:focus-visible" in css
+    assert ".deck-type-btn:focus-visible" in css
+    assert ".section-skeleton" in css
+    assert ".section-unavailable" in css
+    # The pulse must stop for prefers-reduced-motion users.
+    reduced = css[css.index("@media (prefers-reduced-motion: reduce)"):]
+    assert ".section-skeleton { animation: none; }" in reduced
+
+
 def test_static_css_has_a11y_rules(client):
     """The stylesheet ships the a11y primitives the fix relies on:
     reduced-motion opt-out, the sr-only utility, explicit placeholder
@@ -604,6 +734,161 @@ def test_dashboard_printing_savings_with_cheaper_printings(client, monkeypatch):
     assert cult["qty"] == 5
     assert cult["savings"] == pytest.approx(6.25)
     assert ps["total"] == pytest.approx(14.25)
+
+
+# ---------------------------------------------------------------------------
+# Progressive dashboard load: /api/dashboard/core + /api/dashboard/section
+# ---------------------------------------------------------------------------
+
+# Keys the fast core payload must carry — the sections the UI paints on
+# first frame (hero, counts, curve, categories, legality snapshot).
+_CORE_KEYS = (
+    "commander", "deck_progress", "stat_tiles", "mana_curve", "categories",
+    "theme_tags", "legality", "bracket_estimate",
+)
+
+
+def test_dashboard_core_omits_slow_sections_and_advertises_them(client):
+    """The first-paint payload carries every fast section and NEITHER
+    slow attachment, plus the names the client must fetch separately.
+
+    Absence (not an empty value) is the signal the UI branches on to
+    decide "skeleton" vs "nothing to show", so the keys must really be
+    missing, not present-and-empty."""
+    resp = client.get("/api/dashboard/core?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    for key in _CORE_KEYS:
+        assert key in body, key
+    assert "printing_savings" not in body
+    assert "lift_picks" not in body
+    assert body["deferred_sections"] == ["lift_picks", "pricing"]
+    # The fast tiles are really populated, not placeholders.
+    assert body["stat_tiles"]["est_price_usd"] > 0
+    assert body["deck_progress"]["target"] == 100
+    assert body["categories"]
+
+
+def test_dashboard_full_payload_contract_unchanged(client):
+    """The pre-split route still returns the union of core + every
+    section. Other consumers must not have to learn the new shape."""
+    core = client.get("/api/dashboard/core?deck=Alpha").get_json()
+    full = client.get("/api/dashboard?deck=Alpha").get_json()
+    assert "printing_savings" in full
+    assert "lift_picks" in full
+    # Everything the core payload reports is byte-identical in the full
+    # one (deferred_sections is core-only bookkeeping).
+    for key, value in core.items():
+        if key == "deferred_sections":
+            assert key not in full
+            continue
+        assert full[key] == value, key
+
+
+@pytest.mark.parametrize("name,key", [
+    ("pricing", "printing_savings"),
+    ("lift_picks", "lift_picks"),
+])
+def test_dashboard_section_ok_shape(client, name, key):
+    """A section response is {section, status, data, reason} and its
+    ``data`` uses the SAME key the full payload uses, so the client can
+    splice it in without a translation table."""
+    resp = client.get(f"/api/dashboard/section/{name}?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["section"] == name
+    assert body["status"] == "ok"
+    assert body["reason"] is None
+    assert key in body["data"]
+    # Matches what the monolithic route inlines for the same deck.
+    assert body["data"][key] == client.get(
+        "/api/dashboard?deck=Alpha",
+    ).get_json()[key]
+
+
+def test_dashboard_section_pricing_unavailable_is_inline_not_fatal(
+    client, monkeypatch,
+):
+    """A failing section reports ``unavailable`` with HTTP 200 and the
+    empty fallback shape — the page it belongs to has already painted,
+    so the tile degrades on its own and nothing else is affected."""
+    def boom(_text):
+        raise RuntimeError("scryfall printings unreachable")
+
+    monkeypatch.setattr(
+        "commander_builder.web.routes_dashboard."
+        "printing_savings_for_deck_text",
+        boom,
+    )
+    resp = client.get("/api/dashboard/section/pricing?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "unavailable"
+    assert body["reason"]
+    # Fallback shape still present so a status-blind client renders an
+    # empty tile instead of crashing on undefined.
+    assert body["data"]["printing_savings"] == {
+        "total": 0.0, "count": 0, "suggestions": [],
+    }
+    # The core payload is untouched by the outage.
+    assert client.get("/api/dashboard/core?deck=Alpha").status_code == 200
+
+
+def test_dashboard_section_lift_unavailable_is_inline_not_fatal(
+    client, monkeypatch,
+):
+    """Same per-tile outage contract for the corpus-scan section."""
+    def boom(*_a, **_kw):
+        raise RuntimeError("corpus scan failed")
+
+    monkeypatch.setattr(
+        "commander_builder.lift_analysis.lift_picks_payload", boom,
+    )
+    resp = client.get("/api/dashboard/section/lift_picks?deck=Alpha")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "unavailable"
+    assert body["data"]["lift_picks"]["reason"] == "unavailable"
+    assert body["data"]["lift_picks"]["picks"] == []
+    # And the full payload still succeeds (fail-quiet, as before).
+    assert client.get("/api/dashboard?deck=Alpha").status_code == 200
+
+
+def test_dashboard_section_unknown_name_404s(client):
+    resp = client.get("/api/dashboard/section/nope?deck=Alpha")
+    assert resp.status_code == 404
+    body = resp.get_json()
+    assert "unknown dashboard section" in body["error"]
+    assert body["sections"] == ["lift_picks", "pricing"]
+
+
+def test_dashboard_core_and_section_share_deck_and_bracket_validation(client):
+    """All three routes parse the query string through one helper, so a
+    bad bracket or an unknown deck fails identically everywhere."""
+    for url in (
+        "/api/dashboard?deck=Alpha&bracket=9",
+        "/api/dashboard/core?deck=Alpha&bracket=9",
+        "/api/dashboard/section/pricing?deck=Alpha&bracket=9",
+    ):
+        resp = client.get(url)
+        assert resp.status_code == 400, url
+        assert "bracket must be an integer 1..5" in resp.get_json()["error"]
+    for url in (
+        "/api/dashboard?deck=NoSuchDeck",
+        "/api/dashboard/core?deck=NoSuchDeck",
+        "/api/dashboard/section/pricing?deck=NoSuchDeck",
+    ):
+        resp = client.get(url)
+        assert resp.status_code == 404, url
+        assert resp.get_json()["error"] == "deck not found"
+
+
+def test_dashboard_section_honors_bracket(client):
+    """Bracket flows through to the section builder — the UI re-fetches
+    sections after a bracket override, so they must accept it."""
+    resp = client.get("/api/dashboard/section/lift_picks?deck=Alpha&bracket=4")
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
 
 
 def test_dashboard_traversal_blocked(client, tmp_path):

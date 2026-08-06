@@ -104,10 +104,31 @@ def parse_timeline(text: str) -> dict:
           "turns": [{"turn", "seat", "active", "events": [...],
                      "life_totals": {"1": 40, ...}}, ...],
           "pregame_events": [...],       # events seen before Turn 1
-          "result": {"winner_seat", "winner_name", "end_turn",
-                     "duration_ms", "is_draw", "eliminations": [...]},
+          "result": {"winner_seat", "winner_name", "end_turn", "end_round",
+                     "player_turns", "duration_ms", "is_draw",
+                     "eliminations": [...]},
           "truncated": bool,
         }
+
+    TURN-COUNT CONVENTION (2026-08 — the Replays UI showed "ended turn
+    12" above a timeline listing turns 1..22 and nothing said why).
+    There are two different counters in a Forge log and they are NOT
+    interchangeable:
+
+    - ``end_round``  — the number on Forge's authoritative
+      ``Game Outcome: Turn N`` line. This is the game's ROUND counter.
+      ``None`` when the log has no outcome line (truncated/partial).
+    - ``player_turns`` — how many ``Turn:`` entries this timeline
+      contains, i.e. how many individual PLAYER turns were logged. In a
+      multiplayer pod each round contributes one per surviving seat, so
+      this runs well ahead of ``end_round``.
+    - ``end_turn`` — UNCHANGED legacy field, kept for the replay index,
+      ``/api/replays`` and every existing consumer: the outcome-line
+      value when present, otherwise the highest ``Turn:`` number seen.
+      Because it silently switches between the two counters it must not
+      be used for user-facing labels; the UI renders ``end_round`` and
+      ``player_turns`` side by side ("round 12 · 22 player turns")
+      precisely so neither number can be mistaken for the other.
 
     Event dicts carry a ``type`` discriminator: ``life``, ``elimination``,
     ``cast``, ``attack``, ``confirm_action``, ``unsupported_card``.
@@ -125,6 +146,9 @@ def parse_timeline(text: str) -> dict:
     current_turn: Optional[dict] = None
     life_now: dict[int, int] = {}
     end_turn: Optional[int] = None
+    # Round counter straight off the Game Outcome line — never the
+    # max-Turn fallback, so it stays a pure "rounds" number (or None).
+    end_round: Optional[int] = None
     winner_seat: Optional[int] = None
     winner_name: Optional[str] = None
     duration_ms: Optional[int] = None
@@ -234,6 +258,7 @@ def parse_timeline(text: str) -> dict:
         m = _GAME_OUTCOME_TURN.match(line)
         if m:
             end_turn = int(m.group(1))  # authoritative; overrides max-Turn
+            end_round = end_turn        # rounds — see the docstring
             continue
 
         if _DRAW.search(line):
@@ -300,6 +325,8 @@ def parse_timeline(text: str) -> dict:
             "winner_seat": winner_seat,
             "winner_name": winner_name,
             "end_turn": end_turn,
+            "end_round": end_round,
+            "player_turns": len(turns),
             "duration_ms": duration_ms,
             "is_draw": is_draw,
             "eliminations": [

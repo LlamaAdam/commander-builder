@@ -17,8 +17,8 @@ Two read-only routes over the ``~/.commander-builder/replays/`` store that
               "count": int,
               "games": [
                 {"game", "decks", "game_format", "source", "winner_seat",
-                 "winner_name", "end_turn", "duration_ms", "is_draw",
-                 "truncated"},
+                 "winner_name", "end_turn", "end_round", "player_turns",
+                 "duration_ms", "is_draw", "truncated"},
                 ...
               ]
             }, ...
@@ -57,9 +57,14 @@ from ..replay_store import INDEX_NAME, replay_root, replays_enabled
 _RUN_ID_RE = re.compile(r"^(?=.{1,120}$)[A-Za-z0-9._-]*\w[A-Za-z0-9._-]*$")
 
 # Fields from an index game entry that the list endpoint exposes.
+# ``end_round`` / ``player_turns`` are the two disambiguated turn
+# counters (see replay_timeline's turn-count convention). They are None
+# for runs indexed before 2026-08 — ``.get`` below yields None and the
+# UI falls back to the legacy ``end_turn``.
 _GAME_SUMMARY_FIELDS = (
     "game", "decks", "game_format", "source", "winner_seat", "winner_name",
-    "end_turn", "duration_ms", "is_draw", "truncated",
+    "end_turn", "end_round", "player_turns", "duration_ms", "is_draw",
+    "truncated",
 )
 
 _MAX_GAME_NUMBER = 100_000

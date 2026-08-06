@@ -303,6 +303,13 @@ class ReplayRun:
                     "winner_seat": result["winner_seat"],
                     "winner_name": result["winner_name"],
                     "end_turn": result["end_turn"],
+                    # Two DIFFERENT counters — see the turn-count
+                    # convention in replay_timeline.parse_timeline.
+                    # Indexes written before 2026-08 lack both keys;
+                    # readers must treat a missing value as None and
+                    # fall back to end_turn.
+                    "end_round": result["end_round"],
+                    "player_turns": result["player_turns"],
                     "duration_ms": result["duration_ms"],
                     "is_draw": result["is_draw"],
                     "eliminations": result["eliminations"],

@@ -121,6 +121,36 @@
       <!-- DECKS section (default visible) -->
       <div id="section-decks">
         <h2>Decks</h2>
+        <!-- Deck finder. A flat alphabetical list of a few hundred decks
+             is unusable: this narrows it by substring (debounced, Escape
+             clears), by the `type` field /api/decks returns, and by sort
+             order. All client-side over the one deck list app.js already
+             fetched — no extra requests, no persisted state. -->
+        <div class="deck-filters" id="deck-filters">
+          <label class="sr-only" for="deck-filter-input">Filter decks by name</label>
+          <input type="search" id="deck-filter-input" class="deck-filter-input"
+                 placeholder="Filter decks…" autocomplete="off"
+                 aria-label="Filter decks by name" aria-controls="deck-list" />
+          <div class="deck-type-filter" role="group" aria-label="Deck type">
+            <button type="button" class="deck-type-btn active" data-type="all"
+                    aria-pressed="true" title="Every deck">All</button>
+            <button type="button" class="deck-type-btn" data-type="user"
+                    aria-pressed="false" title="[USER] decks">User</button>
+            <button type="button" class="deck-type-btn" data-type="premade"
+                    aria-pressed="false" title="[PREMADE] decks">Premade</button>
+            <button type="button" class="deck-type-btn" data-type="pool"
+                    aria-pressed="false" title="Filler / pool decks">Pool</button>
+          </div>
+          <label class="sr-only" for="deck-sort-select">Sort decks</label>
+          <select id="deck-sort-select" class="deck-sort-select"
+                  aria-label="Sort decks" aria-controls="deck-list">
+            <option value="name">Sort: name</option>
+            <option value="bracket">Sort: bracket</option>
+            <option value="type">Sort: type</option>
+          </select>
+          <p class="muted deck-filter-count" id="deck-filter-count"
+             aria-live="polite"></p>
+        </div>
         <ul class="deck-list" id="deck-list">
           <li class="muted">Loading...</li>
         </ul>

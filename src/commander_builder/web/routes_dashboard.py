@@ -5,9 +5,30 @@ historical iteration metadata:
 
 - ``GET /api/decks``               (list .dck files in deck_dir)
 - ``GET /api/dashboard``           (full dashboard payload)
+- ``GET /api/dashboard/core``      (fast subset — no slow sections)
+- ``GET /api/dashboard/section/<name>``  (one slow section, on demand)
 - ``GET /api/iterations``          (recent iterations list)
 - ``GET /api/pricing_series``      (deck-cost time series)
 - ``GET /api/verdict_breakdown``   (per-audit-version kept/reverted)
+
+PROGRESSIVE LOAD (2026-08). A cold premade deck used to sit on a bare
+"Loading…" for up to ~90s because ``/api/dashboard`` did every piece of
+work serially before its single response: the ``build_dashboard`` core
+(Scryfall oracle lookups, usually warm because import populates that
+cache), then the printing-savings probe (``lookup_card_prints`` — a
+SEPARATE, usually-cold per-card cache, so ~100 network round-trips),
+then the lift-picks corpus scan.
+
+The split: ``/api/dashboard/core`` returns everything except those two
+slow attachments, and ``/api/dashboard/section/<name>`` computes exactly
+one of them. The UI paints core immediately and fills the slow tiles
+from skeletons.
+
+``/api/dashboard`` is UNCHANGED and still returns the union — the
+payload contract other consumers (tests, the bracket-override refetch,
+any external script) rely on keeps working. All three routes share the
+``_pricing_section`` / ``_lift_section`` helpers, so the two shapes can
+never drift.
 
 Built via ``make_dashboard_blueprint(deck_dir, knowledge_db,
 list_decks, resolve_deck_path)``. The two helper functions are
@@ -46,6 +67,70 @@ from ._helpers import (
 )
 from .deck_pricing import printing_savings_for_deck_text
 
+# --- Deferred (slow) dashboard sections --------------------------------
+#
+# Each entry maps a section name to a builder that returns
+# ``(payload_dict, ok)``. ``payload_dict`` uses the SAME keys the full
+# ``/api/dashboard`` payload uses, so the client can splice a section
+# response straight into its dashboard model. ``ok=False`` means the
+# section is unavailable (network/corpus failure) — the client renders
+# the established inline "unavailable" state for that tile only and the
+# rest of the page is untouched.
+#
+# The fallback dicts are byte-identical to what ``/api/dashboard`` has
+# always emitted on failure, so an unavailable section degrades exactly
+# the way the monolithic route already did.
+
+
+def _pricing_section(path: Path, deck_dir: Path, bracket: Optional[int]):
+    """Cheaper-printing savings (ManaFoundry parity).
+
+    The expensive one: ``lookup_card_prints`` has its own per-card disk
+    cache which is cold for a freshly imported deck, so this is ~1
+    network round-trip per distinct card.
+    """
+    try:
+        return {
+            "printing_savings": printing_savings_for_deck_text(
+                path.read_text(encoding="utf-8"),
+            ),
+        }, True
+    except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
+        current_app.logger.warning("printing savings failed: %s", exc)
+        return {
+            "printing_savings": {"total": 0.0, "count": 0, "suggestions": []},
+        }, False
+
+
+def _lift_section(path: Path, deck_dir: Path, bracket: Optional[int]):
+    """Lift picks — co-occurrence scan over the harvested deck corpus.
+
+    Cost scales with the number of .dck files in ``deck_dir`` (hundreds
+    on a real install), so it is deferred alongside pricing even though
+    it never touches the network.
+    """
+    try:
+        from ..lift_analysis import lift_picks_payload
+        return {
+            "lift_picks": lift_picks_payload(
+                path, deck_dir=deck_dir, bracket=bracket,
+            ),
+        }, True
+    except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
+        current_app.logger.warning("lift picks failed: %s", exc)
+        return {
+            "lift_picks": {
+                "corpus_size": 0, "band": "overall", "picks": [],
+                "reason": "unavailable",
+            },
+        }, False
+
+
+_DEFERRED_SECTIONS = {
+    "pricing": _pricing_section,
+    "lift_picks": _lift_section,
+}
+
 
 def make_dashboard_blueprint(
     deck_dir: Path,
@@ -70,37 +155,56 @@ def make_dashboard_blueprint(
             "decks": list_decks(deck_dir, user_only=not all_flag),
         })
 
-    @bp.route("/api/dashboard")
-    def dashboard():
+    def _resolve_request():
+        """Shared arg parsing for the three dashboard routes.
+
+        Returns ``(path, bracket, error_response)`` — exactly one of
+        ``path`` / ``error_response`` is None. Keeping this in one place
+        is what lets ``/api/dashboard``, ``/api/dashboard/core`` and
+        ``/api/dashboard/section/<name>`` agree on which deck (and which
+        declared bracket) a given query string names; a client that
+        splices a section response into a core payload MUST have both
+        computed against the same deck.
+        """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
         try:
             bracket_raw = request.args.get("bracket")
             bracket = int(bracket_raw) if bracket_raw else None
         except ValueError:
-            return jsonify({"error": "bracket must be an integer 1..5"}), 400
+            return None, None, (
+                jsonify({"error": "bracket must be an integer 1..5"}), 400
+            )
         # Enforce the range the error message above already promises —
         # an out-of-range bracket (9, -1) would flow into the power-
         # bracket heuristic and render nonsense tiles.
         if bracket is not None and bracket not in (1, 2, 3, 4, 5):
-            return jsonify({"error": "bracket must be an integer 1..5"}), 400
+            return None, None, (
+                jsonify({"error": "bracket must be an integer 1..5"}), 400
+            )
         # Default to the [B?] suffix in the filename when the request
         # didn't explicitly pass a bracket — the filename is the user's
         # declared bracket and should beat the heuristic.
         if bracket is None:
             bracket = _bracket_from_filename(deck_id)
-        with_advise = request.args.get("advise", "").lower() in (
-            "1", "true", "yes",
-        )
 
         path = _resolve_deck_path(deck_dir, deck_id, explicit)
         if path is None:
-            return jsonify({
-                "error": "deck not found",
-                "deck": deck_id,
-                "path": explicit,
-            }), 404
+            return None, None, (
+                jsonify({
+                    "error": "deck not found",
+                    "deck": deck_id,
+                    "path": explicit,
+                }), 404
+            )
+        return path, bracket, None
 
+    def _core_payload(path: Path, bracket: Optional[int]) -> dict:
+        """The fast dashboard body: everything ``build_dashboard``
+        produces, with no deferred section attached."""
+        with_advise = request.args.get("advise", "").lower() in (
+            "1", "true", "yes",
+        )
         suggested = None
         if with_advise:
             try:
@@ -113,42 +217,83 @@ def make_dashboard_blueprint(
                 current_app.logger.warning("advise failed: %s", exc)
 
         data = build_dashboard(path, bracket=bracket, suggested=suggested)
-        payload = data.to_dict()
-        # Cheaper-printing savings (ManaFoundry parity). Computed in
-        # deck_pricing (module layering: pricing logic never lives in
-        # routes) and attached to the dashboard payload so the pricing
-        # tile can render "Save up to $X" without a second request.
-        # Failure never blocks the dashboard — same fail-quiet contract
-        # as the legality/salt probes in build_dashboard.
-        try:
-            payload["printing_savings"] = printing_savings_for_deck_text(
-                path.read_text(encoding="utf-8"),
-            )
-        except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
-            current_app.logger.warning("printing savings failed: %s", exc)
-            payload["printing_savings"] = {
-                "total": 0.0, "count": 0, "suggestions": [],
-            }
-        # Lift picks (ManaFoundry parity — 'Lift Web'). Candidate adds
-        # ranked by co-occurrence lift over the harvested (non-[USER]/
-        # [CONTROL]) deck corpus in this deck_dir. Computed in
-        # lift_analysis (core layer — stats never live in routes) and
-        # attached so the UI can render "pairs well with your deck"
-        # without a second request. Same fail-quiet contract as
-        # printing_savings above: a corpus/scan failure degrades to an
-        # empty picks list, never a dashboard 500.
-        try:
-            from ..lift_analysis import lift_picks_payload
-            payload["lift_picks"] = lift_picks_payload(
-                path, deck_dir=deck_dir, bracket=bracket,
-            )
-        except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
-            current_app.logger.warning("lift picks failed: %s", exc)
-            payload["lift_picks"] = {
-                "corpus_size": 0, "band": "overall", "picks": [],
-                "reason": "unavailable",
-            }
+        return data.to_dict()
+
+    @bp.route("/api/dashboard")
+    def dashboard():
+        """Full payload — core PLUS every deferred section inlined.
+
+        Unchanged contract: kept for consumers that want one blocking
+        request (the test suite, scripts, and any client that predates
+        the progressive split). The web UI uses ``/api/dashboard/core``
+        + per-section fetches instead.
+        """
+        path, bracket, err = _resolve_request()
+        if err is not None:
+            return err
+        payload = _core_payload(path, bracket)
+        # Cheaper-printing savings + lift picks (ManaFoundry parity).
+        # Both are computed in the core layer (deck_pricing /
+        # lift_analysis — pricing and stats logic never live in routes)
+        # and attached fail-quiet: a network or corpus failure degrades
+        # to the empty shape, never a dashboard 500. Same contract as
+        # the legality/salt probes inside build_dashboard.
+        for builder in (_pricing_section, _lift_section):
+            section, _ok = builder(path, deck_dir, bracket)
+            payload.update(section)
         return jsonify(payload)
+
+    @bp.route("/api/dashboard/core")
+    def dashboard_core():
+        """Fast dashboard subset — the progressive-load first paint.
+
+        Same keys as ``/api/dashboard`` MINUS ``printing_savings`` and
+        ``lift_picks``, plus a ``deferred_sections`` list naming the
+        sections the client must fetch separately. Clients that see an
+        unknown name in that list can simply skip it (forward-compatible
+        by construction), which is why the names are advertised rather
+        than hardcoded on both sides.
+        """
+        path, bracket, err = _resolve_request()
+        if err is not None:
+            return err
+        payload = _core_payload(path, bracket)
+        payload["deferred_sections"] = sorted(_DEFERRED_SECTIONS)
+        return jsonify(payload)
+
+    @bp.route("/api/dashboard/section/<name>")
+    def dashboard_section(name: str):
+        """One deferred dashboard section, computed on demand.
+
+        Returns ``{section, status, data, reason}`` where ``status`` is
+        ``"ok"`` or ``"unavailable"`` and ``data`` carries the same keys
+        the full payload uses (``printing_savings`` / ``lift_picks``),
+        so the client splices it in without a per-section translation
+        table. ``unavailable`` still ships the empty fallback shape in
+        ``data`` so a client that ignores ``status`` renders an empty
+        tile rather than crashing on undefined.
+
+        404 for an unknown section name or an unresolvable deck. A
+        failing section is deliberately NOT a 5xx: it is an expected,
+        per-tile outage, and the page it belongs to has already
+        painted.
+        """
+        builder = _DEFERRED_SECTIONS.get(name)
+        if builder is None:
+            return jsonify({
+                "error": f"unknown dashboard section: {name!r}",
+                "sections": sorted(_DEFERRED_SECTIONS),
+            }), 404
+        path, bracket, err = _resolve_request()
+        if err is not None:
+            return err
+        data, ok = builder(path, deck_dir, bracket)
+        return jsonify({
+            "section": name,
+            "status": "ok" if ok else "unavailable",
+            "data": data,
+            "reason": None if ok else "section computation failed",
+        })
 
     @bp.route("/api/iterations")
     def iterations():
