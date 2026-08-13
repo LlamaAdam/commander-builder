@@ -5398,6 +5398,37 @@ def test_save_iteration_persists_row(save_client):
     assert detail["audit_manifest"]["added"][0]["card"] == "Lotus Cobra"
 
 
+def test_save_iteration_stores_signed_margin_for_regression(save_client):
+    """THE BUG (2026-08-13): the /api/propose_swap response body carries
+    ComparisonReport.margin = abs(new_wins - old_wins) — the UI's
+    "decided by N games" display value — and save_iteration stored it
+    verbatim. knowledge_log documents the margin column as the SIGNED
+    new_wins - old_wins (the convention every CLI writer follows), so a
+    web-saved REGRESSION landed with a positive margin, reading as "new
+    deck ahead" in every cross-run analysis. The writer must recompute
+    the signed delta from the stats and ignore the payload's absolute
+    margin."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "reverted",
+        # Exactly what the UI forwards after a losing swap: the
+        # propose_swap response, margin already absolute. Old deck won
+        # 12-4, so the stored (signed) margin must be -8.
+        "sim_report": {
+            "winner": "old", "old_wins": 12, "new_wins": 4,
+            "old_games": 20, "new_games": 20, "draws": 0,
+            "margin": 8, "total_games": 20, "mode": "pod", "bracket": 3,
+        },
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["margin"] == -8
+    # Win rates keep the head-to-head decisive denominator (12 + 4).
+    assert detail["win_rate_old"] == round(12 / 16, 4)
+    assert detail["win_rate_new"] == round(4 / 16, 4)
+
+
 def test_save_iteration_defaults_deck_snapshot_from_disk(save_client):
     client, db = save_client
     resp = client.post("/api/save_iteration", json={

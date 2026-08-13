@@ -88,6 +88,64 @@ class IterationResult:
     next_action: str         # "continue" | "revert" | "stop"
 
 
+def _materialize_proposed_deck(
+    old_path: Path,
+    new_path: Path,
+    manifest: dict,
+) -> None:
+    """Apply ``manifest``'s added/removed lists to ``old_path`` and write
+    the result to ``new_path``.
+
+    Routes through ``proposer.apply_proposal_to_deck`` so the
+    auto-propose path enforces the SAME deck-legality invariants as
+    commander-auto-curate (add/cut balancing, per-pair decklist
+    validation, basic-land padding, the final mainboard-count guard).
+    The applier derives its own output name by bumping ``old_path``'s
+    version — which need not equal the caller's ``--new`` filename, and
+    could name an unrelated sibling .dck — so it runs against a copy of
+    the old deck in a temp dir; the result lands at ``new_path`` with
+    its ``Name=`` restamped to the REAL output stem (the dck_meta
+    invariant: Forge reports Name=, so a stale stem makes the two
+    compared decks indistinguishable in the match log).
+
+    Mutates ``manifest`` in place to record what actually LANDED:
+    ``added``/``removed`` become the applied lists — the on-disk diff
+    the sim will measure — while the LLM's full intent is preserved
+    under ``requested_adds``/``requested_cuts``. Same convention as
+    ``_proposer_sim._log_auto_curate_iteration``, and the reason the
+    knowledge-log row's manifest now matches the simmed diff.
+    """
+    import shutil
+    import tempfile
+
+    from .dck_meta import rewrite_name
+    from .proposer import Proposal, apply_proposal_to_deck
+
+    proposal = Proposal(
+        adds=[str(c) for c in manifest.get("added", [])],
+        cuts=[str(c) for c in manifest.get("removed", [])],
+        rationale=str(manifest.get("rationale", "")),
+        source=str(manifest.get("source", "manual")),
+    )
+    requested_adds = list(proposal.adds)
+    requested_cuts = list(proposal.cuts)
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp_src = Path(td) / old_path.name
+        shutil.copy2(old_path, tmp_src)
+        tmp_out = apply_proposal_to_deck(tmp_src, proposal)
+        proposed_text = tmp_out.read_text(encoding="utf-8")
+
+    new_path.write_text(
+        rewrite_name(proposed_text, new_path.stem), encoding="utf-8",
+    )
+
+    manifest["added"] = list(proposal.applied_adds)
+    manifest["removed"] = list(proposal.applied_cuts)
+    manifest["requested_adds"] = requested_adds
+    manifest["requested_cuts"] = requested_cuts
+
+
 def propose_then_iterate(
     deck_filename: str,
     new_deck_filename: str,
@@ -100,18 +158,51 @@ def propose_then_iterate(
     analyst_config: Optional[AnalystConfig] = None,
     proposer_config: Optional[ProposerConfig] = None,
 ) -> "IterationResult":
-    """Convenience wrapper: pull the manifest via `propose()`, then run one
-    iteration. Closes the manual paste loop — when `proposer_config.use_claude`
-    is True (and the SDK is wired), the audit happens programmatically.
-    Otherwise falls back to reading a manifest file."""
+    """Convenience wrapper: pull the manifest via `propose()` against the
+    OLD deck, materialize the proposed deck at `new_deck_filename`, then
+    run one iteration. Closes the manual paste loop — when
+    `proposer_config.use_claude` is True (and the SDK is wired), the
+    audit happens programmatically. Otherwise falls back to reading a
+    manifest file (`<old deck>.audit_manifest.json` by convention).
+
+    The pre-2026-08-13 wiring called `propose()` with deck_path=new_path
+    (a file this function never wrote) and then simmed the two
+    PRE-EXISTING files — so the recorded manifest and the simmed diff
+    were unrelated, poisoning the knowledge log. The proposal is now
+    applied to disk (see `_materialize_proposed_deck`) so the deck the
+    sim measures IS the deck the manifest describes.
+
+    Raises:
+      FileNotFoundError — `deck_filename` doesn't exist; there is
+        nothing to propose against.
+      FileExistsError   — `new_deck_filename` already exists. Refusing
+        beats silently comparing a stale pre-existing file against the
+        old deck (exactly the bug above). Checked BEFORE `propose()` so
+        no LLM spend is wasted on a run that can't land.
+    """
     proposer_config = proposer_config or ProposerConfig()
+    old_path = DECK_DIR / deck_filename
     new_path = DECK_DIR / new_deck_filename
+    if not old_path.exists():
+        raise FileNotFoundError(
+            f"old deck not found: {old_path} — auto-propose needs the "
+            f"baseline deck to audit and apply the proposal to."
+        )
+    if new_path.exists():
+        raise FileExistsError(
+            f"new deck already exists: {new_path}. Auto-propose "
+            f"materializes the new deck FROM the LLM proposal; running "
+            f"against a pre-existing file would sim a diff unrelated to "
+            f"the recorded manifest and poison the knowledge log. "
+            f"Delete/rename the file or pass a fresh --new filename."
+        )
     proposer_input = ProposerInput(
-        deck_path=new_path,
+        deck_path=old_path,
         bracket=bracket,
-        deck_id=resolve_deck_id(DECK_DIR / deck_filename, fallback=deck_filename),
+        deck_id=resolve_deck_id(old_path, fallback=deck_filename),
     )
     manifest = propose(proposer_input, proposer_config).to_dict()
+    _materialize_proposed_deck(old_path, new_path, manifest)
     return run_one_iteration(
         deck_filename=deck_filename,
         new_deck_filename=new_deck_filename,
@@ -276,7 +367,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     """
     p = argparse.ArgumentParser(prog="iteration_loop")
     p.add_argument("--old", required=True, help="v_n filename (pre-audit snapshot).")
-    p.add_argument("--new", required=True, help="v_(n+1) filename (post-audit snapshot).")
+    p.add_argument("--new", required=True,
+                   help="v_(n+1) filename. Manual mode: the post-audit "
+                        "snapshot, which must already exist. "
+                        "--auto-propose mode: WRITTEN by applying the "
+                        "proposal to --old; must NOT already exist.")
     p.add_argument("--bracket", type=int, required=True)
     p.add_argument("--manifest", help="Path to audit_manifest.json (manual mode).")
     p.add_argument("--auto-propose", action="store_true",
@@ -289,15 +384,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = p.parse_args(argv)
 
     if args.auto_propose:
-        result = propose_then_iterate(
-            deck_filename=args.old,
-            new_deck_filename=args.new,
-            bracket=args.bracket,
-            parent_iteration_id=args.parent_id,
-            games_per_pod=args.games,
-            filler_pairs=args.filler_pairs,
-            proposer_config=ProposerConfig(use_claude=True),
-        )
+        try:
+            result = propose_then_iterate(
+                deck_filename=args.old,
+                new_deck_filename=args.new,
+                bracket=args.bracket,
+                parent_iteration_id=args.parent_id,
+                games_per_pod=args.games,
+                filler_pairs=args.filler_pairs,
+                proposer_config=ProposerConfig(use_claude=True),
+            )
+        except (FileExistsError, FileNotFoundError) as exc:
+            # Pre-flight guards: --new already on disk (simming it would
+            # record a manifest unrelated to the tested diff) or --old
+            # missing. Actionable message, clean exit — not a traceback.
+            print(f"ERROR: {exc}", flush=True)
+            return 2
     else:
         if not args.manifest:
             p.error("Either --manifest <path> or --auto-propose is required.")

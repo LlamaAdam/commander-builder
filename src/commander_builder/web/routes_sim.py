@@ -889,6 +889,16 @@ def make_sim_blueprint(
         # writer's compare-shaped rows were incomparable with the
         # AB-shaped writers'. When decisive == 0 the helper returns None
         # and the columns stay NULL.
+        #
+        # Margin is ALWAYS recomputed as new_wins - old_wins — the SIGNED
+        # delta knowledge_log's schema documents — and any margin key in
+        # the payload is ignored. The /api/propose_swap response body
+        # carries ComparisonReport.margin, which is abs(new - old) (the
+        # UI's "decided by N games" display value), so storing it
+        # verbatim (the pre-2026-08-13 bug) flipped every web-saved
+        # regression's margin positive while the CLI writers stored
+        # signed values — the column read as "new deck ahead" for rows
+        # where the old deck won.
         win_rate_old = None
         win_rate_new = None
         margin = None
@@ -899,10 +909,7 @@ def make_sim_blueprint(
                 decisive = old_w + new_w
                 win_rate_old = decisive_win_rate(old_w, decisive)
                 win_rate_new = decisive_win_rate(new_w, decisive)
-                if "margin" in sim_report and sim_report["margin"] is not None:
-                    margin = int(sim_report["margin"])
-                else:
-                    margin = new_w - old_w
+                margin = new_w - old_w
             except (TypeError, ValueError):
                 pass
 

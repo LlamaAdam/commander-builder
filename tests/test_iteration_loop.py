@@ -11,12 +11,18 @@ from typing import Any
 import pytest
 
 from commander_builder.compare_versions import ComparisonReport, VersionStats
-from commander_builder.iteration_loop import resolve_deck_id, run_one_iteration
+from commander_builder.iteration_loop import (
+    main as iteration_loop_main,
+    propose_then_iterate,
+    resolve_deck_id,
+    run_one_iteration,
+)
 from commander_builder.knowledge_log import (
     get_iteration,
     iterations_for_deck,
     stats_summary,
 )
+from commander_builder.proposer import ProposerOutput
 
 
 def _write_dck(tmp_path, name: str, body: str):
@@ -295,6 +301,171 @@ def test_run_one_iteration_writes_deck_snapshot_blob(tmp_path, staged_decks, mon
     assert fetched.deck_snapshot is not None
     assert "NewCard" in fetched.deck_snapshot
     assert "Moxfield=stable-public-id" in fetched.deck_snapshot
+
+
+# --- propose_then_iterate (auto-propose materializes the deck) -------------
+
+@pytest.fixture
+def auto_propose_deck(tmp_path, monkeypatch):
+    """Stage ONLY the v1 deck — auto-propose must materialize v2 itself.
+    The mainboard is a full 99 cards so apply's basic-land padding stays
+    out of the diff under test, and Scryfall lookups are stubbed so the
+    appended add-line stays a plain `1 <name>` (offline, deterministic)."""
+    deck_dir = tmp_path / "decks" / "commander"
+    deck_dir.mkdir(parents=True)
+
+    v1 = deck_dir / "[USER] Test Deck v1 [B3].dck"
+    v1.write_text("\n".join([
+        "[metadata]",
+        "Name=[USER] Test Deck v1 [B3]",
+        "Moxfield=stable-public-id",
+        "[Commander]",
+        "1 Test Commander",
+        "[Main]",
+        "1 Sol Ring",
+        "1 OldCard",
+        "97 Forest",
+    ]) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr("commander_builder.iteration_loop.DECK_DIR", deck_dir)
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, cache=True: None,
+    )
+    return {"deck_dir": deck_dir, "v1": v1.name,
+            "v2": "[USER] Test Deck v2 [B3].dck"}
+
+
+def _main_card_names(text: str) -> set:
+    """Card names in [Main], edition tails stripped — enough to diff the
+    two on-disk versions against the recorded manifest."""
+    names = set()
+    in_main = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_main = s.lower() == "[main]"
+            continue
+        if in_main and s:
+            _, _, name = s.partition(" ")
+            names.add(name.split("|")[0].strip())
+    return names
+
+
+def test_propose_then_iterate_materializes_proposed_deck(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """THE BUG (2026-08-13): propose_then_iterate never applied the LLM
+    proposal to disk — it proposed against the v2 path (which had to
+    pre-exist) and then simmed the two PRE-EXISTING files, so the
+    recorded manifest and the simmed diff were unrelated, poisoning the
+    knowledge log. Auto-propose must (a) propose against the OLD deck,
+    (b) materialize the v2 deck FROM the proposal, and (c) persist a
+    manifest that matches the on-disk diff."""
+    seen = {}
+
+    def _fake_propose(input_, config):
+        seen["deck_path"] = input_.deck_path
+        return ProposerOutput(
+            added=["NewCard"], removed=["OldCard"],
+            rationale="swap the dud", source="claude",
+        )
+
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose", _fake_propose,
+    )
+    canned = _make_canned_comparison(old_wins=2, new_wins=12, draws=0, total=14)
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare", lambda **kw: canned,
+    )
+
+    old_path = auto_propose_deck["deck_dir"] / auto_propose_deck["v1"]
+    new_path = auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]
+    db = tmp_path / "kl.sqlite"
+    result = propose_then_iterate(
+        deck_filename=auto_propose_deck["v1"],
+        new_deck_filename=auto_propose_deck["v2"],
+        bracket=3,
+        db_path=db,
+    )
+
+    # (a) The proposer audited the OLD deck, not the then-nonexistent v2.
+    assert seen["deck_path"] == old_path
+
+    # (b) The proposed deck was materialized on disk, Name= restamped to
+    # its own stem (the dck_meta invariant Forge's match log depends on).
+    assert new_path.exists()
+    new_text = new_path.read_text(encoding="utf-8")
+    assert "NewCard" in new_text
+    assert "OldCard" not in new_text
+    assert "Name=[USER] Test Deck v2 [B3]" in new_text
+
+    # (c) The persisted manifest IS the on-disk diff.
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    old_names = _main_card_names(old_path.read_text(encoding="utf-8"))
+    new_names = _main_card_names(new_text)
+    assert set(fetched.audit_manifest["added"]) == new_names - old_names == {"NewCard"}
+    assert set(fetched.audit_manifest["removed"]) == old_names - new_names == {"OldCard"}
+    # The LLM's full intent survives alongside what landed.
+    assert fetched.audit_manifest["requested_adds"] == ["NewCard"]
+    assert fetched.audit_manifest["requested_cuts"] == ["OldCard"]
+    assert result.verdict.label == "kept"
+
+
+def test_propose_then_iterate_refuses_pre_existing_new_file(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """A pre-existing --new file is exactly the poisoned-log setup the
+    fix closes: fail fast, and BEFORE the proposer runs so no LLM spend
+    is wasted on a run that can't land."""
+    (auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]).write_text(
+        "[Main]\n1 Stale\n", encoding="utf-8",
+    )
+
+    def _no_propose(*a, **kw):
+        raise AssertionError("propose() must not run when --new already exists")
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose", _no_propose,
+    )
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        propose_then_iterate(
+            deck_filename=auto_propose_deck["v1"],
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=tmp_path / "kl.sqlite",
+        )
+
+
+def test_propose_then_iterate_requires_old_deck(tmp_path, auto_propose_deck):
+    with pytest.raises(FileNotFoundError, match="old deck not found"):
+        propose_then_iterate(
+            deck_filename="[USER] Ghost [B3].dck",
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=tmp_path / "kl.sqlite",
+        )
+
+
+def test_main_auto_propose_fails_fast_when_new_exists(
+    auto_propose_deck, capsys,
+):
+    """CLI wrapper: --auto-propose with a pre-existing --new file exits 2
+    with an actionable ERROR line instead of silently comparing the two
+    pre-existing files (or dumping a traceback)."""
+    (auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]).write_text(
+        "[Main]\n1 Stale\n", encoding="utf-8",
+    )
+    rc = iteration_loop_main([
+        "--old", auto_propose_deck["v1"],
+        "--new", auto_propose_deck["v2"],
+        "--bracket", "3",
+        "--auto-propose",
+    ])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "ERROR" in out
+    assert "already exists" in out
 
 
 def test_run_one_iteration_refuses_verdict_on_zero_attributed_games(
