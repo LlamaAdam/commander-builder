@@ -2607,6 +2607,25 @@ function renderDashboard(data, iterations) {
     saltRow.appendChild(pill);
     catGrid.appendChild(saltRow);
   }
+  // Forge sim-coverage pill: cards the vendored Forge build has no
+  // script for. Forge silently plays on WITHOUT these cards ("An
+  // unsupported card was requested" in the sim logs), so an A/B
+  // verdict on such a deck rests on partial data — flag it before the
+  // user trusts a sim. Hidden when the corpus is unavailable (fresh
+  // checkout: `available` false means "couldn't check", NOT "all
+  // clear") and when every card is supported.
+  const cov = data.sim_coverage;
+  if (cov && cov.available && cov.unsupported_count > 0) {
+    const covRow = el("div", { class: "salt-pill-row" });
+    const covPill = el("button", {
+      class: "pill warn",
+      style: "cursor: pointer; border: none;",
+    }, `Forge can't simulate: ${cov.unsupported_count}`);
+    covPill.title = (cov.unsupported_names || []).join("\n");
+    covPill.addEventListener("click", () => showSimCoverageAlert(cov));
+    covRow.appendChild(covPill);
+    catGrid.appendChild(covRow);
+  }
   dash.appendChild(panel("Categories", catGrid));
 
   // Theme tags
@@ -3570,6 +3589,41 @@ function showSaltCardsAlert(saltCards) {
         el("span", { class: "muted" }, `(score ${c.score.toFixed(2)})`),
       ));
     }
+    body.appendChild(ul);
+  }
+  showModal("alert-modal");
+}
+
+// Sim-coverage detail modal. `cov` is the dashboard payload's
+// `sim_coverage` object ({available, checked_count, unsupported_count,
+// unsupported_names}) — see routes_dashboard._sim_coverage. Only ever
+// invoked from the pill, which renders solely when the corpus was
+// available AND at least one card is unsupported; the empty branch is
+// defensive.
+function showSimCoverageAlert(cov) {
+  $("alert-title").textContent = "Forge sim coverage";
+  const body = $("alert-body");
+  body.className = "alert-body";
+  body.innerHTML = "";
+  body.appendChild(el(
+    "p", { class: "muted" },
+    "The vendored Forge build has no card script for these cards. " +
+    "Simulations run WITHOUT them (Forge logs “An unsupported card " +
+    "was requested” and plays on), so sim win rates for this deck " +
+    "are built on partial data.",
+  ));
+  const names = (cov && cov.unsupported_names) || [];
+  if (!names.length) {
+    body.appendChild(el(
+      "p", {}, el("span", { class: "pill good" }, "All cards supported"),
+    ));
+  } else {
+    body.appendChild(el(
+      "p", {}, el("span", { class: "pill warn" },
+                  `${names.length} of ${cov.checked_count} cards unsupported`),
+    ));
+    const ul = el("ul");
+    for (const name of names) ul.appendChild(el("li", {}, name));
     body.appendChild(ul);
   }
   showModal("alert-modal");

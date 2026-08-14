@@ -95,9 +95,17 @@ in the tree. Nothing about mana is re-derived here.
 
 MODELLING ASSUMPTIONS (all deliberate, all conservative)
 ========================================================
-* **No free mulligan.** London: draw 7, bottom N. Most Commander
-  playgroups do NOT use the free mulligan, and Wizards' Commander
-  rules don't grant one; assuming one would flatter every deck.
+* **Free first mulligan** (CR 103.5c — the multiplayer "Commander
+  free mulligan"; older CR editions numbered it 103.4c, which is the
+  citation ``deck_builder_manabase``'s Karsten-table notes use).
+  The first mulligan redraws a fresh 7 and bottoms NOTHING; only
+  mulligans past the free one pay the London card
+  (``FREE_MULLIGANS`` / ``MAX_MULLIGANS``). Wizards' multiplayer
+  Commander rules DO grant this, and the Karsten 99-card source
+  counts ``deck_builder_manabase`` builds to already assume it —
+  omitting it here (as this module originally did) graded the very
+  manabases that module builds as less consistent than their own
+  reference model says.
 * **Lands only — ramp is NOT modelled.** Mana rocks and dorks would
   only ever make ``p_commander_on_curve`` go UP, so the reported
   number is an honest FLOOR, not an estimate. A deck that clears the
@@ -128,6 +136,7 @@ from .staples import is_basic_land
 __all__ = [
     "CONVENTION",
     "DEFAULT_TRIALS",
+    "FREE_MULLIGANS",
     "KEEPABLE_LAND_MAX",
     "KEEPABLE_LAND_MIN",
     "MAX_MULLIGANS",
@@ -161,9 +170,17 @@ KEEPABLE_LAND_MAX = 5
 #: Land count the bottoming policy steers toward when it has a choice.
 PREFERRED_KEEP_LANDS = 3
 
-#: Mulligans taken before keeping whatever the 7 shows. 2 ⇒ the worst
-#: kept hand is 5 cards. Beyond that, in a singleton 99 with no free
-#: mulligan, digging costs more than the bad keep.
+#: Free mulligans granted by the format. Multiplayer Commander's free
+#: first mulligan (CR 103.5c): the first mulligan redraws 7 and bottoms
+#: nothing, so it costs no cards — only later mulligans pay the London
+#: card. ``deck_builder_manabase``'s Karsten source-count table assumes
+#: the same rule (cited there under its older 103.4c number).
+FREE_MULLIGANS = 1
+
+#: PAID mulligans (after the free one) taken before keeping whatever
+#: the 7 shows. 2 ⇒ the worst kept hand is 5 cards, reached after up
+#: to three redraws (one free + two paid). Beyond that, in a singleton
+#: 99, digging costs more than the bad keep.
 MAX_MULLIGANS = 2
 
 #: Land-in-play checkpoints reported as ``p_<n>_lands_by_t<t>``.
@@ -742,6 +759,7 @@ def opening_hand_stats(
 
         {
           "trials": int, "seed": int, "commander": str | None,
+          "free_mulligans": int,       # CR 103.5c free mulligans modelled
           "commander_mana_value": float | None,
           "deck_size": int,            # cards simulated (true printed size)
           "land_count": int,           # strict front-face lands
@@ -771,9 +789,11 @@ def opening_hand_stats(
         only; see ``_keepable``.
       * **mulligan_rate** -- P(the first 7 is not a keep), i.e. exactly
         ``1 - p_keepable_7`` under this policy. Reported separately
-        because it is the number a player recognizes;
-        ``avg_opening_hand_size`` is the non-redundant companion (how
-        many cards you actually start with after the London process).
+        because it is the number a player recognizes. Note that under
+        CR 103.5c the FIRST mulligan is free, so a mulligan does not by
+        itself cost a card; ``avg_opening_hand_size`` is the
+        non-redundant companion (how many cards you actually start with
+        after the free-mulligan + London process).
       * **p_N_lands_by_tT** -- N lands ON THE BATTLEFIELD by turn T,
         one drop per turn, from the KEPT hand plus natural draws. Not
         "N lands seen": drawing your third land on turn 5 does not
@@ -821,19 +841,25 @@ def opening_hand_stats(
         for conv in ("on_play", "on_draw")
     }
 
+    max_mulls = FREE_MULLIGANS + MAX_MULLIGANS
     for _ in range(trials):
         kept_hand: list = []
         library: list = []
-        for depth in range(MAX_MULLIGANS + 1):
+        for mulls in range(max_mulls + 1):
+            # CR 103.5c: the first mulligan in multiplayer Commander is
+            # FREE — a fresh 7 with nothing bottomed. Only mulligans
+            # past the free one pay the London card, so the bottoming
+            # depth lags the mulligan count by FREE_MULLIGANS.
+            depth = max(0, mulls - FREE_MULLIGANS)
             prefix = _draw_prefix(deck, rng, needed)
             opener = prefix[:OPENING_HAND_SIZE]
             lands = sum(1 for c in opener if c.is_land)
-            if depth == 0:
+            if mulls == 0:
                 lands_in_7_total += lands
                 if _keepable(lands, 0, len(opener)):
                     keepable_7 += 1
             hand_size = max(0, len(opener) - depth)
-            if _keepable(lands, depth, hand_size) or depth == MAX_MULLIGANS:
+            if _keepable(lands, depth, hand_size) or mulls == max_mulls:
                 kept_hand = _bottom_hand(opener, depth)
                 library = prefix[OPENING_HAND_SIZE:]
                 break
@@ -876,6 +902,7 @@ def opening_hand_stats(
     stats = {
         "trials": trials,
         "seed": seed,
+        "free_mulligans": FREE_MULLIGANS,
         "commander": cmd_name,
         "commander_mana_value": cmd_mv,
         "commander_turn": commander_turn,
@@ -978,7 +1005,8 @@ def format_consistency_report(stats: Optional[dict]) -> str:
     lines.append("")
     quoted = "on the play" if CONVENTION == "on_play" else "on the draw"
     lines.append(
-        f"Headline figures are quoted {quoted} (the harsher read); ramp is "
-        "not modelled, so the commander and land figures are floors."
+        f"Headline figures are quoted {quoted} (the harsher read); the "
+        "Commander free mulligan (CR 103.5c) is modelled; ramp is not, "
+        "so the commander and land figures are floors."
     )
     return "\n".join(lines)

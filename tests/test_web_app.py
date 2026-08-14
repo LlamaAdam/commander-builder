@@ -862,6 +862,92 @@ def test_dashboard_section_unknown_name_404s(client):
     assert body["sections"] == ["lift_picks", "pricing"]
 
 
+# ---------------------------------------------------------------------------
+# Forge sim coverage (roadmap #4 — surface Forge-unsupported cards)
+# ---------------------------------------------------------------------------
+
+class _FakeCardsLoader:
+    """Stand-in for forge_cards_loader.CardsLoader: supports exactly the
+    names it is constructed with; context-manager protocol like the real
+    thing."""
+
+    def __init__(self, supported):
+        self._supported = {s.lower() for s in supported}
+
+    def load_one(self, name):
+        return "Name:x" if name.lower() in self._supported else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+
+def test_dashboard_sim_coverage_flags_forge_unsupported_cards(
+    client, monkeypatch,
+):
+    """Both dashboard payloads carry an additive ``sim_coverage`` key
+    naming the cards the vendored Forge corpus has no script for — the
+    same DB gap that makes a sim log "An unsupported card was
+    requested". Cultivate is made the one unsupported card here."""
+    monkeypatch.setattr(
+        "commander_builder.forge_cards_loader.CardsLoader.locate",
+        lambda forge_dir: _FakeCardsLoader(["Forest", "Test Cmdr"]),
+    )
+    for url in ("/api/dashboard?deck=Alpha", "/api/dashboard/core?deck=Alpha"):
+        body = client.get(url).get_json()
+        cov = body["sim_coverage"]
+        assert cov["available"] is True, url
+        # 3 DISTINCT names: Test Cmdr (commander), Forest, Cultivate.
+        assert cov["checked_count"] == 3, url
+        assert cov["unsupported_count"] == 1, url
+        assert cov["unsupported_names"] == ["Cultivate"], url
+
+
+def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client):
+    """No vendor/forge (this test checkout) is "couldn't check", NOT
+    "all supported": available=False with empty fields, and the
+    dashboard renders normally."""
+    resp = client.get("/api/dashboard/core?deck=Alpha")
+    assert resp.status_code == 200
+    cov = resp.get_json()["sim_coverage"]
+    assert cov == {
+        "available": False,
+        "checked_count": 0,
+        "unsupported_count": 0,
+        "unsupported_names": [],
+    }
+
+
+def test_dashboard_sim_coverage_probe_failure_is_not_fatal(
+    client, monkeypatch,
+):
+    """A blown-up corpus probe degrades to the unavailable shape — the
+    dashboard must render regardless (same fail-quiet contract as the
+    pricing / lift sections)."""
+    def boom(forge_dir):
+        raise RuntimeError("corpus exploded")
+
+    monkeypatch.setattr(
+        "commander_builder.forge_cards_loader.CardsLoader.locate", boom,
+    )
+    resp = client.get("/api/dashboard?deck=Alpha")
+    assert resp.status_code == 200
+    cov = resp.get_json()["sim_coverage"]
+    assert cov["available"] is False
+    assert cov["unsupported_names"] == []
+
+
+def test_static_js_renders_sim_coverage_pill(client):
+    """The dashboard JS actually shows the coverage data to the user —
+    the whole point of the fix was that unsupported cards were parsed
+    but never displayed."""
+    js = client.get("/static/app.js").get_data(as_text=True)
+    assert "sim_coverage" in js
+    assert "showSimCoverageAlert" in js
+
+
 def test_dashboard_core_and_section_share_deck_and_bracket_validation(client):
     """All three routes parse the query string through one helper, so a
     bad bracket or an unknown deck fails identically everywhere."""

@@ -30,6 +30,13 @@ any external script) rely on keeps working. All three routes share the
 ``_pricing_section`` / ``_lift_section`` helpers, so the two shapes can
 never drift.
 
+SIM COVERAGE (2026-08, roadmap #4). Both dashboard payloads additionally
+carry an additive ``sim_coverage`` key — cards the vendored Forge build
+has no script for (see ``_sim_coverage``). Forge sims silently omit
+such cards ("An unsupported card was requested" in the logs, which
+``log_parser`` counts but nothing ever showed a user), so the dashboard
+now flags the gap before anyone trusts a sim verdict built on them.
+
 Built via ``make_dashboard_blueprint(deck_dir, knowledge_db,
 list_decks, resolve_deck_path)``. The two helper functions are
 passed in (rather than imported) because they're still defined in
@@ -132,6 +139,75 @@ _DEFERRED_SECTIONS = {
 }
 
 
+# Empty/unavailable sim-coverage shape. ``available: False`` means "the
+# vendored Forge corpus could not be consulted" — a fresh checkout with
+# no vendor/forge, or a read error — which is NOT the same statement as
+# "every card is supported"; the UI hides the tile instead of showing a
+# confident zero (the fail-quiet convention every other probe follows).
+_SIM_COVERAGE_UNAVAILABLE = {
+    "available": False,
+    "checked_count": 0,
+    "unsupported_count": 0,
+    "unsupported_names": [],
+}
+
+
+def _sim_coverage(path: Path) -> dict:
+    """Forge sim coverage for one deck: which cards the vendored Forge
+    build has NO card script for.
+
+    WHY (2026-08, roadmap #4): ``log_parser`` has always extracted
+    Forge's "An unsupported card was requested" lines, but that parse
+    result is folded away inside ``compare_versions`` and never reaches
+    a web response — so a deck full of cards Forge can't simulate runs
+    its A/B sims as silently-partial data (Forge just plays on without
+    those cards). This probe surfaces the same DB gap *before* any sim,
+    by checking every [Commander]/[Main] card name against the vendored
+    Forge card-script corpus (``forge_cards_loader`` — the exact corpus
+    whose misses produce the log line at sim time).
+
+    Purely local + offline (zip/directory lookups, no network, no JVM),
+    fast enough to ride inline on the core dashboard payload. Additive:
+    a new ``sim_coverage`` key, nothing renamed or removed.
+
+    Returns ``{available, checked_count, unsupported_count,
+    unsupported_names}``; the unavailable shape (``available: False``)
+    on any failure — never a 500, never a fabricated all-clear.
+    """
+    try:
+        from .. import dck_utils
+        from ..forge_cards_loader import CardsLoader
+        from ..forge_runner import VENDOR_FORGE
+
+        text = path.read_text(encoding="utf-8")
+        names: list[str] = []
+        seen: set[str] = set()
+        for section in ("Commander", "Main"):
+            for name in dck_utils.section_card_names(text, section):
+                key = name.strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    names.append(name.strip())
+        if not names:
+            return dict(_SIM_COVERAGE_UNAVAILABLE)
+        with CardsLoader.locate(VENDOR_FORGE) as loader:
+            unsupported = sorted(
+                n for n in names if loader.load_one(n) is None
+            )
+        return {
+            "available": True,
+            "checked_count": len(names),
+            "unsupported_count": len(unsupported),
+            "unsupported_names": unsupported,
+        }
+    except FileNotFoundError:
+        # No vendor/forge (fresh checkout, CI) — expected, not an error.
+        return dict(_SIM_COVERAGE_UNAVAILABLE)
+    except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
+        current_app.logger.warning("sim coverage probe failed: %s", exc)
+        return dict(_SIM_COVERAGE_UNAVAILABLE)
+
+
 def make_dashboard_blueprint(
     deck_dir: Path,
     knowledge_db: Optional[Path],
@@ -217,7 +293,12 @@ def make_dashboard_blueprint(
                 current_app.logger.warning("advise failed: %s", exc)
 
         data = build_dashboard(path, bracket=bracket, suggested=suggested)
-        return data.to_dict()
+        payload = data.to_dict()
+        # Forge sim coverage (roadmap #4): additive key on BOTH the full
+        # and the core payloads — fast, offline, fail-quiet, so it needs
+        # no deferred-section round trip.
+        payload["sim_coverage"] = _sim_coverage(path)
+        return payload
 
     @bp.route("/api/dashboard")
     def dashboard():
