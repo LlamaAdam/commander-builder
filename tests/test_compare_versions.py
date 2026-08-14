@@ -215,10 +215,30 @@ def test_to_dict_includes_winner_and_margin():
     d = r.to_dict()
     assert d["winner"] == "new"
     assert d["margin"] == 2
+    # 2026-08-14 additions (ADD-only — the dict is persisted and parsed
+    # elsewhere): signed margin + head-to-head decisive count.
+    assert d["signed_margin"] == 2
+    assert d["h2h_decisive"] == 10
     # Draw-policy label (2026-07-19): compare() counts turn-cap draws as
     # plain draws; downstream analysis uses this to separate compare-shaped
     # reports from the A/B harness's 'resolve_survivor_leader' shape.
     assert d["draw_policy"] == "plain_draw"
+
+
+def test_to_dict_signed_margin_negative_on_regression():
+    """margin is abs() (legacy key, kept); signed_margin carries direction.
+    A 3-7 regression must serialize signed_margin=-4 so an LLM (or any
+    consumer) reading the dict alone cannot mistake it for a +4 gain."""
+    r = ComparisonReport(
+        old_deck="o", new_deck="n", bracket=3, timestamp="x",
+        mode="pod", games_per_pod=10,
+        old_stats=_stats("o", 7), new_stats=_stats("n", 3),
+    )
+    d = r.to_dict()
+    assert d["margin"] == 4            # unchanged legacy abs key
+    assert d["signed_margin"] == -4    # direction preserved
+    assert d["winner"] == "old"
+    assert d["h2h_decisive"] == 10
 
 
 def test_to_json_round_trips():

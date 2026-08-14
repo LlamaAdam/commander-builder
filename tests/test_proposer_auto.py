@@ -2540,19 +2540,19 @@ def test_auto_curate_main_rejects_negative_max(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_verdict_from_ab_kept_when_new_deck_wins():
-    """20-12 over 32 decisive games (>= the min-decisive threshold) with
-    margin=1 -> kept."""
+    """24-8 over 32 decisive games (>= the min-decisive threshold, and a
+    statistically significant split: exact binomial p ~= 0.007) -> kept."""
     from commander_builder.proposer import _verdict_from_ab
     from commander_builder.forge_runner import ABResult
-    ab = ABResult(wins_a=12, wins_b=20, games=32, status="done")
+    ab = ABResult(wins_a=8, wins_b=24, games=32, status="done")
     assert _verdict_from_ab(ab, margin=1) == "kept"
 
 
 def test_verdict_from_ab_reverted_when_old_deck_wins():
-    """20-12 the other way (wins_a > wins_b) over enough games -> reverted."""
+    """24-8 the other way (wins_a > wins_b) over enough games -> reverted."""
     from commander_builder.proposer import _verdict_from_ab
     from commander_builder.forge_runner import ABResult
-    ab = ABResult(wins_a=20, wins_b=12, games=32, status="done")
+    ab = ABResult(wins_a=24, wins_b=8, games=32, status="done")
     assert _verdict_from_ab(ab, margin=1) == "reverted"
 
 
@@ -2563,6 +2563,24 @@ def test_verdict_from_ab_neutral_within_margin():
     from commander_builder.forge_runner import ABResult
     ab = ABResult(wins_a=20, wins_b=21, games=41, status="done")
     assert _verdict_from_ab(ab, margin=2) == "neutral"
+
+
+def test_verdict_from_ab_12_8_is_neutral_16_4_is_not():
+    """Significance regression test (2026-08-14): under the null the pair
+    split is ~Binomial(n, 0.5), so 12-8 over 20 decisive has p ~= 0.50 —
+    the old |delta| >= margin rule called HALF of all neutral swaps
+    kept/reverted. 12-8 must be neutral; 16-4 (p ~= 0.012) resolves."""
+    from commander_builder.proposer import _verdict_from_ab
+    from commander_builder.forge_runner import ABResult
+    assert _verdict_from_ab(
+        ABResult(wins_a=8, wins_b=12, games=20, status="done"),
+        margin=1) == "neutral"
+    assert _verdict_from_ab(
+        ABResult(wins_a=4, wins_b=16, games=20, status="done"),
+        margin=1) == "kept"
+    assert _verdict_from_ab(
+        ABResult(wins_a=16, wins_b=4, games=20, status="done"),
+        margin=1) == "reverted"
 
 
 def test_verdict_from_ab_inconclusive_below_min_decisive():
@@ -2576,11 +2594,18 @@ def test_verdict_from_ab_inconclusive_below_min_decisive():
     # Just under the threshold is still inconclusive ...
     assert _verdict_from_ab(
         ABResult(wins_a=9, wins_b=10, games=19, status="done")) == "inconclusive"
-    # ... and exactly at the threshold resolves normally.
+    # ... and exactly at the threshold resolves normally (16-4 over 20:
+    # p ~= 0.012 < 0.05).
     assert _verdict_from_ab(
-        ABResult(wins_a=8, wins_b=12, games=20, status="done"), margin=1) == "kept"
-    # The threshold is tunable for callers that know N is trustworthy.
-    assert _verdict_from_ab(ab, margin=1, min_decisive=1) == "kept"
+        ABResult(wins_a=4, wins_b=16, games=20, status="done"), margin=1) == "kept"
+    # The min_decisive gate is tunable, but bypassing it does NOT bypass
+    # the significance test: 1-3 clears the (lowered) gate yet p = 0.625,
+    # so the verdict is a trusted-sample near-tie, not 'kept'.
+    assert _verdict_from_ab(ab, margin=1, min_decisive=1) == "neutral"
+    # A unanimous 0-6 IS significant even at tiny n (p = 2/64 ~= 0.031).
+    assert _verdict_from_ab(
+        ABResult(wins_a=0, wins_b=6, games=6, status="done"),
+        margin=1, min_decisive=1) == "kept"
 
 
 def test_verdict_from_ab_pending_when_sim_did_not_complete():

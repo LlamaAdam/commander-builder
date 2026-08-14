@@ -185,13 +185,35 @@ class ComparisonReport:
 
     @property
     def margin(self) -> int:
-        """Absolute win delta (always >= 0)."""
+        """Absolute win delta (always >= 0). Direction lives in ``winner`` /
+        ``signed_margin`` — consumers that need "which way did it go" must
+        NOT read this field alone (a model shown "margin: 6" on a 6-game
+        regression writes confidently wrong lessons)."""
         return abs(self.new_stats.wins - self.old_stats.wins)
 
+    @property
+    def signed_margin(self) -> int:
+        """Signed win delta: new_wins - old_wins. Positive = new improved."""
+        return self.new_stats.wins - self.old_stats.wins
+
+    @property
+    def h2h_decisive(self) -> int:
+        """Head-to-head decisive games: old_wins + new_wins. Draws and
+        filler-seat wins are excluded — this is the sample size every
+        verdict gate / significance test counts (knowledge_log's
+        2026-07-20 win-rate convention)."""
+        return self.old_stats.wins + self.new_stats.wins
+
     def to_dict(self) -> dict:
+        # ADD-ONLY contract: this dict is persisted to _compare/*.json and
+        # into knowledge_log sim_report blobs, and parsed by the web layer
+        # and analysts. Never rename or remove keys; new derived fields
+        # (signed_margin, h2h_decisive — 2026-08-14) are appended only.
         d = asdict(self)
         d["winner"] = self.winner
         d["margin"] = self.margin
+        d["signed_margin"] = self.signed_margin
+        d["h2h_decisive"] = self.h2h_decisive
         return d
 
     def to_json(self) -> str:

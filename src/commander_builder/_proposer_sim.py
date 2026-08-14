@@ -8,7 +8,10 @@ detailed metrics ``update_iteration_sim`` persists.
 
 Public symbols:
 
-  ``_DEFAULT_SIM_MARGIN``         — minimum delta to call kept/reverted.
+  ``_DEFAULT_SIM_MARGIN``         — legacy minimum-delta pre-filter for
+                                    kept/reverted (see VERDICT_ALPHA).
+  ``VERDICT_ALPHA``               — two-sided binomial significance level
+                                    the kept/reverted call must clear.
   ``EXPECTED_DECISIVE_FRACTION``  — expected decisive share of TOTAL pod
                                     games (filler seats win the rest).
   ``min_sim_games_for_verdict()`` — smallest --sim-games whose expected
@@ -35,11 +38,24 @@ from pathlib import Path
 from typing import Optional
 
 
-# Minimum margin (wins_b - wins_a) for an A/B run to be called a kept
-# vs reverted vs neutral outcome. Default 1 means a 3-2 result is
-# 'kept' rather than 'neutral' -- on a 5-game sim that's a meaningful
-# signal even though it's noisy. The CLI can tune via --sim-margin.
+# Minimum absolute margin (|wins_b - wins_a|) for an A/B run to even be
+# CONSIDERED kept/reverted. Historical knob (the CLI tunes it via
+# --sim-margin) kept for backward compatibility, now a coarse pre-filter:
+# since 2026-08-14 the actual kept/reverted call additionally requires
+# the split to be statistically significant (exact two-sided binomial
+# test vs p=0.5 at VERDICT_ALPHA — see _verdict_from_ab). At the default
+# margin=1 the significance test is strictly stricter, so the knob only
+# matters when a caller raises it ABOVE what significance demands.
 _DEFAULT_SIM_MARGIN = 1
+
+# Two-sided significance level for the kept/reverted call. A fixed
+# absolute margin is game-count-invariant — under the null (a truly
+# neutral swap) pair-decisive wins split ~Binomial(n, 0.5), so with 20
+# decisive games P(|new - old| >= 4) ~= 0.50: half of all neutral swaps
+# would earn a confident verdict. The exact binomial test scales the bar
+# with the decisive count instead (at n=20 significance needs a 15-5
+# split; at n=40, ~26-14).
+VERDICT_ALPHA = 0.05
 
 # Below this many DECISIVE games (wins_a + wins_b, draws excluded), an A/B
 # result is too noisy to call: the win-rate standard error is ~0.5/sqrt(N)
@@ -80,15 +96,20 @@ def min_sim_games_for_verdict() -> int:
 
 
 def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
-                     min_decisive: int = MIN_DECISIVE_GAMES_FOR_VERDICT) -> str:
+                     min_decisive: int = MIN_DECISIVE_GAMES_FOR_VERDICT,
+                     alpha: float = VERDICT_ALPHA) -> str:
     """Map an ``ABResult`` to a verdict label.
 
     Returns one of 'kept' / 'reverted' / 'neutral' / 'inconclusive' / 'pending':
 
-      'kept'         -- new deck won at least ``margin`` more games than old
-      'reverted'     -- old deck won at least ``margin`` more games than new
-      'neutral'      -- difference within margin at a TRUSTWORTHY sample size
-                        (e.g. 21-20 over 41 decisive games)
+      'kept'         -- new deck won more AND the split is statistically
+                        significant (exact two-sided binomial test vs
+                        p=0.5, p < ``alpha``) AND |delta| >= ``margin``
+      'reverted'     -- same standard with old deck ahead
+      'neutral'      -- difference within binomial noise at a TRUSTWORTHY
+                        sample size (e.g. 21-20 over 41 decisive games,
+                        or 12-8 over 20 — p ~= 0.5, a coin does that half
+                        the time)
       'inconclusive' -- fewer than ``min_decisive`` decisive games, so the
                         result is below the noise floor regardless of margin
                         (a 3-2 at 5 games is a coin flip, not a tie)
@@ -98,7 +119,19 @@ def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
     real near-tie we can trust; 'inconclusive' is "not enough games to say."
     Gating low-N runs to 'inconclusive' stops a noise verdict from being
     recorded as authoritative.
+
+    2026-08-14 -- significance requirement added. The old rule was
+    ``|delta| >= margin`` alone, which is game-count-invariant: at the
+    default margin=1 ANY non-tied split over 20+ decisive games earned a
+    confident kept/reverted. Now the split must also clear an exact
+    binomial test (``analyst.binomial_two_sided_p``) at ``alpha``.
+    ``margin`` is retained as a backward-compatible pre-filter for
+    callers (--sim-margin) that want a LARGER minimum effect than
+    significance alone demands; at its default of 1 it is a no-op
+    relative to the test.
     """
+    from .analyst import binomial_two_sided_p
+
     status = getattr(ab_result, "status", None)
     if status != "done":
         return "pending"
@@ -108,11 +141,11 @@ def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
     if decisive < min_decisive:
         return "inconclusive"
     delta = wins_b - wins_a
-    if delta >= margin:
-        return "kept"
-    if delta <= -margin:
-        return "reverted"
-    return "neutral"
+    if abs(delta) < margin:
+        return "neutral"
+    if binomial_two_sided_p(wins_b, decisive) >= alpha:
+        return "neutral"
+    return "kept" if delta > 0 else "reverted"
 
 
 def _ab_to_iteration_fields(ab_result) -> dict:
