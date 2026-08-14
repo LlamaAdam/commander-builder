@@ -422,3 +422,242 @@ def test_fetch_self_mill_candidates_paginates(monkeypatch):
     out = fetch_self_mill_candidates(http_get=_http)
     assert "stitcher's supplier" in out
     assert "hermit druid" in out
+
+
+# ---------------------------------------------------------------------------
+# Local-snapshot scans (bracket_estimator's extra-turn + MLD lists)
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+from commander_builder._card_list_refresh import (  # noqa: E402
+    card_grants_extra_turn,
+    card_matches_mass_land_denial,
+    extra_turn_names_from_snapshots,
+    iter_snapshot_cards,
+    mld_names_from_snapshots,
+)
+
+
+def test_extra_turn_predicate_matches_the_canonical_wordings():
+    """'take an extra turn' (imperative), 'takes an extra turn'
+    (targeted), and 'takes two extra turns' (Time Stretch) all match."""
+    assert card_grants_extra_turn(_card(
+        "Alrund's Epiphany",
+        "Draw two cards... Take an extra turn after this one.",
+    ))
+    assert card_grants_extra_turn(_card(
+        "Time Warp", "Target player takes an extra turn after this one.",
+    ))
+    assert card_grants_extra_turn(_card(
+        "Time Stretch",
+        "Target player takes two extra turns after this one.",
+    ))
+
+
+def test_extra_turn_predicate_ignores_prevention_wording():
+    """Cards that PREVENT extra turns talk about 'begin an extra turn'
+    / 'take extra turns', never 'take(s) an extra turn' — they must
+    not read as extra-turn spells."""
+    assert not card_grants_extra_turn(_card(
+        "Stranglehold",
+        "Your opponents can't search libraries. If an opponent would "
+        "begin an extra turn, that player skips that turn instead.",
+    ))
+    assert not card_grants_extra_turn(_card(
+        "Demonic Tutor",
+        "Search your library for a card, put that card into your hand.",
+    ))
+
+
+def test_extra_turn_predicate_walks_dfc_faces():
+    assert card_grants_extra_turn(_card(
+        "Some Front // Time Back", "",
+        faces=[
+            {"oracle_text": "{T}: Add {U}."},
+            {"oracle_text": "Take an extra turn after this one."},
+        ],
+    ))
+
+
+def test_mld_predicate_matches_the_hardcoded_list_shapes():
+    """Every oracle shape in bracket_estimator._MLD_CARDS must match:
+    destroy-all / exile-all / return-all, symmetric numbered sacrifice,
+    choose-and-sacrifice-the-rest, and destroy-N-lands."""
+    shapes = {
+        "Armageddon": "Destroy all lands.",
+        "Obliterate": (
+            "Obliterate can't be countered.\nDestroy all artifacts, "
+            "creatures, and lands. They can't be regenerated."
+        ),
+        "Decree of Annihilation": (
+            "Exile all artifacts, creatures, and lands from the "
+            "battlefield, all cards from all graveyards, and all cards "
+            "from all hands."
+        ),
+        "Sunder": "Return all lands to their owners' hands.",
+        "Wildfire": (
+            "Each player sacrifices four lands. Wildfire deals 4 damage "
+            "to each creature."
+        ),
+        "Impending Disaster": (
+            "At the beginning of your upkeep, if there are five or more "
+            "lands on the battlefield, sacrifice Impending Disaster and "
+            "each player sacrifices all lands they control."
+        ),
+        "Death Cloud": (
+            "Each player loses X life, discards X cards, sacrifices X "
+            "creatures, then sacrifices X lands."
+        ),
+        "Cataclysm": (
+            "Each player chooses from among the permanents they control "
+            "an artifact, a creature, an enchantment, and a land, then "
+            "sacrifices the rest."
+        ),
+        "Global Ruin": (
+            "Each player chooses a land they control of each basic land "
+            "type, then sacrifices the rest of their lands."
+        ),
+        "Burning of Xinye": (
+            "You destroy four lands you control, then target opponent "
+            "destroys four lands they control. Then Burning of Xinye "
+            "deals 4 damage to each creature."
+        ),
+    }
+    for name, oracle in shapes.items():
+        assert card_matches_mass_land_denial(_card(name, oracle)), name
+
+
+def test_mld_predicate_excludes_targeted_and_single_land_effects():
+    """Single-target land destruction, one-land symmetric edicts, and
+    subtype wipes ('all Islands') are NOT mass land denial."""
+    assert not card_matches_mass_land_denial(_card(
+        "Strip Mine", "{T}, Sacrifice Strip Mine: Destroy target land.",
+    ))
+    assert not card_matches_mass_land_denial(_card(
+        "Smallpox",
+        "Each player loses 1 life, discards a card, sacrifices a "
+        "creature, then sacrifices a land.",
+    ))
+    assert not card_matches_mass_land_denial(_card(
+        "Boil", "Destroy all Islands.",
+    ))
+    assert not card_matches_mass_land_denial(_card(
+        "Divination", "Draw two cards.",
+    ))
+
+
+def test_iter_snapshot_cards_walks_store_and_skips_corrupt(tmp_path):
+    (tmp_path / "good.json").write_text(
+        _json.dumps({"name": "Good Card", "oracle_text": "x"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "corrupt.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "list.json").write_text("[1, 2]", encoding="utf-8")
+    cards = list(iter_snapshot_cards(tmp_path))
+    assert cards == [{"name": "Good Card", "oracle_text": "x"}]
+
+
+def test_iter_snapshot_cards_missing_dir_yields_nothing(tmp_path):
+    assert list(iter_snapshot_cards(tmp_path / "nope")) == []
+
+
+def test_iter_snapshot_cards_defaults_to_scryfall_cache_dir(
+    tmp_path, monkeypatch,
+):
+    import commander_builder.scryfall_client as sc
+    monkeypatch.setattr(sc, "CACHE_DIR", tmp_path)
+    (tmp_path / "a.json").write_text(
+        _json.dumps({"name": "A"}), encoding="utf-8",
+    )
+    assert [c["name"] for c in iter_snapshot_cards()] == ["A"]
+
+
+def test_snapshot_set_builders_lowercase_and_reduce_to_front_face():
+    cards = [
+        _card("Time Warp",
+              "Target player takes an extra turn after this one."),
+        _card("Modal Turn // Back Land", "Take an extra turn after this one."),
+        _card("Armageddon", "Destroy all lands."),
+        _card("Divination", "Draw two cards."),
+        # Alias duplicate (the store writes folded-slug copies).
+        _card("Time Warp",
+              "Target player takes an extra turn after this one."),
+    ]
+    assert extra_turn_names_from_snapshots(cards) == {
+        "time warp", "modal turn",
+    }
+    assert mld_names_from_snapshots(cards) == {"armageddon"}
+
+
+# ---------------------------------------------------------------------------
+# scripts/refresh_card_lists.py wiring for the snapshot-backed categories
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+from pathlib import Path as _Path
+
+# scripts/ isn't a package and isn't on sys.path by default; same import
+# pattern as tests/test_merge_soak.py.
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "scripts"))
+
+import refresh_card_lists as _refresh_cli  # noqa: E402
+
+
+def test_cli_extra_turns_category_diffs_against_snapshot_store(
+    tmp_path, monkeypatch, capsys,
+):
+    import commander_builder.scryfall_client as sc
+    store = tmp_path / "oracle_snapshots"
+    store.mkdir()
+    monkeypatch.setattr(sc, "CACHE_DIR", store)
+    (store / "time_warp.json").write_text(_json.dumps({
+        "name": "Time Warp",
+        "oracle_text": "Target player takes an extra turn after this one.",
+    }), encoding="utf-8")
+    (store / "new_turn_spell.json").write_text(_json.dumps({
+        "name": "Brand New Turn Spell",
+        "oracle_text": "Take an extra turn after this one.",
+    }), encoding="utf-8")
+
+    assert _refresh_cli.main(["--only", "extra-turns", "--json"]) == 0
+    report = _json.loads(capsys.readouterr().out)["extra-turns"]
+    # A snapshot matching the filter but absent from the list surfaces
+    # as a candidate; the list entry the tiny store DOES hold is kept;
+    # everything else in the hardcoded list reads stale (tiny store).
+    assert "brand new turn spell" in report["candidates"]
+    assert "time warp" in report["kept"]
+    assert "time stretch" in report["stale"]
+
+
+def test_cli_mld_category_diffs_against_snapshot_store(
+    tmp_path, monkeypatch, capsys,
+):
+    import commander_builder.scryfall_client as sc
+    store = tmp_path / "oracle_snapshots"
+    store.mkdir()
+    monkeypatch.setattr(sc, "CACHE_DIR", store)
+    (store / "armageddon.json").write_text(_json.dumps({
+        "name": "Armageddon", "oracle_text": "Destroy all lands.",
+    }), encoding="utf-8")
+
+    assert _refresh_cli.main(["--only", "mld", "--json"]) == 0
+    report = _json.loads(capsys.readouterr().out)["mld"]
+    assert "armageddon" in report["kept"]
+    assert "sunder" in report["stale"]  # not in the tiny store
+
+
+def test_cli_snapshot_categories_note_an_empty_store_instead_of_stale_spam(
+    tmp_path, monkeypatch, capsys,
+):
+    """An empty snapshot store is a statement about the store, not the
+    hardcoded lists — the CLI must say so rather than reporting every
+    curated name as stale."""
+    import commander_builder.scryfall_client as sc
+    monkeypatch.setattr(sc, "CACHE_DIR", tmp_path / "empty")
+    assert _refresh_cli.main(["--only", "extra-turns", "--json"]) == 0
+    report = _json.loads(capsys.readouterr().out)["extra-turns"]
+    assert report["stale"] == []
+    assert report["candidates"] == []
+    assert "commander-oracle-refresh" in report["note"]
+    assert report["kept"]  # the current list rides along for review

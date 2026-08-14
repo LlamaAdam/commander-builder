@@ -209,3 +209,81 @@ def test_run_doctor_does_not_touch_production_knowledge_log(tmp_path):
     assert production.exists() == production_existed
     if production_existed:
         assert production.stat().st_mtime_ns == production_mtime
+
+
+# --- Oracle-snapshot freshness check ---------------------------------------
+#
+# Stale snapshots hide B&R updates (lookup_card serves disk snapshots
+# forever). The check goes YELLOW when the store is missing, empty, or
+# older than deck_legality.STALE_SNAPSHOT_DAYS.
+
+import json as _json
+import os as _os
+import time as _time
+
+from commander_builder.doctor import _check_oracle_snapshots
+
+
+def _snap_store(monkeypatch, tmp_path, ages_days):
+    import commander_builder.scryfall_client as sc
+    store = tmp_path / "oracle_snapshots"
+    store.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sc, "CACHE_DIR", store)
+    now = _time.time()
+    for i, age in enumerate(ages_days):
+        p = store / f"card_{i}.json"
+        p.write_text(_json.dumps({"name": f"Card {i}"}), encoding="utf-8")
+        stamp = now - age * 86400.0
+        _os.utime(p, (stamp, stamp))
+    return store
+
+
+def test_oracle_snapshots_yellow_when_store_missing(monkeypatch, tmp_path):
+    import commander_builder.scryfall_client as sc
+    monkeypatch.setattr(sc, "CACHE_DIR", tmp_path / "nope")
+    result = _check_oracle_snapshots()
+    assert result.status == YELLOW
+    assert "No oracle-snapshot store" in result.message
+    assert "commander-oracle-refresh" in result.message
+
+
+def test_oracle_snapshots_yellow_when_store_empty(monkeypatch, tmp_path):
+    _snap_store(monkeypatch, tmp_path, [])
+    result = _check_oracle_snapshots()
+    assert result.status == YELLOW
+    assert "empty" in result.message
+
+
+def test_oracle_snapshots_green_when_fresh(monkeypatch, tmp_path):
+    _snap_store(monkeypatch, tmp_path, [1.0, 3.0])
+    result = _check_oracle_snapshots()
+    assert result.status == GREEN
+    assert "2 snapshots" in result.message
+
+
+def test_oracle_snapshots_yellow_when_newest_is_stale(monkeypatch, tmp_path):
+    """Age keys off the NEWEST snapshot (last refresh activity): a
+    store whose most recent write predates the threshold warns and
+    names the refresh command."""
+    _snap_store(monkeypatch, tmp_path, [90.0, 120.0])
+    result = _check_oracle_snapshots()
+    assert result.status == YELLOW
+    assert "90 days" in result.message
+    assert "commander-oracle-refresh --from-bulk" in result.message
+
+
+def test_oracle_snapshots_freshness_beats_an_old_straggler(
+    monkeypatch, tmp_path,
+):
+    """One ancient file next to a fresh refresh stays GREEN — the
+    doctor measures refresh activity, while per-deck staleness is
+    deck_legality's (oldest-backing-snapshot) job."""
+    _snap_store(monkeypatch, tmp_path, [400.0, 0.5])
+    result = _check_oracle_snapshots()
+    assert result.status == GREEN
+
+
+def test_run_doctor_includes_oracle_snapshots_check():
+    report = run_doctor(skip_ollama=True)
+    names = [c.name for c in report.checks]
+    assert "oracle_snapshots" in names

@@ -2,12 +2,18 @@
 
 Pins:
   * every HARD BOUND against the repo's encoded bracket rules
-    (prompts/moxfield_audit_v3.md table + combo_detection floors):
-    any GC -> floor 3, >3 GCs -> floor 4 (3 GCs stays floor 3 — the
-    table says "Max 3"), 2-card game-ending combo -> floor 4, MLD ->
-    floor 4, 2+ extra turns -> floor 4;
+    (prompts/moxfield_audit_v3.md table + combo_detection floors, read
+    against the 2025-10-21 WotC update): any GC -> floor 3, >3 GCs ->
+    floor 4 (3 GCs stays floor 3 — the table says "Max 3"); the
+    2-card game-ending combo floor DEFERS to combo_detection's speed
+    rule (cheap/unknown-speed pair -> 4, late-game pair -> 3); MLD ->
+    floor 4; extra turns floor 4 only when they can CHAIN (3+ density,
+    or 2+ with recursion/copy support) — non-chaining low quantities
+    are a nudge;
   * each weighted signal's DIRECTION (tutors / fast mana / archetype /
-    curve / salt push the raw score the right way);
+    curve / salt push the raw score the right way), and that the
+    tutor-density reason is labeled a HEURISTIC (the official tutor
+    caps were repealed 2025-10-21);
   * the mismatch policy (>= 1 -> "check", >= 2 -> "mismatch"/True) at
     medium/high confidence, and the CONFIDENCE GATE: low-confidence
     estimates (signal starvation) report "low_signal" instead of
@@ -135,15 +141,63 @@ def test_four_game_changers_floor_4():
 
 
 # ---------------------------------------------------------------------------
-# Hard bounds — combos (combo_detection.combo_bracket_floor)
+# Hard bounds — combos (combo_detection.combo_bracket_floor, deferred to
+# verbatim since the 2025-10-21 rules read: speed gates the two-card case)
 # ---------------------------------------------------------------------------
 
-def test_two_card_game_ending_combo_floors_4():
+def _warm_snapshot_cache(monkeypatch, tmp_path, cmcs: dict[str, float]):
+    """Point scryfall_client.CACHE_DIR at a tmp store holding a snapshot
+    per (name -> cmc), so combo_detection's cache-only speed lookup
+    resolves deterministically."""
+    import commander_builder.scryfall_client as sc
+    cache = tmp_path / "oracle_snapshots"
+    cache.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sc, "CACHE_DIR", cache)
+    for name, cmc in cmcs.items():
+        (cache / f"{sc._slug(name)}.json").write_text(
+            json.dumps({"name": name, "cmc": cmc}), encoding="utf-8",
+        )
+
+
+def test_two_card_combo_with_unknown_speed_floors_4(monkeypatch, tmp_path):
+    """Cold cache: the combo's speed can't be resolved, so
+    combo_bracket_floor's conservative-on-missing-data default (B4)
+    flows through — uncertainty never degrades permissive."""
+    _warm_snapshot_cache(monkeypatch, tmp_path, {})  # empty = cold
     r = estimate_bracket(_deck(
         "Mikaeus, the Unhallowed", "Triskelion", filler=30,
     ))
     assert r["floor"] == 4
     assert r["signals"]["n_two_card_combos"] == 1
+
+
+def test_cheap_two_card_combo_floors_4(monkeypatch, tmp_path):
+    """A cheap (early-assembling) two-card game-ending combo is the
+    case the official rules prohibit below B4."""
+    _warm_snapshot_cache(monkeypatch, tmp_path, {
+        "Mikaeus, the Unhallowed": 2.0, "Triskelion": 1.0,
+    })
+    r = estimate_bracket(_deck(
+        "Mikaeus, the Unhallowed", "Triskelion", filler=30,
+    ))
+    assert r["floor"] == 4
+    assert any("cheap/early" in reason for reason in r["reasons"])
+
+
+def test_late_game_two_card_combo_floors_3_not_4(monkeypatch, tmp_path):
+    """The 2025-10-21 rules make a late-assembling two-card combo
+    B3-legal. Mikaeus (6) + Triskelion (6) = 12 total MV, well past
+    combo_detection's late-game threshold — the old count-only B4
+    floor here was the repealed stricter reading."""
+    _warm_snapshot_cache(monkeypatch, tmp_path, {
+        "Mikaeus, the Unhallowed": 6.0, "Triskelion": 6.0,
+    })
+    r = estimate_bracket(_deck(
+        "Mikaeus, the Unhallowed", "Triskelion", filler=30,
+    ))
+    assert r["floor"] == 3
+    assert r["signals"]["n_two_card_combos"] == 1
+    assert any("late-game" in reason for reason in r["reasons"])
 
 
 def test_three_card_game_ending_combo_floors_3():
@@ -166,19 +220,68 @@ def test_mass_land_denial_floors_4():
     assert r["signals"]["mld_cards"] == ["armageddon"]
 
 
-def test_two_extra_turn_cards_floor_4():
+def test_expanded_mld_names_floor_4():
+    """The 2026-08 list extension: long-standing MLD staples the
+    audit-prompt seed list missed must floor exactly like Armageddon."""
+    for card in ("Sunder", "Fall of the Thran", "Death Cloud",
+                 "Keldon Firebombers"):
+        r = estimate_bracket(_deck(card, filler=30))
+        assert r["floor"] == 4, card
+        assert r["signals"]["mld_cards"] == [card.lower()]
+
+
+def test_two_extra_turn_cards_without_chain_support_is_nudge_not_floor():
+    """2025-10-21 rules: B3 allows LOW QUANTITIES of non-chaining
+    extra turns. Two bare extra-turn spells (no recursion/copy, under
+    the 3-density line) must NOT floor at B4 — the old count==2 floor
+    encoded the repealed stricter beta reading."""
     r = estimate_bracket(_deck("Time Warp", "Temporal Manipulation",
                                filler=30))
+    assert r["floor"] == 1
+    assert r["signals"]["extra_turn_cards"] == [
+        "temporal manipulation", "time warp",
+    ]
+    assert any("non-chaining" in reason for reason in r["reasons"])
+
+
+def test_three_extra_turn_cards_floor_4():
+    """Density operationalization of chaining: at 3+ extra-turn cards
+    the turns realistically cast back-to-back."""
+    r = estimate_bracket(_deck("Time Warp", "Temporal Manipulation",
+                               "Time Stretch", filler=30))
     assert r["floor"] == 4
+    assert any("density" in reason for reason in r["reasons"])
+
+
+def test_two_extra_turn_cards_with_recursion_floor_4():
+    """Support operationalization of chaining: 2 extra-turn spells
+    plus a curated rebuy/copy piece is a credible loop."""
+    r = estimate_bracket(_deck("Time Warp", "Temporal Manipulation",
+                               "Archaeomancer", filler=30))
+    assert r["floor"] == 4
+    assert r["signals"]["extra_turn_chain_enablers"] == ["archaeomancer"]
+    assert any("recursion/copy" in reason for reason in r["reasons"])
 
 
 def test_single_extra_turn_card_is_nudge_not_floor():
     """One extra-turn spell is B3-legal (un-chained); it contributes a
-    weighted nudge but must NOT floor the deck at 4."""
-    r = estimate_bracket(_deck("Time Warp", filler=30))
+    weighted nudge but must NOT floor the deck at 4 — even with a
+    recursion piece alongside it."""
+    r = estimate_bracket(_deck("Time Warp", "Archaeomancer", filler=30))
     assert r["floor"] == 1
     assert r["estimate"] < 4
     assert any("extra-turn" in reason for reason in r["reasons"])
+
+
+def test_expanded_extra_turn_names_recognized():
+    """The 2026-08 list extension: widely-played extra-turn spells the
+    seed list missed count toward the chaining density."""
+    r = estimate_bracket(_deck("Alrund's Epiphany", "Temporal Mastery",
+                               "Capture of Jingzhou", filler=30))
+    assert r["floor"] == 4
+    assert r["signals"]["extra_turn_cards"] == [
+        "alrund's epiphany", "capture of jingzhou", "temporal mastery",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -191,13 +294,35 @@ def _raw(deck_text: str, **kw) -> float:
 
 def test_tutor_density_pushes_up_and_4_plus_steps_harder():
     """Non-GC tutors so the GC signal stays silent: 2-3 tutors add the
-    half signal; 4+ triggers the prompt's 'stacking 4+ tutors
-    auto-bumps' full step."""
+    half signal; 4+ the full step. HEURISTIC only — the official
+    'stacking 4+ tutors auto-bumps' rule was repealed 2025-10-21, but
+    tutor density remains a real consistency/power signal."""
     base = _raw(_deck(filler=30))
     two = _raw(_deck("Diabolic Tutor", "Green Sun's Zenith", filler=30))
     four = _raw(_deck("Diabolic Tutor", "Green Sun's Zenith",
                       "Chord of Calling", "Fabricate", filler=30))
     assert base < two < four
+
+
+def test_tutor_density_reason_is_labeled_heuristic_not_official_rule():
+    """The Oct 2025 update removed tutor caps from the bracket rules;
+    the reason string must not claim to transcribe an official rule
+    (and never hard-floors — the score is the only thing that moves)."""
+    r = estimate_bracket(_deck("Diabolic Tutor", "Green Sun's Zenith",
+                               "Chord of Calling", "Fabricate", filler=30))
+    assert r["floor"] == 1  # tutor density never floors
+    tutor_reason = next(re for re in r["reasons"] if "tutor" in re)
+    assert "heuristic" in tutor_reason
+    assert "auto-bump" not in tutor_reason
+
+
+def test_two_non_chaining_extra_turn_cards_nudge_twice_a_single():
+    """The nudge is per card (capped at 2): two non-chaining extra-turn
+    spells score 2x the single-card weight."""
+    base = _raw(_deck(filler=30))
+    one = _raw(_deck("Time Warp", filler=30))
+    two = _raw(_deck("Time Warp", "Temporal Manipulation", filler=30))
+    assert (two - base) == pytest.approx(2 * (one - base))
 
 
 def test_fast_mana_pushes_up():
