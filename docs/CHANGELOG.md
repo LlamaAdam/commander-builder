@@ -6,6 +6,72 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-14 — AI-review roadmap: five correctness/currency fixes
+
+Implements the joint top-5 roadmap from the 2026-08-13 two-AI review
+(code reviewer + MTG domain analyst; findings and cross-examination
+recorded in the mtga-advisor repo, `docs/ollama-analysis/`).
+
+#### Fixed
+
+- **Auto-propose now applies the proposal to disk** before simming
+  (`iteration_loop.propose_then_iterate`): it proposes against the OLD
+  deck, materializes `--new` via `apply_proposal_to_deck`, records the
+  APPLIED adds/cuts as the manifest (LLM intent kept under
+  `requested_*`), and fails fast if `--new` already exists. Previously
+  the recorded manifest and the simmed diff were unrelated, poisoning
+  the knowledge log.
+- **Web `save_iteration` stores the signed margin** (`new_wins -
+  old_wins`), ignoring the absolute `ComparisonReport.margin` the
+  propose_swap payload carries. Web-saved regressions no longer read as
+  improvements in pooled analysis.
+- **Commander's free first mulligan is modelled** (`consistency.py`,
+  CR 103.5c) — the module previously claimed the rule doesn't exist
+  while `deck_builder_manabase` depended on it; every keep/on-curve
+  stat was systematically pessimistic.
+- **Land-band contradiction resolved**: `deck_health` imports the
+  builder's `LAND_COUNT_BAND` (33-40) instead of a hand-kept (33,38),
+  so the grader stops docking the app's own 39-40-land builds.
+
+#### Changed
+
+- **A/B verdicts are significance-based** (`analyst.heuristic_verdict`,
+  `_proposer_sim._verdict_from_ab`): decisive = head-to-head wins only
+  (filler-won pod games no longer count), and kept/reverted requires an
+  exact two-sided binomial test vs p=0.5 at alpha 0.05 (>= 15-5 at 20
+  decisive) instead of a game-count-invariant |margin| >= 4 — which
+  labeled ~half of neutral swaps confidently. LLM-facing sim summaries
+  now carry `signed_margin`, `winner`, `draws`, `h2h_decisive`.
+- **Bracket estimator re-based on the 2025-10-21 / 2026-02-09 official
+  bracket rules**: two-card-combo floor defers to `combo_detection`'s
+  speed rule (late pairs are B3-legal), the repealed 4+-tutor auto-bump
+  is demoted to a labeled power heuristic, and the extra-turn B4 floor
+  keys on chainability (3+ cards, or 2 + a recursion/copy enabler)
+  instead of bare count >= 2.
+- **EDHREC ingestion is JSON-first**: commander/tag/salt/average-deck
+  fetchers try `json.edhrec.com` before falling back to the
+  `__NEXT_DATA__` HTML scrape.
+- **Manabase tiers modernized**: the 10 triomes (3+ color identities)
+  and the 10 MKM surveil duals (top budget-tier two-color duals) join
+  the essentials tiers; `target_land_count` learns optional MDFC
+  spell-front discounting.
+
+#### Added
+
+- **Extra-turn and MLD card lists are regenerable from oracle
+  snapshots** (`scripts/refresh_card_lists.py --only extra-turns|mld`,
+  diff-and-review like the MDFC flow) and both hardcoded fallbacks
+  gained their well-known misses (+7 extra-turn, +8 MLD names). Tutors
+  stay curated — oracle text can't separate tutors from fetches/ramp.
+- **Legality staleness surfacing**: `LegalityReport` carries
+  `data_age_days` + `data_warning` when backing oracle snapshots are
+  older than 45 days (WotC now runs seven B&R windows a year), and
+  `commander-doctor` gained an oracle-snapshot freshness check.
+- **Sim-coverage warning on the dashboard**: deck names are
+  preflight-checked against the vendored Forge card-script corpus;
+  cards Forge can't simulate surface as a warning pill + detail modal
+  instead of silently-partial sim data.
+
 ### 2026-08-05 — FP-010: desktop EXE rebuilt against current master
 
 #### Changed
