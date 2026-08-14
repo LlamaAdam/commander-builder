@@ -1,10 +1,11 @@
 """Manabase-essentials safety net for the improvement advisor.
 
 Curated recommender that surfaces any color-identity-appropriate
-ABU dual / fetch / shock / bond land the deck doesn't already own,
-plus tribal-utility lands (Cavern of Souls etc.) when the commander
-is tribal. Runs alongside the source-specific recommenders
-(heuristic / bracket_peers / claude) so manabase upgrades always
+ABU dual / fetch / shock / bond / triome / surveil land the deck
+doesn't already own, plus tribal-utility lands (Cavern of Souls
+etc.) when the commander is tribal. Runs alongside the
+source-specific recommenders (heuristic / bracket_peers / claude)
+so manabase upgrades always
 get surfaced, regardless of which references the source happens to
 include.
 
@@ -37,8 +38,10 @@ def _missing_manabase_recommendations(
     lands." The heuristic + bracket_peers paths only surface lands
     when they happen to appear in references/EDHREC. This helper
     runs alongside those paths to deterministically recommend any
-    color-identity-appropriate ABU dual / fetch / shock / bond land
-    that the deck doesn't already own.
+    color-identity-appropriate land from the curated tiers (ABU dual /
+    fetch / shock / bond, plus the 2026-08 additions: triomes for 3+
+    color identities and MKM surveil duals) that the deck doesn't
+    already own.
 
     ``deck_cards`` is the set of card names currently in the deck.
     ``color_identity`` is a set/iterable of WUBRG letters (case-
@@ -52,8 +55,8 @@ def _missing_manabase_recommendations(
     regardless of color identity.
 
     ``budget=True`` strips the $200+ ABU duals and $25-60 fetch
-    lands from the color-gated tier — shocks, bond lands, utility
-    fixers, and tribal lands stay.
+    lands from the color-gated tier — shocks, bond lands, triomes,
+    surveil duals, utility fixers, and tribal lands stay.
 
     Each rec carries ``evidence.role="land"`` so it groups cleanly
     in the UI. Source identifies which arm produced it:
@@ -78,7 +81,8 @@ def _missing_manabase_recommendations(
             action="add",
             reason=(
                 "manabase essential — high-impact land for this "
-                "color identity (dual / fetch / shock / bond)"
+                "color identity (dual / fetch / shock / bond / "
+                "triome / surveil)"
             ),
             evidence={
                 "source": "manabase_essentials",

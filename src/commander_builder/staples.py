@@ -164,6 +164,49 @@ SHOCK_LANDS: dict[str, frozenset[str]] = {
     "hallowed fountain": frozenset({"U", "W"}),
 }
 
+# Ikoria (2020) + New Capenna (2022) triomes — the 10 three-color lands
+# carrying three basic land types plus cycling. They enter tapped, but
+# they're fetchable (typed), fix THREE colors at once, and cycle away in
+# the late game — the modern default for 3+ color manabases. Tiered
+# BELOW the untapped duals (ABU / fetch / shock / bond) but above any
+# generic tapland. The 3-of-3 color containment check in
+# ``essential_manabase_for_colors`` naturally gates these to 3+ color
+# identities — a two-color deck can never contain a triome's identity.
+TRIOME_LANDS: dict[str, frozenset[str]] = {
+    # Ikoria: Lair of Behemoths (allied wedges).
+    "indatha triome": frozenset({"W", "B", "G"}),
+    "ketria triome": frozenset({"G", "U", "R"}),
+    "raugrin triome": frozenset({"U", "R", "W"}),
+    "savai triome": frozenset({"R", "W", "B"}),
+    "zagoth triome": frozenset({"B", "G", "U"}),
+    # Streets of New Capenna (shards).
+    "jetmir's garden": frozenset({"R", "G", "W"}),
+    "raffine's tower": frozenset({"W", "U", "B"}),
+    "spara's headquarters": frozenset({"G", "W", "U"}),
+    "xander's lounge": frozenset({"U", "B", "R"}),
+    "ziatora's proving ground": frozenset({"B", "R", "G"}),
+}
+
+# Murders at Karlov Manor (2024) surveil lands — the 10 two-color duals
+# with both basic land types plus "surveil 1" on entry. Taplands, but
+# fetchable (typed search finds them) and the surveil trigger is real
+# card selection, which makes them the TOP budget-tier dual for any
+# two-color pair ($2-8 each). Kept in budget mode alongside shocks and
+# bonds; in full mode they tier below every untapped dual and below the
+# triomes (three colors fixed beats two when both enter tapped).
+SURVEIL_LANDS: dict[str, frozenset[str]] = {
+    "commercial district": frozenset({"R", "G"}),
+    "elegant parlor": frozenset({"R", "W"}),
+    "hedge maze": frozenset({"G", "U"}),
+    "lush portico": frozenset({"G", "W"}),
+    "meticulous archive": frozenset({"W", "U"}),
+    "raucous theater": frozenset({"B", "R"}),
+    "shadowy backstreet": frozenset({"W", "B"}),
+    "thundering falls": frozenset({"U", "R"}),
+    "undercity sewers": frozenset({"U", "B"}),
+    "underground mortuary": frozenset({"B", "G"}),
+}
+
 
 def utility_fixing_lands(color_identity) -> list[str]:
     """Universal-fixer lands worth slotting in 3+ color decks.
@@ -194,13 +237,17 @@ def essential_manabase_for_colors(
 
     ``color_identity`` is a set / iterable of WUBRG letters
     (case-insensitive). Includes ABU duals, fetch lands, bond lands,
-    shock lands, and (for 3+ color decks) universal utility fixers.
-    A 2-color land is included only when BOTH of its colors are
-    inside the deck's identity — a mono-red deck won't see Stomping
-    Ground (RG) because the G slot is wasted.
+    shock lands, triomes (3+ color identities only — the containment
+    check gates them naturally), surveil duals, and (for 3+ color
+    decks) universal utility fixers. A multi-color land is included
+    only when ALL of its colors are inside the deck's identity — a
+    mono-red deck won't see Stomping Ground (RG) because the G slot
+    is wasted.
 
     ``budget=True`` strips the $200+ ABU duals AND the $25-60 fetch
-    lands — leaving shock lands ($10-30), bond lands ($5-20), and
+    lands — leaving shock lands ($10-30), bond lands ($5-20),
+    triomes ($3-15), surveil duals ($2-8, the top budget-tier dual:
+    basic-typed so they fetch, plus real card selection), and
     utility fixers ($5-30) as the realistic budget manabase. Use
     when the user opted out of the most expensive cards via the
     audit panel's budget toggle.
@@ -209,8 +256,11 @@ def essential_manabase_for_colors(
     can still surface colorless utility lands (Cavern of Souls,
     Strip Mine, etc.) separately via tribal / utility helpers.
 
-    Order: duals → fetches → shocks → bond lands → universal fixers
-    (when 3+ colors). Within each tier, alphabetical. Budget mode
+    Order: duals → fetches → shocks → bond lands → triomes →
+    surveil duals → universal fixers (when 3+ colors). The untapped
+    tiers outrank the tapped ones (triomes / surveil); triomes
+    outrank surveil duals because three fixed colors beat two when
+    both enter tapped. Within each tier, alphabetical. Budget mode
     skips the first two tiers but preserves order within the rest.
     """
     if not color_identity:
@@ -220,10 +270,11 @@ def essential_manabase_for_colors(
     tiers: tuple[dict[str, frozenset[str]], ...]
     if budget:
         # Drop ABU duals + fetches — the two expensive tiers. Shocks,
-        # bonds, and utility fixers stay.
-        tiers = (SHOCK_LANDS, BOND_LANDS)
+        # bonds, triomes, surveil duals, and utility fixers stay.
+        tiers = (SHOCK_LANDS, BOND_LANDS, TRIOME_LANDS, SURVEIL_LANDS)
     else:
-        tiers = (ABU_DUAL_LANDS, FETCH_LANDS, SHOCK_LANDS, BOND_LANDS)
+        tiers = (ABU_DUAL_LANDS, FETCH_LANDS, SHOCK_LANDS, BOND_LANDS,
+                 TRIOME_LANDS, SURVEIL_LANDS)
 
     out: list[str] = []
     for source in tiers:

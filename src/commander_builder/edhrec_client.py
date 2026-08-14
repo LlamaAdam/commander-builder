@@ -5,10 +5,18 @@ percentages, synergy scores, popular variants, and "Average Deck" links to
 Moxfield. The audit prompt scrapes this manually via a logged-in browser
 session; this module is the programmatic equivalent for automated curation.
 
-Strategy: EDHREC's commander page (`/commanders/<slug>`) renders a
-hydrating React app, but the static HTML is enough for our purposes — the
-key data ships in a `<script id="__NEXT_DATA__">` JSON blob that next.js
-bakes into every page. We grab the page HTML, extract that blob, and parse.
+Strategy (2026-08 JSON-first migration): EDHREC serves every page's data
+directly as JSON at ``json.edhrec.com/pages/<path>.json`` — the same
+document next.js bakes into the HTML page's ``<script id="__NEXT_DATA__">``
+blob (the JSON payload mirrors the blob's ``props.pageProps`` content).
+The JSON endpoint is far less likely to serve the CDN bot-challenge
+interstitials that break the HTML scrape (the STATUS.md salt-backfill
+blocker), so every fetcher now tries json.edhrec.com FIRST and only
+FALLS BACK to the legacy HTML ``__NEXT_DATA__`` scrape when the JSON
+attempt fails (network error / non-JSON body / no recognizable cards).
+Behavior can only improve: the fallback path is byte-for-byte the old one,
+and all parsing is shared between the two paths (the walkers hunt by
+shape, not by wrapper).
 
 The bracket-deck-list pages (`/decks/<slug>/<bracket>`) sometimes block
 non-browser fetches with a "Cookie/query string data" guard. The commander
@@ -45,8 +53,11 @@ from typing import Optional
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = REPO_ROOT / ".cache" / "edhrec"
 EDHREC_BASE = "https://edhrec.com"
-# Direct JSON API (no HTML scrape). Used by fetch_top_cards for the
-# time-windowed / by-type "top cards" pages.
+# Direct JSON API (no HTML scrape). Serves the same document that the HTML
+# pages embed as __NEXT_DATA__ pageProps. fetch_top_cards /
+# fetch_top_commanders are JSON-only; the page fetchers (commander / tag /
+# salt / average-deck) try this endpoint first and fall back to the HTML
+# scrape (see _try_fetch_page_payload).
 EDHREC_JSON_BASE = "https://json.edhrec.com/pages"
 USER_AGENT = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
 REQUEST_SLEEP_SEC = 0.5  # EDHREC isn't rate-limited like Scryfall but be polite.
@@ -287,6 +298,42 @@ def _http_get_text_with_retry(
     raise last_exc
 
 
+def _try_fetch_page_payload(path: str) -> Optional[tuple[dict, int]]:
+    """Best-effort fetch of ``json.edhrec.com/pages/<path>.json``.
+
+    Returns ``(payload, raw_size_bytes)`` when the endpoint answered with
+    a JSON object, or ``None`` on ANY failure — network error (incl.
+    404/403 after `_http_get_text_with_retry`'s deterministic-4xx
+    short-circuit), mid-body disconnect, or a non-JSON body (challenge
+    page). ``None`` means "fall back to the HTML ``__NEXT_DATA__``
+    scrape"; callers must treat it as a soft miss, never an error. A
+    payload that parses but carries no recognizable cards is the
+    CALLER's judgment call (the card walkers are shape-specific), so no
+    signal check happens here.
+    """
+    url = f"{EDHREC_JSON_BASE}/{path}.json"
+    time.sleep(REQUEST_SLEEP_SEC)
+    try:
+        raw = _http_get_text_with_retry(url)
+        payload = json.loads(raw)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        # Same failure envelope as fetch_top_cards: OSError covers
+        # HTTPError/URLError/TimeoutError, HTTPException covers mid-body
+        # disconnects, ValueError covers non-JSON bodies. Anything else
+        # is a programming error and propagates. This is a fallback
+        # seam, not a terminal failure, so log at info-ish volume — the
+        # HTML path emits the loud warnings if IT also fails.
+        print(
+            f"[edhrec] json-api fetch failed for {path!r} ({exc!r}) — "
+            "falling back to the HTML scrape",
+            file=sys.stderr, flush=True,
+        )
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload, len(raw)
+
+
 def _extract_next_data(html: str) -> dict:
     """Pull the `__NEXT_DATA__` JSON out of an EDHREC HTML page. Raises
     ValueError if the blob isn't present (page changed shape, or we hit a
@@ -408,19 +455,44 @@ def _walk_for_int(node, key: str) -> Optional[int]:
 def _parse_commander_page(commander_name: str, slug: str, html: str) -> CommanderPage:
     """Build a CommanderPage from raw HTML. Tolerant of schema shifts —
     missing fields surface as empty lists, not exceptions."""
+    try:
+        next_data = _extract_next_data(html)
+    except ValueError:
+        # Empty page; caller can detect via empty top_cards.
+        return CommanderPage(
+            commander_name=commander_name,
+            slug=slug,
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+            raw_size_bytes=len(html),
+        )
+    return _page_from_payload(
+        commander_name, slug, next_data, raw_size_bytes=len(html),
+    )
+
+
+def _page_from_payload(
+    commander_name: str,
+    slug: str,
+    payload: dict,
+    raw_size_bytes: int = 0,
+) -> CommanderPage:
+    """Build a CommanderPage from a parsed page document.
+
+    Shared by BOTH fetch paths — ``payload`` is either the HTML page's
+    ``__NEXT_DATA__`` blob or the json.edhrec.com document (which mirrors
+    the blob's ``props.pageProps`` content) — so the two paths can never
+    drift. All the walkers below hunt by shape, not by wrapper, which is
+    what makes the sharing safe.
+    """
     page = CommanderPage(
         commander_name=commander_name,
         slug=slug,
         fetched_at=datetime.now(timezone.utc).isoformat(),
-        raw_size_bytes=len(html),
+        raw_size_bytes=raw_size_bytes,
     )
-    try:
-        next_data = _extract_next_data(html)
-    except ValueError:
-        return page  # Empty page; caller can detect via empty top_cards.
 
     buckets: dict[str, list[CardEntry]] = {}
-    _walk_for_cardlists(next_data, buckets)
+    _walk_for_cardlists(payload, buckets)
     page.top_cards = buckets.get("top_cards", [])
     page.high_synergy_cards = buckets.get("high_synergy", [])
     page.new_cards = buckets.get("new_cards", [])
@@ -435,15 +507,19 @@ def _parse_commander_page(commander_name: str, slug: str, html: str) -> Commande
     }
 
     # Recursively hunt for the "Average Deck" Moxfield URL — schema varies.
-    page.average_deck_url = _walk_for_moxfield_url(next_data)
+    page.average_deck_url = _walk_for_moxfield_url(payload)
 
     # Deck count is also schema-fluid; search for it by key name at any depth.
-    deck_count = _walk_for_int(next_data, "num_decks") or _walk_for_int(next_data, "deck_count")
+    deck_count = _walk_for_int(payload, "num_decks") or _walk_for_int(payload, "deck_count")
     page.deck_count = deck_count
 
-    # Related commanders — best-effort, optional.
-    props = next_data.get("props", {}).get("pageProps", {})
-    container = props.get("data") or props
+    # Related commanders — best-effort, optional. The __NEXT_DATA__ blob
+    # nests the page document under props.pageProps; the json.edhrec.com
+    # payload IS that document, so fall back to the payload itself when
+    # the wrapper isn't there.
+    props = payload.get("props")
+    page_props = props.get("pageProps", {}) if isinstance(props, dict) else {}
+    container = page_props.get("data") or page_props or payload
     if isinstance(container, dict):
         related = container.get("related_commanders") or []
         if isinstance(related, list):
@@ -688,9 +764,12 @@ def fetch_commander_page(
 ) -> Optional[CommanderPage]:
     """Fetch + parse one commander's EDHREC page. Caches the parsed
     CommanderPage to disk; subsequent calls within `ttl_hours` skip the
-    network. Returns ``None`` when EDHREC has no page (404 — unknown/mis-slugged
-    commander), the retries are exhausted, or parsing fails; callers must
-    handle None (the heuristic recommender already does)."""
+    network. Tries the json.edhrec.com document first (same content,
+    no bot-challenge interstitials) and falls back to the HTML
+    ``__NEXT_DATA__`` scrape on any JSON-path failure. Returns ``None``
+    when EDHREC has no page (404 — unknown/mis-slugged commander), the
+    retries are exhausted, or parsing fails; callers must handle None
+    (the heuristic recommender already does)."""
     slug = commander_or_slug if "-" in commander_or_slug and commander_or_slug.islower() \
         else commander_slug(commander_or_slug)
     cache_path = _cache_path(slug)
@@ -700,6 +779,22 @@ def fetch_commander_page(
             return _page_from_dict(data)
         except (OSError, ValueError):
             pass  # Fall through to fresh fetch on cache corruption.
+
+    # JSON-first: json.edhrec.com serves the same document the HTML page
+    # embeds, without the CDN bot-challenge risk. Any failure (or a
+    # payload with no card signal) falls through to the HTML scrape, so
+    # behavior can only improve.
+    got = _try_fetch_page_payload(f"commanders/{urllib.parse.quote(slug)}")
+    if got is not None:
+        payload, raw_size = got
+        page = _page_from_payload(
+            commander_or_slug, slug, payload, raw_size_bytes=raw_size,
+        )
+        if _page_has_card_signal(page):
+            if cache:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(page.to_json(), encoding="utf-8")
+            return page
 
     url = f"{EDHREC_BASE}/commanders/{urllib.parse.quote(slug)}"
     time.sleep(REQUEST_SLEEP_SEC)
@@ -797,6 +892,42 @@ def tribe_tag_slug(tribe_name: str) -> Optional[str]:
     return _TRIBE_TO_TAG_SLUG.get(tribe_name)
 
 
+def _salt_scores_from_node(node) -> dict[str, float]:
+    """Walk a parsed page document (``__NEXT_DATA__`` blob or the
+    json.edhrec.com payload — the walk is shape-based, shared by both
+    fetch paths) looking for cardviews carrying a
+    ``label: "Salt Score: X.XX"`` annotation. There's exactly one such
+    section on the /top/salt page; the parser tolerates any header
+    text. Returns ``{card_name_lowercase: salt_score}``."""
+    salt_map: dict[str, float] = {}
+
+    def _walk(n):
+        if isinstance(n, dict):
+            if isinstance(n.get("cardviews"), list):
+                for cv in n["cardviews"]:
+                    if not isinstance(cv, dict):
+                        continue
+                    name = cv.get("name") or cv.get("sanitized")
+                    label = cv.get("label", "")
+                    if not name or "Salt Score" not in label:
+                        continue
+                    # "Salt Score: 3.06" → 3.06
+                    m = re.search(r"([\d.]+)", label)
+                    if m:
+                        try:
+                            salt_map[name.lower()] = float(m.group(1))
+                        except ValueError:
+                            pass
+            for v in n.values():
+                _walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                _walk(v)
+
+    _walk(node)
+    return salt_map
+
+
 def fetch_salt_list(
     cache: bool = True,
     ttl_hours: int = 168,  # 7 days — salt scores change slowly
@@ -813,7 +944,8 @@ def fetch_salt_list(
 
     Returns an empty dict on fetch failure. Cached for 168h
     (a week) since salt scores update slowly and the URL doesn't
-    take any parameters.
+    take any parameters. Tries json.edhrec.com first, HTML scrape
+    as fallback (same JSON-first contract as fetch_commander_page).
     """
     cache_path = CACHE_DIR.parent / "edhrec_salt" / "top-salt.json"
     if cache and _is_cache_fresh(cache_path, ttl_hours):
@@ -821,6 +953,23 @@ def fetch_salt_list(
             return json.loads(cache_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass  # Cache corruption → fresh fetch.
+
+    # JSON-first (same payload the HTML page embeds; same fallback
+    # contract as fetch_commander_page). An empty salt map from the JSON
+    # payload falls through to the HTML scrape rather than caching.
+    got = _try_fetch_page_payload("top/salt")
+    if got is not None:
+        salt_map = _salt_scores_from_node(got[0])
+        if salt_map:
+            if cache:
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(
+                        json.dumps(salt_map), encoding="utf-8",
+                    )
+                except OSError:
+                    pass
+            return salt_map
 
     url = f"{EDHREC_BASE}/top/salt"
     time.sleep(REQUEST_SLEEP_SEC)
@@ -850,35 +999,7 @@ def fetch_salt_list(
         _warn_empty_parse("salt list", "top/salt")
         return {}
 
-    # Walk the blob looking for a section with cards carrying a
-    # ``label: "Salt Score: X.XX"`` annotation. There's exactly
-    # one such section on the /top/salt page; the parser tolerates
-    # any header text.
-    salt_map: dict[str, float] = {}
-    def _walk(node):
-        if isinstance(node, dict):
-            if isinstance(node.get("cardviews"), list):
-                for cv in node["cardviews"]:
-                    if not isinstance(cv, dict):
-                        continue
-                    name = cv.get("name") or cv.get("sanitized")
-                    label = cv.get("label", "")
-                    if not name or "Salt Score" not in label:
-                        continue
-                    # "Salt Score: 3.06" → 3.06
-                    import re as _re
-                    m = _re.search(r"([\d.]+)", label)
-                    if m:
-                        try:
-                            salt_map[name.lower()] = float(m.group(1))
-                        except ValueError:
-                            pass
-            for v in node.values():
-                _walk(v)
-        elif isinstance(node, list):
-            for v in node:
-                _walk(v)
-    _walk(next_data)
+    salt_map = _salt_scores_from_node(next_data)
 
     # A present-but-saltless blob means the page schema shifted (the
     # ``label: "Salt Score: X"`` annotation moved/renamed). Warn so the
@@ -915,7 +1036,9 @@ def fetch_tag_page(
 
     Returns None on 404 (unknown tag slug) or any other fetch
     failure. Cached separately from commander pages under
-    ``.cache/edhrec_tag/<slug>.json``.
+    ``.cache/edhrec_tag/<slug>.json``. Tries json.edhrec.com first,
+    HTML scrape as fallback (same JSON-first contract as
+    fetch_commander_page).
 
     Use case: tribal/themed decks (Dragon, Goblin, Sliver, Tokens,
     Spellslinger, …). The commander-specific page covers what THIS
@@ -937,6 +1060,21 @@ def fetch_tag_page(
             return _page_from_dict(data)
         except (OSError, ValueError):
             pass  # Cache corruption → fresh fetch.
+
+    # JSON-first, same contract as fetch_commander_page: tag pages live
+    # at json.edhrec.com/pages/tags/<slug>.json with the same document
+    # shape; any failure falls back to the HTML scrape below.
+    got = _try_fetch_page_payload(f"tags/{urllib.parse.quote(safe_slug)}")
+    if got is not None:
+        payload, raw_size = got
+        page = _page_from_payload(
+            f"tag:{safe_slug}", safe_slug, payload, raw_size_bytes=raw_size,
+        )
+        if _page_has_card_signal(page):
+            if cache:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(page.to_json(), encoding="utf-8")
+            return page
 
     url = f"{EDHREC_BASE}/tags/{urllib.parse.quote(safe_slug)}"
     time.sleep(REQUEST_SLEEP_SEC)
@@ -1219,7 +1357,9 @@ def fetch_average_deck(
       4. Bare commander — fall back to `/average-decks/<slug>`.
 
     Returns None if no average deck is published for the request OR the page
-    has no parseable cardlist."""
+    has no parseable cardlist. Tries the json.edhrec.com twin of the page
+    first (for ``direct_url`` the path is lifted off the given URL), HTML
+    scrape as fallback."""
     if direct_url:
         url = direct_url
         slug_from_url = urllib.parse.urlparse(direct_url).path
@@ -1249,6 +1389,40 @@ def fetch_average_deck(
             )
         except (OSError, ValueError, KeyError):
             pass  # Fall through to fresh fetch.
+
+    # JSON-first: the average-deck document lives at
+    # json.edhrec.com/pages/<same-path>.json (for direct_url fetches the
+    # path is lifted off the given URL, so a pasted edhrec.com link maps
+    # onto its JSON twin). Any failure — or a payload with no parseable
+    # cardlist — falls back to the HTML scrape below.
+    json_path = slug_from_url.strip("/")
+    if json_path.endswith(".json"):  # a pasted json.edhrec.com URL.
+        json_path = json_path[: -len(".json")]
+    got = _try_fetch_page_payload(json_path) if json_path else None
+    if got is not None:
+        cards = _walk_for_average_deck_cards(got[0])
+        if cards:
+            deck = AverageDeck(
+                commander_name=(
+                    commander_or_slug if direct_url is None else "Unknown"
+                ),
+                slug=commander_slug(commander_or_slug) if direct_url is None else "",
+                url=url,
+                bracket_slug=BRACKET_SLUG.get(bracket) if bracket else None,
+                budget_slug=budget,
+                cards=cards,
+            )
+            if cache:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps({
+                    "commander_name": deck.commander_name,
+                    "slug": deck.slug,
+                    "url": deck.url,
+                    "bracket_slug": deck.bracket_slug,
+                    "budget_slug": deck.budget_slug,
+                    "cards": [asdict(c) for c in deck.cards],
+                }, indent=2), encoding="utf-8")
+            return deck
 
     try:
         time.sleep(REQUEST_SLEEP_SEC)

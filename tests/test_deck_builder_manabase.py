@@ -628,3 +628,51 @@ def test_manabase_report_colorless_deck_has_no_color_demands():
     assert report["colors"] == []
     assert report["per_color"] == {}
     assert report["land_count"] == 38
+
+
+# ===========================================================================
+# 2026-08 manabase modernization — triomes / surveil duals / shared band.
+# ===========================================================================
+
+
+def test_triome_counts_for_all_three_of_its_colors():
+    # Triomes come from the shared staples tiers (no lookup needed), and
+    # count as a source for every one of their three colors.
+    assert land_color_sources(
+        "Ketria Triome", {"G", "U", "R"}, lambda n: None,
+    ) == {"G", "U", "R"}
+    # Intersected with the identity like every tiered land.
+    assert land_color_sources(
+        "Ketria Triome", {"G", "U"}, lambda n: None,
+    ) == {"G", "U"}
+
+
+def test_surveil_dual_counts_for_both_its_colors():
+    assert land_color_sources(
+        "Undercity Sewers", {"U", "B"}, lambda n: None,
+    ) == {"U", "B"}
+
+
+def test_land_count_band_is_shared_with_deck_health():
+    """One constant, two consumers: the builder's clamp band IS the
+    grader's healthy band, so the app can never dock its own builds."""
+    from commander_builder.deck_builder_manabase import LAND_COUNT_BAND
+    from commander_builder import deck_health
+    assert LAND_COUNT_BAND == (33, 40)
+    assert deck_health._LAND_BAND is LAND_COUNT_BAND
+    # The clamp really uses the shared band at both edges.
+    assert target_land_count(0.0) == LAND_COUNT_BAND[0]
+    assert target_land_count(9.0) == LAND_COUNT_BAND[1]
+
+
+def test_land_count_mdfc_spell_fronts_discount_half_a_land_each():
+    # 6 spell-front MDFCs = 3 fewer real lands at the 3.5-MV pivot —
+    # the same 0.5 weighting deck_health's effective-land count uses.
+    assert target_land_count(3.5, mdfc_spell_fronts=6) == 35
+    # The clamp floor still applies after the discount.
+    assert target_land_count(2.0, mdfc_spell_fronts=8) == 33
+    # Seed trust ignores the discount (the seed's count is already tuned
+    # around its own MDFCs).
+    assert target_land_count(3.5, seed_land_count=38, mdfc_spell_fronts=6) == 38
+    # Default 0 keeps the historical model untouched.
+    assert target_land_count(3.5) == 38

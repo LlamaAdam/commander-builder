@@ -962,3 +962,73 @@ def test_essential_manabase_excludes_utility_fixers_for_two_color():
     assert "Savannah" in out          # 2-color duals stay
     assert "Temple Garden" in out     # shocks stay
     assert "City of Brass" not in out
+
+
+# ---------------------------------------------------------------------------
+# Triomes + surveil duals (2026-08 manabase modernization)
+# ---------------------------------------------------------------------------
+
+
+def test_essential_manabase_includes_triomes_for_three_color():
+    """A 3-color identity picks up exactly the triomes whose three
+    colors all sit inside the identity."""
+    from commander_builder.staples import essential_manabase_for_colors
+    abzan = essential_manabase_for_colors({"W", "B", "G"})
+    assert "Indatha Triome" in abzan            # WBG — exact match
+    assert "Ketria Triome" not in abzan         # GUR — off-color
+
+
+def test_essential_manabase_excludes_triomes_for_two_color():
+    """Triomes need all THREE of their colors in the identity, so a
+    2-color deck never sees one (the containment check gates them)."""
+    from commander_builder.staples import essential_manabase_for_colors
+    wg = essential_manabase_for_colors({"W", "G"})
+    assert not any("Triome" in name for name in wg)
+    assert "Jetmir's Garden" not in wg
+
+
+def test_essential_manabase_five_color_gets_all_ten_triomes():
+    from commander_builder.staples import essential_manabase_for_colors
+    out = set(essential_manabase_for_colors({"W", "U", "B", "R", "G"}))
+    expected = {
+        "Indatha Triome", "Ketria Triome", "Raugrin Triome",
+        "Savai Triome", "Zagoth Triome", "Jetmir's Garden",
+        "Raffine's Tower", "Spara's Headquarters", "Xander's Lounge",
+        "Ziatora's Proving Ground",
+    }
+    assert expected <= out
+
+
+def test_essential_manabase_includes_surveil_duals_for_two_color():
+    """MKM surveil duals are the top budget-tier default for any
+    two-color pair — basic-typed (fetchable) + surveil on entry."""
+    from commander_builder.staples import essential_manabase_for_colors
+    dimir = essential_manabase_for_colors({"U", "B"})
+    assert "Undercity Sewers" in dimir
+    assert "Meticulous Archive" not in dimir    # WU — off-color
+    mono_u = essential_manabase_for_colors({"U"})
+    assert "Undercity Sewers" not in mono_u
+
+
+def test_essential_manabase_budget_mode_keeps_triomes_and_surveil():
+    """Budget mode strips ABU duals + fetches but keeps the cheap
+    modern fixing: triomes ($3-15) and surveil duals ($2-8)."""
+    from commander_builder.staples import essential_manabase_for_colors
+    out = essential_manabase_for_colors({"W", "U", "B", "R", "G"}, budget=True)
+    assert "Bayou" not in out
+    assert "Windswept Heath" not in out
+    assert "Ketria Triome" in out
+    assert "Undercity Sewers" in out
+
+
+def test_essential_manabase_tier_order_untapped_before_tapped():
+    """Tier order: untapped duals (ABU/fetch/shock/bond) outrank the
+    tapped triomes, which outrank the tapped surveil duals; utility
+    fixers come last. Pin with a Bant (GWU) identity where every tier
+    has a representative."""
+    from commander_builder.staples import essential_manabase_for_colors
+    out = essential_manabase_for_colors({"G", "W", "U"})
+    assert out.index("Temple Garden") < out.index("Spara's Headquarters")
+    assert out.index("Sea of Clouds") < out.index("Spara's Headquarters")
+    assert out.index("Spara's Headquarters") < out.index("Meticulous Archive")
+    assert out.index("Meticulous Archive") < out.index("City of Brass")

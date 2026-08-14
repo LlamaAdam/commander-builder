@@ -326,9 +326,15 @@ def test_fetch_average_deck_builds_url_from_bracket(tmp_path, monkeypatch):
     deck = fetch_average_deck("Hakbal of the Surging Soul", bracket=3,
                               budget="expensive")
     assert deck is not None
-    assert len(captured_urls) == 1
+    # JSON-first: the json.edhrec.com twin is tried first; the HTML body
+    # this mock serves isn't JSON, so the fetch falls back to the HTML URL.
+    assert len(captured_urls) == 2
+    assert captured_urls[0] == (
+        "https://json.edhrec.com/pages/average-decks/"
+        "hakbal-of-the-surging-soul/upgraded/expensive.json"
+    )
     # URL should match what the user's deck used.
-    assert "/average-decks/hakbal-of-the-surging-soul/upgraded/expensive" in captured_urls[0]
+    assert "/average-decks/hakbal-of-the-surging-soul/upgraded/expensive" in captured_urls[1]
     assert deck.bracket_slug == "upgraded"
     assert deck.budget_slug == "expensive"
     names = [c.name for c in deck.cards]
@@ -438,8 +444,13 @@ def test_fetch_average_deck_uses_direct_url_when_provided(tmp_path, monkeypatch)
         direct_url="https://edhrec.com/average-decks/foo/upgraded/expensive",
     )
     assert deck is not None
-    # Direct URL was used, not constructed.
-    assert captured[0] == "https://edhrec.com/average-decks/foo/upgraded/expensive"
+    # JSON-first maps the pasted URL's path onto its json.edhrec.com twin;
+    # the HTML body isn't JSON so it falls back to the direct URL itself
+    # (used as given, not constructed from the commander name).
+    assert captured == [
+        "https://json.edhrec.com/pages/average-decks/foo/upgraded/expensive.json",
+        "https://edhrec.com/average-decks/foo/upgraded/expensive",
+    ]
     assert len(deck.cards) == 2
 
 
@@ -700,7 +711,10 @@ def test_fetch_commander_page_recovers_from_transient_503(tmp_path, monkeypatch)
     page = fetch_commander_page("Sephiroth")
     assert page is not None
     assert page.deck_count == 7
-    assert calls["n"] == 2
+    # Call 1: the JSON-first attempt eats the 503 and retries; call 2
+    # hands it HTML (not JSON → soft miss); call 3 is the HTML-scrape
+    # fallback that succeeds.
+    assert calls["n"] == 3
     assert (tmp_path / "sephiroth.json").exists()
 
 
@@ -1016,11 +1030,16 @@ def test_fetch_commander_page_caches_after_empty_parse_recovery(
         "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
     )
     responses = [_CHALLENGE_HTML, _valid_page_html("Arcane Signet")]
-    calls = {"n": 0}
+    calls = {"html": 0}
 
     def sequenced(url):
-        body = responses[calls["n"]]
-        calls["n"] += 1
+        # The JSON-first attempt (json.edhrec.com) 404s so each
+        # fetch_commander_page call exercises exactly one HTML fetch,
+        # keeping the sequenced responses aligned with the calls.
+        if "json.edhrec.com" in url:
+            raise _make_http_error(404)
+        body = responses[calls["html"]]
+        calls["html"] += 1
         return body
     monkeypatch.setattr(
         "commander_builder.edhrec_client._http_get_text", sequenced,
@@ -1033,13 +1052,13 @@ def test_fetch_commander_page_caches_after_empty_parse_recovery(
     # Second call must hit the network again (nothing poisoned the
     # cache) and this time succeed + cache.
     second = fetch_commander_page("Vexing Commander")
-    assert calls["n"] == 2
+    assert calls["html"] == 2
     assert second.top_cards[0].name == "Arcane Signet"
     assert (tmp_path / "vexing-commander.json").exists()
 
     # Third call is served from the fresh, VALID cache — no network.
     third = fetch_commander_page("Vexing Commander")
-    assert calls["n"] == 2
+    assert calls["html"] == 2
     assert third.top_cards[0].name == "Arcane Signet"
 
 
@@ -1083,11 +1102,15 @@ def test_fetch_tag_page_caches_valid_page_after_empty_parse(
         "commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0,
     )
     responses = [_CHALLENGE_HTML, _valid_page_html("Terror of the Peaks")]
-    calls = {"n": 0}
+    calls = {"html": 0}
 
     def sequenced(url):
-        body = responses[calls["n"]]
-        calls["n"] += 1
+        # 404 the JSON-first attempt so each fetch_tag_page call maps to
+        # exactly one HTML fetch (same shape as the commander-page test).
+        if "json.edhrec.com" in url:
+            raise _make_http_error(404)
+        body = responses[calls["html"]]
+        calls["html"] += 1
         return body
     monkeypatch.setattr(
         "commander_builder.edhrec_client._http_get_text", sequenced,
@@ -1098,7 +1121,7 @@ def test_fetch_tag_page_caches_valid_page_after_empty_parse(
     assert not (tmp_path / "edhrec_tag" / "dragons.json").exists()
 
     second = fetch_tag_page("dragons")
-    assert calls["n"] == 2
+    assert calls["html"] == 2
     assert second.top_cards[0].name == "Terror of the Peaks"
     assert (tmp_path / "edhrec_tag" / "dragons.json").exists()
 
@@ -1271,6 +1294,196 @@ def test_to_moxfield_shape_partner_names_use_98_main_target():
     # so it stays in [Main] as a 61st non-basic; 98 - 61 = 37 basics
     # split 19/18. Total lands exactly on the 98-card partner target.
     assert sum(e["quantity"] for e in main.values()) == 98
+
+
+# ---------------------------------------------------------------------------
+# JSON-first migration — json.edhrec.com tried before the HTML scrape.
+# The JSON payload mirrors the __NEXT_DATA__ pageProps content, so these
+# fixtures reuse the recorded container/json_dict/cardlists shape the
+# fetch_top_cards / fetch_top_commanders tests already pin.
+# ---------------------------------------------------------------------------
+
+def _json_page_payload(card_name: str = "Sol Ring") -> str:
+    """A json.edhrec.com page document (commander/tag shape)."""
+    return json.dumps({
+        "container": {"json_dict": {"cardlists": [
+            {"header": "Top Cards", "cardviews": [
+                {"name": card_name, "inclusion": 61.0, "synergy": 0.05,
+                 "num_decks": 1200},
+            ]},
+        ]}},
+        "num_decks": 4321,
+    })
+
+
+def _url_dispatch(monkeypatch, json_body=None, html_body=None):
+    """Mock _http_get_text to answer json.edhrec.com and edhrec.com
+    separately. A None body raises 404 for that host; captured URLs are
+    returned for ordering assertions."""
+    captured: list[str] = []
+
+    def fake_get(url):
+        captured.append(url)
+        body = json_body if "json.edhrec.com" in url else html_body
+        if body is None:
+            raise _make_http_error(404)
+        return body
+
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client._http_get_text", fake_get,
+    )
+    return captured
+
+
+def test_fetch_commander_page_prefers_json_api(tmp_path, monkeypatch):
+    """A healthy json.edhrec.com answer satisfies the fetch outright —
+    the HTML scrape never runs, and the page is cached as usual."""
+    monkeypatch.setattr("commander_builder.edhrec_client.CACHE_DIR", tmp_path)
+    monkeypatch.setattr("commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0)
+    captured = _url_dispatch(
+        monkeypatch, json_body=_json_page_payload("Arcane Signet"),
+        html_body=None,  # HTML host would 404 — it must never be asked.
+    )
+
+    page = fetch_commander_page("New Commander")
+    assert page is not None
+    assert page.top_cards[0].name == "Arcane Signet"
+    assert page.deck_count == 4321
+    assert captured == [
+        "https://json.edhrec.com/pages/commanders/new-commander.json",
+    ]
+    cache_file = tmp_path / "new-commander.json"
+    assert cache_file.exists()
+    assert "Arcane Signet" in cache_file.read_text(encoding="utf-8")
+
+
+def test_fetch_commander_page_json_failure_falls_back_to_html(
+    tmp_path, monkeypatch,
+):
+    """json.edhrec.com down/blocked (404/403/network) → the legacy HTML
+    __NEXT_DATA__ scrape still serves the page. Behavior can only
+    improve over the HTML-only client."""
+    monkeypatch.setattr("commander_builder.edhrec_client.CACHE_DIR", tmp_path)
+    monkeypatch.setattr("commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0)
+    captured = _url_dispatch(
+        monkeypatch, json_body=None, html_body=_valid_page_html("Sol Ring"),
+    )
+
+    page = fetch_commander_page("New Commander")
+    assert page is not None
+    assert page.top_cards[0].name == "Sol Ring"
+    assert captured == [
+        "https://json.edhrec.com/pages/commanders/new-commander.json",
+        "https://edhrec.com/commanders/new-commander",
+    ]
+    assert (tmp_path / "new-commander.json").exists()
+
+
+def test_fetch_commander_page_empty_json_payload_falls_back_to_html(
+    tmp_path, monkeypatch,
+):
+    """A JSON answer with no recognizable cardlists (schema shift /
+    challenge JSON) is a soft miss — fall back to HTML rather than
+    returning an empty page while the HTML path could still work."""
+    monkeypatch.setattr("commander_builder.edhrec_client.CACHE_DIR", tmp_path)
+    monkeypatch.setattr("commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0)
+    captured = _url_dispatch(
+        monkeypatch, json_body=json.dumps({"nothing": "here"}),
+        html_body=_valid_page_html("Lightning Greaves"),
+    )
+
+    page = fetch_commander_page("New Commander")
+    assert page.top_cards[0].name == "Lightning Greaves"
+    assert len(captured) == 2  # JSON tried, HTML fallback used.
+
+
+def test_fetch_tag_page_prefers_json_api(tmp_path, monkeypatch):
+    from commander_builder.edhrec_client import fetch_tag_page
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "edhrec",
+    )
+    monkeypatch.setattr("commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0)
+    captured = _url_dispatch(
+        monkeypatch, json_body=_json_page_payload("Terror of the Peaks"),
+        html_body=None,
+    )
+
+    page = fetch_tag_page("dragons")
+    assert page is not None
+    assert page.top_cards[0].name == "Terror of the Peaks"
+    assert page.commander_name == "tag:dragons"
+    assert captured == ["https://json.edhrec.com/pages/tags/dragons.json"]
+    assert (tmp_path / "edhrec_tag" / "dragons.json").exists()
+
+
+def test_fetch_salt_list_prefers_json_api(tmp_path, monkeypatch):
+    from commander_builder.edhrec_client import fetch_salt_list
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "edhrec",
+    )
+    monkeypatch.setattr("commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0)
+    salt_json = json.dumps({
+        "container": {"json_dict": {"cardlists": [
+            {"header": "Salt", "cardviews": [
+                {"name": "Stasis", "label": "Salt Score: 3.06"},
+                {"name": "Smothering Tithe", "label": "Salt Score: 2.58"},
+            ]},
+        ]}},
+    })
+    captured = _url_dispatch(monkeypatch, json_body=salt_json, html_body=None)
+
+    salt = fetch_salt_list()
+    assert salt["stasis"] == 3.06
+    assert salt["smothering tithe"] == 2.58
+    assert captured == ["https://json.edhrec.com/pages/top/salt.json"]
+    assert (tmp_path / "edhrec_salt" / "top-salt.json").exists()
+
+
+def test_fetch_average_deck_prefers_json_api(tmp_path, monkeypatch):
+    from commander_builder.edhrec_client import fetch_average_deck
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    monkeypatch.setattr("commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0)
+    avg_json = json.dumps({
+        "container": {"json_dict": {"cardlists": [
+            {"header": "Average Deck", "cardviews": [
+                {"name": "Sol Ring", "num_decks": 1},
+                {"name": "Forest", "num_decks": 1},
+            ]},
+        ]}},
+    })
+    captured = _url_dispatch(monkeypatch, json_body=avg_json, html_body=None)
+
+    deck = fetch_average_deck("Hakbal of the Surging Soul", bracket=3,
+                              budget="expensive")
+    assert deck is not None
+    assert [c.name for c in deck.cards] == ["Sol Ring", "Forest"]
+    assert deck.bracket_slug == "upgraded"
+    assert captured == [
+        "https://json.edhrec.com/pages/average-decks/"
+        "hakbal-of-the-surging-soul/upgraded/expensive.json",
+    ]
+
+
+def test_fetch_average_deck_json_empty_falls_back_to_html(
+    tmp_path, monkeypatch,
+):
+    """JSON payload with no cardlist → HTML fallback still parses."""
+    from commander_builder.edhrec_client import fetch_average_deck
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    monkeypatch.setattr("commander_builder.edhrec_client.REQUEST_SLEEP_SEC", 0)
+    captured = _url_dispatch(
+        monkeypatch, json_body=json.dumps({"nothing": "here"}),
+        html_body=_avg_deck_html(["Sol Ring", "Forest"]),
+    )
+
+    deck = fetch_average_deck("Foo", bracket=3)
+    assert deck is not None
+    assert [c.name for c in deck.cards] == ["Sol Ring", "Forest"]
+    assert len(captured) == 2
 
 
 def test_to_moxfield_shape_direct_url_unknown_sentinel_not_injected():

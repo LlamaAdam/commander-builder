@@ -1303,3 +1303,37 @@ def test_cli_report_renders_na_health_grade_explicitly():
     grade = {"grade": "N/A", "score": None, "reasons": [], "components": {}}
     text = _format_report_text(report, health_grade=grade)
     assert "Health grade: N/A (signals unavailable)" in text
+
+
+# ---------------------------------------------------------------------------
+# Land-band reconciliation (2026-08): _LAND_BAND is the builder's clamp band
+# ---------------------------------------------------------------------------
+
+
+def test_land_band_is_the_builders_clamp_band():
+    """deck_builder_manabase clamps its builds to LAND_COUNT_BAND
+    (33-40); the grade must accept that whole range — before the
+    reconciliation _LAND_BAND was a hand-kept (33, 38) and the app
+    docked ~12 points per land on its own 39/40-land builds."""
+    from commander_builder.deck_builder_manabase import LAND_COUNT_BAND
+    assert deck_health._LAND_BAND == LAND_COUNT_BAND == (33, 40)
+
+
+def test_score_land_band_accepts_builder_max_land_counts():
+    """39/40 effective lands (a high-curve build the assembler itself
+    emits) now score a clean 100 on the land half of mana_health."""
+    for eff in (33.0, 38.0, 39.0, 40.0):
+        score = deck_health._score_land_band({"effective_lands": eff})
+        assert score == 100.0, f"{eff} effective lands should be in-band"
+
+
+def test_score_land_band_still_penalizes_outside_the_shared_band():
+    """The linear penalty survives the widening: below 33 and above 40
+    are still charged _LAND_BAND_PENALTY per effective land."""
+    per = deck_health._LAND_BAND_PENALTY
+    assert deck_health._score_land_band({"effective_lands": 32.0}) == 100.0 - per
+    # A seed-trusted 42-land build is charged mildly (2 past the band) —
+    # intentional: the band covers what OUR model would choose.
+    assert deck_health._score_land_band({"effective_lands": 42.0}) == 100.0 - 2 * per
+    # The 27-land greed manabase still craters (6 under the floor).
+    assert deck_health._score_land_band({"effective_lands": 27.0}) == 100.0 - 6 * per

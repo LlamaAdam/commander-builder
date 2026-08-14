@@ -58,6 +58,7 @@ import re
 from typing import Iterable, Optional
 
 from . import dck_utils
+from .deck_builder_manabase import LAND_COUNT_BAND
 
 
 # ---------------------------------------------------------------------------
@@ -759,11 +760,24 @@ _FLAVOR_SCORES: dict[str, int] = {"good": 100, "neutral": 70, "warn": 30}
 # (MDFC section) documents the underlying guidance: 36-38 lands is the
 # classic default, and an MDFC-heavy deck legitimately drops to 32-34
 # because each spell-front MDFC is "half a land". Counting MDFC spell
-# fronts at 0.5 lands each and accepting 33..38 covers both shapes with
-# one band. Each effective land outside the band costs
-# ``_LAND_BAND_PENALTY`` points (linear, floored at 0) -- steep enough
-# that a 27-land greed manabase scores under 30.
-_LAND_BAND: tuple[int, int] = (33, 38)
+# fronts at 0.5 lands each and accepting the band covers both shapes.
+# Each effective land outside the band costs ``_LAND_BAND_PENALTY``
+# points (linear, floored at 0) -- steep enough that a 27-land greed
+# manabase scores under 30.
+#
+# 2026-08 reconciliation: the band IS the builder's clamp band,
+# imported from ``deck_builder_manabase.LAND_COUNT_BAND`` (33-40).
+# Before sharing, this module graded against a hand-kept (33, 38)
+# while ``deck_builder_manabase`` clamped its own builds to 33-40 --
+# so a 40-land high-curve build the app itself assembled was docked
+# ~24 points on the land half of mana_health. One constant, one
+# owner (the builder, whose land-count model defines "sane"), zero
+# drift. NOTE: seed-trusted builds may still carry up to 42 lands
+# (the builder trusts a community-tuned seed count in 33-42); 41-42
+# is charged the mild linear penalty, which is intentional -- the
+# band covers what OUR model would choose, the seed trust is a
+# deliberate exception.
+_LAND_BAND: tuple[int, int] = LAND_COUNT_BAND
 _LAND_BAND_PENALTY: float = 12.0
 
 # Commander-cost -> ramp expectation (the ``commander_alignment``
