@@ -37,7 +37,7 @@ dev = [
 [project.scripts]
 # CLI entry points so users can `commander-import ...` instead of
 # `python -m commander_builder.moxfield_import ...`. Kept the long forms too
-# since they're already documented in PROJECT.md and audit_workflow.md.
+# since they're already documented in docs/architecture.md and README.md.
 commander-import     = "commander_builder.moxfield_import:main"
 commander-push       = "commander_builder.moxfield_push:main"
 commander-snapshot   = "commander_builder.snapshot_deck:main"

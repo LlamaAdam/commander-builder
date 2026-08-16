@@ -21,7 +21,7 @@
 │  Layer 3 — Phase 2: closed-loop iteration                       │
 │    iteration_loop.py        (orchestrator)                      │
 │    analyst.py               (verdict router)                    │
-│    improvement_advisor.py   (orchestrator: routes to 7 sources) │
+│    improvement_advisor.py   (orchestrator: 3 backends + filters) │
 │      ├─ _advisor_models.py  (shared dataclasses)                │
 │      ├─ _advisor_heuristic.py    (EDHREC-based)               │
 │      ├─ _advisor_bracket_peers.py (Moxfield peer refs)        │
@@ -83,8 +83,13 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The arrow is "depends on". Higher layers compose lower ones. Lower
-layers never import higher.
+The arrows read top-to-bottom as "composes"; dependency actually flows
+the other way for the last hop — **Layer 0 (web) sits on top and
+imports layers 1-3**, not the reverse. Known, deliberate exceptions to
+"lower never imports higher": `status.py` and `doctor.py` (Layer 1
+boxes) read `knowledge_log` (Layer 3), and `deck_dashboard.py` reads
+`archetype`/`staples` (Layer 2) — they are reporting surfaces that may
+read any layer. Everything else honors the invariant.
 
 ## Module responsibility table
 

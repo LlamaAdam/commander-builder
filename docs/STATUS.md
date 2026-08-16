@@ -10,7 +10,7 @@
 
 **Last updated:** 2026-08-03 (repo tidy) — `master` @ `74d258e`
 (PR #68) is the live tip. PRs #36–#68 all landed via short-lived
-branches PR'd to `master`. Full offline suite: **3002 passed / 158
+branches PR'd to `master`. Full offline suite: **3200+ passed (hand-pinned counts rot; run `pytest -q` for the live number) / ~160
 skipped** (re-verified on this box; the repo tidy moved 40 tests
 belonging to one-off scripts out of the collected suite — master
 before the tidy was 3042/158).
@@ -95,7 +95,7 @@ before the tidy was 3042/158).
 
 ## State of the tree
 
-- **Tests:** 3002 passed / 158 skipped — the full offline suite
+- **Tests:** 3200+ passed (see `pytest -q` for the live count) — the full offline suite
   (`python -m pytest tests/ -q`), re-verified 2026-08-03 on this box.
 - **Branch:** `master` (`74d258e`, PR #68) is the live tip — every
   branch through PR #68 is merged; nothing is in flight in the tree.
@@ -662,7 +662,7 @@ For older decisions see [docs/architecture.md](architecture.md#key-decisions).
 
 - **Modules**: ~30 production (advisor split into orchestrator + 7
   sub-modules; web split into orchestrator + 5 blueprints + helpers)
-- **Tests**: 3002 passed / 158 skipped (full offline suite,
+- **Tests**: 3200+ passed (see `pytest -q` for the live count) (full offline suite,
   2026-08-03)
 - **CLI entry points**: 14
 - **Shared with `forge_py`**: `C:\dev\mtg_cards\` cache
