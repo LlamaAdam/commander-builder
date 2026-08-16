@@ -118,21 +118,46 @@ def test_heuristic_inconclusive_when_too_many_draws():
 
 
 def test_heuristic_inputs_lessons_for_kept():
-    # 12-2 over 14 decisive: p ~= 0.013 → kept.
-    v = heuristic_verdict(_input(old_wins=2, new_wins=12, draws=0, total=14), AnalystConfig())
+    # 16-4 over 20 decisive: p ~= 0.012 → kept. (20 decisive: the aligned
+    # MIN_DECISIVE_GAMES_FOR_VERDICT floor — 14 would now be inconclusive.)
+    v = heuristic_verdict(_input(old_wins=4, new_wins=16, draws=0, total=20), AnalystConfig())
     assert any("swap_kept" in lesson for lesson in v.lessons)
 
 
 def test_heuristic_inputs_lessons_for_reverted():
-    v = heuristic_verdict(_input(old_wins=12, new_wins=2, draws=0, total=14), AnalystConfig())
+    v = heuristic_verdict(_input(old_wins=16, new_wins=4, draws=0, total=20), AnalystConfig())
     assert any("swap_reverted" in lesson for lesson in v.lessons)
+
+
+def test_min_decisive_floor_aligned_with_proposer_sim():
+    """Fix 3 (2026-08-16): the analyst's decisive-games floor must be THE
+    SAME constant _proposer_sim gates on — the old AnalystConfig default
+    of 8 let the analyst render confident verdicts on samples the
+    auto-curate path correctly called 'inconclusive'."""
+    from commander_builder import _proposer_sim
+    from commander_builder.analyst import MIN_DECISIVE_GAMES_FOR_VERDICT
+    assert MIN_DECISIVE_GAMES_FOR_VERDICT == 20
+    assert AnalystConfig().min_decisive_games == MIN_DECISIVE_GAMES_FOR_VERDICT
+    assert (_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT
+            == MIN_DECISIVE_GAMES_FOR_VERDICT)
+
+
+def test_heuristic_inconclusive_below_aligned_floor():
+    """14 decisive games (a lopsided 12-2, p ~= 0.013) sits below the
+    aligned 20-decisive floor: the verdict must be the inconclusive
+    neutral, not a confident kept — matching _verdict_from_ab, which
+    returns 'inconclusive' for the same outcome."""
+    v = heuristic_verdict(_input(old_wins=2, new_wins=12, draws=0, total=14), AnalystConfig())
+    assert v.label == "neutral"
+    assert v.confidence == 0.3
+    assert "Inconclusive" in v.reasoning
 
 
 # --- analyze() router ------------------------------------------------------
 
 def test_analyze_returns_heuristic_when_strong_signal():
     """High-confidence heuristic short-circuits — no LLM escalation needed."""
-    v = analyze(_input(old_wins=2, new_wins=10, draws=0, total=12))
+    v = analyze(_input(old_wins=4, new_wins=16, draws=0, total=20))
     assert v.source == "heuristic"
     assert v.label == "kept"
 

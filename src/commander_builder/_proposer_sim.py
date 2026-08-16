@@ -37,6 +37,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Canonical decisive-games floor, defined next to the binomial test it
+# gates (analyst owns the verdict statistics; this module already imports
+# ``binomial_two_sided_p`` from there — same direction, no cycle).
+# Re-exported under its historical name: ``improve`` and callers import
+# ``_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT``.
+from .analyst import MIN_DECISIVE_GAMES_FOR_VERDICT  # noqa: F401
+
 
 # Minimum absolute margin (|wins_b - wins_a|) for an A/B run to even be
 # CONSIDERED kept/reverted. Historical knob (the CLI tunes it via
@@ -54,15 +61,15 @@ _DEFAULT_SIM_MARGIN = 1
 # decisive games P(|new - old| >= 4) ~= 0.50: half of all neutral swaps
 # would earn a confident verdict. The exact binomial test scales the bar
 # with the decisive count instead (at n=20 significance needs a 15-5
-# split; at n=40, ~26-14).
+# split; at n=40, 27-13 — exact tails give p(26,40)=0.081, p(27,40)=0.039).
 VERDICT_ALPHA = 0.05
 
-# Below this many DECISIVE games (wins_a + wins_b, draws excluded), an A/B
+# MIN_DECISIVE_GAMES_FOR_VERDICT (imported from ``analyst`` above): below
+# that many DECISIVE games (wins_a + wins_b, draws excluded), an A/B
 # result is too noisy to call: the win-rate standard error is ~0.5/sqrt(N)
 # (N=10 -> +/-0.16, N=20 -> +/-0.11), which swamps the ~0.01-0.05 effect a
 # curator swap actually has. Below the threshold the verdict is 'inconclusive'
 # rather than a confident kept/reverted that a single-game flip could invert.
-MIN_DECISIVE_GAMES_FOR_VERDICT = 20
 
 # Unit converter between --sim-games and the gate above. --sim-games is
 # TOTAL 4-player-pod games, but the gate counts DECISIVE games -- games

@@ -899,6 +899,14 @@ def make_sim_blueprint(
         # regression's margin positive while the CLI writers stored
         # signed values — the column read as "new deck ahead" for rows
         # where the old deck won.
+        #
+        # When decisive == 0 margin stays NULL too (2026-08-16), matching
+        # the win-rate columns' own NULL-on-no-decisive rule two sentences
+        # up: a payload where neither compared version won a game (all
+        # draws, filler sweep, or a hand-built report with no win counts
+        # at all) carries no observed head-to-head delta, and a fabricated
+        # 0 would read as an observed dead-even split in every cross-run
+        # margin analysis.
         win_rate_old = None
         win_rate_new = None
         margin = None
@@ -909,7 +917,8 @@ def make_sim_blueprint(
                 decisive = old_w + new_w
                 win_rate_old = decisive_win_rate(old_w, decisive)
                 win_rate_new = decisive_win_rate(new_w, decisive)
-                margin = new_w - old_w
+                if decisive > 0:
+                    margin = new_w - old_w
             except (TypeError, ValueError):
                 pass
 

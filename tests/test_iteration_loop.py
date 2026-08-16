@@ -154,8 +154,9 @@ def staged_decks(tmp_path, monkeypatch):
 
 
 def test_run_one_iteration_persists_kept_verdict(tmp_path, staged_decks, monkeypatch):
-    """Strong improvement (margin 10) → kept verdict → next_action='continue'."""
-    canned = _make_canned_comparison(old_wins=2, new_wins=12, draws=0, total=14)
+    """Strong improvement (16-4 over 20 decisive, p ~= 0.012 — at the
+    aligned 20-decisive floor) → kept verdict → next_action='continue'."""
+    canned = _make_canned_comparison(old_wins=4, new_wins=16, draws=0, total=20)
     monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
 
     db = tmp_path / "kl.sqlite"
@@ -175,11 +176,11 @@ def test_run_one_iteration_persists_kept_verdict(tmp_path, staged_decks, monkeyp
     assert fetched is not None
     assert fetched.deck_id == "stable-public-id"  # publicId, not filename
     assert fetched.verdict == "kept"
-    assert fetched.margin == 10
+    assert fetched.margin == 12
     # One-convention precision (2026-07-19): all knowledge_log win-rate
     # writers round to 4 places via knowledge_log.decisive_win_rate.
-    assert fetched.win_rate_old == round(2 / 14, 4)
-    assert fetched.win_rate_new == round(12 / 14, 4)
+    assert fetched.win_rate_old == round(4 / 20, 4)
+    assert fetched.win_rate_new == round(16 / 20, 4)
     assert fetched.audit_manifest["added"] == ["NewCard"]
     # Sim report is the full ComparisonReport.to_dict()
     assert fetched.sim_report["winner"] == "new"
@@ -212,7 +213,7 @@ def test_run_one_iteration_win_rates_exclude_filler_wins(tmp_path, staged_decks,
 
 def test_run_one_iteration_persists_reverted_verdict(tmp_path, staged_decks, monkeypatch):
     """Strong regression → reverted → next_action='revert'."""
-    canned = _make_canned_comparison(old_wins=12, new_wins=2, draws=0, total=14)
+    canned = _make_canned_comparison(old_wins=16, new_wins=4, draws=0, total=20)
     monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
 
     db = tmp_path / "kl.sqlite"
@@ -374,7 +375,7 @@ def test_propose_then_iterate_materializes_proposed_deck(
     monkeypatch.setattr(
         "commander_builder.iteration_loop.propose", _fake_propose,
     )
-    canned = _make_canned_comparison(old_wins=2, new_wins=12, draws=0, total=14)
+    canned = _make_canned_comparison(old_wins=4, new_wins=16, draws=0, total=20)
     monkeypatch.setattr(
         "commander_builder.iteration_loop.compare", lambda **kw: canned,
     )

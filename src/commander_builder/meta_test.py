@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Optional
 
 from . import dck_utils
+from ._proposer_sim import VERDICT_ALPHA
+from .analyst import binomial_two_sided_p
 from .compare_versions import COMPARE_OUT_DIR, ComparisonReport, compare
 from .dck_meta import rewrite_name
 from .edhrec_client import (
@@ -643,6 +645,23 @@ def run_meta_test(
 
 # --- Output formatting -----------------------------------------------------
 
+def _min_significant_split(decisive: int,
+                           alpha: float = VERDICT_ALPHA) -> Optional[int]:
+    """Smallest win count ``k`` (of ``decisive`` head-to-head games) whose
+    exact two-sided binomial p vs 0.5 clears ``alpha``.
+
+    Returns ``None`` when NO split at this sample size can reach
+    significance — below 6 decisive games even a clean sweep has
+    p >= 0.0625, so the honest advice is "play more games", not "win
+    harder". Used by ``format_report_text`` to tell the user what record
+    a verdict would actually take at their game count.
+    """
+    for k in range(decisive // 2 + 1, decisive + 1):
+        if binomial_two_sided_p(k, decisive) < alpha:
+            return k
+    return None
+
+
 def format_report_text(report: MetaTestReport) -> str:
     lines = []
     lines.append("=" * 60)
@@ -671,13 +690,36 @@ def format_report_text(report: MetaTestReport) -> str:
     )
     lines.append("")
     decisive = rec["user_wins"] + rec["user_losses"]
-    if rec["user_wins"] > rec["user_losses"]:
+    # Verdict language is gated on statistical significance (2026-08-16):
+    # at the CLI default of 2 games per reference a 1-2 record used to
+    # print "The references BEAT your deck" — an exact two-sided binomial
+    # p of 1.0, i.e. a coin flip narrated as a verdict. OUTPERFORMED/BEAT
+    # now require p < VERDICT_ALPHA on the head-to-head decisive split
+    # (same test + bar as the kept/reverted gates). The card-diff sections
+    # below are deliberately untouched — at low N they, not the W/L
+    # record, are the real signal of a meta-test run.
+    p_value = binomial_two_sided_p(rec["user_wins"], decisive)
+    significant = decisive > 0 and p_value < VERDICT_ALPHA
+    if significant and rec["user_wins"] > rec["user_losses"]:
         lines.append("=> Your deck OUTPERFORMED the references. The diff below "
                      "is more 'cards you might add' than 'must-haves'.")
-    elif rec["user_wins"] < rec["user_losses"]:
+    elif significant and rec["user_wins"] < rec["user_losses"]:
         lines.append("=> The references BEAT your deck. The 'must-add' list "
                      "below is concrete signal — those cards are in both "
                      "winning decks and missing from yours.")
+    elif decisive > 0:
+        need_k = _min_significant_split(decisive)
+        if need_k is not None:
+            need = f"need ~{need_k}-{decisive - need_k} for significance"
+        else:
+            need = (f"even {decisive}-0 wouldn't be significant; run more "
+                    f"games — 6+ decisive at minimum")
+        lines.append(
+            f"=> {rec['user_wins']}-{rec['user_losses']} is not "
+            f"statistically distinguishable over {decisive} decisive games "
+            f"({need}). The card diff below is the real signal at this "
+            f"sample size."
+        )
     elif decisive == 0 and rec["draws"] > 0:
         # 0-0-N: neither side could close. Different message than "even".
         lines.append(f"=> NEITHER deck could close ({rec['draws']} draws, no "

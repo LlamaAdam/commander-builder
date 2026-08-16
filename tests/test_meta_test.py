@@ -292,6 +292,14 @@ def test_fetch_reference_decks_pulls_top_likes_and_edhrec_avg(tmp_path, monkeypa
         "commander_builder.meta_test.fetch_deck",
         lambda deck_id: fake_edhrec_avg,
     )
+    # Keep the suite offline: the EDHREC average-deck path calls
+    # _fetch_edhrec_average_deck (edhrec_client under the hood), which
+    # would otherwise hit the live network. Same stub seam the
+    # missing-top-likes test uses.
+    monkeypatch.setattr(
+        "commander_builder.meta_test._fetch_edhrec_average_deck",
+        lambda commander_name, bracket=None, **kw: fake_edhrec_avg,
+    )
 
     refs = fetch_reference_decks(
         "Hakbal of the Surging Soul",
@@ -397,18 +405,89 @@ def test_format_report_text_includes_winner_framing():
         references=[_ref(["X", "Y", "Z"])],
         comparisons=[],
         card_diff=diff,
+        # 3-17 over 20 decisive: exact binomial p ~= 0.0026 — a
+        # statistically real loss, so the BEAT framing is earned.
         user_record={
-            "user_wins": 2, "user_losses": 8, "draws": 0,
-            "total_games": 10, "win_rate": 0.2,
+            "user_wins": 3, "user_losses": 17, "draws": 0,
+            "total_games": 20, "win_rate": 0.15,
         },
     )
     text = format_report_text(report)
     assert "Must-add" in text
     assert "X" in text and "Y" in text
-    assert "BEAT your deck" in text  # losses > wins framing
+    assert "BEAT your deck" in text  # significant losses > wins framing
 
 
 def test_format_report_text_outperform_framing():
+    from commander_builder.meta_test import MetaTestReport
+    report = MetaTestReport(
+        user_deck="user.dck", bracket=3, timestamp="x",
+        references=[_ref(["X"])],
+        card_diff=CardDiffReport(),
+        # 16-4 over 20 decisive: p ~= 0.012 — a statistically real win.
+        user_record={
+            "user_wins": 16, "user_losses": 4, "draws": 0,
+            "total_games": 20, "win_rate": 0.8,
+        },
+    )
+    text = format_report_text(report)
+    assert "OUTPERFORMED" in text
+
+
+# --- verdict-language significance gating (2026-08-16) ----------------------
+
+def test_format_report_no_beat_language_on_coin_flip_record():
+    """The CLI default (2 games/reference) routinely produces records like
+    1-2 — exact binomial p = 1.0, pure coin flip. The BEAT framing must
+    NOT print; the honest not-distinguishable line (with the more-games
+    guidance) must, and the card-diff sections stay intact — they are the
+    real signal at low N."""
+    from commander_builder.meta_test import CardSuggestion, MetaTestReport
+    diff = CardDiffReport(
+        must_add=[CardSuggestion(card="X", in_n_references=1,
+                                 total_references=1, role="other")],
+    )
+    report = MetaTestReport(
+        user_deck="user.dck", bracket=3, timestamp="x",
+        references=[_ref(["X"])],
+        card_diff=diff,
+        user_record={
+            "user_wins": 1, "user_losses": 2, "draws": 0,
+            "total_games": 3, "win_rate": 1 / 3,
+        },
+    )
+    text = format_report_text(report)
+    assert "BEAT" not in text
+    assert "OUTPERFORMED" not in text
+    assert "not statistically distinguishable over 3 decisive games" in text
+    # 3 decisive can never reach p < 0.05 (even 3-0 is p=0.25): the line
+    # must say "more games", not name an impossible split.
+    assert "6+ decisive" in text
+    # Card diff untouched.
+    assert "Must-add" in text
+    assert "X" in text
+
+
+def test_format_report_beat_language_allowed_when_significant():
+    """4-16 over 20 decisive (p ~= 0.012 < 0.05): a real loss — the BEAT
+    framing is allowed through the gate."""
+    from commander_builder.meta_test import MetaTestReport
+    report = MetaTestReport(
+        user_deck="user.dck", bracket=3, timestamp="x",
+        references=[_ref(["X"])],
+        card_diff=CardDiffReport(),
+        user_record={
+            "user_wins": 4, "user_losses": 16, "draws": 0,
+            "total_games": 20, "win_rate": 0.2,
+        },
+    )
+    text = format_report_text(report)
+    assert "BEAT your deck" in text
+
+
+def test_format_report_names_needed_split_when_reachable():
+    """8-2 over 10 decisive is NOT significant (p ~= 0.109); at 10 decisive
+    the minimal significant split is 9-1, and the message should say so."""
     from commander_builder.meta_test import MetaTestReport
     report = MetaTestReport(
         user_deck="user.dck", bracket=3, timestamp="x",
@@ -420,7 +499,18 @@ def test_format_report_text_outperform_framing():
         },
     )
     text = format_report_text(report)
-    assert "OUTPERFORMED" in text
+    assert "OUTPERFORMED" not in text
+    assert "not statistically distinguishable over 10 decisive games" in text
+    assert "~9-1" in text
+
+
+def test_min_significant_split_matches_exact_tails():
+    from commander_builder.meta_test import _min_significant_split
+    assert _min_significant_split(20) == 15   # p(15,20) ~= 0.041
+    assert _min_significant_split(40) == 27   # p(27,40) ~= 0.038; 26-14 is 0.081
+    assert _min_significant_split(6) == 6     # only the sweep clears at n=6
+    assert _min_significant_split(5) is None  # 5-0 is p=0.0625 — unreachable
+    assert _min_significant_split(3) is None
 
 
 def test_format_report_text_all_draws_framing():

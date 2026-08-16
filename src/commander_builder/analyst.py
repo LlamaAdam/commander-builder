@@ -40,6 +40,22 @@ from ._llm_json import extract_json_object
 
 # --- Verdict statistics ----------------------------------------------------
 
+# Canonical decisive-games floor for ANY confident verdict, shared by every
+# verdict path (this module's heuristic_verdict and
+# ``_proposer_sim._verdict_from_ab``, which imports it from here). Below
+# this many HEAD-TO-HEAD decisive games (old_wins + new_wins; draws and
+# filler-seat wins excluded) the win-rate standard error is ~0.5/sqrt(N)
+# (N=10 -> +/-0.16, N=20 -> +/-0.11), which swamps the ~0.01-0.05 effect a
+# curator swap actually has, so the result is inconclusive regardless of
+# how lopsided the split looks.
+#
+# 2026-08-16 alignment: AnalystConfig previously defaulted to 8 (an early
+# empirical guess) while _proposer_sim gated at 20 — the SAME sim outcome
+# could earn a confident kept/reverted from the analyst path but
+# 'inconclusive' from the auto-curate path. One constant, one floor.
+MIN_DECISIVE_GAMES_FOR_VERDICT = 20
+
+
 def binomial_two_sided_p(k: int, n: int) -> float:
     """Exact two-sided binomial test of ``k`` successes in ``n`` trials
     against the null hypothesis p = 0.5.
@@ -116,7 +132,12 @@ class AnalystConfig:
     margin_strong_threshold: int = 4   # DEPRECATED (unread): superseded by `alpha`
     margin_noise_threshold: int = 2    # DEPRECATED (unread): superseded by `alpha`
     alpha: float = 0.05                # two-sided significance bar for kept/reverted
-    min_decisive_games: int = 8        # head-to-head decisive games needed for any verdict
+    # Head-to-head decisive games needed for any verdict. Defaults to the
+    # canonical module-level MIN_DECISIVE_GAMES_FOR_VERDICT (20) so this
+    # gate and _proposer_sim._verdict_from_ab's agree — the old default of
+    # 8 let the analyst render confident verdicts on samples the
+    # auto-curate path correctly called 'inconclusive'.
+    min_decisive_games: int = MIN_DECISIVE_GAMES_FOR_VERDICT
     use_claude: bool = False           # Set True when ANTHROPIC_API_KEY is wired.
     use_ollama: bool = False           # Set True when local model is running.
     claude_model: str = "claude-sonnet-4-5"
