@@ -649,6 +649,19 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         ),
         (r"(?:put|return)[^.]+land card[^.]+(?:onto the battlefield|to the battlefield)", None, 80),
         (r"create a treasure token", None, 40),
+        # Plural / variable Treasure production — "create two Treasure
+        # tokens" (Big Score), "create X Treasure tokens" (Dockside
+        # Extortionist), "create that many Treasure tokens" (Old
+        # Gnawbone). Round-2 evergreen audit 2026-08-16: the singular
+        # pattern above only matched "create a treasure token", so every
+        # multi-Treasure producer was invisible to the ramp-role count.
+        # Cards whose draw clause outranks this (Big Score's "Draw two
+        # cards", score 70 > 40) still classify as draw — intended.
+        (
+            r"create (?:two|three|four|five|six|seven|eight|nine|ten|"
+            r"x|that many|a number of) treasure tokens",
+            None, 40,
+        ),
     ]),
     ("draw", [
         (r"draw (?:a card|two cards|three cards|\d cards|x cards|cards equal)", None, 70),
@@ -662,6 +675,24 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"investigate", None, 40),
         (r"scry \d+", None, 30),
         (r"\bcantrip", None, 60),
+        # Impulse draw — "Exile the top [two/three/X] card(s) of your
+        # library. [Until end of turn / Until the end of your next
+        # turn,] you may play ..." (Light Up the Stage, Wrenn's
+        # Resolve, Prosper's end-step trigger). Round-2 evergreen audit
+        # 2026-08-16: no pattern saw exile-to-play card advantage at
+        # all. The window is ``[^\n]{0,60}`` — crossing the sentence
+        # break but never a paragraph break — so the "exile the top"
+        # clause and the "you may play/cast" permission must sit in the
+        # SAME ability. Cascade reminder text can't false-positive:
+        # its wording is "exile cards from the top of your library",
+        # which never matches "exile the top", and its "you may cast
+        # it" lives in the same reminder either way (pinned by the
+        # Bloodbraid Elf fixture test).
+        (
+            r"exile the top (?:\w+ )?cards? of your library"
+            r"[^\n]{0,60}?you may (?:play|cast)",
+            None, 60,
+        ),
     ]),
     ("removal", [
         (r"destroy target", None, 70),
@@ -670,6 +701,35 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"target creature gets -\d+/-\d+", None, 40),
         (r"deals \d+ damage to (?:any target|target)", None, 50),
         (r"counter target spell", None, 65),
+        # Restricted counterspells — Negate ("counter target
+        # noncreature spell"), Dovin's Veto, Swan Song ("counter target
+        # enchantment, instant, or sorcery spell"), Spell Pierce
+        # ("... noncreature spell unless its controller pays {2}").
+        # Round-2 evergreen audit 2026-08-16: the pattern above
+        # required "spell" IMMEDIATELY after "target", so every
+        # restricted counter fell through to "other". ``[^.\n]{0,60}``
+        # keeps the qualifier list inside one sentence; ``\bspell\b``
+        # keeps ability counters (Stifle's "counter target activated
+        # or triggered ability") out — those never say "spell".
+        (r"counter target [^.\n]{0,60}?\bspell\b", None, 65),
+        # Fight ("Target creature you control fights target creature
+        # you don't control" — Prey Upon class) and bite ("deals damage
+        # equal to its power to target creature" — Ram Through class).
+        # Round-2 evergreen audit 2026-08-16: both classified "other".
+        # Prey Upon's reminder text ("Each deals damage equal to its
+        # power to the other.") matches neither pattern on its own —
+        # "the other" is not "target creature".
+        (r"fights? (?:up to \w+ )?(?:another )?target creature", None, 50),
+        (r"deals damage equal to its power to target creature", None, 50),
+        # Edicts — Diabolic Edict ("Target player sacrifices a
+        # creature"), Soul Shatter ("Each opponent sacrifices a
+        # creature or planeswalker ..."). Round-2 evergreen audit
+        # 2026-08-16. Anchored on "(each|target) (opponent|player)" so
+        # your-own-sacrifice costs ("Sacrifice a creature: Add
+        # {C}{C}.") and aristocrats triggers ("Whenever you sacrifice
+        # a creature") never match — same guard interaction.py's edict
+        # pattern uses.
+        (r"(?:each|target) (?:opponent|player) sacrifices? a creature", None, 65),
     ]),
     ("wipe", [
         (r"destroy all (?:creatures|nonland|nonland permanents|permanents)", None, 90),
@@ -684,6 +744,22 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"exile all (?:creatures|permanents)", None, 90),
         (r"return all .* to (?:its|their) owners' hands", None, 80),
         (r"deals \d+ damage to each (?:creature|player)", None, 75),
+        # X-damage sweeps — Earthquake ("deals X damage to each
+        # creature without flying and each player") / Chain Reaction
+        # class. Round-2 evergreen audit 2026-08-16: the digit pattern
+        # above requires literal digits, so every X-wipe classified
+        # "other". Oracle text arrives lowercased, so the X is a
+        # literal "x". Targeted X burn ("deals X damage to target
+        # creature") stays out — the pattern is anchored on "to each".
+        (r"deals x damage to each (?:creature|player)", None, 75),
+        # "deals damage equal to ... to each ... creature" — Widespread
+        # Brutality class (the Army "deals damage equal to its power to
+        # each non-Army creature"). Same-sentence window mirrors the
+        # restricted-counterspell discipline; the trailing ``creature``
+        # anchor keeps "to each opponent" finisher text (Torment of
+        # Hailfire class) in the finisher bucket where it already
+        # lives.
+        (r"deals damage equal to [^.\n]{0,60}to each [^.\n]{0,25}creature", None, 75),
         # "Destroy each <typed> creature" / "destroy each <subtype>" —
         # In Garruk's Wake, Dusk // Dawn, etc. The "each <typed>"
         # idiom is modern templating for board-scoped removal.
@@ -730,6 +806,14 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"protection from", None, 60),
         (r"shroud", None, 50),
         (r"can't be the target of", None, 50),
+        # Ward — "ward {2}" (Miirym) / "ward—pay 1 life" (Raffine) /
+        # "ward—sacrifice ..." lines. Round-2 evergreen audit
+        # 2026-08-16: the evergreen keyword postdates the original
+        # pattern table entirely. Requiring the cost marker (``{`` or
+        # the em-dash) right after the keyword keeps card-name mentions
+        # ("Ward of Bones") and words containing "ward" (``\b`` blocks
+        # "toward"/"reward") from matching.
+        (r"\bward\s*(?:\{|—)", None, 50),
     ]),
     ("tutor", [
         (r"search your library for a (?:card|creature|artifact|enchantment|instant|sorcery|planeswalker|legendary)", None, 80),

@@ -319,6 +319,157 @@ def test_classify_role_tutor_or_combined_types():
     assert classify_role(o["oracle_text"], o["type_line"]) == "tutor"
 
 
+# ---------------------------------------------------------------------------
+# Round-2 evergreen gaps (2026-08-16) — six confirmed classify_role misses
+# (all returned "other" against real Scryfall text) plus the treasure-plural
+# ramp gap. Every fixture below comes from tests/fixtures/real_oracles.py
+# per the real-oracle discipline.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [
+    "Negate",           # counter target noncreature spell
+    "Dovin's Veto",     # can't-be-countered rider + noncreature counter
+    "Spell Pierce",     # noncreature + unless-controller-pays form
+    "Swan Song",        # enchantment, instant, or sorcery type list
+])
+def test_classify_role_removal_restricted_counterspells(name):
+    # The original pattern required "spell" immediately after
+    # "target", so every restricted counterspell fell to "other".
+    from tests.fixtures.real_oracles import oracle
+    o = oracle(name)
+    assert classify_role(o["oracle_text"], o["type_line"]) == "removal"
+
+
+@pytest.mark.parametrize("name", [
+    "Light Up the Stage",   # plural, "until the end of your next turn"
+    "Wrenn's Resolve",      # bare two-card impulse template
+])
+def test_classify_role_draw_impulse_exile_to_play(name):
+    from tests.fixtures.real_oracles import oracle
+    o = oracle(name)
+    assert classify_role(o["oracle_text"], o["type_line"]) == "draw"
+
+
+def test_classify_role_draw_impulse_engine_prosper():
+    # Singular form ("exile the top card ... you may play that
+    # card") on a creature; impulse draw (60) must beat both the
+    # threat fallback and Prosper's treasure-ramp clause (40).
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Prosper, Tome-Bound")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "draw"
+
+
+def test_classify_role_impulse_guard_cascade_reminder_not_draw():
+    # Cascade's reminder text ("exile cards from the top of your
+    # library ... You may cast it without paying its mana cost")
+    # must NOT trip the impulse-draw pattern — Bloodbraid Elf is a
+    # threat, not a draw spell.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Bloodbraid Elf")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "threat"
+
+
+def test_classify_role_removal_fight_prey_upon():
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Prey Upon")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "removal"
+
+
+def test_classify_role_removal_bite_ram_through():
+    # One-sided fight: "deals damage equal to its power to target
+    # creature" with no "fights" keyword anywhere.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Ram Through")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "removal"
+
+
+@pytest.mark.parametrize("name", [
+    "Diabolic Edict",   # target player sacrifices a creature
+    "Soul Shatter",     # each opponent sacrifices a creature or planeswalker
+])
+def test_classify_role_removal_edicts(name):
+    from tests.fixtures.real_oracles import oracle
+    o = oracle(name)
+    assert classify_role(o["oracle_text"], o["type_line"]) == "removal"
+
+
+def test_classify_role_edict_guard_own_sacrifice_cost_not_removal():
+    # Sacrificing YOUR OWN creature as an activation cost (Ashnod's
+    # Altar) must never read as edict removal — the edict pattern is
+    # anchored on "(each|target) (opponent|player) sacrifices".
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Ashnod's Altar")
+    role = classify_role(o["oracle_text"], o["type_line"])
+    assert role != "removal"
+    assert role == "ramp"   # via its "Add {C}{C}" clause
+
+
+@pytest.mark.parametrize("name", [
+    "Earthquake",       # deals X damage to each creature ... and each player
+    "Chain Reaction",   # deals X damage to each creature, where X is ...
+])
+def test_classify_role_wipe_x_damage_each_creature(name):
+    # The original wipe pattern required literal digits, so every
+    # X-damage sweep classified "other".
+    from tests.fixtures.real_oracles import oracle
+    o = oracle(name)
+    assert classify_role(o["oracle_text"], o["type_line"]) == "wipe"
+
+
+def test_classify_role_wipe_damage_equal_to_each_creature():
+    # Widespread Brutality: "deals damage equal to its power to each
+    # non-Army creature" — no digits, no literal X.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Widespread Brutality")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "wipe"
+
+
+@pytest.mark.parametrize("name", [
+    "Miirym, Sentinel Wyrm",      # ward {2} in a keyword line
+    "Phyrexian Fleshgorger",      # Ward—Pay ... em-dash cost form
+])
+def test_classify_role_protection_ward(name):
+    from tests.fixtures.real_oracles import oracle
+    o = oracle(name)
+    assert classify_role(o["oracle_text"], o["type_line"]) == "protection"
+
+
+def test_classify_role_ward_guard_requires_cost_marker():
+    # The ward pattern demands "{" or the em-dash right after the
+    # keyword, so a card-name mention ("Ward of Bones") or words
+    # containing "ward" never classify as protection. Synthetic
+    # NEGATIVE guard — no real card needs to exist for the
+    # non-match to be worth pinning.
+    assert classify_role(
+        "Sacrifice Ward of Bones: each opponent discards a card.",
+        "Artifact",
+    ) != "protection"
+    assert classify_role(
+        "Creatures you control can attack as though they didn't have "
+        "defender. Move toward victory as you reap your reward.",
+        "Enchantment",
+    ) != "protection"
+
+
+def test_classify_role_ramp_treasure_plural_dockside():
+    # "create X Treasure tokens" — the singular "create a treasure
+    # token" pattern missed every plural/variable Treasure producer.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Dockside Extortionist")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "ramp"
+
+
+def test_classify_role_big_score_draw_clause_still_wins():
+    # Big Score creates two Treasures AND draws two cards; the draw
+    # role (70) must keep outranking the new treasure-ramp match
+    # (40) — the round-2 fix adds ramp-pattern coverage without
+    # reclassifying draw spells.
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Big Score")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "draw"
+
+
 def test_classify_role_finisher():
     role = classify_role("Target opponent loses the game.", "Sorcery")
     assert role == "finisher"
