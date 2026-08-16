@@ -121,7 +121,8 @@ _MLD_CARDS = frozenset(c.lower() for c in (
 # The bare count-of-two proxy this module used to floor on encoded the
 # stricter pre-Oct-2025 beta reading; the chaining operationalization
 # now lives in ``_estimate_bracket_inner`` (see the extra-turn floor
-# comment there and ``_EXTRA_TURN_CHAIN_ENABLERS``).
+# comment there and ``_EXTRA_TURN_REPEATABLE_ENABLERS`` /
+# ``_EXTRA_TURN_ONESHOT_REBUYS``).
 _EXTRA_TURN_CARDS = frozenset(c.lower() for c in (
     # Audit-prompt seed list
     "Time Warp", "Temporal Manipulation", "Walk the Aeons",
@@ -137,17 +138,58 @@ _EXTRA_TURN_CARDS = frozenset(c.lower() for c in (
 # on the stack. Curated (oracle text can't cleanly separate "returns
 # instants/sorceries" recursion aimed at time magic from generic value
 # recursion — human judgment stays in the loop, same stance as the
-# tutor list). Used only by the extra-turn chaining floor below: a
-# deck holding 2 extra-turn spells PLUS one of these has a credible
-# loop; 2 bare extra-turn spells is the "low quantities" B3 allowance.
-_EXTRA_TURN_CHAIN_ENABLERS = frozenset(c.lower() for c in (
-    # Graveyard rebuy
+# tutor list).
+#
+# SPLIT BY REPEATABILITY (round-2 bracket-floor correctness pass). The
+# 2025-10-21 WotC bracket language restricts extra turns below B4 when
+# they are "CHAINED OR LOOPED"; B3 allows them in low quantities
+# otherwise. A chain/loop needs an engine that rebuys or copies turn
+# spells REPEATEDLY — a ONE-SHOT rebuy (Eternal Witness returning one
+# Time Warp, Fork copying one) yields exactly one additional turn and
+# then is spent: that is "low quantities plus value", not a chain, and
+# hard-flooring it at B4 slammed ordinary B3 lists. The one axis that
+# separates the buckets is: after the enabler does its thing once, can
+# it do it again without outside help?
+#
+#   * REPEATABLE (hard B4 floor at 2+ extra-turn cards): the enabler
+#     survives its own use or rebuys spells en masse — buyback returns
+#     the copy engine to hand every cast (Reiterate); a permanent
+#     copies every turn spell you cast, forever (Mirari); a fetchable
+#     land re-tops the turn spell each time it re-enters (Mystic
+#     Sanctuary); a mass rebuy hands the whole graveyard back
+#     (Timetwister, Underworld Breach, Past in Flames).
+#   * ONE-SHOT (weighted signal, NO hard floor at 2): single rebuys and
+#     single copies — Eternal Witness / Regrowth / Mystic Retrieval
+#     (one card back, once), Snapcaster Mage / Torrential Gearhulk
+#     (one flashback / one free cast), Twincast / Fork (one copy),
+#     Narset's Reversal (copies AND rebounds the turn spell, but
+#     spends ITSELF — the loop dies without a second Reversal),
+#     Dualcaster Mage (one ETB copy), and the bare ETB-recursion
+#     creatures Archaeomancer / Mnemonic Wall / Scholar of the Ages:
+#     repeating those requires a blink engine, which is out of static
+#     name-list reach, so the bare creatures stay one-shot.
+#
+# Used by the extra-turn chaining floor below: 2+ extra-turn spells
+# PLUS a REPEATABLE engine is a credible loop (hard B4 floor); 2 with
+# only one-shot rebuys is the "low quantities" B3 allowance carrying an
+# extra weighted nudge (see DEFAULT_WEIGHTS["extra_turn_oneshot_rebuy"]).
+# The 3+ raw-density floor is unchanged and independent of this split.
+_EXTRA_TURN_REPEATABLE_ENABLERS = frozenset(c.lower() for c in (
+    # Buyback / permanent copy engines
+    "Reiterate", "Mirari",
+    # Fetchable, recurring graveyard-to-library rebuy
+    "Mystic Sanctuary",
+    # Mass rebuy
+    "Timetwister", "Underworld Breach", "Past in Flames",
+))
+
+_EXTRA_TURN_ONESHOT_REBUYS = frozenset(c.lower() for c in (
+    # Single graveyard rebuy
     "Archaeomancer", "Mnemonic Wall", "Scholar of the Ages",
-    "Mystic Sanctuary", "Eternal Witness", "Regrowth",
-    "Timetwister", "Underworld Breach",
-    # Stack copy
-    "Narset's Reversal", "Mirari", "Reiterate", "Twincast", "Fork",
-    "Dualcaster Mage",
+    "Eternal Witness", "Regrowth", "Mystic Retrieval",
+    "Snapcaster Mage", "Torrential Gearhulk",
+    # Single stack copy
+    "Narset's Reversal", "Twincast", "Fork", "Dualcaster Mage",
 ))
 
 # Tutors, for the density signal. HEURISTIC ONLY as of the 2025-10-21
@@ -245,8 +287,17 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     # Per NON-CHAINING extra-turn card, capped at 2 counted (B3 allows
     # "low quantities" of un-chained extra turns — 2025-10-21 rules).
     # A chaining count/setup is a hard B4 floor instead, so this
-    # weight only ever fires for 1-2 cards with no chain support.
+    # weight only ever fires for 1-2 cards without a repeatable chain
+    # engine.
     "extra_turn_single": 0.25,
+    # Per ONE-SHOT rebuy/copy piece (capped at 2 counted) alongside 2+
+    # extra-turn cards. One-shot rebuys (Eternal Witness, Fork, ...)
+    # can't sustain the "chained or looped" line the 2025-10-21 rules
+    # floor on, so they are a power nudge — same magnitude per card as
+    # extra_turn_single — never a floor. Fires only at 2+ extra-turn
+    # cards: a single Time Warp plus Snapcaster is generic value, not
+    # extra-turn pressure.
+    "extra_turn_oneshot_rebuy": 0.25,
     # Curve bands from _power_bracket: <=2.6 avg CMC reads "tuned low
     # curve"; >=3.8 reads "casual battlecruiser" and pulls DOWN.
     "curve_tight": 0.5,
@@ -581,7 +632,10 @@ def _estimate_bracket_inner(
     )
     mld_hits = sorted(names_set & _MLD_CARDS)
     extra_turn_hits = sorted(names_set & _EXTRA_TURN_CARDS)
-    extra_turn_chain_hits = sorted(names_set & _EXTRA_TURN_CHAIN_ENABLERS)
+    extra_turn_repeatable_hits = sorted(
+        names_set & _EXTRA_TURN_REPEATABLE_ENABLERS
+    )
+    extra_turn_oneshot_hits = sorted(names_set & _EXTRA_TURN_ONESHOT_REBUYS)
     tutor_hits = sorted(names_set & _TUTOR_CARDS)
     fast_mana_hits = sorted(names_set & _FAST_MANA_CARDS)
     salt_count = _offline_salt_count(names_set)
@@ -647,22 +701,27 @@ def _estimate_bracket_inner(
         reasons.append(
             f"floor B4: mass land denial present ({', '.join(mld_hits)})"
         )
-    # Extra turns: the 2025-10-21 rules target CHAINING/looping extra
-    # turns; B3 explicitly allows "low quantities" of non-chaining
-    # ones, so a bare count of 2 is no longer a floor (that was the
-    # pre-Oct-2025 beta reading). OPERATIONALIZATION of "can chain",
-    # from a static list: (a) 3+ extra-turn cards — at that density
-    # the turns realistically cast back-to-back, which is the chained
-    # experience the rule targets regardless of intent; or (b) 2+
-    # extra-turn cards alongside a curated recursion/copy piece
-    # (_EXTRA_TURN_CHAIN_ENABLERS) that can rebuy or duplicate them —
-    # a credible loop. A single extra-turn card never floors, even
-    # with recursion present (one Time Warp + Archaeomancer is a slow
-    # 2-card value engine combo_detection would flag separately if it
-    # were game-ending).
+    # Extra turns: the 2025-10-21 rules target extra turns that are
+    # "CHAINED OR LOOPED"; B3 explicitly allows "low quantities" of
+    # non-chaining ones, so a bare count of 2 is no longer a floor
+    # (that was the pre-Oct-2025 beta reading). OPERATIONALIZATION of
+    # "chained or looped", from a static list: (a) 3+ extra-turn cards
+    # — at that density the turns realistically cast back-to-back,
+    # which is the chained experience the rule targets regardless of
+    # intent; or (b) 2+ extra-turn cards alongside a REPEATABLE
+    # rebuy/copy engine (_EXTRA_TURN_REPEATABLE_ENABLERS) that can
+    # recur or duplicate them turn after turn — a credible loop.
+    # ONE-SHOT rebuys (_EXTRA_TURN_ONESHOT_REBUYS — Eternal Witness,
+    # Fork, bare Archaeomancer, ...) buy back a single turn once and
+    # are spent: that cannot sustain a chain, so they contribute the
+    # extra_turn_oneshot_rebuy weighted nudge instead of a floor (see
+    # the repeatability split comment on the two frozensets). A single
+    # extra-turn card never floors, even with recursion present (one
+    # Time Warp + Archaeomancer is a slow 2-card value engine
+    # combo_detection would flag separately if it were game-ending).
     extra_turns_chain = (
         len(extra_turn_hits) >= 3
-        or (len(extra_turn_hits) >= 2 and extra_turn_chain_hits)
+        or (len(extra_turn_hits) >= 2 and extra_turn_repeatable_hits)
     )
     if extra_turns_chain:
         floor = max(floor, 4)
@@ -675,9 +734,10 @@ def _estimate_bracket_inner(
         else:
             reasons.append(
                 f"floor B4: {len(extra_turn_hits)} extra-turn cards "
-                f"plus recursion/copy support "
-                f"({', '.join(extra_turn_chain_hits[:3])}) — chaining "
-                f"potential (B3 allows only non-chaining extra turns)"
+                f"plus repeatable recursion/copy engine "
+                f"({', '.join(extra_turn_repeatable_hits[:3])}) — "
+                f"chaining potential (the 2025-10-21 rules floor "
+                f"chained-or-looped extra turns at B4)"
             )
 
     # --- WEIGHTED SIGNALS inside the bounds ---------------------------------
@@ -744,6 +804,21 @@ def _estimate_bracket_inner(
             f"+{pts:.1f}: {len(extra_turn_hits)} non-chaining "
             f"extra-turn card(s) ({', '.join(extra_turn_hits[:2])})"
         )
+        if len(extra_turn_hits) >= 2 and extra_turn_oneshot_hits:
+            # One-shot rebuys/copies alongside 2 extra-turn cards: a
+            # single extra rebuy each, not a chain — the demoted form
+            # of the old hard floor (see the repeatability split).
+            pts = w["extra_turn_oneshot_rebuy"] * min(
+                len(extra_turn_oneshot_hits), 2
+            )
+            score += pts
+            fired += 1
+            reasons.append(
+                f"+{pts:.1f}: {len(extra_turn_oneshot_hits)} one-shot "
+                f"extra-turn rebuy/copy piece(s) "
+                f"({', '.join(extra_turn_oneshot_hits[:2])}) — single "
+                f"rebuys, not a chain (no B4 floor)"
+            )
     if avg_cmc is not None and avg_cmc > 0:
         # Curve bands lifted from deck_dashboard._power_bracket:
         # <=2.6 = tight/tuned, >3.4 = high-curve casual (we use >=3.8
@@ -815,7 +890,14 @@ def _estimate_bracket_inner(
             "n_two_card_combos": n_two_card_combos,
             "mld_cards": mld_hits,
             "extra_turn_cards": extra_turn_hits,
-            "extra_turn_chain_enablers": extra_turn_chain_hits,
+            # Split by repeatability (2025-10-21 "chained or looped"):
+            # only the repeatable engines participate in the B4 floor.
+            # "extra_turn_chain_enablers" keeps the pre-split key name
+            # for payload consumers and now carries the floor-relevant
+            # (repeatable) hits.
+            "extra_turn_chain_enablers": extra_turn_repeatable_hits,
+            "extra_turn_repeatable_enablers": extra_turn_repeatable_hits,
+            "extra_turn_oneshot_rebuys": extra_turn_oneshot_hits,
             "tutor_count": len(tutor_hits),
             "tutors": tutor_hits,
             "fast_mana_count": len(fast_mana_hits),

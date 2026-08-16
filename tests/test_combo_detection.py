@@ -274,6 +274,197 @@ def test_non_game_ending_combo_floor_is_1_without_any_lookup():
 
 
 # --------------------------------------------------------------------------- #
+# Reanimation-aware speed pricing (round-2 bracket-floor correctness pass)
+#
+# Summing PRINTED mana values mis-priced reanimator combos: Worldgorger
+# Dragon (6) + Animate Dead (2) summed to 8 >= _LATE_GAME_COMBO_MV and read
+# as "late-game B3-legal", though the real line assembles for ~3 mana via
+# the graveyard. Under-flagging early combos is the failure this module
+# exists to prevent, so a creature partnered with a reanimation piece is
+# priced at min(printed MV, reanimation MV). Oracle fixtures come from
+# tests/fixtures/real_oracles.py per repo discipline — never synthesized.
+# --------------------------------------------------------------------------- #
+
+from tests.fixtures.real_oracles import ORACLES
+
+
+def _scry(name: str, cmc: float) -> dict:
+    """Scryfall-shaped dict: real oracle fixture + mana value."""
+    return {"cmc": float(cmc), **ORACLES[name]}
+
+
+_WORLDGORGER_COMBO = {"cards": ["Worldgorger Dragon", "Animate Dead"],
+                      "produces": "Infinite mana/loops"}
+
+_WORLDGORGER_LOOKUP_TABLE = {
+    "Worldgorger Dragon": _scry("Worldgorger Dragon", 6.0),
+    "Animate Dead": _scry("Animate Dead", 2.0),
+}
+
+
+def test_worldgorger_animate_dead_prices_early_and_floors_4():
+    """THE regression pin. Printed sum is 8 (>= the late-game threshold of
+    7) — the old printed-MV rule floored this at 3. Effective cost is
+    Animate Dead (2) + min(Worldgorger 6, Animate Dead 2) = 4 -> early ->
+    floor B4."""
+    lookup = _WORLDGORGER_LOOKUP_TABLE.get
+    assert combo_detection._combined_mana_value(
+        _WORLDGORGER_COMBO, lookup) == 4.0
+    assert combo_bracket_floor(_WORLDGORGER_COMBO, lookup=lookup) == 4
+
+
+def test_reanimation_offline_fallback_works_without_oracle_text():
+    """Cold snapshot cache offline path: the hard-tagged name set alone
+    must reprice — lookup yields only cmc (no oracle_text, no type_line;
+    unknown type reprices, the strict direction)."""
+    table = {"Worldgorger Dragon": {"cmc": 6.0}, "Animate Dead": {"cmc": 2.0}}
+    assert combo_bracket_floor(_WORLDGORGER_COMBO, lookup=table.get) == 4
+
+
+def test_every_hard_tagged_reanimation_spell_is_recognized_by_name():
+    """The offline fallback set covers the canonical reanimation package
+    even with zero oracle data."""
+    for name in ("Animate Dead", "Necromancy", "Dance of the Dead",
+                 "Reanimate", "Persist", "Life // Death", "Victimize",
+                 "Corpse Dance"):
+        assert combo_detection._is_reanimation_spell(name, {}), name
+        assert combo_detection._is_reanimation_spell(name.upper(), {}), name
+
+
+def test_reanimation_patterns_match_real_oracle_text_without_the_tag():
+    """The oracle-text patterns must classify unlisted cards with real
+    reanimation wording (fixture texts under a name NOT in the hard set),
+    so future reanimation printings are caught when snapshots exist."""
+    for fixture in ("Animate Dead", "Dance of the Dead", "Necromancy",
+                    "Reanimate", "Persist", "Corpse Dance"):
+        assert combo_detection._is_reanimation_spell(
+            "Untagged Future Spell", ORACLES[fixture]), fixture
+
+
+def test_reanimation_patterns_reject_non_reanimation_recursion():
+    """Hand recursion (Eternal Witness), small-permanent recursion (Sun
+    Titan), and the reanimation TARGET itself (Worldgorger Dragon) must
+    not classify — repricing on generic recursion would floor half of
+    every graveyard deck's value combos at B4."""
+    for fixture in ("Eternal Witness", "Sun Titan", "Worldgorger Dragon",
+                    "Damnation"):
+        assert not combo_detection._is_reanimation_spell(
+            "Untagged Card", ORACLES[fixture]), fixture
+
+
+def test_victimize_pattern_gap_is_carried_by_the_hard_tag():
+    """Victimize's return clause names the creature cards a sentence
+    earlier — out of clause-bound pattern reach. The hard tag carries it;
+    this documents that an untagged copy of the text would NOT match (so
+    the fixture keeps the gap visible if the patterns ever widen)."""
+    assert combo_detection._is_reanimation_spell(
+        "Victimize", ORACLES["Victimize"])
+    assert not combo_detection._is_reanimation_spell(
+        "Untagged Sac Reanimator", ORACLES["Victimize"])
+
+
+def test_cheap_partner_keeps_its_printed_cost_under_the_min():
+    """min(printed, reanimation MV): a partner CHEAPER than the
+    reanimation spell is just cast — its printed MV stands. Reanimation
+    piece 5 + creature partner 1 -> 5 + min(1, 5) = 6, not 10."""
+    table = {
+        "Pricey Reanimation": {"cmc": 5.0, **ORACLES["Reanimate"]},
+        "Cheap Creature": {"cmc": 1.0,
+                           "type_line": "Creature — Goblin",
+                           "oracle_text": ""},
+    }
+    combo = {"cards": ["Pricey Reanimation", "Cheap Creature"],
+             "produces": "Win the game"}
+    assert combo_detection._combined_mana_value(combo, table.get) == 6.0
+
+
+def test_non_creature_partner_is_never_repriced():
+    """Reanimation cheats out CREATURE cards; a resolvable non-creature
+    partner keeps its printed MV, so an expensive enchantment + Animate
+    Dead stays a late-game pair (floor 3)."""
+    table = {
+        "Animate Dead": _scry("Animate Dead", 2.0),
+        "Huge Enchantment": {"cmc": 6.0, "type_line": "Enchantment",
+                             "oracle_text": ""},
+    }
+    combo = {"cards": ["Huge Enchantment", "Animate Dead"],
+             "produces": "Win the game"}
+    assert combo_detection._combined_mana_value(combo, table.get) == 8.0
+    assert combo_bracket_floor(combo, lookup=table.get) == 3
+
+
+def test_unknown_partner_type_reprices_in_the_strict_direction():
+    """No type_line -> treated as reanimation-eligible: repricing can only
+    LOWER effective cost, i.e. floor B4 — conservative, never permissive."""
+    table = {
+        "Animate Dead": _scry("Animate Dead", 2.0),
+        "Mystery Partner": {"cmc": 9.0},
+    }
+    combo = {"cards": ["Mystery Partner", "Animate Dead"],
+             "produces": "Win the game"}
+    assert combo_bracket_floor(combo, lookup=table.get) == 4
+
+
+def test_reanimation_combo_with_unresolvable_piece_stays_floor_4():
+    """Missing-data behavior unchanged: any unresolvable piece -> MV
+    unknown -> the conservative B4 default (unknown -> early)."""
+    table = {"Animate Dead": _scry("Animate Dead", 2.0)}
+    combo = {"cards": ["Totally Unknown Dragon", "Animate Dead"],
+             "produces": "Win the game"}
+    assert combo_bracket_floor(combo, lookup=table.get) == 4
+
+
+def test_non_reanimation_pairs_keep_the_printed_sum():
+    """No reanimation piece -> the pre-existing printed-MV rule is
+    untouched (Sanguine Bond + Exquisite Blood stays the canonical
+    late-game B3 pair)."""
+    lookup = _mv_lookup(**{"Sanguine_Bond": 5.0, "Exquisite_Blood": 6.0})
+    combo = {"cards": ["Sanguine Bond", "Exquisite Blood"],
+             "produces": "Infinite life drain"}
+    assert combo_detection._combined_mana_value(combo, lookup) == 11.0
+    assert combo_bracket_floor(combo, lookup=lookup) == 3
+
+
+def test_split_card_oracle_text_is_read_from_card_faces():
+    """Life // Death keeps oracle text on card_faces (Scryfall split
+    layout); _oracle_text must join faces so the Death half's real text
+    ("Return all creature cards from your graveyard to the battlefield.")
+    reaches the patterns. Face texts sourced verbatim from Scryfall —
+    real_oracles.py's flat shape can't represent split cards."""
+    life_death = {
+        "cmc": 2.0,
+        "type_line": "Sorcery // Sorcery",
+        "card_faces": [
+            {"name": "Life",
+             "oracle_text": ("All lands you control become 1/1 creatures "
+                             "until end of turn. They're still lands.")},
+            {"name": "Death",
+             "oracle_text": ("As an additional cost to cast this spell, "
+                             "pay 1 life for each creature card in your "
+                             "graveyard.\nReturn all creature cards from "
+                             "your graveyard to the battlefield.")},
+        ],
+    }
+    assert "Return all creature cards" in combo_detection._oracle_text(
+        life_death)
+    # Pattern path (untagged name) AND the hard tag both classify it.
+    assert combo_detection._is_reanimation_spell("Untagged Split", life_death)
+    assert combo_detection._is_reanimation_spell("Life // Death", {})
+
+
+def test_one_piece_away_reprices_reanimation_completions():
+    """The advisor row for completing Worldgorger + Animate Dead must
+    carry the early-game B4 floor — a B2/B3 deck gets warned off adding
+    the missing piece."""
+    deck = _deck("Animate Dead")
+    rows = one_piece_away(
+        deck, combos=[_WORLDGORGER_COMBO],
+        lookup=_WORLDGORGER_LOOKUP_TABLE.get)
+    assert [r["missing"] for r in rows] == ["Worldgorger Dragon"]
+    assert rows[0]["bracket_floor"] == 4
+
+
+# --------------------------------------------------------------------------- #
 # one_piece_away — "am I ONE card short?" (the actionable question)
 # --------------------------------------------------------------------------- #
 

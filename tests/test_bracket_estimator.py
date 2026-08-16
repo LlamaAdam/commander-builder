@@ -6,10 +6,12 @@ Pins:
     against the 2025-10-21 WotC update): any GC -> floor 3, >3 GCs ->
     floor 4 (3 GCs stays floor 3 — the table says "Max 3"); the
     2-card game-ending combo floor DEFERS to combo_detection's speed
-    rule (cheap/unknown-speed pair -> 4, late-game pair -> 3); MLD ->
-    floor 4; extra turns floor 4 only when they can CHAIN (3+ density,
-    or 2+ with recursion/copy support) — non-chaining low quantities
-    are a nudge;
+    rule (cheap/unknown-speed pair -> 4, late-game pair -> 3, with
+    reanimation-aware effective pricing); MLD -> floor 4; extra turns
+    floor 4 only when they can CHAIN (3+ density, or 2+ with a
+    REPEATABLE rebuy/copy engine — the 2025-10-21 "chained or looped"
+    axis) — non-chaining low quantities and one-shot rebuys are
+    weighted nudges, never floors;
   * each weighted signal's DIRECTION (tutors / fast mana / archetype /
     curve / salt push the raw score the right way), and that the
     tutor-density reason is labeled a HEURISTIC (the official tutor
@@ -53,11 +55,14 @@ _TEST_GC = {
     "Demonic Tutor", "Vampiric Tutor", "Mystical Tutor",
 }
 
-# Fixed combo DB (mirrors two entries of combo_detection._FALLBACK):
-# one 2-card game-ending combo, one 3-card game-ending combo.
+# Fixed combo DB (mirrors entries of combo_detection._FALLBACK):
+# two 2-card game-ending combos (one reanimator), one 3-card game-ending
+# combo.
 _TEST_COMBOS = [
     {"cards": ["Mikaeus, the Unhallowed", "Triskelion"],
      "produces": "Infinite damage"},
+    {"cards": ["Worldgorger Dragon", "Animate Dead"],
+     "produces": "Infinite mana/loops"},
     {"cards": ["Underworld Breach", "Lion's Eye Diamond", "Brain Freeze"],
      "produces": "Win the game"},
 ]
@@ -145,17 +150,22 @@ def test_four_game_changers_floor_4():
 # verbatim since the 2025-10-21 rules read: speed gates the two-card case)
 # ---------------------------------------------------------------------------
 
-def _warm_snapshot_cache(monkeypatch, tmp_path, cmcs: dict[str, float]):
+def _warm_snapshot_cache(monkeypatch, tmp_path, cmcs: dict):
     """Point scryfall_client.CACHE_DIR at a tmp store holding a snapshot
-    per (name -> cmc), so combo_detection's cache-only speed lookup
-    resolves deterministically."""
+    per name, so combo_detection's cache-only speed lookup resolves
+    deterministically. Values are either a bare cmc float or a full
+    Scryfall-shaped dict (oracle_text/type_line + cmc) for the
+    reanimation-pricing pins."""
     import commander_builder.scryfall_client as sc
     cache = tmp_path / "oracle_snapshots"
     cache.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(sc, "CACHE_DIR", cache)
-    for name, cmc in cmcs.items():
+    for name, payload in cmcs.items():
+        snapshot = (dict(payload) if isinstance(payload, dict)
+                    else {"cmc": payload})
+        snapshot.setdefault("name", name)
         (cache / f"{sc._slug(name)}.json").write_text(
-            json.dumps({"name": name, "cmc": cmc}), encoding="utf-8",
+            json.dumps(snapshot), encoding="utf-8",
         )
 
 
@@ -253,14 +263,84 @@ def test_three_extra_turn_cards_floor_4():
     assert any("density" in reason for reason in r["reasons"])
 
 
-def test_two_extra_turn_cards_with_recursion_floor_4():
-    """Support operationalization of chaining: 2 extra-turn spells
-    plus a curated rebuy/copy piece is a credible loop."""
+def test_two_extra_turn_cards_with_repeatable_engine_floor_4():
+    """Support operationalization of "chained or looped" (2025-10-21
+    language): 2 extra-turn spells plus a REPEATABLE rebuy/copy engine
+    (buyback Reiterate) is a credible loop -> hard B4 floor."""
     r = estimate_bracket(_deck("Time Warp", "Temporal Manipulation",
-                               "Archaeomancer", filler=30))
+                               "Reiterate", filler=30))
     assert r["floor"] == 4
-    assert r["signals"]["extra_turn_chain_enablers"] == ["archaeomancer"]
-    assert any("recursion/copy" in reason for reason in r["reasons"])
+    assert r["signals"]["extra_turn_repeatable_enablers"] == ["reiterate"]
+    # Pre-split payload key stays present and carries the floor-relevant
+    # (repeatable) hits.
+    assert r["signals"]["extra_turn_chain_enablers"] == ["reiterate"]
+    assert any("repeatable" in reason for reason in r["reasons"])
+
+
+@pytest.mark.parametrize("engine", [
+    "Reiterate",          # buyback — returns to hand every cast
+    "Mirari",             # permanent copy engine
+    "Mystic Sanctuary",   # fetchable recurring rebuy land
+    "Timetwister",        # mass rebuy
+    "Underworld Breach",  # mass escape rebuy
+    "Past in Flames",     # mass flashback rebuy
+])
+def test_each_repeatable_engine_floors_4_with_two_extra_turns(engine):
+    r = estimate_bracket(_deck("Time Warp", "Temporal Manipulation",
+                               engine, filler=30))
+    assert r["floor"] == 4, engine
+
+
+def test_two_extra_turn_cards_with_oneshot_rebuy_is_nudge_not_floor():
+    """The repeatability split (round-2): a ONE-SHOT rebuy (Eternal
+    Witness returns one turn spell once, then is spent) cannot sustain
+    the "chained or looped" line the rules floor on. Demoted from the
+    old hard B4 floor to a weighted signal."""
+    r = estimate_bracket(_deck("Time Warp", "Temporal Manipulation",
+                               "Eternal Witness", filler=30))
+    assert r["floor"] == 1
+    assert r["signals"]["extra_turn_oneshot_rebuys"] == ["eternal witness"]
+    assert r["signals"]["extra_turn_repeatable_enablers"] == []
+    assert not any("floor B4" in reason for reason in r["reasons"])
+    assert any("one-shot" in reason for reason in r["reasons"])
+
+
+@pytest.mark.parametrize("rebuy", [
+    "Archaeomancer",       # bare ETB rebuy — blink loop out of static reach
+    "Mnemonic Wall",
+    "Scholar of the Ages",
+    "Eternal Witness",
+    "Regrowth",
+    "Snapcaster Mage",
+    "Torrential Gearhulk",
+    "Mystic Retrieval",
+    "Narset's Reversal",   # copies + rebounds the spell but spends itself
+    "Twincast",
+    "Fork",
+    "Dualcaster Mage",
+])
+def test_each_oneshot_rebuy_never_floors_with_two_extra_turns(rebuy):
+    r = estimate_bracket(_deck("Time Warp", "Temporal Manipulation",
+                               rebuy, filler=30))
+    assert r["floor"] == 1, rebuy
+
+
+def test_oneshot_rebuy_weight_pushes_the_score_up():
+    """The demotion is to a MODEST weighted signal (same per-card
+    magnitude as extra_turn_single), so the deck still reads more
+    powerful than bare extra turns."""
+    bare = _raw(_deck("Time Warp", "Temporal Manipulation", filler=30))
+    rebuy = _raw(_deck("Time Warp", "Temporal Manipulation",
+                       "Eternal Witness", filler=30))
+    assert rebuy == pytest.approx(bare + 0.25)
+
+
+def test_oneshot_rebuy_weight_needs_two_extra_turn_cards():
+    """A single Time Warp plus Snapcaster is generic value, not
+    extra-turn pressure — the one-shot weight stays silent below 2."""
+    one_bare = _raw(_deck("Time Warp", filler=30))
+    one_rebuy = _raw(_deck("Time Warp", "Snapcaster Mage", filler=30))
+    assert one_rebuy == pytest.approx(one_bare)
 
 
 def test_single_extra_turn_card_is_nudge_not_floor():
@@ -282,6 +362,69 @@ def test_expanded_extra_turn_names_recognized():
     assert r["signals"]["extra_turn_cards"] == [
         "alrund's epiphany", "capture of jingzhou", "temporal mastery",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Calibration regression pins (round-2 bracket-floor correctness pass)
+#
+# Synthetic canonical decks run end-to-end through estimate_bracket. These
+# pin the two round-2 floor fixes at the ESTIMATOR level (the unit rules are
+# pinned above / in test_combo_detection): the repeatability split must not
+# hard-floor a B3-ish deck holding one-shot rebuys, must hard-floor the same
+# deck once a repeatable engine appears, and the reanimation-aware combo
+# pricing must floor a Worldgorger reanimator at B4 despite its printed MVs
+# summing past the late-game threshold.
+# ---------------------------------------------------------------------------
+
+def _b3ish_turns_deck(*extra: str) -> str:
+    """A canonical upgraded-but-not-optimized list: one Game Changer
+    (floor 3) and two extra-turn spells — plus ``extra``."""
+    return _deck(
+        "Rhystic Study",                       # 1 GC -> floor 3
+        "Time Warp", "Temporal Manipulation",  # low-quantity extra turns
+        *extra, filler=30,
+    )
+
+
+def test_calibration_b3ish_deck_with_oneshot_rebuy_does_not_floor_4():
+    """B3-ish deck + 2 extra turns + Eternal Witness: the one-shot rebuy
+    must NOT hard-floor B4 — the deck stays a legal B3 by rule."""
+    r = estimate_bracket(_b3ish_turns_deck("Eternal Witness"))
+    assert r["floor"] == 3  # the Game Changer floor, not an extra-turn B4
+    assert r["estimate"] == 3
+    assert not any("floor B4" in reason for reason in r["reasons"])
+
+
+def test_calibration_same_deck_with_reiterate_must_floor_4():
+    """Identical list with Reiterate instead: buyback makes the turns
+    chainable -> hard B4 floor."""
+    r = estimate_bracket(_b3ish_turns_deck("Reiterate"))
+    assert r["floor"] == 4
+    assert r["estimate"] >= 4
+    assert any(
+        "floor B4" in reason and "repeatable" in reason
+        for reason in r["reasons"]
+    )
+
+
+def test_calibration_worldgorger_reanimator_must_floor_4(
+    monkeypatch, tmp_path,
+):
+    """Worldgorger Dragon + Animate Dead with REAL oracle snapshots and
+    printed MVs (6 + 2 = 8, past the late-game threshold of 7): the
+    reanimation-aware pricing (2 + min(6, 2) = 4) must floor the deck at
+    B4. Before the fix this deck estimated floor 3 ("late-game pair")."""
+    from tests.fixtures.real_oracles import ORACLES
+    _warm_snapshot_cache(monkeypatch, tmp_path, {
+        "Worldgorger Dragon": {"cmc": 6.0, **ORACLES["Worldgorger Dragon"]},
+        "Animate Dead": {"cmc": 2.0, **ORACLES["Animate Dead"]},
+    })
+    r = estimate_bracket(_deck(
+        "Worldgorger Dragon", "Animate Dead", filler=30,
+    ))
+    assert r["floor"] == 4
+    assert r["signals"]["n_two_card_combos"] == 1
+    assert any("cheap/early" in reason for reason in r["reasons"])
 
 
 # ---------------------------------------------------------------------------

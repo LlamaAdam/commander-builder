@@ -59,6 +59,27 @@ from __future__ import annotations
 # Card name → ``{"oracle_text": str, "type_line": str}`` dict, sourced
 # verbatim from Scryfall. Keys sorted alphabetically by card name.
 ORACLES: dict[str, dict[str, str]] = {
+    # Animate Dead — the canonical graveyard-aura reanimation spell.
+    # Its return clause lives inside an errata replacement paragraph;
+    # the stable signature is the "Enchant creature card in a
+    # graveyard" line. Pins combo_detection._REANIMATION_PATTERNS'
+    # aura shape (round-2 bracket-floor pass: reanimation-aware combo
+    # speed pricing).
+    "Animate Dead": {
+        "oracle_text": (
+            "Enchant creature card in a graveyard\n"
+            "When this aura enters, if it's on the battlefield, it "
+            "loses \"enchant creature card in a graveyard\" and gains "
+            "\"enchant creature put onto the battlefield with this "
+            "aura.\" Return enchanted creature card to the battlefield "
+            "under your control and attach this aura to it. When this "
+            "aura leaves the battlefield, that creature's controller "
+            "sacrifices it.\n"
+            "Enchanted creature gets -1/-0."
+        ),
+        "type_line": "Enchantment — Aura",
+    },
+
     # Arcane Signet — natural-language "Add one mana of any color"
     # template that didn't match the classifier's strict
     # ``add \{[wubrgc]\}`` regex. Live-audit follow-up 2026-05-16
@@ -74,6 +95,55 @@ ORACLES: dict[str, dict[str, str]] = {
         "type_line": "Artifact",
     },
 
+    # Ashnod's Altar — NEGATIVE guard for the round-2 edict pattern
+    # (2026-08-16): sacrificing YOUR OWN creature as an activation
+    # cost must never read as edict removal. Classifies as ramp via
+    # its "Add {C}{C}" clause.
+    "Ashnod's Altar": {
+        "oracle_text": "Sacrifice a creature: Add {C}{C}.",
+        "type_line": "Artifact",
+    },
+
+    # Big Score — plural-Treasure producer whose DRAW clause must
+    # keep winning the role (draw 70 > treasure-ramp 40). Control
+    # fixture for the round-2 treasure-plural ramp pattern.
+    "Big Score": {
+        "oracle_text": (
+            "As an additional cost to cast this spell, discard a "
+            "card.\n"
+            "Draw two cards and create two Treasure tokens."
+        ),
+        "type_line": "Instant",
+    },
+
+    # Bloodbraid Elf — NEGATIVE guard for the round-2 impulse-draw
+    # pattern: cascade's reminder text ("exile cards from the top of
+    # your library ... You may cast it without paying its mana cost")
+    # must NOT read as impulse draw. Classifies as threat (creature,
+    # no stronger signal).
+    "Bloodbraid Elf": {
+        "oracle_text": (
+            "Cascade (When you cast this spell, exile cards from the "
+            "top of your library until you exile a nonland card that "
+            "costs less. You may cast it without paying its mana "
+            "cost. Put the exiled cards on the bottom of your "
+            "library in a random order.)\n"
+            "Haste"
+        ),
+        "type_line": "Creature — Elf Berserker",
+    },
+
+    # Chain Reaction — "deals X damage to each creature" scaling
+    # sweep. The wipe pattern required literal digits until the
+    # round-2 evergreen-gaps fix (2026-08-16).
+    "Chain Reaction": {
+        "oracle_text": (
+            "Chain Reaction deals X damage to each creature, where X "
+            "is the number of creatures on the battlefield."
+        ),
+        "type_line": "Sorcery",
+    },
+
     # Coalition Victory — uses "You win the game" idiom which the
     # original ``_WIN_CONDITION_PATTERNS`` didn't cover. Pinned in
     # commit b2ff2b9.
@@ -83,6 +153,21 @@ ORACLES: dict[str, dict[str, str]] = {
             "land type and a creature of each color."
         ),
         "type_line": "Sorcery",
+    },
+
+    # Corpse Dance — "Return the top creature card OF your graveyard"
+    # (of, not from) — pins the from|of alternation in
+    # combo_detection's reanimation return-clause pattern.
+    "Corpse Dance": {
+        "oracle_text": (
+            "Buyback {2} (You may pay an additional {2} as you cast "
+            "this spell. If you do, put this card into your hand as "
+            "it resolves.)\n"
+            "Return the top creature card of your graveyard to the "
+            "battlefield. That creature gains haste. Exile it at the "
+            "beginning of the next end step."
+        ),
+        "type_line": "Instant",
     },
 
     # Craterhoof Behemoth — "gain trample and get +X/+X" is the
@@ -135,6 +220,113 @@ ORACLES: dict[str, dict[str, str]] = {
         "type_line": "Sorcery",
     },
 
+    # Dance of the Dead — second graveyard-aura reanimation shape;
+    # like Animate Dead the reliable signature is the enchant line
+    # ("Put enchanted creature card onto the battlefield" appears only
+    # inside the errata paragraph).
+    "Dance of the Dead": {
+        "oracle_text": (
+            "Enchant creature card in a graveyard\n"
+            "When this aura enters, if it's on the battlefield, it "
+            "loses \"enchant creature card in a graveyard\" and gains "
+            "\"enchant creature put onto the battlefield with this "
+            "aura.\" Put enchanted creature card onto the battlefield "
+            "tapped under your control and attach this aura to it. "
+            "When this aura leaves the battlefield, that creature's "
+            "controller sacrifices it.\n"
+            "Enchanted creature gets +1/+1 and doesn't untap during "
+            "its controller's untap step.\n"
+            "At the beginning of the upkeep of enchanted creature's "
+            "controller, that player may pay {1}{B}. If the player "
+            "does, untap that creature."
+        ),
+        "type_line": "Enchantment — Aura",
+    },
+
+    # Diabolic Edict — the class-defining edict: "Target player
+    # sacrifices a creature" answers hexproof/shroud threats that
+    # targeted removal can't touch. Classified "other" until the
+    # round-2 evergreen-gaps fix (2026-08-16).
+    "Diabolic Edict": {
+        "oracle_text": "Target player sacrifices a creature of their choice.",
+        "type_line": "Instant",
+    },
+
+    # Dockside Extortionist — "create X Treasure tokens" (no Treasure
+    # reminder text in its oracle, so nothing else for the ramp
+    # patterns to latch onto). The singular "create a treasure token"
+    # pattern missed every plural/variable Treasure producer until
+    # the round-2 fix.
+    "Dockside Extortionist": {
+        "oracle_text": (
+            "When this creature enters, create X Treasure tokens, "
+            "where X is the number of artifacts and enchantments "
+            "your opponents control."
+        ),
+        "type_line": "Creature — Goblin Pirate",
+    },
+
+    # Dovin's Veto — restricted counterspell with a leading
+    # can't-be-countered rider on its own paragraph; the "counter
+    # target noncreature spell" clause is the load-bearing line.
+    "Dovin's Veto": {
+        "oracle_text": (
+            "This spell can't be countered.\n"
+            "Counter target noncreature spell."
+        ),
+        "type_line": "Instant",
+    },
+
+    # Earthquake — X-damage sweep ("deals X damage to each creature
+    # without flying and each player"). The original wipe pattern
+    # required literal digits, so every X-wipe classified "other".
+    "Earthquake": {
+        "oracle_text": (
+            "Earthquake deals X damage to each creature without "
+            "flying and each player."
+        ),
+        "type_line": "Sorcery",
+    },
+
+    # Eternal Witness — NEGATIVE control for the reanimation patterns:
+    # graveyard recursion to HAND, not to the battlefield. Must not
+    # classify as a reanimation spell.
+    "Eternal Witness": {
+        "oracle_text": (
+            "When this creature enters, you may return target card "
+            "from your graveyard to your hand."
+        ),
+        "type_line": "Creature — Human Shaman",
+    },
+
+    # Light Up the Stage — impulse draw with a spectacle rider. The
+    # exile-to-play clause sits on its own paragraph AFTER the
+    # keyword line; the spectacle reminder text contains "You may
+    # cast this spell" and must not be what the impulse pattern
+    # matches on. Round-2 evergreen-gaps fix (2026-08-16).
+    "Light Up the Stage": {
+        "oracle_text": (
+            "Spectacle {R} (You may cast this spell for its "
+            "spectacle cost rather than its mana cost if an opponent "
+            "lost life this turn.)\n"
+            "Exile the top two cards of your library. Until the end "
+            "of your next turn, you may play those cards."
+        ),
+        "type_line": "Sorcery",
+    },
+
+    # Miirym, Sentinel Wyrm — ward in a comma-separated keyword line
+    # ("Flying, vigilance, ward {2}"). The ward keyword postdated the
+    # protection patterns entirely until the round-2 fix.
+    "Miirym, Sentinel Wyrm": {
+        "oracle_text": (
+            "Flying, vigilance, ward {2}\n"
+            "Whenever another nontoken Dragon enters the battlefield "
+            "under your control, create a token that's a copy of it."
+        ),
+        "type_line": "Legendary Creature — Dragon Spirit",
+    },
+
     # Mystical Tutor — "instant or sorcery card" OR-templating
     # pattern; flat alternation in the original tutor regex didn't
     # match. Pinned in commit 085c256.
@@ -143,6 +335,158 @@ ORACLES: dict[str, dict[str, str]] = {
             "Search your library for an instant or sorcery card, "
             "reveal it, then shuffle and put that card on top of "
             "your library."
+        ),
+        "type_line": "Instant",
+    },
+
+    # Necromancy — "Put target creature card from a graveyard onto the
+    # battlefield" mid-paragraph (after the flash rider) — pins that
+    # the put-shape pattern doesn't require sentence-initial position.
+    "Necromancy": {
+        "oracle_text": (
+            "You may cast this spell as though it had flash. If you "
+            "cast it any time a sorcery couldn't have been cast, the "
+            "controller of the permanent it becomes sacrifices it at "
+            "the beginning of the next cleanup step.\n"
+            "When this enchantment enters, if it's on the battlefield, "
+            "it becomes an Aura with \"enchant creature put onto the "
+            "battlefield with this enchantment.\" Put target creature "
+            "card from a graveyard onto the battlefield under your "
+            "control and attach this enchantment to it. When this "
+            "enchantment leaves the battlefield, that creature's "
+            "controller sacrifices it."
+        ),
+        "type_line": "Enchantment",
+    },
+
+    # Negate — the minimal restricted counterspell ("counter target
+    # noncreature spell"). The original pattern required "spell"
+    # immediately after "target", so Negate classified "other".
+    "Negate": {
+        "oracle_text": "Counter target noncreature spell.",
+        "type_line": "Instant",
+    },
+
+    # Persist — the plain modern return-to-battlefield template with a
+    # qualifier ("non-legendary") between "target" and "creature card".
+    "Persist": {
+        "oracle_text": (
+            "Return target non-legendary creature card from your "
+            "graveyard to the battlefield."
+        ),
+        "type_line": "Sorcery",
+    },
+
+    # Phyrexian Fleshgorger — "Ward—Pay ..." em-dash cost form (no
+    # braces), the second ward templating the round-2 protection
+    # pattern must catch.
+    "Phyrexian Fleshgorger": {
+        "oracle_text": (
+            "Prototype {1}{B}{B} — 3/3 (You may cast this spell with "
+            "different mana cost, color, and size. It keeps its "
+            "abilities and types.)\n"
+            "Menace, lifelink\n"
+            "Ward—Pay life equal to this creature's power."
+        ),
+        "type_line": "Artifact Creature — Phyrexian Wurm",
+    },
+
+    # Prey Upon — the class-defining fight spell. Its reminder text
+    # ("Each deals damage equal to its power to the other.") must not
+    # be the clause that matches — "the other" is not "target
+    # creature"; the fight clause itself is the signal.
+    "Prey Upon": {
+        "oracle_text": (
+            "Target creature you control fights target creature you "
+            "don't control. (Each deals damage equal to its power to "
+            "the other.)"
+        ),
+        "type_line": "Sorcery",
+    },
+
+    # Prosper, Tome-Bound — engine-style impulse draw, singular form
+    # ("exile the top card of your library. Until the end of your
+    # next turn, you may play that card"). Also creates Treasures, so
+    # it pins impulse-draw (60) outranking treasure-ramp (40).
+    "Prosper, Tome-Bound": {
+        "oracle_text": (
+            "Deathtouch\n"
+            "Mysterious Stranger — At the beginning of your end "
+            "step, exile the top card of your library. Until the end "
+            "of your next turn, you may play that card.\n"
+            "Pact Boon — Whenever you play a card from exile, create "
+            "a Treasure token."
+        ),
+        "type_line": "Legendary Creature — Tiefling Warlock",
+    },
+
+    # Ram Through — the class-defining bite spell ("deals damage
+    # equal to its power to target creature"): one-sided fight,
+    # no "fights" keyword anywhere in the text.
+    "Ram Through": {
+        "oracle_text": (
+            "Target creature you control deals damage equal to its "
+            "power to target creature you don't control. If the "
+            "creature you control has trample, excess damage is "
+            "dealt to that creature's controller instead."
+        ),
+        "type_line": "Instant",
+    },
+
+    # Reanimate — the minimal put-shape template.
+    "Reanimate": {
+        "oracle_text": (
+            "Put target creature card from a graveyard onto the "
+            "battlefield under your control. You lose life equal to "
+            "its mana value."
+        ),
+        "type_line": "Sorcery",
+    },
+
+    # Soul Shatter — modern each-opponent edict wording ("Each
+    # opponent sacrifices a creature or planeswalker with the
+    # highest mana value ...").
+    "Soul Shatter": {
+        "oracle_text": (
+            "Each opponent sacrifices a creature or planeswalker "
+            "with the highest mana value among creatures and "
+            "planeswalkers they control."
+        ),
+        "type_line": "Instant",
+    },
+
+    # Spell Pierce — restricted counterspell in the
+    # unless-controller-pays form; both qualifiers at once
+    # ("noncreature" + "unless its controller pays {2}").
+    "Spell Pierce": {
+        "oracle_text": (
+            "Counter target noncreature spell unless its controller "
+            "pays {2}."
+        ),
+        "type_line": "Instant",
+    },
+
+    # Sun Titan — NEGATIVE control: returns "permanent card with mana
+    # value 2 or less", not "creature card" — recursion, but not the
+    # reanimation shape the combo-speed rule reprices on.
+    "Sun Titan": {
+        "oracle_text": (
+            "Vigilance\n"
+            "Whenever this creature enters or attacks, you may return "
+            "target permanent card with mana value 2 or less from "
+            "your graveyard to the battlefield."
+        ),
+        "type_line": "Creature — Giant",
+    },
+
+    # Swan Song — the widest restricted-counter type list ("counter
+    # target enchantment, instant, or sorcery spell"), with a
+    # token-gift rider that must not distract the classifier.
+    "Swan Song": {
+        "oracle_text": (
+            "Counter target enchantment, instant, or sorcery spell. "
+            "Its controller creates a 2/2 blue Bird creature token "
+            "with flying."
         ),
         "type_line": "Instant",
     },
@@ -181,11 +525,66 @@ ORACLES: dict[str, dict[str, str]] = {
         "type_line": "Sorcery",
     },
 
+    # Victimize — reanimation whose return clause ("return the chosen
+    # cards to the battlefield tapped") names the creature cards a
+    # SENTENCE EARLIER — deliberately out of reach of the clause-bound
+    # oracle patterns; carried by combo_detection's hard-tagged
+    # _REANIMATION_SPELLS set instead. This fixture pins that gap.
+    "Victimize": {
+        "oracle_text": (
+            "Choose two target creature cards in your graveyard. "
+            "Sacrifice a creature. If you do, return the chosen cards "
+            "to the battlefield tapped."
+        ),
+        "type_line": "Sorcery",
+    },
+
+    # Widespread Brutality — "deals damage equal to its power to each
+    # non-Army creature": the equal-to sweep form (no digits, no
+    # literal X) the round-2 wipe pattern must catch.
+    "Widespread Brutality": {
+        "oracle_text": (
+            "Amass Zombies 2, then the Army you amassed deals damage "
+            "equal to its power to each non-Army creature. (To amass "
+            "Zombies 2, put two +1/+1 counters on an Army you "
+            "control. It's also a Zombie. If you don't control an "
+            "Army, create a 0/0 black Zombie Army creature token "
+            "first.)"
+        ),
+        "type_line": "Sorcery",
+    },
+
+    # Worldgorger Dragon — the reanimation-combo poster child (with
+    # Animate Dead). Printed MV 6; the round-2 combo-speed fix must
+    # price it at Animate Dead's MV instead of 6 so the pair reads
+    # early-game (B4 floor), not "8 total mana = late-game B3".
+    "Worldgorger Dragon": {
+        "oracle_text": (
+            "Flying, trample\n"
+            "When this creature enters, exile all other permanents "
+            "you control.\n"
+            "When this creature leaves the battlefield, return the "
+            "exiled cards to the battlefield under their owners' "
+            "control."
+        ),
+        "type_line": "Creature — Nightmare Dragon",
+    },
+
     # Wrath of God — baseline destroy-all template. Used as a
     # control value to confirm the standard pattern still works
     # after the multi-paragraph parser tweaks.
     "Wrath of God": {
         "oracle_text": "Destroy all creatures. They can't be regenerated.",
+        "type_line": "Sorcery",
+    },
+
+    # Wrenn's Resolve — the bare two-card impulse-draw template
+    # (functional Reckless Impulse reprint), no keyword riders.
+    "Wrenn's Resolve": {
+        "oracle_text": (
+            "Exile the top two cards of your library. Until the end "
+            "of your next turn, you may play those cards."
+        ),
         "type_line": "Sorcery",
     },
 }
