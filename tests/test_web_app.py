@@ -4319,10 +4319,17 @@ def test_audit_payload_carries_suggested_mode(client, monkeypatch, deck_dir):
     assert resp.status_code == 200
     body = resp.get_json()
     sug = body["suggested_mode"]
-    assert set(sug.keys()) == {"mode", "health_score", "fallback"}
+    assert set(sug.keys()) == {
+        # rebuild_suppressed / note joined the shape 2026-08-17 when the
+        # rebuild tier became opt-in; both are inert unless the score
+        # actually wanted rebuild.
+        "mode", "health_score", "fallback", "rebuild_suppressed", "note",
+    }
     assert sug["mode"] == "polish"
     assert sug["health_score"] is None
     assert sug["fallback"] is True
+    assert sug["rebuild_suppressed"] is False
+    assert sug["note"] is None
     # No ?mode= param -> nothing was applied.
     assert body["curation_mode"] is None
 
@@ -7196,6 +7203,99 @@ def test_mutation_gate_covers_put(client):
         data="text=evil", content_type="application/x-www-form-urlencoded",
     )
     assert resp.status_code == 415
+
+
+# ---------------------------------------------------------------------------
+# Host-header gate (2026-08-17 — DNS rebinding)
+# ---------------------------------------------------------------------------
+# Binding loopback does not make the server unreachable from a browser:
+# a page can point a hostname it controls at 127.0.0.1 and become
+# same-origin, at which point the mutation gate above is no defense (a
+# same-origin fetch sets any Content-Type it likes and READS the
+# response). The Host header still names the hostname the page asked
+# for, so the before_request gate 403s anything that isn't loopback.
+
+@pytest.mark.parametrize("host", [
+    "127.0.0.1", "127.0.0.1:5000", "localhost", "localhost:5000",
+    "[::1]", "[::1]:5000", "::1", "LocalHost:5000",
+])
+def test_is_loopback_host_accepts_loopback_forms(host):
+    from commander_builder.web.app import _is_loopback_host
+    assert _is_loopback_host(host) is True
+
+
+@pytest.mark.parametrize("host", [
+    None, "", "   ",
+    "evil.example", "evil.example:5000",
+    "127.0.0.1.evil.example",          # suffix trick
+    "evil.example:127.0.0.1",          # the host is not the port
+    "localhost.evil.example",
+    "127.0.0.1:notaport",
+    "127.0.0.1:",
+    "[::1",                            # unterminated literal
+    "[::1]junk",
+    "0.0.0.0:5000", "192.168.1.5:5000",
+])
+def test_is_loopback_host_rejects_everything_else(host):
+    from commander_builder.web.app import _is_loopback_host
+    assert _is_loopback_host(host) is False
+
+
+def test_host_gate_403s_a_rebound_get(client):
+    """A GET carrying an attacker-controlled Host is refused before the
+    route runs — deck contents are what's being protected here."""
+    resp = client.get("/api/decks", headers={"Host": "evil.example:5000"})
+    assert resp.status_code == 403
+    body = resp.get_json()
+    assert "Host" in body["error"]
+    assert body["received"] == "evil.example:5000"
+
+
+def test_host_gate_403s_a_rebound_json_post(client):
+    """A well-formed JSON POST (which sails through the mutation gate)
+    still dies on the Host check."""
+    resp = client.post(
+        "/api/log_error", json={"message": "rebound"},
+        headers={"Host": "evil.example"},
+    )
+    assert resp.status_code == 403
+
+
+def test_host_gate_403s_a_lan_host(client):
+    """--host 0.0.0.0 still binds, but a LAN Host header is refused —
+    the documented consequence of the non-configurable gate."""
+    resp = client.get("/api/health", headers={"Host": "192.168.1.5:5000"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("host", [
+    "127.0.0.1:5000", "localhost:5000", "[::1]:5000", "localhost",
+])
+def test_host_gate_allows_loopback_hosts(client, host):
+    resp = client.get("/api/health", headers={"Host": host})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
+
+
+def test_host_gate_leaves_the_default_test_client_working(client):
+    """Flask's test client sends ``Host: localhost`` — the whole suite
+    depends on that passing the gate untouched."""
+    resp = client.get("/api/decks")
+    assert resp.status_code == 200
+
+
+def test_host_gate_covers_static_assets(client):
+    """Static files go through the same before_request hook: loopback
+    serves them, a rebound Host doesn't."""
+    ok = client.get("/static/app.css")
+    assert ok.status_code == 200
+    rebound = client.get("/static/app.css", headers={"Host": "evil.example"})
+    assert rebound.status_code == 403
+
+
+def test_host_gate_leaves_the_root_template_working(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------

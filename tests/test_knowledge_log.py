@@ -5,6 +5,7 @@ Each test uses a tmp_path-scoped DB so they don't pollute the real history.
 import pytest
 
 from commander_builder.knowledge_log import (
+    SCHEMA_VERSION,
     Iteration,
     get_iteration,
     init_db,
@@ -655,7 +656,9 @@ def test_init_db_migrates_v1_to_v2_adds_milestone_column(tmp_path):
     assert row["verdict"] == "kept"   # legacy row intact
     assert row["milestone"] is None   # new column NULL by default
     cur = conn.execute("SELECT version FROM schema_version")
-    assert cur.fetchone()["version"] == 2
+    # Whatever the current schema version is — a v1 database is upgraded
+    # all the way, not to some intermediate step.
+    assert cur.fetchone()["version"] == SCHEMA_VERSION
     conn.close()
 
 
@@ -670,6 +673,207 @@ def test_init_db_migration_is_idempotent(tmp_path):
     set_milestone(it_id, "still-works", db_path=p)
     row = get_iteration(it_id, db_path=p)
     assert row.milestone == "still-works"
+
+
+# ---------------------------------------------------------------------------
+# measurement_era column (schema v3, 2026-08-17)
+# ---------------------------------------------------------------------------
+# The log spans three mutually incompatible measurement conventions and
+# nothing on a row said which one produced its numbers. Every new row is
+# now stamped; historical rows are backfilled where the boundary is
+# KNOWN and left NULL where it isn't (a NULL means "unknown", never a
+# fourth era).
+
+@pytest.mark.parametrize("created_at,row_id,expected", [
+    # Era 1 — pre-seat-attribution. The DATE decides; ``id < 314``
+    # (STATUS.md's boundary for the owner's log) only breaks the tie
+    # inside the 2026-05-21/22 fix session or when there's no date.
+    ("2026-03-01T00:00:00+00:00", 12, 1),
+    ("2026-03-01T00:00:00+00:00", None, 1),
+    ("2026-05-21T12:00:00+00:00", 12, 1),    # mid-session, pre-fix id
+    ("2026-05-21T12:00:00+00:00", 400, 2),   # mid-session, post-fix id
+    (None, 12, 1),                           # no date -> id boundary only
+    # A low id does NOT make a recent row an artifact: ids restart at 1
+    # in every fresh database, so the date has to win.
+    ("2026-08-15T00:00:00+00:00", 1, 4),
+    # Era 2 — seat-attributed, mixed win-rate denominators.
+    ("2026-06-01T00:00:00+00:00", 400, 2),
+    ("2026-07-18T23:59:59+00:00", None, 2),
+    # Era 3 — head-to-head decisive denominator, margin-threshold verdicts.
+    ("2026-07-20T00:00:00+00:00", 500, 3),
+    ("2026-08-13T23:59:59+00:00", None, 3),
+    # Era 4 — significance-based verdicts.
+    ("2026-08-14T00:00:00+00:00", 900, 4),
+    ("2026-09-01T12:00:00+00:00", None, 4),
+    # Unknown — never guessed.
+    (None, None, None),
+    ("", None, None),
+    (None, 400, None),                          # no date, id proves nothing
+    ("2026-07-19T12:00:00+00:00", 450, None),   # the mixed-writer window
+    ("2026-05-21T12:00:00+00:00", None, None),  # mid fix-session, no id
+])
+def test_measurement_era_for_boundaries(created_at, row_id, expected):
+    from commander_builder.knowledge_log import measurement_era_for
+    assert measurement_era_for(created_at, row_id) == expected
+
+
+def test_measurement_eras_mapping_documents_every_stamped_value():
+    from commander_builder.knowledge_log import (
+        CURRENT_MEASUREMENT_ERA,
+        MEASUREMENT_ERAS,
+    )
+    assert set(MEASUREMENT_ERAS) == {1, 2, 3, 4}
+    assert CURRENT_MEASUREMENT_ERA in MEASUREMENT_ERAS
+    assert all(v.strip() for v in MEASUREMENT_ERAS.values())
+
+
+def test_record_iteration_stamps_the_current_era(db):
+    from commander_builder.knowledge_log import CURRENT_MEASUREMENT_ERA
+    row = get_iteration(_add_row(db), db_path=db)
+    assert row.measurement_era == CURRENT_MEASUREMENT_ERA
+
+
+def test_record_iteration_classifies_a_backdated_row_by_its_timestamp(db):
+    """A row carrying an older created_at (a merge/import fold) is
+    stamped from ITS OWN measurement date, not from today."""
+    it_id = record_iteration(
+        Iteration(
+            deck_id="old", deck_name="old", bracket=3,
+            created_at="2026-08-01T00:00:00+00:00",
+        ),
+        db_path=db,
+    )
+    assert get_iteration(it_id, db_path=db).measurement_era == 3
+
+
+def test_record_iteration_leaves_an_unclassifiable_row_null(db):
+    """The 2026-07-19/20 window is a MIXED population by writer — NULL
+    is the honest answer, not a rounded-off era."""
+    it_id = record_iteration(
+        Iteration(
+            deck_id="mixed", deck_name="mixed", bracket=3,
+            created_at="2026-07-19T08:00:00+00:00",
+        ),
+        db_path=db,
+    )
+    # And it STAYS None: the migration's backfill re-scans NULL rows on
+    # every init_db, and must not label this row era 1 just because a
+    # fresh database handed it a low id.
+    init_db(db)
+    assert get_iteration(it_id, db_path=db).measurement_era is None
+
+
+def test_record_iteration_honors_an_explicit_era(db):
+    it_id = record_iteration(
+        Iteration(
+            deck_id="x", deck_name="x", bracket=3, measurement_era=2,
+        ),
+        db_path=db,
+    )
+    assert get_iteration(it_id, db_path=db).measurement_era == 2
+
+
+def _legacy_v2_db(tmp_path, rows):
+    """Hand-build a v2 database (milestone, no measurement_era) holding
+    ``rows`` of (id, created_at)."""
+    import sqlite3
+    p = tmp_path / "legacy_v2.sqlite"
+    conn = sqlite3.connect(p)
+    conn.executescript("""
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        CREATE TABLE iterations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deck_id TEXT NOT NULL, deck_name TEXT NOT NULL,
+            bracket INTEGER NOT NULL, parent_id INTEGER,
+            audit_version TEXT, audit_manifest TEXT, sim_report TEXT,
+            verdict TEXT NOT NULL DEFAULT 'pending', verdict_notes TEXT,
+            win_rate_old REAL, win_rate_new REAL, margin INTEGER,
+            created_at TEXT NOT NULL, deck_snapshot TEXT, milestone TEXT
+        );
+        INSERT INTO schema_version (version) VALUES (2);
+    """)
+    for row_id, created_at in rows:
+        conn.execute(
+            "INSERT INTO iterations (id, deck_id, deck_name, bracket, "
+            "created_at, verdict, margin) VALUES (?, ?, ?, 3, ?, 'kept', 4)",
+            (row_id, f"deck{row_id}", f"deck{row_id}", created_at),
+        )
+    conn.commit()
+    conn.close()
+    return p
+
+
+def test_migration_v2_to_v3_backfills_known_eras_only(tmp_path):
+    """The backfill classifies by id/date where the boundary is known
+    and leaves the rest NULL. It must not touch any other column."""
+    import sqlite3
+    p = _legacy_v2_db(tmp_path, [
+        (12, "2026-04-01T00:00:00+00:00"),    # id < 314 -> era 1
+        (400, "2026-06-15T00:00:00+00:00"),   # era 2
+        (450, "2026-07-19T09:00:00+00:00"),   # mixed window -> unknown
+        (500, "2026-07-25T00:00:00+00:00"),   # era 3
+        (900, "2026-08-15T00:00:00+00:00"),   # era 4
+    ])
+    init_db(p)
+
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT id, measurement_era, verdict, margin FROM iterations "
+        "ORDER BY id"
+    )
+    rows = {r["id"]: r for r in cur.fetchall()}
+    assert rows[12]["measurement_era"] == 1
+    assert rows[400]["measurement_era"] == 2
+    assert rows[450]["measurement_era"] is None
+    assert rows[500]["measurement_era"] == 3
+    assert rows[900]["measurement_era"] == 4
+    # Nothing else was reprocessed.
+    assert all(r["verdict"] == "kept" and r["margin"] == 4
+               for r in rows.values())
+    cur = conn.execute("SELECT version FROM schema_version")
+    assert cur.fetchone()["version"] == SCHEMA_VERSION
+    conn.close()
+
+
+def test_migration_v2_to_v3_is_idempotent_and_preserves_stamps(tmp_path):
+    """Re-running init_db doesn't re-classify: a row whose era was set
+    (by the first pass, or by hand) keeps it, and the still-unknown row
+    stays NULL rather than drifting into an era."""
+    import sqlite3
+    p = _legacy_v2_db(tmp_path, [
+        (400, "2026-06-15T00:00:00+00:00"),
+        (450, "2026-07-19T09:00:00+00:00"),
+    ])
+    init_db(p)
+    conn = sqlite3.connect(p)
+    conn.execute("UPDATE iterations SET measurement_era = 9 WHERE id = 400")
+    conn.commit()
+    conn.close()
+
+    init_db(p)
+    init_db(p)
+
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute("SELECT id, measurement_era FROM iterations")
+    rows = {r["id"]: r["measurement_era"] for r in cur.fetchall()}
+    assert rows[400] == 9      # a set value is never rewritten
+    assert rows[450] is None
+    conn.close()
+
+
+def test_from_row_tolerates_a_pre_v3_row(tmp_path):
+    """A Row out of a database the migration hasn't touched has no
+    measurement_era key — reads must degrade to None, not IndexError
+    (the same legacy guard milestone carries)."""
+    import sqlite3
+    p = _legacy_v2_db(tmp_path, [(400, "2026-06-15T00:00:00+00:00")])
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM iterations WHERE id = 400").fetchone()
+    conn.close()
+    assert Iteration.from_row(row).measurement_era is None
 
 
 # --- decisive_win_rate — the one win-rate convention (2026-07-19) -----------

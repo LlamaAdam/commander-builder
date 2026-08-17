@@ -530,6 +530,34 @@ def test_list_bracket_candidates_excludes_control_and_user_keeps_ref(tmp_path):
     ]
 
 
+def test_ref_is_a_candidate_but_never_a_filler(tmp_path):
+    """The 2026-08-17 policy, pinned across both modules that implement
+    it: a [REF] deck is pool-CANDIDATE eligible (candidacy ends in a
+    published ranking, so a popular deck is signal the operator reads)
+    and filler-INELIGIBLE (a filler seat is never ranked; its strength
+    silently sets the A/B baseline, so popularity bias goes unseen)."""
+    import random as _rnd
+
+    import commander_builder.pool_curator as pc
+    from commander_builder._proposer_sim import _pick_filler_decks
+
+    for name in [
+        "Alpha Deck [B3].dck",
+        "Beta Deck [B3].dck",
+        "[REF] mox Community Build [B3].dck",
+    ]:
+        (tmp_path / name).write_text("[Main]\n1 Forest\n", encoding="utf-8")
+
+    assert "[REF] mox Community Build [B3].dck" in pc._list_bracket_candidates(
+        3, deck_dir=tmp_path,
+    )
+    fillers = _pick_filler_decks(
+        tmp_path, exclude_paths=[], count=2, target_bracket=3,
+        rng=_rnd.Random(7),
+    )
+    assert sorted(fillers) == ["Alpha Deck [B3].dck", "Beta Deck [B3].dck"]
+
+
 def test_main_returns_distinct_exit_code_on_insufficient_survivors(monkeypatch):
     """CLI convention: 0 = success, 2 = not enough decks on disk,
     3 = preflight rejected the pool. No traceback."""

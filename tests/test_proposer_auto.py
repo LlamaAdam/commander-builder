@@ -2706,6 +2706,39 @@ def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):
     assert "[USER] Mine v2 [B3].dck" not in picks
 
 
+def test_pick_filler_decks_excludes_ref_decks(tmp_path):
+    """2026-08-17: [REF] (meta_test's Moxfield top-likes) is no longer
+    filler-eligible. It carries the same popularity bias [PREMADE] is
+    excluded for, and a filler seat is never ranked — its strength just
+    sets the A/B baseline, so the bias would be invisible."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    for name in ("Filler A [B3].dck", "Filler B [B3].dck",
+                 "[REF] Top Liked [B3].dck", "[REF] Also Top [B3].dck"):
+        (tmp_path / name).write_text("a", encoding="utf-8")
+    picks = _pick_filler_decks(
+        tmp_path, exclude_paths=[], count=2, target_bracket=3,
+        rng=_rnd.Random(0),
+    )
+    assert sorted(picks) == ["Filler A [B3].dck", "Filler B [B3].dck"]
+
+
+def test_pick_filler_decks_returns_empty_rather_than_seating_a_ref(tmp_path):
+    """The exclusion is absolute, not a preference: with only [REF]
+    decks left the picker returns [] (caller surfaces "no fillers" and
+    skips the sim) instead of falling back to a biased seat."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    for name in ("[REF] Top Liked [B3].dck", "[REF] Also Top [B3].dck",
+                 "Filler A [B3].dck"):
+        (tmp_path / name).write_text("a", encoding="utf-8")
+    picks = _pick_filler_decks(
+        tmp_path, exclude_paths=[], count=2, target_bracket=3,
+        rng=_rnd.Random(0),
+    )
+    assert picks == []
+
+
 def test_pick_filler_decks_prefers_same_bracket(tmp_path):
     """Regression for the 2026-05-15 live-bug: B4 user deck was matched
     against B5 cEDH + B2 casual fillers, producing a noise-dominated

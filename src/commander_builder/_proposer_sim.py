@@ -220,8 +220,17 @@ def _pick_filler_decks(
         identical copy in the filler slots would be self-defeating).
       - Skip ``[USER]`` prefixed decks (those are the user's own
         work; the opponent pool is everything WITHOUT the prefix),
-        ``[CONTROL]`` calibration decks, and ``[PREMADE]``
-        popularity-ranked imports (they'd skew filler strength).
+        ``[CONTROL]`` calibration decks, ``[PREMADE]``
+        popularity-ranked imports, and -- since 2026-08-17 --
+        ``[REF]`` meta-test references. ``[REF]`` decks are Moxfield
+        top-likes: the SAME popularity bias ``[PREMADE]`` is excluded
+        for, so seating them as fillers made that exclusion arbitrary
+        rather than principled. The asymmetry now survives only where
+        it is earned: ``[REF]`` stays a pool CANDIDATE in
+        ``pool_curator._list_bracket_candidates`` (a real playable
+        community build, worth RANKING) but is no longer filler-
+        eligible, because a filler seat is never ranked -- its
+        strength silently sets the A/B baseline instead.
       - When ``target_bracket`` is given, group candidates by
         |bracket_of_candidate - target_bracket| and walk the buckets
         from delta=0 up. Each bucket is shuffled via ``rng`` for
@@ -244,6 +253,7 @@ def _pick_filler_decks(
         if not p.name.startswith("[USER]")
         and not p.name.startswith("[CONTROL]")  # never use a calibration deck as filler
         and not p.name.startswith("[PREMADE]")  # popularity-ranked; would skew filler strength
+        and not p.name.startswith("[REF]")  # 2026-08-17: same popularity bias as [PREMADE]
         and p.name not in exclude_set
     ]
     if not candidates:

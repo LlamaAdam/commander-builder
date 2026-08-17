@@ -20,6 +20,15 @@ where Forge provides ground-truth simulation and an LLM (Claude or local
 Ollama) acts as the analyst that reads sim deltas and decides what to try
 next.
 
+**What that ground truth is, exactly.** The opponents are bots. A `kept`
+verdict certifies "this version wins more against Forge's AI" — an AI
+that misplays whole card classes and, in our soak runs, grinds roughly a
+quarter of games into turn-cap loops — not "this version is better at
+your table". Politics, threat assessment, deal-making, and who the table
+decides to kill on turn six are outside what the sim can measure at all,
+and they decide plenty of real Commander games. It is a real measurement
+of a real thing; it just isn't your pod.
+
 **Source-of-truth docs:**
 - [STATUS.md](docs/STATUS.md) — current state, open backlog, parked plans
 - [CHANGELOG.md](docs/CHANGELOG.md) — what landed, in reverse chronological order

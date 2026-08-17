@@ -1,6 +1,8 @@
 """Tests for the adaptive change budget (``change_budget.py``).
 
 Covers the tier boundary mapping (34/35/54/55/74/75 + None fallback),
+the 2026-08-17 rebuild opt-in (auto caps at overhaul and discloses why;
+``--mode rebuild`` and ``COMMANDER_BUILDER_REBUILD_TIER=1`` lift it),
 the manabase-rebuild planner (offline, stubbed lookups) and its
 staging through the normal legality path, ``--mode auto`` resolution
 printing on commander-auto-curate and commander-advise, the rebuild
@@ -16,15 +18,27 @@ from pathlib import Path
 import pytest
 
 from commander_builder.change_budget import (
+    AUTO_MAX_TIER,
     FALLBACK_TIER,
+    REBUILD_OPT_IN_NOTE,
+    REBUILD_TIER_ENV_VAR,
     TIER_CAPS,
     BudgetTier,
     format_auto_mode_line,
     plan_manabase_rebuild,
+    rebuild_tier_enabled,
     resolve_tier,
     suggested_mode_payload,
     trim_recommendations,
 )
+
+
+@pytest.fixture(autouse=True)
+def _rebuild_opt_in_off(monkeypatch):
+    """Default every test to "operator has NOT opted into rebuild" —
+    the env flag is process-wide, so an inherited value would silently
+    change what the auto path resolves to."""
+    monkeypatch.delenv(REBUILD_TIER_ENV_VAR, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -32,13 +46,15 @@ from commander_builder.change_budget import (
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("score,expected_mode", [
-    (34, "rebuild"),
+    # Sub-35 wants rebuild but resolves to the AUTO_MAX_TIER cap unless
+    # the operator opts in — see the rebuild-opt-in block below.
+    (34, AUTO_MAX_TIER),
     (35, "overhaul"),
     (54, "overhaul"),
     (55, "polish"),
     (74, "polish"),
     (75, "keep"),
-    (0, "rebuild"),
+    (0, AUTO_MAX_TIER),
     (100, "keep"),
 ])
 def test_resolve_tier_boundaries(score, expected_mode):
@@ -47,6 +63,85 @@ def test_resolve_tier_boundaries(score, expected_mode):
     assert (tier.max_adds, tier.max_cuts) == TIER_CAPS[expected_mode]
     assert tier.health_score == score
     assert tier.fallback is False
+
+
+@pytest.mark.parametrize("score,expected_mode", [
+    (34, "rebuild"),
+    (0, "rebuild"),
+    (35, "overhaul"),
+])
+def test_resolve_tier_boundaries_with_rebuild_opted_in(score, expected_mode):
+    """With the opt-in the mapping is the historical one: <35 ->
+    rebuild, and nothing else moves."""
+    tier = resolve_tier(score, allow_rebuild=True)
+    assert tier.mode == expected_mode
+    assert (tier.max_adds, tier.max_cuts) == TIER_CAPS[expected_mode]
+    assert tier.rebuild_suppressed is False
+
+
+# ---------------------------------------------------------------------------
+# Rebuild tier is opt-in (2026-08-17)
+# ---------------------------------------------------------------------------
+# The 30+30 tier is a ~6x cost multiplier gated on the deck-health
+# score, which has never been validated against sim outcomes (same
+# epistemic class as CardScore, which failed three pre-registered
+# gates). Automatic escalation therefore stops at AUTO_MAX_TIER and
+# says so; the operator opts in with --mode rebuild or the env flag.
+
+def test_auto_escalation_caps_at_the_next_tier_down(monkeypatch):
+    monkeypatch.delenv(REBUILD_TIER_ENV_VAR, raising=False)
+    tier = resolve_tier(20)
+    assert tier.mode == AUTO_MAX_TIER == "overhaul"
+    assert (tier.max_adds, tier.max_cuts) == (15, 15)
+    assert tier.rebuild_suppressed is True
+    # The real score is still reported — the cap is disclosed, not hidden.
+    assert tier.health_score == 20
+
+
+def test_env_flag_opts_auto_escalation_into_rebuild(monkeypatch):
+    monkeypatch.setenv(REBUILD_TIER_ENV_VAR, "1")
+    tier = resolve_tier(20)
+    assert tier.mode == "rebuild"
+    assert (tier.max_adds, tier.max_cuts) == (30, 30)
+    assert tier.rebuild_suppressed is False
+
+
+@pytest.mark.parametrize("value,enabled", [
+    ("1", True), ("true", True), ("YES", True), (" true ", True),
+    ("0", False), ("", False), ("off", False), ("no", False),
+])
+def test_rebuild_tier_enabled_truthy_convention(monkeypatch, value, enabled):
+    """Same truthy spelling as card_score.is_enabled."""
+    monkeypatch.setenv(REBUILD_TIER_ENV_VAR, value)
+    assert rebuild_tier_enabled() is enabled
+
+
+def test_explicit_allow_rebuild_false_beats_the_env_flag(monkeypatch):
+    """An explicit bool bypasses the env entirely (callers that have
+    already resolved the operator's intent)."""
+    monkeypatch.setenv(REBUILD_TIER_ENV_VAR, "1")
+    assert resolve_tier(20, allow_rebuild=False).mode == AUTO_MAX_TIER
+
+
+def test_suppressed_tier_disclosure_names_both_opt_in_surfaces():
+    line = format_auto_mode_line(resolve_tier(20))
+    assert "auto mode: overhaul (health 20/100)" in line
+    assert "--mode rebuild" in line
+    assert REBUILD_TIER_ENV_VAR in line
+    assert "unvalidated" in line
+    # One line — callers indent it differently.
+    assert "\n" not in line
+
+
+def test_unsuppressed_tiers_carry_no_note():
+    assert REBUILD_OPT_IN_NOTE not in format_auto_mode_line(resolve_tier(42))
+
+
+def test_explicit_rebuild_mode_still_gets_the_full_budget():
+    """The --mode rebuild path reads TIER_CAPS directly and never
+    passes through resolve_tier, so the opt-in gate cannot shrink an
+    explicitly requested rebuild."""
+    assert TIER_CAPS["rebuild"] == (30, 30)
 
 
 def test_resolve_tier_none_score_falls_back_to_polish():
@@ -86,10 +181,23 @@ def test_format_auto_mode_line():
 def test_suggested_mode_payload_shapes():
     assert suggested_mode_payload(42) == {
         "mode": "overhaul", "health_score": 42, "fallback": False,
+        "rebuild_suppressed": False, "note": None,
     }
     assert suggested_mode_payload(None) == {
         "mode": "polish", "health_score": None, "fallback": True,
+        "rebuild_suppressed": False, "note": None,
     }
+
+
+def test_suggested_mode_payload_surfaces_the_suppressed_rebuild():
+    """The web audit's ?mode=auto applies suggested_mode["mode"], so the
+    cap propagates there for free — but the API consumer also needs to
+    be told the budget was capped and how to lift it."""
+    payload = suggested_mode_payload(20)
+    assert payload["mode"] == AUTO_MAX_TIER
+    assert payload["health_score"] == 20
+    assert payload["rebuild_suppressed"] is True
+    assert payload["note"] == REBUILD_OPT_IN_NOTE
 
 
 def test_trim_recommendations_caps_adds_and_cuts_preserving_order():
@@ -317,12 +425,79 @@ def test_auto_curate_main_auto_mode_json_keeps_stdout_parseable(
     ])
     assert rc == 0
     captured = capsys.readouterr()
-    assert "auto mode: rebuild (health 20/100)" in captured.err
+    # Health 20 WANTS rebuild; without the opt-in it caps at overhaul and
+    # the stderr disclosure says why (2026-08-17).
+    assert "auto mode: overhaul (health 20/100)" in captured.err
+    assert REBUILD_TIER_ENV_VAR in captured.err
     payload = json.loads(captured.out)
-    assert payload["mode"] == "rebuild"
+    assert payload["mode"] == "overhaul"
     assert payload["requested_mode"] == "auto"
     assert payload["auto_health_score"] == 20
+
+
+def test_auto_curate_main_auto_mode_caps_rebuild_without_opt_in(
+    tmp_path, monkeypatch, capsys,
+):
+    """The point of the cap: a sub-35 deck under --mode auto gets the
+    15+15 overhaul budget, not 30+30, and the rebuild-only manabase
+    step never runs."""
+    from commander_builder._proposer_cli import auto_curate_main
+    deck = _write_min_deck(tmp_path)
+    seen: dict = {}
+    _stub_pipeline(monkeypatch, seen)
+    monkeypatch.setattr(
+        "commander_builder.change_budget.health_score_for_deck",
+        lambda _text: 12,
+    )
+
+    def _boom(_text):
+        raise AssertionError("manabase rebuild must not run below the cap")
+    monkeypatch.setattr(
+        "commander_builder.change_budget.plan_manabase_rebuild", _boom,
+    )
+
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--mode", "auto", "--dry-run",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "auto mode: overhaul (health 12/100)" in out
+    assert "--mode rebuild" in out
+    assert seen["auto_propose_kwargs"]["mode"] == "overhaul"
+    assert seen["auto_propose_kwargs"]["max_adds"] == 15
+    assert seen["auto_propose_kwargs"]["max_cuts"] == 15
+
+
+def test_auto_curate_main_auto_mode_reaches_rebuild_with_env_opt_in(
+    tmp_path, monkeypatch, capsys,
+):
+    """With COMMANDER_BUILDER_REBUILD_TIER=1 the auto path escalates all
+    the way — the pre-2026-08-17 behavior, now opted into."""
+    from commander_builder._proposer_cli import auto_curate_main
+    deck = _write_min_deck(tmp_path)
+    seen: dict = {}
+    _stub_pipeline(monkeypatch, seen)
+    monkeypatch.setenv(REBUILD_TIER_ENV_VAR, "1")
+    monkeypatch.setattr(
+        "commander_builder.change_budget.health_score_for_deck",
+        lambda _text: 20,
+    )
+    monkeypatch.setattr(
+        "commander_builder.change_budget.plan_manabase_rebuild",
+        lambda _text: None,
+    )
+
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--mode", "auto", "--dry-run", "--json",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "auto mode: rebuild (health 20/100)" in captured.err
+    assert REBUILD_OPT_IN_NOTE not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["mode"] == "rebuild"
     assert "manabase_rebuild" in payload
+    assert seen["auto_propose_kwargs"]["max_adds"] == 30
 
 
 def test_auto_curate_main_rebuild_budget_and_manabase_plumbing(

@@ -29,12 +29,40 @@ TIER THRESHOLDS — named constants, with the reasoning:
   midpoint of the D/F grade bands (``deck_health._GRADE_BANDS``: D
   ends at 40, F below): a deck under ~35 is failing on multiple
   weighted components at once, which 15 swaps cannot fix.
-- ``< 35 -> "rebuild"`` (NEW tier): 30+30 through the same proposer /
-  curator plumbing, plus an optional manabase rebuild via the FP-014
-  Karsten per-CMC model (``plan_manabase_rebuild`` below). Every
-  change still flows through the normal legality + A/B verdict
-  machinery — the tier only widens the budget, it never bypasses the
-  empirical gate.
+- ``< 35 -> "rebuild"``: 30+30 through the same proposer / curator
+  plumbing, plus an optional manabase rebuild via the FP-014 Karsten
+  per-CMC model (``plan_manabase_rebuild`` below). Every change still
+  flows through the normal legality + A/B verdict machinery — the tier
+  only widens the budget, it never bypasses the empirical gate.
+
+REBUILD IS OPT-IN, NOT AUTOMATIC (2026-08-17)
+=============================================
+The automatic escalation path (``--mode auto`` on auto-curate /
+advise / improve, and the web audit's ``?mode=auto``) will NOT select
+``rebuild`` on its own. It caps at ``overhaul`` — the next tier down —
+and surfaces ``REBUILD_OPT_IN_NOTE`` instead.
+
+Why: rebuild is a ~6x cost multiplier over polish (30+30 curated swaps,
+each an LLM call and a Forge seat) and the ONLY thing standing between
+the operator and that spend is the deck-health score. That score has
+never been validated against sim outcomes — it is the same epistemic
+class as CardScore, which failed three pre-registered gates (FP-015),
+and this module's own opening paragraph is explicit that health carries
+NO win-rate claim. An unvalidated score is allowed to pick between
+timid and moderate budgets; it is not allowed to spend six times the
+money by itself.
+
+Two ways to opt in, both explicit:
+  * ``--mode rebuild`` — the operator names the tier. Unaffected by any
+    of this: explicit tier selection reads ``TIER_CAPS`` directly and
+    never passes through ``resolve_tier``.
+  * ``COMMANDER_BUILDER_REBUILD_TIER=1`` — lets AUTO escalate all the
+    way to rebuild. Env-flag opt-in matching this repo's convention for
+    unvalidated machinery (``COMMANDER_BUILDER_CARD_SCORE``,
+    ``COMMANDER_BUILDER_CORPUS_NORMS``); it is set once per shell, so it
+    also covers batch/improve runs where there is no per-round prompt.
+    Remove the flag when the health score earns its escalation with a
+    measured A/B result.
 
 Score unavailable (health ``None`` — empty deck, Scryfall outage):
 fall back to ``polish`` with a printed note, never crash. An outage is
@@ -43,6 +71,7 @@ must not trigger the aggressive tiers either.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -68,6 +97,34 @@ TIER_CAPS: dict[str, tuple[int, int]] = {
 # data.
 FALLBACK_TIER = "polish"
 
+# Where automatic escalation stops without an explicit opt-in, and the
+# env flag that lifts the stop (rationale in the module docstring).
+AUTO_MAX_TIER = "overhaul"
+REBUILD_TIER_ENV_VAR = "COMMANDER_BUILDER_REBUILD_TIER"
+
+#: Printed / surfaced verbatim whenever auto WANTED rebuild and got
+#: ``AUTO_MAX_TIER`` instead. Names both opt-in surfaces and the reason,
+#: because "your budget was quietly capped" is useless without "here is
+#: how to un-cap it, and here is why it was capped".
+REBUILD_OPT_IN_NOTE = (
+    "deck-health suggests a rebuild-tier budget (30+30); re-run with "
+    "--mode rebuild, or set COMMANDER_BUILDER_REBUILD_TIER=1 to let "
+    "auto escalate there — the health score gating this escalation is "
+    "unvalidated. Capped at overhaul (15+15)."
+)
+
+
+def rebuild_tier_enabled() -> bool:
+    """True when the operator has opted auto-escalation into ``rebuild``.
+
+    Same truthy-value convention as ``card_score.is_enabled`` /
+    ``_advisor_logging.is_enabled`` — one shared spelling of "is this
+    flag on" across every opt-in in the codebase.
+    """
+    return os.environ.get(
+        REBUILD_TIER_ENV_VAR, "",
+    ).strip().lower() in ("1", "true", "yes")
+
 
 @dataclass(frozen=True)
 class BudgetTier:
@@ -76,6 +133,11 @@ class BudgetTier:
     ``fallback`` is True when the tier came from the None-score
     fallback (health unavailable) rather than an actual score — the
     caller must surface that in its printed note.
+
+    ``rebuild_suppressed`` is True when the score mapped to ``rebuild``
+    but the opt-in was absent, so ``mode`` is the capped
+    ``AUTO_MAX_TIER`` instead. Callers surface ``REBUILD_OPT_IN_NOTE``
+    when they see it (``format_auto_mode_line`` already does).
     """
 
     mode: str
@@ -83,14 +145,27 @@ class BudgetTier:
     max_cuts: int
     health_score: Optional[int]
     fallback: bool = False
+    rebuild_suppressed: bool = False
 
 
-def resolve_tier(score: Optional[float]) -> BudgetTier:
+def resolve_tier(
+    score: Optional[float], *, allow_rebuild: Optional[bool] = None,
+) -> BudgetTier:
     """Map a deck-health score (0-100 or None) to a ``BudgetTier``.
 
     Boundary semantics (inclusive lower bounds): 75 -> keep, 74 ->
-    polish, 55 -> polish, 54 -> overhaul, 35 -> overhaul, 34 ->
-    rebuild. ``None`` -> the polish fallback with ``fallback=True``.
+    polish, 55 -> polish, 54 -> overhaul, 35 -> overhaul. ``None`` ->
+    the polish fallback with ``fallback=True``.
+
+    Below 35 the score wants ``rebuild``, which this function only
+    RETURNS when the operator has opted in (2026-08-17; see the module
+    docstring). ``allow_rebuild=None`` (the default) reads
+    ``COMMANDER_BUILDER_REBUILD_TIER`` at call time — env, not import,
+    so a test or a caller can flip it mid-process. Pass the bool
+    explicitly to bypass the env entirely. Without the opt-in the tier
+    is capped at ``AUTO_MAX_TIER`` with ``rebuild_suppressed=True``;
+    ``health_score`` still reports the real score, so nothing downstream
+    has to reverse-engineer why the budget stopped where it did.
     """
     if score is None:
         adds, cuts = TIER_CAPS[FALLBACK_TIER]
@@ -99,6 +174,7 @@ def resolve_tier(score: Optional[float]) -> BudgetTier:
             health_score=None, fallback=True,
         )
     s = int(score)
+    suppressed = False
     if s >= KEEP_MIN_SCORE:
         mode = "keep"
     elif s >= POLISH_MIN_SCORE:
@@ -106,10 +182,14 @@ def resolve_tier(score: Optional[float]) -> BudgetTier:
     elif s >= OVERHAUL_MIN_SCORE:
         mode = "overhaul"
     else:
-        mode = "rebuild"
+        if allow_rebuild is None:
+            allow_rebuild = rebuild_tier_enabled()
+        mode = "rebuild" if allow_rebuild else AUTO_MAX_TIER
+        suppressed = not allow_rebuild
     adds, cuts = TIER_CAPS[mode]
     return BudgetTier(
         mode=mode, max_adds=adds, max_cuts=cuts, health_score=s,
+        rebuild_suppressed=suppressed,
     )
 
 
@@ -131,34 +211,56 @@ def health_score_for_deck(deck_text: str) -> Optional[int]:
         return None
 
 
-def resolve_tier_for_deck(deck_text: str) -> BudgetTier:
+def resolve_tier_for_deck(
+    deck_text: str, *, allow_rebuild: Optional[bool] = None,
+) -> BudgetTier:
     """Convenience: ``resolve_tier(health_score_for_deck(deck_text))``."""
-    return resolve_tier(health_score_for_deck(deck_text))
+    return resolve_tier(
+        health_score_for_deck(deck_text), allow_rebuild=allow_rebuild,
+    )
 
 
 def format_auto_mode_line(tier: BudgetTier) -> str:
-    """The one-line disclosure every ``--mode auto`` surface prints."""
+    """The one-line disclosure every ``--mode auto`` surface prints.
+
+    A suppressed rebuild appends ``REBUILD_OPT_IN_NOTE`` — the operator
+    asked the score to size the budget, so they are owed the fact that
+    it wanted more than it was allowed to take.
+    """
     if tier.fallback:
         return (
             f"auto mode: {tier.mode} (health score unavailable — "
             f"defaulting to {FALLBACK_TIER})"
         )
-    return f"auto mode: {tier.mode} (health {tier.health_score}/100)"
+    line = f"auto mode: {tier.mode} (health {tier.health_score}/100)"
+    if tier.rebuild_suppressed:
+        # One line, not two: callers indent this string differently
+        # (auto-curate pads it, advise doesn't), so a newline inside it
+        # would land ragged on one of them.
+        line = f"{line} — {REBUILD_OPT_IN_NOTE}"
+    return line
 
 
 def suggested_mode_payload(score: Optional[float]) -> dict:
     """JSON-shaped tier suggestion for the web audit payload.
 
     Always returns a dict (never raises): ``{"mode": str,
-    "health_score": int|None, "fallback": bool}``. The UI renders it
-    next to the health-grade tile as "suggested mode: <tier>
-    (health N/100)".
+    "health_score": int|None, "fallback": bool, "rebuild_suppressed":
+    bool, "note": str|None}``. The UI renders it next to the
+    health-grade tile as "suggested mode: <tier> (health N/100)".
+
+    ``note`` is non-None only when the score wanted ``rebuild`` and the
+    opt-in was absent (2026-08-17); it carries the same text the CLI
+    prints, so the API surface and the terminal tell the operator the
+    same story about a capped budget.
     """
     tier = resolve_tier(score)
     return {
         "mode": tier.mode,
         "health_score": tier.health_score,
         "fallback": tier.fallback,
+        "rebuild_suppressed": tier.rebuild_suppressed,
+        "note": REBUILD_OPT_IN_NOTE if tier.rebuild_suppressed else None,
     }
 
 

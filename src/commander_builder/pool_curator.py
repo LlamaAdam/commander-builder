@@ -826,8 +826,18 @@ def _list_bracket_candidates(bracket: int, deck_dir: Path = DECK_DIR) -> list[st
                   recipe's like-weighted sampling is the intended amount of
                   popularity bias. Mirrors run_match._fallback_opponents.
     [REF] decks (meta_test's imported community references) are deliberately
-    KEPT: they are real, playable community builds at the bracket — exactly
-    the population the curator exists to rank.
+    KEPT as candidates: they are real, playable community builds at the
+    bracket — exactly the population the curator exists to rank.
+
+    Candidacy is now the ONLY seat [REF] is welcome in. Until 2026-08-17 they
+    were ALSO filler-eligible in ``_proposer_sim._pick_filler_decks``, which
+    made the [PREMADE] exclusion above arbitrary rather than principled —
+    [REF] is Moxfield top-likes, the same popularity bias. The rule that
+    replaced it keys on what the SEAT does, not on the import tag: a
+    candidate seat gets RANKED (its strength becomes an output the operator
+    reads, so a popular deck is signal), while a filler seat is never ranked
+    (its strength silently sets the A/B baseline, so a popularity-skewed
+    filler is invisible bias). Hence [REF] stays here and is excluded there.
 
     Note: globbing `*[B<n>].dck` doesn't work — pathlib treats the brackets
     as a character class. We glob `*.dck` and filter by suffix instead."""

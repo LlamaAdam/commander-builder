@@ -23,6 +23,8 @@ Schema rationale:
     margin          int, new_wins - old_wins
     created_at      ISO timestamp
     deck_snapshot   .dck text content (full deck preserved for reproducibility)
+    measurement_era small int naming which measurement convention produced
+                    this row's numbers (see MEASUREMENT_ERAS); NULL = unknown
 
 Win-rate convention (2026-07-20): ``win_rate_old`` / ``win_rate_new`` are
 wins / HEAD-TO-HEAD DECISIVE games, where decisive = wins_old + wins_new —
@@ -32,7 +34,9 @@ unattributed games, and filler-won pod games are all excluded; see
 fabricated 0.0.
 
 Convention history — cross-run analyses that pool these columns must
-bucket rows by write date:
+bucket rows by ``measurement_era`` (2026-08-17; before that column
+existed, by write date and id, which is what the backfill below
+mechanizes):
 
   * Before 2026-07-19 the three writers used three different denominators
     (all-games-including-draws, decisive-only, per-version-games).
@@ -149,7 +153,123 @@ def canonical_content_hash(row: dict, exclude: frozenset = frozenset()) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-SCHEMA_VERSION = 2
+# ---------------------------------------------------------------------------
+# Measurement eras (2026-08-17)
+# ---------------------------------------------------------------------------
+# This log spans three mutually incompatible measurement conventions and,
+# until now, nothing on a row said which one produced its numbers. Pooling
+# them is not "noisy data", it is comparing different quantities: an era-1
+# margin was attributed to the wrong deck, an era-2 win rate has a
+# denominator up to ~2x an era-3 one, and an era-3 'kept' means
+# |margin| >= 4 where an era-4 'kept' means a significant binomial test.
+# Every new row now carries its era; historical rows are backfilled where
+# the boundary is KNOWN and left NULL where it isn't.
+#
+#: era -> what changed. The value stored in ``iterations.measurement_era``.
+MEASUREMENT_ERAS: dict[int, str] = {
+    1: (
+        "pre-seat-attribution (…2026-05-21, local ids < 314). A/B wins "
+        "were credited by deck NAME, and A/B decks routinely share a "
+        "Name=, so wins funnelled to one side (e8777b6). margin, "
+        "win_rate_* and verdict are all measurement artifacts — archive "
+        "only, never training data."
+    ),
+    2: (
+        "seat-attributed, mixed win-rate denominators (2026-05-22 … "
+        "2026-07-18). Wins are correctly attributed, but the three "
+        "writers used three different denominators "
+        "(all-games-including-draws / decisive-only / per-version-games), "
+        "so win_rate_old and win_rate_new are not comparable across rows. "
+        "margin and verdict are usable; the rates are not."
+    ),
+    3: (
+        "head-to-head decisive denominator, margin-threshold verdicts "
+        "(2026-07-20 … 2026-08-13). Every writer computes win rates over "
+        "wins_old + wins_new (``decisive_win_rate``), so the rates pool "
+        "cleanly. Verdicts do NOT: kept/reverted came from a "
+        "game-count-invariant |margin| >= 4, which labels ~half of "
+        "NEUTRAL swaps confidently at 20 decisive games."
+    ),
+    4: (
+        "significance-based verdicts (2026-08-14 …). Same decisive "
+        "denominator as era 3, plus kept/reverted now requires an exact "
+        "two-sided binomial test vs p=0.5 at alpha 0.05 over >= 20 "
+        "decisive head-to-head games; everything else is 'inconclusive'. "
+        "Rates AND verdicts pool cleanly."
+    ),
+}
+
+#: Stamped on every row written from now on.
+CURRENT_MEASUREMENT_ERA = 4
+
+# Era boundaries. Dates are the ISO prefixes of ``created_at``; the id
+# boundary is the one recorded in STATUS.md for THIS repo's log.
+PRE_SEAT_ATTRIBUTION_MAX_ID = 314   # ids < 314 are era 1 (STATUS.md, e8777b6)
+_SEAT_FIX_START = "2026-05-21"      # fix landed over the 2026-05-21/22 session
+_SEAT_FIX_SETTLED = "2026-05-23"    # first date that is unambiguously post-fix
+_DECISIVE_MIXED_START = "2026-07-19"  # writers unified, denominators still mixed
+_DECISIVE_SETTLED = "2026-07-20"    # every writer on head-to-head decisive
+_SIGNIFICANCE_START = "2026-08-14"  # significance-based verdicts land
+
+
+def measurement_era_for(
+    created_at: Optional[str], iteration_id: Optional[int] = None,
+) -> Optional[int]:
+    """Which ``MEASUREMENT_ERAS`` key a row belongs to, or None if unknown.
+
+    Two signals, and ``created_at`` DECIDES:
+
+      * ``created_at`` — the ISO timestamp, compared against the era
+        boundaries above as strings (ISO-8601 sorts chronologically, so
+        ``>=`` on the raw string is a date compare).
+      * ``iteration_id`` — only a tie-breaker, for the one window a
+        date can't resolve (the fix landed mid-session on 2026-05-21/22)
+        and for rows with no usable timestamp at all. STATUS.md pins the
+        pre-fix boundary at ``id < 314``, but ids are MACHINE-LOCAL: on
+        the owner's log they're chronological and agree with the dates,
+        while a fresh database (or an imported row) restarts at 1. That
+        is why the date leads — letting ``id < 314`` fire first labeled
+        every low-id row in a brand-new database as a 2026-era
+        measurement artifact.
+
+    Returns None — "unknown", stored as NULL — rather than guessing, in
+    the three cases where the honest answer is that we cannot tell:
+    a missing/unparseable timestamp with no id to fall back on; a row
+    written during the 2026-05-21/22 fix session with no id to
+    disambiguate; and a row written in the 2026-07-19 → 2026-07-20
+    window, which is a MIXED population by writer (compare-shaped
+    writers counted filler-won games, AB-shaped writers didn't) and
+    therefore has no single era.
+    """
+    stamp = created_at.strip() if isinstance(created_at, str) else ""
+    if not stamp:
+        # No date. The id boundary is all that's left, and it can only
+        # ever establish era 1 — "id >= 314" means "not era 1", not
+        # "era 2" (that needs a date).
+        if (
+            iteration_id is not None
+            and iteration_id < PRE_SEAT_ATTRIBUTION_MAX_ID
+        ):
+            return 1
+        return None
+    if stamp >= _SIGNIFICANCE_START:
+        return 4
+    if stamp >= _DECISIVE_SETTLED:
+        return 3
+    if stamp >= _DECISIVE_MIXED_START:
+        return None  # the mixed window — see the docstring
+    if stamp >= _SEAT_FIX_SETTLED:
+        return 2
+    if stamp >= _SEAT_FIX_START:
+        # Inside the fix session: the id is the only disambiguator, and
+        # without one there is nothing to disambiguate with.
+        if iteration_id is None:
+            return None
+        return 1 if iteration_id < PRE_SEAT_ATTRIBUTION_MAX_ID else 2
+    return 1
+
+
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -173,6 +293,7 @@ CREATE TABLE IF NOT EXISTS iterations (
     created_at      TEXT NOT NULL,
     deck_snapshot   TEXT,            -- .dck file contents
     milestone       TEXT,            -- v2 (#012): user-chosen tag (e.g. "baseline", "PR-ready")
+    measurement_era INTEGER,         -- v3: MEASUREMENT_ERAS key, NULL = unknown/mixed
     FOREIGN KEY (parent_id) REFERENCES iterations(id)
 );
 
@@ -207,6 +328,53 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3 migration: add ``measurement_era`` and backfill it.
+
+    Same check-then-add shape as ``_migrate_to_v2`` (pragma_table_info
+    guard, ``IF NOT EXISTS`` index) so re-running init_db is a no-op.
+
+    The backfill classifies rows through ``measurement_era_for``, the
+    SAME function the insert path stamps with — one boundary
+    definition, not two that can drift. It touches ONLY rows whose era
+    is still NULL, and only sets a value where the era is KNOWN:
+    unclassifiable rows (no timestamp, the 2026-05-21/22 fix session,
+    the 2026-07-19/20 mixed-denominator window) keep NULL, which reads
+    as "unknown" and not as a fourth era. No other column is read or
+    written — this migration must never touch the numbers whose
+    provenance it is describing.
+
+    Because unknown rows stay NULL, the scan re-runs on every init_db.
+    That is deliberate (it is how a hand-inserted or imported legacy
+    row eventually gets classified) and cheap at this log's scale
+    (hundreds of rows); ``idx_iterations_measurement_era`` — plain, not
+    partial, unlike the milestone index — serves both this ``IS NULL``
+    lookup and the era-filtered analysis queries the column exists for.
+    """
+    cur = conn.execute("PRAGMA table_info(iterations)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "measurement_era" not in cols:
+        conn.execute(
+            "ALTER TABLE iterations ADD COLUMN measurement_era INTEGER"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_iterations_measurement_era "
+        "ON iterations(measurement_era)"
+    )
+    cur = conn.execute(
+        "SELECT id, created_at FROM iterations WHERE measurement_era IS NULL"
+    )
+    updates: list[tuple[int, int]] = []
+    for row in cur.fetchall():
+        era = measurement_era_for(row["created_at"], row["id"])
+        if era is not None:
+            updates.append((era, row["id"]))
+    if updates:
+        conn.executemany(
+            "UPDATE iterations SET measurement_era = ? WHERE id = ?", updates,
+        )
+
+
 @dataclass
 class Iteration:
     """One row of the iteration history. Fields default to None so callers can
@@ -226,6 +394,10 @@ class Iteration:
     created_at: Optional[str] = None
     deck_snapshot: Optional[str] = None
     milestone: Optional[str] = None  # v2: user-chosen tag (#012)
+    # v3: which measurement convention produced this row's numbers.
+    # Left None by callers; ``to_row`` derives it from created_at so
+    # every writer stamps it without having to know it exists.
+    measurement_era: Optional[int] = None
     id: Optional[int] = None  # Set after insert.
 
     def to_row(self) -> dict:
@@ -233,6 +405,15 @@ class Iteration:
         d["audit_manifest"] = json.dumps(self.audit_manifest) if self.audit_manifest is not None else None
         d["sim_report"] = json.dumps(self.sim_report) if self.sim_report is not None else None
         d["created_at"] = self.created_at or datetime.now(timezone.utc).isoformat()
+        # Derive the era from the row's OWN timestamp rather than
+        # hardcoding CURRENT_MEASUREMENT_ERA: a live write stamps now ->
+        # the current era, while a backdated row (an import of an older
+        # export, a merge_soak fold) is classified by when it was
+        # actually measured. An era the caller set explicitly wins; None
+        # means "you work it out", and an unclassifiable timestamp
+        # stays None (NULL) rather than being rounded to an era.
+        if d.get("measurement_era") is None:
+            d["measurement_era"] = measurement_era_for(d["created_at"])
         d.pop("id", None)
         return d
 
@@ -262,6 +443,13 @@ class Iteration:
             # so legacy databases don't break read paths.
             milestone=(
                 row["milestone"] if "milestone" in row.keys() else None
+            ),
+            # Same legacy guard as milestone: schema v3 added this
+            # column, so a Row from a database the migration hasn't
+            # touched yet has no such key.
+            measurement_era=(
+                row["measurement_era"]
+                if "measurement_era" in row.keys() else None
             ),
         )
 
@@ -302,6 +490,9 @@ def init_db(db_path: Optional[Path] = None) -> None:
                databases; existing tables already match).
       v1 → v2: add ``milestone`` column + partial index
                (``_migrate_to_v2``, AGENT_BACKLOG #012).
+      v2 → v3: add ``measurement_era`` column + index, and backfill
+               historical rows from their id/created_at where the era
+               is known (``_migrate_to_v3``, 2026-08-17).
     """
     with _connect(_resolve_db_path(db_path)) as conn:
         # Per-statement execute, NOT executescript(): executescript()
@@ -316,6 +507,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
         # so calling them on a fresh DB just adds the v2 column +
         # index that aren't in the base _SCHEMA_SQL.
         _migrate_to_v2(conn)
+        _migrate_to_v3(conn)
         cur = conn.execute("SELECT version FROM schema_version")
         row = cur.fetchone()
         if row is None:
