@@ -93,6 +93,49 @@ _SAVINGS_PCT_OF_CURRENT = 0.30
 _EXCLUDED_SET_TYPES = {"memorabilia"}
 
 
+# --- Snapshot freshness (P19) -----------------------------------------
+
+def price_snapshot_staleness(names) -> tuple[Optional[float], bool]:
+    """``(oldest_snapshot_age_days, is_stale)`` for the price data
+    behind ``names``.
+
+    Every price in this module comes from ``lookup_card``, which serves
+    disk snapshots with NO TTL — the same "snapshot of any age, served
+    forever" property that made legality verdicts silently stale.
+    Legality solved it by reporting the age of the oldest snapshot
+    backing the verdict; prices had no such signal at all, so a
+    six-month-old ``$3.20`` renders identically to one fetched a minute
+    ago. Card prices move faster than ban lists, so if anything the
+    signal matters more here.
+
+    Deliberately REUSES ``deck_legality.snapshot_staleness`` (which in
+    turn reads ``oracle_store.snapshot_age_days`` — file mtime) and its
+    ``STALE_SNAPSHOT_DAYS`` threshold instead of duplicating either:
+    both readings describe the same disk store, so a user must never
+    see "legality data 60 days old" next to fresh-looking prices. Only
+    the age is taken from that helper; its warning STRING is legality-
+    worded, so the boolean here is derived from the same threshold and
+    the caller words the price-side message.
+
+    Never raises: freshness is a bonus signal on a payload that must
+    render offline, so any import/stat failure degrades to
+    ``(None, False)`` — "unknown age", not "stale".
+    """
+    try:
+        from ..deck_legality import STALE_SNAPSHOT_DAYS, snapshot_staleness
+    except Exception:  # noqa: BLE001 — a bonus signal, never a blocker
+        return None, False
+    try:
+        age, _legality_warning = snapshot_staleness(
+            names, threshold_days=STALE_SNAPSHOT_DAYS,
+        )
+    except Exception:  # noqa: BLE001
+        return None, False
+    if age is None:
+        return None, False
+    return age, age >= STALE_SNAPSHOT_DAYS
+
+
 def _printing_min_usd(printing: dict) -> Optional[float]:
     """Cheapest way to buy one physical copy of this printing.
 
@@ -178,6 +221,18 @@ def printing_savings_for_deck_text(text: str) -> dict:
     is the sum, so the UI's "save up to $X" headline is the real
     whole-deck number.
 
+    Freshness (P19): the payload also carries ``price_data_age_days``
+    — the age of the OLDEST disk snapshot behind the quoted cards, the
+    same reading legality reports as ``data_age_days`` — and
+    ``price_data_stale``, true once that age crosses
+    ``deck_legality.STALE_SNAPSHOT_DAYS`` (45 days, imported, never
+    re-declared here). Both keys are ADDITIVE: the three historical
+    keys keep their exact meaning, so a client that ignores freshness
+    reads the payload it always did. Age ``None`` means "no snapshot on
+    disk to date" — an empty suggestion list, a cold store, a hermetic
+    test — and is reported as NOT stale, because unknown age is not
+    evidence of staleness.
+
     Offline behavior: printings come from ``lookup_card_prints``, which
     is lazily network-backed. After the FIRST network failure we flip a
     circuit breaker and drain the remaining cards cache-only — without
@@ -260,8 +315,17 @@ def printing_savings_for_deck_text(text: str) -> dict:
     # rows are the only ones many users will ever read.
     suggestions.sort(key=lambda s: s["savings"], reverse=True)
     total = round(sum(s["savings"] for s in suggestions), 2)
+    # Age the prices being rendered, using the cards they were read
+    # from — the OLDEST of those snapshots is the honest number,
+    # exactly as validate_deck reports the oldest snapshot behind a
+    # legality verdict. An empty suggestion list quotes no prices and
+    # consults no snapshots, so it reports an unknown (None) age rather
+    # than a fabricated fresh one.
+    age, stale = price_snapshot_staleness([s["card"] for s in suggestions])
     return {
         "total": total,
         "count": len(suggestions),
         "suggestions": suggestions,
+        "price_data_age_days": age,
+        "price_data_stale": stale,
     }

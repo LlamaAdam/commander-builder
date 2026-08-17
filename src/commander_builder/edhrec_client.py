@@ -334,6 +334,36 @@ def _try_fetch_page_payload(path: str) -> Optional[tuple[dict, int]]:
     return payload, len(raw)
 
 
+def _json_twin_path(direct_url: str) -> Optional[str]:
+    """Map a pasted URL onto its ``json.edhrec.com/pages/<path>.json``
+    probe path, or ``None`` when the URL has no JSON twin.
+
+    Only ``edhrec.com/average-decks/*`` pages (and URLs that already
+    point at ``json.edhrec.com/pages/*``) have a twin. An arbitrary
+    pasted URL — a different edhrec.com page shape, or a non-EDHREC
+    host entirely — does not, and probing json.edhrec.com with its
+    path would be a guaranteed-miss request costing a polite sleep
+    plus a retry cycle before the real fetch even starts.
+    """
+    parsed = urllib.parse.urlparse(direct_url)
+    host = (parsed.netloc or "").lower().split(":", 1)[0]
+    path = (parsed.path or "").strip("/")
+    if not path:
+        return None
+    if host == "json.edhrec.com":
+        # Already a JSON URL — normalize to the probe-path shape
+        # (_try_fetch_page_payload re-adds the /pages prefix + .json).
+        if path.endswith(".json"):
+            path = path[: -len(".json")]
+        if path.startswith("pages/"):
+            path = path[len("pages/"):]
+        return path or None
+    if host == "edhrec.com" or host.endswith(".edhrec.com"):
+        if path.startswith("average-decks/"):
+            return path
+    return None
+
+
 def _extract_next_data(html: str) -> dict:
     """Pull the `__NEXT_DATA__` JSON out of an EDHREC HTML page. Raises
     ValueError if the blob isn't present (page changed shape, or we hit a
@@ -796,8 +826,10 @@ def fetch_commander_page(
                 cache_path.write_text(page.to_json(), encoding="utf-8")
             return page
 
+    # No extra sleep here: the JSON probe above already paid this
+    # logical fetch's polite delay (one sleep per fetch, not per URL —
+    # the old double-sleep made every fallback cost 2x REQUEST_SLEEP_SEC).
     url = f"{EDHREC_BASE}/commanders/{urllib.parse.quote(slug)}"
-    time.sleep(REQUEST_SLEEP_SEC)
     try:
         html = _http_get_text_with_retry(url)
     except urllib.error.HTTPError as exc:
@@ -971,8 +1003,9 @@ def fetch_salt_list(
                     pass
             return salt_map
 
+    # No extra sleep: the JSON probe above already slept for this
+    # logical fetch (one polite delay per fetch, not per URL).
     url = f"{EDHREC_BASE}/top/salt"
-    time.sleep(REQUEST_SLEEP_SEC)
     try:
         html = _http_get_text_with_retry(url)
     except (OSError, http.client.HTTPException) as exc:
@@ -1076,8 +1109,9 @@ def fetch_tag_page(
                 cache_path.write_text(page.to_json(), encoding="utf-8")
             return page
 
+    # No extra sleep: the JSON probe above already slept for this
+    # logical fetch (one polite delay per fetch, not per URL).
     url = f"{EDHREC_BASE}/tags/{urllib.parse.quote(safe_slug)}"
-    time.sleep(REQUEST_SLEEP_SEC)
     try:
         html = _http_get_text_with_retry(url)
     except urllib.error.HTTPError as exc:
@@ -1391,13 +1425,16 @@ def fetch_average_deck(
             pass  # Fall through to fresh fetch.
 
     # JSON-first: the average-deck document lives at
-    # json.edhrec.com/pages/<same-path>.json (for direct_url fetches the
-    # path is lifted off the given URL, so a pasted edhrec.com link maps
-    # onto its JSON twin). Any failure — or a payload with no parseable
-    # cardlist — falls back to the HTML scrape below.
-    json_path = slug_from_url.strip("/")
-    if json_path.endswith(".json"):  # a pasted json.edhrec.com URL.
-        json_path = json_path[: -len(".json")]
+    # json.edhrec.com/pages/<same-path>.json. For direct_url fetches the
+    # probe path is derived via _json_twin_path, which returns None for
+    # URL shapes that have no JSON twin (arbitrary pasted links) — those
+    # skip straight to fetching the URL as given instead of paying a
+    # guaranteed-miss probe first. Any probe failure — or a payload with
+    # no parseable cardlist — falls back to the HTML scrape below.
+    if direct_url:
+        json_path: Optional[str] = _json_twin_path(direct_url)
+    else:
+        json_path = slug_from_url.strip("/")
     got = _try_fetch_page_payload(json_path) if json_path else None
     if got is not None:
         cards = _walk_for_average_deck_cards(got[0])
@@ -1425,7 +1462,11 @@ def fetch_average_deck(
             return deck
 
     try:
-        time.sleep(REQUEST_SLEEP_SEC)
+        # One polite delay per logical fetch: when the JSON probe ran it
+        # already slept; only sleep here when the probe was skipped
+        # (a direct_url shape with no JSON twin).
+        if not json_path:
+            time.sleep(REQUEST_SLEEP_SEC)
         html = _http_get_text_with_retry(url)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:

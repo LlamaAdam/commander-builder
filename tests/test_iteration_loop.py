@@ -12,6 +12,7 @@ import pytest
 
 from commander_builder.compare_versions import ComparisonReport, VersionStats
 from commander_builder.iteration_loop import (
+    _materialize_proposed_deck,
     main as iteration_loop_main,
     propose_then_iterate,
     resolve_deck_id,
@@ -467,6 +468,201 @@ def test_main_auto_propose_fails_fast_when_new_exists(
     out = capsys.readouterr().out
     assert "ERROR" in out
     assert "already exists" in out
+
+
+def test_propose_then_iterate_refuses_when_every_pair_is_dropped(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """L3: apply-time validation can drop EVERY proposed pair (a cut
+    naming a card that isn't in the decklist takes its paired add down
+    with it). The materialized v2 is then content-identical to v1, and
+    simming it burns 10+ Forge games comparing a deck against itself
+    and writes a pure-noise row into the knowledge log. Refuse BEFORE
+    compare(), and delete the just-written file so the next run doesn't
+    trip the pre-existing-file guard on our own leftover."""
+    def _fake_propose(input_, config):
+        # "GhostCard" is not in the [Main] list → unmatched cut → the
+        # NewCard/GhostCard PAIR is dropped, leaving nothing applied.
+        return ProposerOutput(
+            added=["NewCard"], removed=["GhostCard"],
+            rationale="swap a card that isn't there", source="claude",
+        )
+
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose", _fake_propose,
+    )
+
+    def _no_compare(**kw):
+        raise AssertionError("compare() must not run on a no-op swap")
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare", _no_compare,
+    )
+
+    new_path = auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]
+    with pytest.raises(RuntimeError) as excinfo:
+        propose_then_iterate(
+            deck_filename=auto_propose_deck["v1"],
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=tmp_path / "kl.sqlite",
+        )
+
+    msg = str(excinfo.value)
+    # Actionable: names the requested pair AND why it didn't survive.
+    assert "no proposed swap survived" in msg
+    assert "GhostCard" in msg
+    assert "NewCard" in msg
+    # The half-written artifact is gone — a re-run must not hit the
+    # FileExistsError guard on a file THIS call created.
+    assert not new_path.exists()
+
+
+def test_propose_then_iterate_no_op_swap_logs_nothing(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """The point of the guard is the knowledge log: a refused run must
+    leave zero rows behind (a noise row is worse than no row — it
+    dilutes every win-rate summary computed over the deck)."""
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose",
+        lambda input_, config: ProposerOutput(
+            added=["NewCard"], removed=["GhostCard"],
+            rationale="no-op", source="claude",
+        ),
+    )
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _make_canned_comparison(
+            old_wins=4, new_wins=16, draws=0, total=20,
+        ),
+    )
+    db = tmp_path / "kl.sqlite"
+    with pytest.raises(RuntimeError):
+        propose_then_iterate(
+            deck_filename=auto_propose_deck["v1"],
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=db,
+        )
+    assert iterations_for_deck("stable-public-id", db_path=db) == []
+
+
+def test_main_auto_propose_exits_2_when_every_pair_is_dropped(
+    auto_propose_deck, monkeypatch, capsys,
+):
+    """CLI wrapper: the no-op-swap guard exits 2 with an ERROR line,
+    same clean-exit treatment as the pre-existing-file guard — not a
+    traceback."""
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose",
+        lambda input_, config: ProposerOutput(
+            added=["NewCard"], removed=["GhostCard"],
+            rationale="no-op", source="claude",
+        ),
+    )
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: (_ for _ in ()).throw(
+            AssertionError("compare() must not run"),
+        ),
+    )
+    rc = iteration_loop_main([
+        "--old", auto_propose_deck["v1"],
+        "--new", auto_propose_deck["v2"],
+        "--bracket", "3",
+        "--auto-propose",
+    ])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "ERROR" in out
+    assert "no proposed swap survived" in out
+
+
+# --- _materialize_proposed_deck: manifest ↔ on-disk-diff invariant ---------
+
+def test_materialize_records_padding_in_manifest(tmp_path, monkeypatch):
+    """L2: the applier pads a SHORT source deck with basic lands so
+    Forge will load it. Those basics are part of the on-disk diff the
+    sim measures, so the persisted manifest has to carry them — without
+    ``padded_count`` / ``padded_breakdown`` the manifest silently
+    under-describes the deck that was actually simmed."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, cache=True: None,
+    )
+    old_path = _write_dck(tmp_path, "[USER] Short v1 [B3].dck", "\n".join([
+        "[metadata]",
+        "Name=[USER] Short v1 [B3]",
+        "[Commander]",
+        "1 Test Commander",
+        "[Main]",
+        "1 OldCard",
+        "40 Forest",
+    ]) + "\n")
+    new_path = tmp_path / "[USER] Short v2 [B3].dck"
+    manifest = {
+        "added": ["NewCard"], "removed": ["OldCard"],
+        "rationale": "swap", "source": "claude",
+    }
+    _materialize_proposed_deck(old_path, new_path, manifest)
+
+    # 1 OldCard + 40 Forest = 41 main; the swap keeps 40 + adds 1 = 41,
+    # so 58 basics are synthesized to reach the 99-card target.
+    assert manifest["padded_count"] == 58
+    assert manifest["padded_breakdown"] == {"Forest": 58}
+    # And the padding is REAL — the manifest number matches the file
+    # (the padder appends its own line rather than merging counts).
+    new_text = new_path.read_text(encoding="utf-8")
+    forests = sum(
+        int(line.split(" ", 1)[0])
+        for line in new_text.splitlines()
+        if line.strip().endswith("Forest")
+    )
+    assert forests == 40 + manifest["padded_count"] == 98
+
+
+def test_materialize_records_pair_drops_in_manifest(tmp_path, monkeypatch):
+    """Same invariant from the other side: pairs the applier refused
+    are recorded under the SAME key names ``_proposer_sim`` uses (the
+    other writer of this manifest shape), so knowledge-log consumers
+    read one schema regardless of which path produced the row."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, cache=True: None,
+    )
+    old_path = _write_dck(tmp_path, "[USER] Drop v1 [B3].dck", "\n".join([
+        "[metadata]",
+        "Name=[USER] Drop v1 [B3]",
+        "[Commander]",
+        "1 Test Commander",
+        "[Main]",
+        "1 OldCard",
+        "98 Forest",
+    ]) + "\n")
+    new_path = tmp_path / "[USER] Drop v2 [B3].dck"
+    manifest = {
+        "added": ["NewCard"], "removed": ["GhostCard"],
+        "rationale": "swap", "source": "claude",
+    }
+    _materialize_proposed_deck(old_path, new_path, manifest)
+
+    assert manifest["added"] == []
+    assert manifest["removed"] == []
+    assert manifest["dropped_unmatched_cut"] == [
+        {"cut": "GhostCard", "add": "NewCard"},
+    ]
+    # Every reason bucket _proposer_sim persists is present (empty is a
+    # fact, absent is a hole a consumer has to guess at).
+    for key in (
+        "dropped_for_bracket", "dropped_for_protection",
+        "dropped_for_color_identity", "dropped_for_balance",
+        "dropped_duplicate_add", "dropped_commander_add",
+        "padded_count", "padded_breakdown",
+    ):
+        assert key in manifest
+    # Intent is preserved alongside what landed.
+    assert manifest["requested_adds"] == ["NewCard"]
+    assert manifest["requested_cuts"] == ["GhostCard"]
 
 
 def test_run_one_iteration_refuses_verdict_on_zero_attributed_games(

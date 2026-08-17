@@ -43,6 +43,38 @@ _JS_ERROR_LOG_MAX_BYTES = 5 * 1024 * 1024  # ~5 MB
 # Tunable for tests: how long to back off before retrying a 429.
 _CARD_IMAGE_429_RETRY_DELAY_SEC = 1.5
 
+_JS_ERROR_LOG_NAME = "_js_errors.log"
+
+
+def _js_error_log_path() -> Path:
+    """Where the browser-error sink writes: ``<user config
+    home>/_js_errors.log``.
+
+    The sink used to live at ``deck_dir.parent.parent`` — two levels
+    above the deck directory. With the default deck dir
+    (``~/Documents/CommanderBuilder/decks``) that resolves to
+    ``~/Documents``; inside a bundled install it lands in ``vendor/``,
+    and with a deck dir the user picked (``/mnt/share/mtg/decks``) it
+    drops an app-private log two levels up in territory the app does
+    not own at all. The deck dir is user data whose ANCESTORS are not
+    ours to write to.
+
+    The user config home — ``~/.commander-builder`` (or
+    ``%LOCALAPPDATA%\\commander-builder`` on Windows), the directory
+    that already holds ``credentials``, ``config.json``, ``replays/``
+    and ``collection.txt`` — is the one location the app definitively
+    owns. Derived from ``config_store.config_path()`` rather than
+    re-deriving the platform rules here, so the
+    ``COMMANDER_BUILDER_CONFIG`` override (tests / CI / portable
+    installs) relocates the sink with everything else.
+
+    Resolved per call, never frozen at import/blueprint-build time —
+    the same call-time-resolution rule the config/collection/knowledge-
+    log paths follow so an env override set after import still wins.
+    """
+    from ..config_store import config_path
+    return config_path().parent / _JS_ERROR_LOG_NAME
+
 
 def make_meta_blueprint(
     deck_dir: Path,
@@ -57,11 +89,11 @@ def make_meta_blueprint(
     """
     bp = Blueprint("meta", __name__)
 
-    # Browser-side JS error sink path. The browser-side window.onerror
-    # / unhandledrejection handlers POST here so silent failures (TDZ
-    # ReferenceErrors, async network errors, etc.) land in a server-
-    # readable log instead of vanishing in the user's devtools.
-    js_error_log = deck_dir.parent.parent / "_js_errors.log"
+    # Legacy browser-error sink location (two levels above the deck
+    # dir). Only read now — see ``_js_error_log_path`` for why the
+    # sink moved to the user config home, and ``log_error`` for the
+    # one-line breadcrumb left behind for anyone hunting old entries.
+    legacy_js_error_log = deck_dir.parent.parent / _JS_ERROR_LOG_NAME
 
     @bp.route("/")
     def root():
@@ -228,6 +260,9 @@ def make_meta_blueprint(
         kind = _one_line((payload.get("kind") or "error")[:40])
         from datetime import datetime as _dt, timezone as _tz
         ts = _dt.now(_tz.utc).isoformat()
+        # Resolved per request (not at blueprint-build time) so an env
+        # override applied after import still steers the write.
+        js_error_log = _js_error_log_path()
         # Size cap: past _JS_ERROR_LOG_MAX_BYTES, skip the write but
         # still 200 — the endpoint is best-effort diagnostics and a
         # browser error-handler must never see its own error sink fail
@@ -242,10 +277,31 @@ def make_meta_blueprint(
                 return jsonify({"logged": False, "reason": "log full"}), 200
         except OSError:
             pass
+        # One-time migration breadcrumb: if entries exist at the old
+        # location and the new log hasn't been started yet, the first
+        # write opens with a line pointing at the old file. The old
+        # file is NEVER moved or deleted — it may sit in a directory
+        # we don't own (that's the whole reason the sink moved), so
+        # touching it is exactly the overreach being fixed; a reader
+        # who finds the new log just needs to know where the earlier
+        # entries went. Once the new file exists the condition is
+        # false forever, so the note is written at most once.
+        try:
+            needs_migration_note = (
+                legacy_js_error_log.exists() and not js_error_log.exists()
+            )
+        except OSError:
+            needs_migration_note = False
         # Append-only; never read from this endpoint.
         try:
             js_error_log.parent.mkdir(parents=True, exist_ok=True)
             with js_error_log.open("a", encoding="utf-8") as f:
+                if needs_migration_note:
+                    f.write(
+                        f"--- {ts} [migration] this log moved here from "
+                        f"{legacy_js_error_log} — earlier entries are "
+                        f"still in that file (left in place, not moved)\n"
+                    )
                 f.write(f"--- {ts} [{kind}] {url}\n")
                 f.write(f"UA: {ua}\n")
                 f.write(f"MSG: {msg}\n")

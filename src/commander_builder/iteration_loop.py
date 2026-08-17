@@ -144,6 +144,23 @@ def _materialize_proposed_deck(
     manifest["removed"] = list(proposal.applied_cuts)
     manifest["requested_adds"] = requested_adds
     manifest["requested_cuts"] = requested_cuts
+    # Apply-time telemetry (same key names as _proposer_sim.
+    # _log_auto_curate_iteration, the other writer of this manifest
+    # shape): which pairs the applier dropped and why, plus the
+    # basic-land padding synthesized for short source decks. Without
+    # these the persisted manifest under-describes the on-disk diff —
+    # padded basics appear in the deck but nowhere in the manifest,
+    # breaking the manifest↔diff invariant this function exists to keep.
+    manifest["dropped_for_bracket"] = list(proposal.dropped_for_bracket)
+    manifest["dropped_for_protection"] = list(proposal.dropped_for_protection)
+    manifest["dropped_for_color_identity"] = list(
+        proposal.dropped_for_color_identity)
+    manifest["dropped_for_balance"] = list(proposal.dropped_for_balance)
+    manifest["dropped_unmatched_cut"] = list(proposal.dropped_unmatched_cut)
+    manifest["dropped_duplicate_add"] = list(proposal.dropped_duplicate_add)
+    manifest["dropped_commander_add"] = list(proposal.dropped_commander_add)
+    manifest["padded_count"] = proposal.padded_count
+    manifest["padded_breakdown"] = dict(proposal.padded_breakdown)
 
 
 def propose_then_iterate(
@@ -179,6 +196,10 @@ def propose_then_iterate(
         beats silently comparing a stale pre-existing file against the
         old deck (exactly the bug above). Checked BEFORE `propose()` so
         no LLM spend is wasted on a run that can't land.
+      RuntimeError      — apply-time validation dropped every proposed
+        pair, so the materialized deck is content-identical to the old
+        one. The file is deleted and the sim refused — comparing a deck
+        against itself for 10+ games records nothing but noise.
     """
     proposer_config = proposer_config or ProposerConfig()
     old_path = DECK_DIR / deck_filename
@@ -203,6 +224,29 @@ def propose_then_iterate(
     )
     manifest = propose(proposer_input, proposer_config).to_dict()
     _materialize_proposed_deck(old_path, new_path, manifest)
+    # No-op-swap guard: if apply-time validation dropped EVERY proposed
+    # pair (unmatched cuts, duplicate adds, balance slicing, ...), the
+    # materialized deck is content-identical to the old one. Simming it
+    # would burn 10+ Forge games comparing a deck against itself and
+    # record a pure-noise row in the knowledge log. Delete the
+    # just-written file (so a re-run doesn't trip the FileExistsError
+    # guard on a stale artifact) and refuse loudly BEFORE compare().
+    if not manifest["added"] and not manifest["removed"]:
+        new_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"no proposed swap survived apply-time validation "
+            f"(requested adds: {manifest.get('requested_adds', [])}, "
+            f"requested cuts: {manifest.get('requested_cuts', [])}; "
+            f"dropped pairs: "
+            f"unmatched_cut={manifest.get('dropped_unmatched_cut', [])}, "
+            f"duplicate_add={manifest.get('dropped_duplicate_add', [])}, "
+            f"commander_add={manifest.get('dropped_commander_add', [])}, "
+            f"balance={manifest.get('dropped_for_balance', [])}). "
+            f"The materialized deck would be content-identical to "
+            f"{deck_filename}, so simming it would only record noise. "
+            f"{new_path.name} was deleted; fix the proposal (check the "
+            f"cut names against the actual decklist) and re-run."
+        )
     return run_one_iteration(
         deck_filename=deck_filename,
         new_deck_filename=new_deck_filename,
@@ -394,10 +438,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 filler_pairs=args.filler_pairs,
                 proposer_config=ProposerConfig(use_claude=True),
             )
-        except (FileExistsError, FileNotFoundError) as exc:
+        except (FileExistsError, FileNotFoundError, RuntimeError) as exc:
             # Pre-flight guards: --new already on disk (simming it would
-            # record a manifest unrelated to the tested diff) or --old
-            # missing. Actionable message, clean exit — not a traceback.
+            # record a manifest unrelated to the tested diff), --old
+            # missing, or every proposed pair dropped at apply time (the
+            # materialized deck would be content-identical to --old).
+            # Actionable message, clean exit — not a traceback.
             print(f"ERROR: {exc}", flush=True)
             return 2
     else:

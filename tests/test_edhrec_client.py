@@ -1500,3 +1500,182 @@ def test_to_moxfield_shape_direct_url_unknown_sentinel_not_injected():
     assert [e["card"]["name"]
             for e in shape["boards"]["mainboard"]["cards"].values()] == [
         "Sol Ring"]
+
+
+# --- Polite-delay accounting + JSON-twin probing (L4) ----------------------
+#
+# Two coupled costs the JSON-first rollout introduced:
+#
+#   1. ``_try_fetch_page_payload`` sleeps REQUEST_SLEEP_SEC and then the
+#      HTML fallback slept AGAIN, so every fallback — the common case
+#      whenever json.edhrec.com 404s a page shape — paid 2x the polite
+#      delay. One LOGICAL fetch should cost one polite delay.
+#   2. ``fetch_average_deck(direct_url=...)`` probed a json.edhrec.com
+#      twin for whatever path the user pasted. Only
+#      ``edhrec.com/average-decks/*`` has a twin; for anything else the
+#      probe is a guaranteed miss that costs a request, a sleep and a
+#      retry cycle before the real fetch starts.
+
+def _count_polite_sleeps(monkeypatch) -> list[float]:
+    """Record ``time.sleep`` calls with REQUEST_SLEEP_SEC left at its
+    real value (nothing actually sleeps — sleep itself is stubbed), so
+    the polite delays are distinguishable from retry backoffs."""
+    import commander_builder.edhrec_client as ec
+    slept: list[float] = []
+    monkeypatch.setattr(ec.time, "sleep", lambda s: slept.append(s))
+    return slept
+
+
+def _polite(slept: list[float]) -> list[float]:
+    from commander_builder.edhrec_client import REQUEST_SLEEP_SEC
+    return [s for s in slept if s == REQUEST_SLEEP_SEC]
+
+
+def test_commander_page_html_fallback_sleeps_once(tmp_path, monkeypatch):
+    """JSON probe misses → HTML scrape runs. ONE logical fetch, so
+    exactly one polite delay — not one per URL touched."""
+    monkeypatch.setattr("commander_builder.edhrec_client.CACHE_DIR", tmp_path)
+    slept = _count_polite_sleeps(monkeypatch)
+    captured = _url_dispatch(
+        monkeypatch,
+        json_body="<html>challenge page, not json</html>",
+        html_body=_valid_page_html("Sol Ring"),
+    )
+
+    page = fetch_commander_page("New Commander")
+    assert page is not None
+    assert len(captured) == 2  # both URLs were tried…
+    assert len(_polite(slept)) == 1  # …but the delay was paid once.
+
+
+def test_commander_page_json_hit_sleeps_once(tmp_path, monkeypatch):
+    """The no-fallback path is the baseline the fallback must match."""
+    monkeypatch.setattr("commander_builder.edhrec_client.CACHE_DIR", tmp_path)
+    slept = _count_polite_sleeps(monkeypatch)
+    _url_dispatch(
+        monkeypatch, json_body=_json_page_payload("Arcane Signet"),
+        html_body=None,
+    )
+    assert fetch_commander_page("New Commander") is not None
+    assert len(_polite(slept)) == 1
+
+
+def test_tag_page_html_fallback_sleeps_once(tmp_path, monkeypatch):
+    from commander_builder.edhrec_client import fetch_tag_page
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    slept = _count_polite_sleeps(monkeypatch)
+    _url_dispatch(
+        monkeypatch, json_body="not json",
+        html_body=_valid_page_html("Sol Ring"),
+    )
+    assert fetch_tag_page("dragon") is not None
+    assert len(_polite(slept)) == 1
+
+
+def test_salt_list_html_fallback_sleeps_once(tmp_path, monkeypatch):
+    from commander_builder.edhrec_client import fetch_salt_list
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    slept = _count_polite_sleeps(monkeypatch)
+    salt_html = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        '{"props": {"data": {"cardlist": {"header": "Salty",'
+        ' "cardviews": [{"name": "Stasis", "label": "Salt Score: 3.06"}]'
+        '}}}}</script>'
+    )
+    _url_dispatch(monkeypatch, json_body="not json", html_body=salt_html)
+    assert fetch_salt_list()["stasis"] == 3.06
+    assert len(_polite(slept)) == 1
+
+
+def test_average_deck_html_fallback_sleeps_once(tmp_path, monkeypatch):
+    from commander_builder.edhrec_client import fetch_average_deck
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    slept = _count_polite_sleeps(monkeypatch)
+    _url_dispatch(
+        monkeypatch, json_body="not json",
+        html_body=_avg_deck_html(["Sol Ring", "Forest"]),
+    )
+    assert fetch_average_deck("Foo", bracket=3) is not None
+    assert len(_polite(slept)) == 1
+
+
+# --- _json_twin_path -------------------------------------------------------
+
+@pytest.mark.parametrize("url,expected", [
+    # The one page shape that HAS a twin.
+    ("https://edhrec.com/average-decks/hakbal/upgraded",
+     "average-decks/hakbal/upgraded"),
+    ("https://www.edhrec.com/average-decks/hakbal",
+     "average-decks/hakbal"),
+    ("https://edhrec.com/average-decks/hakbal/",
+     "average-decks/hakbal"),
+    # A pasted JSON URL is already the twin — normalized to the probe
+    # path so _try_fetch_page_payload re-adds /pages + .json exactly once.
+    ("https://json.edhrec.com/pages/average-decks/hakbal.json",
+     "average-decks/hakbal"),
+    # No twin: other edhrec.com shapes, and anything off-host.
+    ("https://edhrec.com/commanders/hakbal", None),
+    ("https://edhrec.com/decks/abc123", None),
+    ("https://edhrec.com/", None),
+    ("https://moxfield.com/decks/abc123", None),
+    ("https://example.com/average-decks/hakbal", None),
+])
+def test_json_twin_path(url, expected):
+    from commander_builder.edhrec_client import _json_twin_path
+    assert _json_twin_path(url) == expected
+
+
+def test_direct_url_without_twin_skips_the_json_probe(tmp_path, monkeypatch):
+    """A pasted URL that has no JSON twin must go straight to the URL as
+    given: no guaranteed-miss json.edhrec.com request, and still exactly
+    one polite delay for the one logical fetch."""
+    from commander_builder.edhrec_client import fetch_average_deck
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    slept = _count_polite_sleeps(monkeypatch)
+    captured = _url_dispatch(
+        monkeypatch, json_body=None,  # would 404 — must never be asked.
+        html_body=_avg_deck_html(["Card A", "Card B"]),
+    )
+
+    deck = fetch_average_deck(
+        "irrelevant", direct_url="https://edhrec.com/decks/abc123",
+    )
+    assert deck is not None
+    assert captured == ["https://edhrec.com/decks/abc123"]
+    assert not any("json.edhrec.com" in u for u in captured)
+    assert len(_polite(slept)) == 1
+
+
+def test_direct_url_with_twin_still_probes_json_first(tmp_path, monkeypatch):
+    """The regression guard for the fix above: average-decks URLs DO
+    have a twin and must keep taking the cheap JSON path."""
+    from commander_builder.edhrec_client import fetch_average_deck
+    monkeypatch.setattr(
+        "commander_builder.edhrec_client.CACHE_DIR", tmp_path / "cache",
+    )
+    slept = _count_polite_sleeps(monkeypatch)
+    captured = _url_dispatch(
+        monkeypatch,
+        json_body=json.dumps({"container": {"json_dict": {"cardlists": [
+            {"header": "Average Deck", "cardviews": [{"name": "Sol Ring"}]},
+        ]}}}),
+        html_body=None,  # HTML host would 404 — the JSON hit ends it.
+    )
+
+    deck = fetch_average_deck(
+        "irrelevant",
+        direct_url="https://edhrec.com/average-decks/foo/upgraded",
+    )
+    assert deck is not None
+    assert captured == [
+        "https://json.edhrec.com/pages/average-decks/foo/upgraded.json",
+    ]
+    assert len(_polite(slept)) == 1
