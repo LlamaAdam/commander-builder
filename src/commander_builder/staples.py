@@ -18,8 +18,17 @@ deserve a dedicated module:
    now we keep an independent local copy because the two projects share
    no code.
 
-Both functions are pure (no I/O, no network) and idempotent. Tests can
-exercise them with synthetic ``oracle_text`` strings.
+3. **Politics tagging** (2026-08-17, decision C2) — goad / monarch / vote /
+   tempting offer / Rhystic-tax / pillow-fort detection. Same oracle-text
+   shape as role classification, but it answers a different question: not
+   "what does this card do for the deck" but "can the Forge AI that the A/B
+   loop measures against value this card at all". See
+   ``_POLITICS_PATTERNS``.
+
+The classifiers are pure (no I/O, no network) and idempotent. Tests can
+exercise them with synthetic ``oracle_text`` strings; the name-keyed
+wrappers (``count_deck_roles``, ``is_politics_card_name``) resolve through
+Scryfall and take an injectable lookup instead.
 """
 
 from __future__ import annotations
@@ -976,6 +985,199 @@ def classify_role(oracle_text: str, type_line: str = "") -> str:
     if best_role == "other" and has_creature_type:
         return "threat"
     return best_role
+
+
+# --- Politics detection (the sim-invisible multiplayer axis) --------------
+#
+# ADDED 2026-08-17 (decision C2). Forge's AI does not negotiate, does not
+# reason about who the archenemy is, and does not model an opponent's
+# incentive to pay a tax. Every mechanic below therefore reads as a no-op
+# or near-no-op to the sim: goad redirects an attack the AI would likely
+# have made anyway, the monarch's card-draw race is played out mechanically
+# with no threat assessment, a vote among AI seats is decided by a table
+# that never bargains, and a Rhystic tax the AI reflexively pays costs it
+# nothing it knows how to miss. The A/B loop in ``compare_versions``
+# measures margin against exactly that AI, so it will "empirically"
+# recommend cutting the cards that define the multiplayer format. The
+# margin is not evidence against these cards; it is evidence that the
+# instrument can't see them.
+#
+# This table is the detector. Its consumers (the advisor cut loop, the
+# advisor filters, ``card_score``'s cut rails) use it to SHIELD, never to
+# promote — a politics card is not scored higher anywhere, it is only
+# exempted from margin-driven cuts. Add recommendations are untouched.
+#
+# Patterns match ORACLE TEXT case-insensitively and are deliberately
+# anchored on the printed rules templating rather than on card names, so a
+# new printing of an existing mechanic is covered on day one.
+
+#: Oracle-pattern table: ``(tag, compiled_pattern)``. Table order is the
+#: order :func:`politics_tags` reports matches in.
+_POLITICS_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    # Goad — the keyword and its inflections, ``\b`` on both sides so a
+    # longer word that merely CONTAINS the letters can't match. The goad
+    # reminder text ("attacks each combat if able and attacks a player
+    # other than you if able") always ships alongside the keyword, so
+    # there is no separate pattern for it: matching that reminder shape
+    # independently would false-positive on plain "attacks each combat if
+    # able" curses (Curse of the Nightly Hunt), which are goad-adjacent
+    # but are not the goad keyword.
+    ("goad", re.compile(r"\bgoad(?:s|ed|ing)?\b", re.IGNORECASE)),
+    # The monarch — every monarch card carries the reminder text, whose
+    # last sentence is "...its controller becomes the monarch", so one
+    # pattern covers the whole mechanic. The hate side never says
+    # "becomes", hence the second pattern.
+    ("monarch", re.compile(r"\bbecomes? the monarch\b", re.IGNORECASE)),
+    ("monarch", re.compile(r"\bcan't become the monarch\b", re.IGNORECASE)),
+    # Voting — the two named mechanics plus the bare verb. The leading
+    # ``\b`` is what keeps "devotion" / "devoted" out (the letters are
+    # preceded by a word character there, so the boundary fails), and the
+    # explicit inflection list keeps it off "voter"-shaped coinages.
+    ("vote", re.compile(r"\bwill of the council\b", re.IGNORECASE)),
+    ("vote", re.compile(r"\bcouncil's dilemma\b", re.IGNORECASE)),
+    ("vote", re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)),
+    # Tempting offer — named mechanic, one pattern.
+    ("tempting_offer", re.compile(r"\btempting offer\b", re.IGNORECASE)),
+    # Rhystic-style taxes (Rhystic Study, Mystic Remora, Smothering
+    # Tithe). The load-bearing half is WHO pays: "unless that player pays"
+    # is always an OPPONENT being handed a decision. Deliberately NOT
+    # matched: "unless you pay" (your own upkeep cost — cumulative upkeep,
+    # Braid of Fire) and "unless its controller pays" (Spell Pierce and
+    # the rest of the soft-counter family, which the AI plays perfectly
+    # well as ordinary interaction). Both are pinned by tests.
+    ("tax", re.compile(r"\bunless that player pays\b", re.IGNORECASE)),
+    # Deterrent / pillow-fort (Propaganda, Ghostly Prison, Norn's Annex).
+    # The attack-tax clause can carry a rider between "you" and "unless"
+    # ("...you or planeswalkers you control unless..."), so the window is
+    # bounded by ``[^.]`` — it may cross that rider but never a sentence
+    # break, which would otherwise let two unrelated clauses match as one.
+    ("deterrent", re.compile(r"can't attack you\b[^.]{0,80}?\bunless\b",
+                             re.IGNORECASE)),
+]
+
+#: The user-visible annotation the shield attaches wherever it fires.
+#: One sentence, one source of truth: the advisor's skip records, the
+#: ``card_score`` cut-block reason and any UI pill must all say the same
+#: thing, because they are all reporting the same refusal.
+POLITICS_SHIELD_REASON: str = (
+    "sim-invisible: Forge's AI cannot value goad/monarch/tax effects, "
+    "so the A/B margin is not evidence against this card"
+)
+
+#: ``[metadata]`` directive that turns the guard off for ONE deck.
+#: Follows the ``Protect=`` precedent (see
+#: ``web/_helpers.read_protected_cards``): a plain ``Key=Value`` line in
+#: the deck file's ``[metadata]`` block, which Forge ignores and which
+#: therefore travels with the deck across imports and version bumps.
+#: Spelled as a POSITIVE switch (``PoliticsGuard=off``) rather than
+#: ``NoPoliticsGuard=`` on purpose — a negated boolean makes the
+#: explicit-enable case ("NoPoliticsGuard=false") unreadable.
+POLITICS_GUARD_META_KEY: str = "PoliticsGuard"
+
+#: Values that read as "off". Anything else — a missing line, an empty
+#: value, a typo — leaves the guard ON, because the failure mode of a
+#: mis-parsed opt-out must be "the card survives", not "the sim quietly
+#: cut your monarch package".
+_POLITICS_GUARD_OFF_VALUES: frozenset[str] = frozenset({
+    "off", "false", "no", "0", "none", "disabled",
+})
+
+
+def politics_tags(oracle_text: str, type_line: str = "") -> tuple[str, ...]:
+    """Which politics mechanics ``oracle_text`` uses, in table order.
+
+    Returns a deduplicated tuple drawn from ``goad``, ``monarch``,
+    ``vote``, ``tempting_offer``, ``tax``, ``deterrent`` — empty when the
+    card isn't a politics card.
+
+    ``type_line`` is accepted for signature parity with ``classify_role``
+    / ``detect_tribal_type`` (callers hold the pair and shouldn't have to
+    remember which classifier wants which half) but is NOT consulted:
+    every mechanic here is a rules-text mechanic, and none of them has a
+    type or subtype that identifies it.
+    """
+    text = oracle_text or ""
+    if not text:
+        return ()
+    out: list[str] = []
+    for tag, pattern in _POLITICS_PATTERNS:
+        if tag in out:
+            continue
+        if pattern.search(text):
+            out.append(tag)
+    return tuple(out)
+
+
+def is_politics_card(oracle_text: str, type_line: str = "") -> bool:
+    """True iff the card uses a mechanic Forge's AI can't value.
+
+    The predicate every cut path gates on. See ``_POLITICS_PATTERNS`` for
+    what counts and why.
+    """
+    return bool(politics_tags(oracle_text, type_line))
+
+
+def politics_tags_for_name(card_name: str, lookup=None) -> tuple[str, ...]:
+    """Name-keyed :func:`politics_tags`: resolve the card, then classify.
+
+    ``lookup`` is the same injectable Scryfall-shaped ``name -> dict``
+    seam ``card_score`` uses, so an offline caller (or a cache-only one
+    like the advisor's ``_cached_scryfall``) never touches the network.
+    Defaults to this module's ``lookup_card``, matching how
+    ``count_deck_roles`` resolves names.
+
+    An unresolvable name has NO politics tags: the shield has to be
+    positively earned, or a Scryfall outage would freeze every cut the
+    advisor could otherwise propose. Never raises — the callers are
+    ranking loops, and one bad name must not take down a whole audit.
+    """
+    resolve = lookup if lookup is not None else lookup_card
+    try:
+        card = resolve(card_name)
+    except Exception:  # noqa: BLE001 — a blip must not block cut ranking
+        return ()
+    if not card:
+        return ()
+    return politics_tags(card.get("oracle_text", "") or "",
+                         card.get("type_line", "") or "")
+
+
+def is_politics_card_name(card_name: str, lookup=None) -> bool:
+    """Boolean form of :func:`politics_tags_for_name`, for gate-style
+    callers that don't need to report WHICH mechanic fired."""
+    return bool(politics_tags_for_name(card_name, lookup))
+
+
+def politics_guard_enabled(deck_text: str) -> bool:
+    """Is the politics guard active for this deck?
+
+    ON by default (decision C2: the guard protects a category the sim
+    cannot judge, so opting IN would leave every un-annotated deck
+    exposed). One deck turns it off with a ``[metadata]`` line::
+
+        [metadata]
+        Name=My Monarch Deck
+        PoliticsGuard=off
+
+    Only the ``[metadata]`` block is consulted and the key is
+    case-insensitive — the same two rules ``read_protected_cards``
+    enforces, so a user who already learned the ``Protect=`` syntax
+    doesn't have to learn a second one.
+    """
+    in_metadata = False
+    for raw in (deck_text or "").splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_metadata = s.lower() == "[metadata]"
+            continue
+        if not in_metadata or "=" not in s:
+            continue
+        key, _, value = s.partition("=")
+        if key.strip().lower() != POLITICS_GUARD_META_KEY.lower():
+            continue
+        if value.strip().lower() in _POLITICS_GUARD_OFF_VALUES:
+            return False
+    return True
 
 
 # --- Frequency labels (for "in N of M references") -----------------------

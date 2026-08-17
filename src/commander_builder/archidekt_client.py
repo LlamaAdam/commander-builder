@@ -18,14 +18,32 @@ API shapes (probed live 2026-07-25 with the project User-Agent):
   ...}]}``. Category membership is the deck's own board semantics:
   Maybeboard/Sideboard categories carry ``includedInDeck: false``.
 
-Same degrade-don't-die contract as the other clients: every public
+Same degrade-don't-die contract as the other clients: every CORPUS
 function returns an empty result on network/shape failure rather than
-raising, and ``fetch_json`` is injectable so tests stay offline.
+raising, and ``fetch_json`` is injectable so tests stay offline. The
+single-deck import lane added 2026-08-17 (decision C3) is the documented
+exception — see :func:`fetch_deck`.
+
+WHAT THIS CLIENT COVERS, AND WHAT IT DOESN'T (decision C3, 2026-08-17).
+Archidekt is the resilience lane for Moxfield, not a replacement:
+
+- **Single-deck import** — full parity. ``parse_deck_id`` /
+  ``fetch_deck`` / ``to_deck_json`` feed ``moxfield_import.import_deck``'s
+  ``source="archidekt"`` path, which then runs the same render, dedupe,
+  destination and metadata-merge code as a Moxfield import.
+- **Commander-keyed reference decks** — partial. ``fetch_top_decks``
+  ranks by ``viewCount`` (Archidekt exposes no like count) and can only
+  SOFT-filter bracket, because ``edhBracket`` is null on most decks.
+- **Bulk harvest by bracket** — NO equivalent. Archidekt's search has no
+  reliable bracket axis to page through, so the opponent-pool harvest
+  stays Moxfield-only.
+- **Top-likes search** — NO equivalent (no like count in the API).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -114,23 +132,39 @@ def _get_json_with_retry(
     raise last_exc
 
 
-def extract_mainboard(deck_json: dict) -> list[str]:
-    """Pull the playable-deck card names out of an Archidekt detail JSON.
+def _excluded_categories(deck_json: dict) -> set[str]:
+    """Lowercased category names whose cards are NOT in the playable deck.
 
-    Honors the deck's own category flags: a card counts iff its
-    ``quantity`` > 0, none of its categories is marked
-    ``includedInDeck: false`` at the deck level, and it is not in the
-    ``Commander`` category (the corpus wants the 99 — the commander is
-    the query key, not a data point). A card with NO categories counts
-    (Archidekt leaves categories empty for plain mainboard entries).
+    Archidekt's board semantics live in the deck's own category list:
+    Maybeboard / Sideboard / Considering carry ``includedInDeck: false``.
     """
-    excluded = {"commander"}
+    excluded: set[str] = set()
     for cat in deck_json.get("categories") or []:
         if isinstance(cat, dict) and cat.get("includedInDeck") is False:
             name = (cat.get("name") or "").strip().lower()
             if name:
                 excluded.add(name)
-    out: list[str] = []
+    return excluded
+
+
+def _split_boards(deck_json: dict) -> tuple[list[dict], list[dict]]:
+    """``(commander_entries, mainboard_entries)`` from a detail JSON.
+
+    ONE walk, ONE notion of "counts as part of the deck", shared by the
+    corpus reader (:func:`extract_mainboard`) and the single-deck importer
+    (:func:`to_deck_json`) — the two used to be able to disagree about a
+    Maybeboard card, which would have meant the imported ``.dck`` and the
+    reference corpus read the same URL differently.
+
+    An entry counts iff ``quantity`` > 0 and none of its categories is
+    excluded at the deck level. An entry in the ``Commander`` category is
+    a commander; everything else that counts is mainboard. A card with NO
+    categories is mainboard (Archidekt leaves categories empty for plain
+    entries).
+    """
+    excluded = _excluded_categories(deck_json)
+    commanders: list[dict] = []
+    mainboard: list[dict] = []
     for entry in deck_json.get("cards") or []:
         if not isinstance(entry, dict):
             continue
@@ -140,11 +174,157 @@ def extract_mainboard(deck_json: dict) -> list[str]:
                 for c in (entry.get("categories") or [])]
         if any(c in excluded for c in cats):
             continue
-        name = (((entry.get("card") or {}).get("oracleCard") or {})
-                .get("name") or "").strip()
-        if name:
-            out.append(name)
-    return out
+        if "commander" in cats:
+            commanders.append(entry)
+        else:
+            mainboard.append(entry)
+    return commanders, mainboard
+
+
+def _entry_name(entry: dict) -> str:
+    return (((entry.get("card") or {}).get("oracleCard") or {})
+            .get("name") or "").strip()
+
+
+def extract_mainboard(deck_json: dict) -> list[str]:
+    """Pull the playable-deck card names out of an Archidekt detail JSON.
+
+    Commanders are excluded — the corpus wants the 99; the commander is
+    the query key, not a data point. See :func:`_split_boards` for the
+    membership rules.
+    """
+    _, mainboard = _split_boards(deck_json)
+    return [n for n in (_entry_name(e) for e in mainboard) if n]
+
+
+# ---------------------------------------------------------------------------
+# Single-deck import lane (decision C3, 2026-08-17)
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS: essentially all deck acquisition rides
+# ``api2.moxfield.com`` — an UNDOCUMENTED private API. One ToS change, one
+# CDN rule or one schema rename strands single-deck import, bracket-peer
+# references and the meta-test reference pull at the same moment, with no
+# second lane. Archidekt's API is public and documented, so this module
+# becomes the fallback lane for the one capability a user cannot work
+# around by hand: getting THEIR deck into Forge.
+#
+# Scope is deliberately the CLIENT layer only. There is no way to map a
+# Moxfield deck id onto an Archidekt one (different sites, different decks,
+# no shared identifier), so this is not an automatic rescue of a Moxfield
+# URL — it is a swappable source the user points at their Archidekt copy.
+
+#: Deck ids in an Archidekt URL are numeric:
+#: ``archidekt.com/decks/1234567/my-deck-slug``. The slug is decoration.
+_DECK_URL_RE = re.compile(r"/decks/(\d+)")
+
+
+def is_archidekt_url(url_or_id: str) -> bool:
+    """True when the string is recognizably an Archidekt deck URL.
+
+    Host match only — a BARE numeric id is deliberately not claimed here,
+    because a bare id is exactly what a Moxfield-shaped call site passes.
+    Source selection is the caller's decision; this only answers "is this
+    unambiguously Archidekt".
+    """
+    return "archidekt.com" in (url_or_id or "").lower()
+
+
+def parse_deck_id(url_or_id: str) -> str:
+    """Accept a full Archidekt URL or a bare deck id; return the id.
+
+    Mirrors ``moxfield_import.parse_deck_id`` so the two importer lanes
+    take the same shape of user input.
+    """
+    m = _DECK_URL_RE.search(url_or_id or "")
+    return m.group(1) if m else (url_or_id or "").strip()
+
+
+def fetch_deck(
+    deck_id: str,
+    *,
+    fetch_json: Optional[Callable[[str], dict]] = None,
+) -> dict:
+    """Fetch one deck's detail JSON. RAISES on failure, unlike the corpus
+    functions above.
+
+    The degrade-don't-die contract belongs to bulk corpus reads, where one
+    dead deck out of 25 is noise. A single-deck import has no such
+    redundancy: swallowing the error here would write an empty ``.dck``
+    and call it success, which is exactly the silent failure the project's
+    working principles forbid. Retries still apply (429/5xx).
+    """
+    get = fetch_json or _http_get_json
+    return _get_json_with_retry(get, f"{BASE}/decks/{parse_deck_id(deck_id)}/")
+
+
+def deck_bracket(deck_json: dict) -> int:
+    """Archidekt's ``edhBracket`` as a 1-5 int, or 0 for unknown.
+
+    Most decks leave it null. 0 is the same "unknown" value
+    ``moxfield_import.resolve_bracket`` returns, so the filename tag comes
+    out as ``[B?]`` and every bracket-aware consumer treats the deck the
+    same way it treats an unbracketed Moxfield import.
+    """
+    value = deck_json.get("edhBracket")
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return n if 1 <= n <= 5 else 0
+
+
+def to_deck_json(deck_json: dict) -> dict:
+    """Adapt an Archidekt detail JSON to the project's internal deck shape.
+
+    That internal shape happens to be Moxfield's response shape — not
+    because Moxfield is privileged, but because it is what
+    ``moxfield_import.to_dck`` / ``card_line`` / ``deck_destination``
+    already consume, and ``premade_import`` already treats it as the
+    interchange format between sources ("Moxfield-shape deck JSON"). One
+    adapter here is the whole cost of making the importer source-agnostic;
+    the alternative — a second renderer — would fork the ``.dck`` writer,
+    and with it the C0-control-character sanitizing and the printing
+    (set/collector-number) handling.
+
+    ``publicId`` is deliberately NOT set: an Archidekt id is not a
+    Moxfield publicId and stamping one into the ``Moxfield=`` line would
+    poison the re-import dedupe index. The importer records provenance as
+    ``Archidekt=<id>`` / ``Source=archidekt`` instead.
+    """
+    commanders, mainboard = _split_boards(deck_json)
+
+    def _mox_entry(entry: dict) -> dict:
+        card = entry.get("card") or {}
+        edition = card.get("edition") or {}
+        return {
+            "quantity": entry.get("quantity", 1),
+            "card": {
+                "name": _entry_name(entry),
+                "set": (edition.get("editioncode") or "").strip(),
+                "cn": str(card.get("collectorNumber") or "").strip(),
+            },
+        }
+
+    def _board(entries: list[dict]) -> dict:
+        return {"cards": {
+            f"{i}": _mox_entry(e) for i, e in enumerate(entries)
+            if _entry_name(e)
+        }}
+
+    return {
+        "name": (deck_json.get("name") or "").strip() or "Untitled",
+        "format": "commander",
+        # ``resolve_bracket`` reads this key first; 0 stays unset so it
+        # falls through to its own "unknown" default rather than being
+        # handed an out-of-range int.
+        **({"bracket": deck_bracket(deck_json)}
+           if deck_bracket(deck_json) else {}),
+        "boards": {
+            "commanders": _board(commanders),
+            "mainboard": _board(mainboard),
+        },
+    }
 
 
 def fetch_top_decks(

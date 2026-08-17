@@ -13,6 +13,17 @@ Single-deck usage:
     python -m commander_builder.moxfield_import https://moxfield.com/decks/<id>
     python -m commander_builder.moxfield_import <id>
 
+Archidekt fallback lane (decision C3, 2026-08-17) — Moxfield's API is
+undocumented and private, so single-deck import has a second source:
+
+    python -m commander_builder.moxfield_import https://archidekt.com/decks/<id>
+    python -m commander_builder.moxfield_import <mox-id> --archidekt <archidekt-url>
+
+The first form imports from Archidekt outright (the URL is sniffed). The
+second keeps Moxfield as the primary and uses Archidekt only when the
+Moxfield fetch fails for a non-404 reason. Deck ids are NOT translatable
+between the two sites — the user supplies both.
+
 Bulk-by-bracket usage:
 
     python -m commander_builder.moxfield_import --bracket 3 --count 4
@@ -26,6 +37,7 @@ import json
 import re
 import time
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -198,9 +210,13 @@ def find_top_liked_deck_for_commander(
     try:
         payload = _http_get_json(url)
     except Exception as exc:
-        if verbose:
-            print(f"  [moxfield] search HTTP failed: {type(exc).__name__}: {exc}",
-                  file=sys.stderr, flush=True)
+        # Printed unconditionally (not gated on ``verbose``): the search
+        # dying takes the WHOLE capability with it, and the caller only
+        # sees a bare None. Say which lane failed and that this one has
+        # no Archidekt substitute.
+        print(f"  [moxfield] search HTTP failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        print(MOXFIELD_ONLY_NOTE, file=sys.stderr, flush=True)
         return None
     results = payload.get("data", []) or []
     if verbose:
@@ -291,9 +307,12 @@ def find_top_liked_decks_for_commander(
     try:
         payload = _http_get_json(url)
     except Exception as exc:
-        if verbose:
-            print(f"  [moxfield] search HTTP failed: {type(exc).__name__}: {exc}",
-                  file=sys.stderr, flush=True)
+        # Unconditional for the same reason as the singular variant above:
+        # a dead search is a dead capability, and the bracket-peers advisor
+        # would otherwise silently degrade to "no peer references found".
+        print(f"  [moxfield] search HTTP failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        print(MOXFIELD_ONLY_NOTE, file=sys.stderr, flush=True)
         return []
     results = payload.get("data", []) or []
     if verbose:
@@ -419,6 +438,15 @@ def to_dck(deck_json: dict) -> str:
 
 
 _MOXFIELD_META = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
+
+# `Archidekt=<id>`: the same provenance line for the Archidekt import lane
+# (decision C3, 2026-08-17). A separate KEY rather than a reused
+# `Moxfield=` with a prefixed value, because the .dck must stay honest
+# about where the deck came from — the web layer's `/api/deck_source` and
+# `verify_against_source` both re-fetch `Moxfield=` from Moxfield, and
+# handing them an Archidekt id under that key would produce a confidently
+# wrong "your deck is out of sync" report on every check.
+_ARCHIDEKT_META = re.compile(r"^Archidekt=(.+)$", re.MULTILINE)
 
 # Filename prefix marking a deck as the USER's own test deck. This is a ROLE
 # boundary, not just cosmetics: web/app.py's sidebar lists only `[USER]`-
@@ -807,7 +835,7 @@ def _rename_for_bracket_drift(
 
 
 def _moxfield_id_from_text(text: str) -> Optional[str]:
-    """Parse the `Moxfield=` publicId out of raw .dck TEXT.
+    """Parse the recorded SOURCE id out of raw .dck TEXT.
 
     Split out from `_read_moxfield_id` so a caller holding .dck content that
     never touched disk shares the exact same parse as the on-disk reader —
@@ -815,11 +843,21 @@ def _moxfield_id_from_text(text: str) -> Optional[str]:
     restore target from a knowledge_log `deck_snapshot` blob (in-memory
     string), not from the file about to be overwritten.
 
-    None when the text carries no `Moxfield=` line (bare paste, or a snapshot
+    `Moxfield=<publicId>` is returned verbatim. An Archidekt-sourced deck
+    (decision C3, 2026-08-17) records `Archidekt=<id>` instead, and comes
+    back NAMESPACED as `archidekt:<id>` — the two id spaces are unrelated
+    integers-vs-slugs and a bare collision, however unlikely, would make a
+    re-import overwrite the wrong deck. Namespacing costs nothing: every
+    consumer treats this value as an opaque identity key.
+
+    None when the text carries neither line (bare paste, or a snapshot
     recorded before the publicId-in-metadata patch) — callers must treat that
     as "identity unknown", not "different"."""
     m = _MOXFIELD_META.search(text)
-    return m.group(1).strip() if m else None
+    if m:
+        return m.group(1).strip()
+    m = _ARCHIDEKT_META.search(text)
+    return f"archidekt:{m.group(1).strip()}" if m else None
 
 
 def _read_moxfield_id(path: Path) -> Optional[str]:
@@ -877,6 +915,13 @@ def _classify_destination(dest: Path, public_id: str) -> str:
 # web/_helpers.read_protected_cards) — written locally, never present in the
 # Moxfield payload, so a fresh to_dck render drops it.
 _PROTECT_META = re.compile(r"^Protect=.*$", re.MULTILINE)
+# `PoliticsGuard=`: the decision-C2 per-deck opt-out (see
+# staples.politics_guard_enabled). Same situation as `Protect=` — a
+# local-only user directive that a fresh render would silently discard,
+# which would re-enable a guard the user deliberately turned off and
+# quietly stop the advisor proposing the cuts they asked for.
+_POLITICS_GUARD_META = re.compile(r"^PoliticsGuard=.*$",
+                                  re.MULTILINE | re.IGNORECASE)
 # `DisplayName=`: the pretty deck name stamp_name_preserving_display writes
 # when safe_filename mangled the Moxfield name — and which the user may have
 # hand-edited since. `.+` (not `.*`) on purpose: an EMPTIED local
@@ -891,9 +936,10 @@ def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
     freshly rendered import.
 
     `to_dck` only regenerates `Name=`/`Moxfield=`; a plain same-id overwrite
-    would silently wipe local-only metadata. Two keys are carried:
+    would silently wipe local-only metadata. Three keys are carried:
 
-    - `Protect=` pet-card locks (all lines), and
+    - `Protect=` pet-card locks (all lines),
+    - `PoliticsGuard=` (all lines) — the decision-C2 per-deck opt-out, and
     - `DisplayName=` (first line) — dck_meta documents that user edits to
       the display name survive re-imports, and this carry is what makes
       that true: import_deck runs this merge BEFORE
@@ -904,6 +950,7 @@ def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
     Re-insert them right after the metadata block (before the first card
     section header)."""
     carried = _PROTECT_META.findall(old_text)
+    carried += _POLITICS_GUARD_META.findall(old_text)
     local_display = _DISPLAY_META.search(old_text)
     if local_display:
         # Local DisplayName wins over the fresh render's. to_dck never emits
@@ -913,36 +960,176 @@ def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
         fresh_dck = re.sub(r"^DisplayName=.*\n?", "", fresh_dck,
                            flags=re.MULTILINE)
         carried.append(local_display.group(0))
-    if not carried:
-        return fresh_dck
-    lines = fresh_dck.splitlines()
-    # First section header AFTER [metadata] (i.e. [Commander] or [Main]) —
-    # carried lines must stay inside the metadata block to be parseable.
+    return _insert_metadata_lines(fresh_dck, carried)
+
+
+def _insert_metadata_lines(dck_text: str, extra: list[str]) -> str:
+    """Insert `Key=Value` lines into the `[metadata]` block.
+
+    Placement: right before the first card-section header after
+    `[metadata]`, so the lines stay inside the block every metadata parser
+    reads. (`premade_import._insert_metadata_lines` documents itself as
+    mirroring this placement; it can't import from here without a cycle.)
+    """
+    if not extra:
+        return dck_text
+    lines = dck_text.splitlines()
     insert_at = len(lines)
     for i, ln in enumerate(lines):
         if i > 0 and ln.startswith("["):
             insert_at = i
             break
-    lines[insert_at:insert_at] = carried
+    lines[insert_at:insert_at] = extra
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Source lanes for single-deck import (decision C3, 2026-08-17)
+# ---------------------------------------------------------------------------
+#
+# WHY: everything in this module rides `api2.moxfield.com`, an UNDOCUMENTED
+# private API. One ToS or CDN change strands single-deck import, bracket-peer
+# references and the meta-test reference pull simultaneously. Archidekt's API
+# is public and documented, so it becomes a second lane for the one capability
+# the user cannot work around by hand — getting THEIR deck into Forge.
+#
+# What this is NOT: an automatic rescue of a broken Moxfield URL. A Moxfield
+# deck id cannot be translated into an Archidekt one (unrelated sites, no
+# shared identifier), so the fallback is about the CLIENT being swappable —
+# the user supplies their Archidekt copy and we take that lane instead.
+
+SOURCE_MOXFIELD = "moxfield"
+SOURCE_ARCHIDEKT = "archidekt"
+
+#: Printed whenever a MOXFIELD-ONLY capability fails. Bulk harvest by
+#: bracket and top-likes search have no Archidekt equivalent — Archidekt's
+#: search exposes no like count and its ``edhBracket`` is null on most
+#: decks, so neither can be paged the way these functions page Moxfield.
+#: Saying so explicitly (and naming what DOES have a fallback) is the
+#: difference between "the tool is broken" and "this lane is down, here is
+#: the one that isn't" — the no-silent-failures principle applied to a
+#: capability gap rather than an exception.
+MOXFIELD_ONLY_NOTE = (
+    "  NOTE: this capability is Moxfield-only — Archidekt's public API "
+    "exposes no like count and leaves edhBracket unset on most decks, so "
+    "there is no fallback lane for bracket harvest / top-likes search. "
+    "SINGLE-DECK import does have one: pass an Archidekt deck URL "
+    "(commander-import --source archidekt <url>)."
+)
+
+# HTTP codes that mean "this deck does not exist" rather than "the lane is
+# broken". A 404/410 is a genuine answer from a working API — falling back
+# to Archidekt on one would silently import a DIFFERENT deck than the user
+# asked for. Everything else (5xx, 403 CDN block, timeout, URLError, a
+# JSON/schema failure) is a lane failure, which is exactly what the
+# fallback exists for.
+_DECK_ABSENT_HTTP_CODES = frozenset({404, 410})
+
+
+def resolve_source(url_or_id: str, source: str = "auto") -> str:
+    """Which lane a given input belongs to.
+
+    ``auto`` (the default) sniffs the URL host: an ``archidekt.com`` URL is
+    Archidekt, everything else — including a bare id — is Moxfield, which
+    keeps every existing call site byte-identical. An explicit
+    ``source=`` always wins, so a bare Archidekt deck number is usable.
+    """
+    if source and source != "auto":
+        s = source.strip().lower()
+        if s not in (SOURCE_MOXFIELD, SOURCE_ARCHIDEKT):
+            raise ValueError(
+                f"unknown deck source {source!r} — expected "
+                f"{SOURCE_MOXFIELD!r}, {SOURCE_ARCHIDEKT!r} or 'auto'"
+            )
+        return s
+    from .archidekt_client import is_archidekt_url
+    return SOURCE_ARCHIDEKT if is_archidekt_url(url_or_id) else SOURCE_MOXFIELD
+
+
+def _fetch_archidekt(url_or_id: str) -> tuple[dict, str, list[str]]:
+    """Fetch + adapt one Archidekt deck.
+
+    Returns ``(deck_json_in_moxfield_shape, source_id, provenance_lines)``.
+    ``source_id`` is namespaced (`archidekt:<id>`) to match what
+    `_moxfield_id_from_text` reads back off disk, so re-imports overwrite
+    in place exactly like a Moxfield re-pull.
+    """
+    from . import archidekt_client
+    deck_id = archidekt_client.parse_deck_id(url_or_id)
+    print(f"Fetching {deck_id} from Archidekt...")
+    raw = archidekt_client.fetch_deck(deck_id)
+    return (
+        archidekt_client.to_deck_json(raw),
+        f"archidekt:{deck_id}",
+        [f"Archidekt={deck_id}", f"Source={SOURCE_ARCHIDEKT}"],
+    )
+
+
+def _is_deck_absent(exc: BaseException) -> bool:
+    """True for "that deck does not exist", false for "the lane is down"."""
+    return (isinstance(exc, urllib.error.HTTPError)
+            and exc.code in _DECK_ABSENT_HTTP_CODES)
 
 
 def import_deck(
     url_or_id: str,
     out_dir: Path = DECK_OUT_DIR,
     is_user: bool = False,
+    *,
+    source: str = "auto",
+    archidekt: Optional[str] = None,
 ) -> Path:
-    deck_id = parse_deck_id(url_or_id)
-    print(f"Fetching {deck_id} from Moxfield...")
-    deck_json = fetch_deck(deck_id)
+    """Import ONE deck to a Forge `.dck`.
+
+    ``source`` selects the lane — ``"auto"`` (sniff the URL),
+    ``"moxfield"`` or ``"archidekt"``. ``archidekt`` is the FALLBACK: the
+    user's Archidekt URL/id for the same deck, used only when the Moxfield
+    lane fails with a network/HTTP/parse error. A genuine 404 is not a
+    lane failure — that deck really is gone, and quietly importing a
+    different deck from another site would be worse than raising.
+    """
+    lane = resolve_source(url_or_id, source)
+    provenance: list[str] = []
+
+    if lane == SOURCE_ARCHIDEKT:
+        deck_json, source_id, provenance = _fetch_archidekt(url_or_id)
+        deck_id = source_id.split(":", 1)[1]
+    else:
+        deck_id = parse_deck_id(url_or_id)
+        print(f"Fetching {deck_id} from Moxfield...")
+        try:
+            deck_json = fetch_deck(deck_id)
+            source_id = deck_json.get("publicId", "")
+        except Exception as exc:  # noqa: BLE001 — classified immediately
+            if _is_deck_absent(exc):
+                # A working API saying "no such deck". No fallback can fix
+                # that, and importing SOME OTHER deck would be worse.
+                raise
+            if not archidekt:
+                # No silent failures: name the lane that still works.
+                print(
+                    f"  Moxfield fetch failed ({type(exc).__name__}: "
+                    f"{exc}). Moxfield's API is undocumented and can break "
+                    f"without notice — re-run with "
+                    f"--source archidekt <archidekt-url> (or --archidekt "
+                    f"<url> to keep Moxfield as the primary) to import the "
+                    f"same deck from Archidekt's public API instead.",
+                    file=sys.stderr, flush=True,
+                )
+                raise
+            print(
+                f"  Moxfield fetch failed ({type(exc).__name__}: {exc}); "
+                f"falling back to the Archidekt lane.",
+                file=sys.stderr, flush=True,
+            )
+            deck_json, source_id, provenance = _fetch_archidekt(archidekt)
 
     fmt = (deck_json.get("format") or "").lower()
     if fmt and fmt != "commander":
         print(f"  WARN: deck format is '{fmt}', not 'commander'. Importing anyway.")
 
     bracket = resolve_bracket(deck_json)
-    dck = to_dck(deck_json)
-    public_id = deck_json.get("publicId", "")
+    dck = _insert_metadata_lines(to_dck(deck_json), provenance)
     out_path = deck_destination(deck_json.get("name", deck_id), bracket, out_dir, is_user)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Same-id lookup over the whole deck dir WITHIN THIS IMPORT'S ROLE, not
@@ -962,8 +1149,8 @@ def import_deck(
     #   deck already imported"; it's a different role's copy, and the two
     #   legitimately coexist. One directory scan per import call.
     same_path = (
-        _existing_moxfield_ids(out_dir, is_user=is_user).get(public_id)
-        if public_id else None
+        _existing_moxfield_ids(out_dir, is_user=is_user).get(source_id)
+        if source_id else None
     )
     if same_path is not None:
         # Documented re-pull semantics (README audit-cycle step 4,
@@ -993,7 +1180,7 @@ def import_deck(
         # come back here — a base-path file recording this id carries this
         # role's wrapper and would have been in the map — so the only
         # occupied-destination verdicts left are:
-        verdict = _classify_destination(out_path, public_id)
+        verdict = _classify_destination(out_path, source_id)
         if verdict in ("collision", "unknown"):
             # A DIFFERENT deck (or one we can't identify) owns this
             # filename — never clobber it; write under a uniquified name.
@@ -1110,6 +1297,11 @@ def import_by_bracket(
         page += 1
     if len(written) < count:
         print(f"  WARN: only got {len(written)} of {count} requested for B{bracket} [{sort_type}].")
+        if not written:
+            # Zero decks is a lane failure, not a thin bracket. Name the
+            # capability gap rather than letting the user assume the whole
+            # importer is dead.
+            print(MOXFIELD_ONLY_NOTE)
     return written
 
 
@@ -1160,6 +1352,8 @@ def harvest_bracket(
         )
         all_written.extend(written)
     print(f"=== B{bracket} done: {len(all_written)} unique decks ===\n")
+    if not all_written:
+        print(MOXFIELD_ONLY_NOTE)
     return all_written
 
 
@@ -1267,6 +1461,23 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--user",
         action="store_true",
         help="Mark imported decks as the user's test deck (filename gets a [USER] prefix).",
+    )
+    p.add_argument(
+        "--source",
+        choices=["auto", SOURCE_MOXFIELD, SOURCE_ARCHIDEKT],
+        default="auto",
+        help="Which site to import single decks from. 'auto' (default) "
+             "sniffs the URL; pass 'archidekt' to force the lane for a "
+             "bare Archidekt deck number.",
+    )
+    p.add_argument(
+        "--archidekt",
+        default=None,
+        metavar="URL_OR_ID",
+        help="Archidekt URL/id for the SAME deck, used as a fallback when "
+             "the Moxfield fetch fails for a non-404 reason. Only "
+             "meaningful with a single Moxfield deck argument — deck ids "
+             "can't be translated between the two sites.",
     )
     p.add_argument(
         "--bracket",
@@ -1663,9 +1874,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             ),
         )
 
+    if args.archidekt and len(args.decks) > 1:
+        # One fallback URL can only stand in for ONE deck; silently
+        # applying it to every argument would import the same Archidekt
+        # deck several times under different names.
+        print("  ERROR: --archidekt takes a single deck argument.")
+        return 2
+
     for url_or_id in args.decks:
         try:
-            import_deck(url_or_id, is_user=args.user)
+            import_deck(url_or_id, is_user=args.user,
+                        source=args.source, archidekt=args.archidekt)
         except Exception as exc:
             print(f"  ERROR importing {url_or_id}: {type(exc).__name__}: {exc}")
             failures += 1

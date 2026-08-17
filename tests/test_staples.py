@@ -1205,3 +1205,216 @@ def test_essential_manabase_tier_order_untapped_before_tapped():
     assert out.index("Sea of Clouds") < out.index("Spara's Headquarters")
     assert out.index("Spara's Headquarters") < out.index("Meticulous Archive")
     assert out.index("Meticulous Archive") < out.index("City of Brass")
+
+
+# ---------------------------------------------------------------------------
+# Politics detection (decision C2) — is_politics_card / politics_tags
+# ---------------------------------------------------------------------------
+#
+# ORACLE-TEXT PROVENANCE, read this before adding a case. The repo's rule
+# (tests/fixtures/real_oracles.py) is that classifier tests source oracle
+# text verbatim from Scryfall, never from a hand-written approximation.
+# No politics card is in that fixture yet and Scryfall is unreachable from
+# the sandbox this landed in, so:
+#
+#   - Every NEGATIVE (false-positive) guard below uses a REAL fixture card
+#     — those are the cases where an approximation would hide a bug, since
+#     a false positive is by definition text nobody expected to match.
+#   - Every POSITIVE case uses SYNTHETIC text, marked ``# SYNTHETIC`` and
+#     written to the printed rules TEMPLATE the pattern targets, not to a
+#     specific card. They pin pattern SHAPE only.
+#
+# FOLLOW-UP for a session with network: add Rhystic Study, Palace
+# Sentinels, Marchesa's Decree, Council's Judgment, Tempt with Discovery,
+# Propaganda and Disrupt Decorum to real_oracles.py (plus their entries in
+# test_real_oracle_fixture.EXPECTED_ROLE) and re-point the positives here.
+
+from commander_builder.staples import (  # noqa: E402
+    POLITICS_SHIELD_REASON,
+    is_politics_card,
+    is_politics_card_name,
+    politics_guard_enabled,
+    politics_tags,
+    politics_tags_for_name,
+)
+from tests.fixtures.real_oracles import oracle  # noqa: E402
+
+
+@pytest.mark.parametrize("text,expected_tag", [
+    # SYNTHETIC — goad keyword + its reminder text.
+    ("Goad target creature. (Until your next turn, that creature attacks "
+     "in combat if able and attacks a player other than you if able.)",
+     "goad"),
+    # SYNTHETIC — plural/third-person inflection ("goads each creature").
+    ("At the beginning of combat on your turn, this creature goads each "
+     "creature your opponents control.", "goad"),
+    # SYNTHETIC — monarch reminder text, which every monarch card carries.
+    ("When this creature enters, you become the monarch. (At the beginning "
+     "of the monarch's end step, that player draws a card. Whenever a "
+     "creature deals combat damage to the monarch, its controller becomes "
+     "the monarch.)", "monarch"),
+    # SYNTHETIC — the monarch hate side.
+    ("Players can't become the monarch.", "monarch"),
+    # SYNTHETIC — will of the council.
+    ("Will of the council — Starting with you, each player votes for an "
+     "artifact, creature, or enchantment.", "vote"),
+    # SYNTHETIC — council's dilemma.
+    ("Council's dilemma — Starting with you, each player votes for "
+     "carnage or homage.", "vote"),
+    # SYNTHETIC — the bare vote verb with no named mechanic.
+    ("Each player may vote for an opponent.", "vote"),
+    # SYNTHETIC — tempting offer.
+    ("Tempting offer — Search your library for a land card. Each opponent "
+     "may search their library for a land card.", "tempting_offer"),
+    # SYNTHETIC — Rhystic-style tax (Rhystic Study / Mystic Remora shape).
+    ("Whenever an opponent casts a spell, you may draw a card unless that "
+     "player pays {1}.", "tax"),
+    # SYNTHETIC — pillow-fort attack tax (Propaganda / Ghostly Prison).
+    ("Creatures can't attack you unless their controller pays {2} for "
+     "each creature they control that's attacking you.", "deterrent"),
+    # SYNTHETIC — the same tax with a planeswalker rider between "you"
+    # and "unless" (Norn's Annex shape); the bounded window must span it.
+    ("Creatures can't attack you or planeswalkers you control unless "
+     "their controller pays {W/P} for each of those creatures.",
+     "deterrent"),
+])
+def test_politics_positive_shapes(text, expected_tag):
+    """Each printed politics template is detected and tagged."""
+    assert is_politics_card(text) is True
+    assert expected_tag in politics_tags(text)
+
+
+@pytest.mark.parametrize("card_name", [
+    # "unless its CONTROLLER pays" — a soft counterspell, not a Rhystic
+    # tax. The AI plays this as ordinary interaction, so shielding it
+    # would exempt a whole family of removal from every cut path.
+    "Spell Pierce",
+    # Ward is an "unless ... pays" cost too, in the em-dash form.
+    "Phyrexian Fleshgorger",
+    # Gives an opponent a token — table-facing, but no politics mechanic.
+    "Swan Song",
+    # "Target player sacrifices" — an opponent makes a choice, which is
+    # NOT what politics means here (no negotiation, no vote, no tax).
+    "Diabolic Edict",
+    # Each-opponent effect with a choice, same reasoning.
+    "Soul Shatter",
+    # Broad control staples that must stay cuttable.
+    "Wrath of God",
+    "Cyclonic Rift",
+    "Sylvan Library",
+    "Arcane Signet",
+])
+def test_politics_negative_real_oracles(card_name):
+    """Real Scryfall text that must NOT read as politics."""
+    data = oracle(card_name)
+    assert is_politics_card(data["oracle_text"], data["type_line"]) is False
+    assert politics_tags(data["oracle_text"]) == ()
+
+
+@pytest.mark.parametrize("text", [
+    # SYNTHETIC word-boundary guards. "vote" inside a longer word is the
+    # exact false positive the leading \b exists for.
+    "As long as you have devotion to black, this creature gets +1/+1.",
+    "Devoted Druid enters the battlefield tapped.",
+    # Your OWN pay cost — cumulative upkeep / Braid of Fire shape. The
+    # tax pattern requires "that player", i.e. an opponent.
+    "At the beginning of your upkeep, sacrifice this unless you pay {2}.",
+    # A creature that can't attack — no "unless" clause, so the pillow-
+    # fort pattern must not latch onto the bare "can't attack you".
+    "Creatures with power 2 or less can't attack you.",
+    # Two unrelated sentences: "can't attack you." then an "unless" in
+    # the NEXT sentence. The [^.] window must refuse to cross the stop.
+    ("Creatures can't attack you. Sacrifice this enchantment unless you "
+     "pay {1} during your upkeep."),
+])
+def test_politics_false_positive_guards(text):
+    """SYNTHETIC near-miss templates that must stay unshielded."""
+    assert is_politics_card(text) is False
+
+
+def test_politics_tags_are_deduplicated_and_ordered():
+    """A card matching two monarch patterns reports ``monarch`` once, and
+    multi-mechanic cards report in table order (goad before monarch)."""
+    # SYNTHETIC — a card that both goads and hands out the monarchy.
+    text = ("Goad each creature your opponents control. You become the "
+            "monarch. Players can't become the monarch this turn.")
+    assert politics_tags(text) == ("goad", "monarch")
+
+
+def test_politics_empty_text_is_not_politics():
+    assert is_politics_card("") is False
+    assert politics_tags("", "Artifact") == ()
+
+
+# --- name-keyed wrapper ----------------------------------------------------
+
+def test_politics_tags_for_name_uses_injected_lookup():
+    """The injectable lookup keeps the predicate offline."""
+    # SYNTHETIC oracle body; the point of the test is the seam.
+    def lookup(name):
+        return {"oracle_text": "Goad target creature.", "type_line": "Instant"}
+    assert politics_tags_for_name("Whatever", lookup) == ("goad",)
+    assert is_politics_card_name("Whatever", lookup) is True
+
+
+def test_politics_name_unresolvable_is_not_politics():
+    """A Scryfall miss must not shield — the guard is earned, not
+    assumed, or an outage would freeze every cut the advisor can make."""
+    assert is_politics_card_name("Nonexistent", lambda n: None) is False
+
+
+def test_politics_name_lookup_error_is_not_politics():
+    """A raising lookup degrades to 'not politics', never propagates:
+    the callers are ranking loops."""
+    def boom(name):
+        raise RuntimeError("scryfall down")
+    assert is_politics_card_name("Whatever", boom) is False
+
+
+# --- per-deck opt-out ------------------------------------------------------
+
+def test_politics_guard_on_by_default():
+    """No directive → guard active (decision C2 ships it on)."""
+    deck = "[metadata]\nName=Test\nMoxfield=abc\n[Main]\n1 Sol Ring\n"
+    assert politics_guard_enabled(deck) is True
+    assert politics_guard_enabled("") is True
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "false", "no", "0",
+                                   "none", "disabled", "  off  "])
+def test_politics_guard_opt_out_values(value):
+    deck = f"[metadata]\nName=Test\nPoliticsGuard={value}\n[Main]\n"
+    assert politics_guard_enabled(deck) is False
+
+
+@pytest.mark.parametrize("key", ["PoliticsGuard", "politicsguard",
+                                 "POLITICSGUARD"])
+def test_politics_guard_key_is_case_insensitive(key):
+    """Mirrors ``Protect=``'s case-insensitive key."""
+    assert politics_guard_enabled(f"[metadata]\n{key}=off\n[Main]\n") is False
+
+
+def test_politics_guard_explicit_on_is_a_no_op():
+    """``PoliticsGuard=on`` is a valid way to state the default."""
+    assert politics_guard_enabled("[metadata]\nPoliticsGuard=on\n") is True
+
+
+def test_politics_guard_unparseable_value_stays_on():
+    """Fail SAFE: a typo leaves the shield up rather than silently
+    exposing the deck's politics package to margin-driven cuts."""
+    assert politics_guard_enabled("[metadata]\nPoliticsGuard=maybe\n") is True
+    assert politics_guard_enabled("[metadata]\nPoliticsGuard=\n") is True
+
+
+def test_politics_guard_ignores_directive_outside_metadata():
+    """Only ``[metadata]`` is consulted — same rule as Protect=."""
+    deck = "[metadata]\nName=T\n[Main]\nPoliticsGuard=off\n1 Sol Ring\n"
+    assert politics_guard_enabled(deck) is True
+
+
+def test_politics_shield_reason_is_the_project_voice():
+    """One sentence, one source of truth: every surface that reports
+    the shield quotes this constant verbatim."""
+    assert "sim-invisible" in POLITICS_SHIELD_REASON
+    assert "A/B margin is not evidence against this card" in (
+        POLITICS_SHIELD_REASON)

@@ -88,6 +88,16 @@ class AdviceReport:
     # don't own" instead of silently shortening the list. Always
     # empty when no collection is registered or in 'flag' mode.
     skipped_for_ownership: list[dict] = field(default_factory=list)
+    # Cuts the politics guard refused (decision C2, 2026-08-17). Forge's
+    # AI does not negotiate, pick an archenemy, or model an opponent's
+    # incentive to pay a tax, so goad / monarch / vote / tempting-offer /
+    # Rhystic-tax / pillow-fort cards read to the sim as no-ops — a
+    # near-zero margin on one is evidence the instrument is blind, not
+    # evidence against the card. Each entry: {card, reason}. Same
+    # disclosure contract as the other skip buckets, so the UI can say
+    # "kept 2 cuts the sim can't judge" rather than silently shortening
+    # the list. Empty when a deck sets ``PoliticsGuard=off``.
+    skipped_for_politics: list[dict] = field(default_factory=list)
     # Non-zero only when ``source="claude"`` AND the Claude path
     # successfully fetched bracket-peer references before the LLM
     # call. Lets the UI disclose 'Claude analyst (5 peer refs)' on
