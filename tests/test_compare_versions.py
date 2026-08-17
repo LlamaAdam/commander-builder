@@ -2264,3 +2264,179 @@ def test_compare_default_runner_for_secondary_profile_rotates_pool(
     for sim in tracker["sims"]:
         assert sim.forge_log_tail == "real pod tail"
         assert sim.forge_log_tail != _PARALLEL_LOG_TAIL_MARKER
+
+
+# ---------------------------------------------------------------------------
+# Cross-invocation profile locking (2026-08-16). compare()'s isolated pool is
+# a profile CHECKOUT just like run_ab_parallel's, and the web UI runs compare()
+# on a background thread (/api/propose_swap_async) — so a second job must not
+# be handed a profile this one is already simulating in. The lockfile mechanics
+# themselves are pinned in tests/test_forge_batch.py; these tests only pin
+# compare()'s use of them, and therefore need REAL profile dirs on disk (a
+# lock is a real file).
+# ---------------------------------------------------------------------------
+
+
+def _real_profiles(tmp_path, n):
+    from commander_builder.forge_batch import _PROFILE_LOCK_NAME  # noqa: F401
+
+    out = []
+    for i in range(n):
+        p = tmp_path / "profiles" / ("forge" if i == 0 else f"forge{i + 1}")
+        p.mkdir(parents=True)
+        out.append(p)
+    return out
+
+
+def _lockfile(profile):
+    from commander_builder.forge_batch import _PROFILE_LOCK_NAME
+
+    return profile / _PROFILE_LOCK_NAME
+
+
+def _hold_profile(profile):
+    """Simulate ANOTHER live sim owning ``profile``."""
+    lp = _lockfile(profile)
+    lp.write_text("pid=999999\nhost=other-box\n", encoding="utf-8")
+    return lp
+
+
+def _injected_for(profile):
+    """An ``_ExplodingRunner`` bound to ``profile``.
+
+    compare() only lets the per-worker pool supersede an injected runner it can
+    REPRODUCE (``runner_is_pool_covered``), so the injection has to name a
+    discovered profile — otherwise these tests would silently take the
+    shared-profile fallback and never build the pool under test.
+    """
+    r = _ExplodingRunner()
+    r.forge_dir = profile
+    return r
+
+
+def test_compare_parallel_locks_pooled_profiles_and_releases_them(
+    tmp_path, monkeypatch,
+):
+    """Every pooled profile is fenced for the whole dispatch, then freed."""
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    profiles = _real_profiles(tmp_path, 2)
+    monkeypatch.setattr(cv, "_discover_profiles", lambda: list(profiles))
+    runner_for, tracker = _make_profile_tracking_runner_factory("real pod tail")
+
+    locked_during = []
+
+    def tracking_runner_for(profile):
+        r = runner_for(profile)
+        inner_run = r.run
+
+        def run(*a, **k):
+            locked_during.append(_lockfile(Path(r.profile)).exists())
+            return inner_run(*a, **k)
+
+        r.run = run
+        return r
+
+    monkeypatch.setattr(cv, "_runner_for", tracking_runner_for)
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=_injected_for(profiles[0]),
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    assert len(report.pods) == 2
+    assert locked_during and all(locked_during)   # fenced while simulating
+    for p in profiles:
+        assert not _lockfile(p).exists()          # released on the way out
+
+
+def test_compare_parallel_skips_a_profile_another_sim_holds(
+    tmp_path, monkeypatch,
+):
+    """A profile locked by a concurrent sim job is passed over — compare()
+    runs narrower rather than double-booking a live JVM's forge.log."""
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    p1, p2 = _real_profiles(tmp_path, 2)
+    _hold_profile(p1)
+    monkeypatch.setattr(cv, "_discover_profiles", lambda: [p1, p2])
+    runner_for, tracker = _make_profile_tracking_runner_factory("t")
+    monkeypatch.setattr(cv, "_runner_for", runner_for)
+
+    report = cv.compare(
+        old_deck=OLD, new_deck=NEW,
+        bracket=3, games_per_pod=2, filler_pairs=2,
+        runner=_injected_for(p1),
+        out_dir=tmp_path / "_compare",
+        parallel=True, early_stop=False,
+    )
+
+    # Both pods still ran, serialized over the one free profile.
+    assert len(report.pods) == 2
+    assert tracker["violation"] is None
+    assert tracker["distinct_profiles"] == {str(p2)}
+    assert _lockfile(p1).exists()                 # the other run keeps its lock
+    assert not _lockfile(p2).exists()
+
+
+def test_compare_parallel_all_profiles_locked_fails_fast(tmp_path, monkeypatch):
+    """Fail fast with an actionable message instead of colliding (or queueing
+    behind a multi-hour soak that owns every profile)."""
+    from commander_builder.forge_batch import ProfileLockError
+
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    p1, p2 = _real_profiles(tmp_path, 2)
+    _hold_profile(p1)
+    _hold_profile(p2)
+    monkeypatch.setattr(cv, "_discover_profiles", lambda: [p1, p2])
+    runner_for, _tracker = _make_profile_tracking_runner_factory("t")
+    monkeypatch.setattr(cv, "_runner_for", runner_for)
+
+    with pytest.raises(ProfileLockError) as exc:
+        cv.compare(
+            old_deck=OLD, new_deck=NEW,
+            bracket=3, games_per_pod=2, filler_pairs=2,
+            runner=_injected_for(p1),
+            out_dir=tmp_path / "_compare",
+            parallel=True, early_stop=False,
+        )
+    msg = str(exc.value)
+    assert "all locked" in msg
+    assert "delete if no sim is active" in msg
+
+
+def test_compare_parallel_releases_locks_when_a_pod_explodes(
+    tmp_path, monkeypatch,
+):
+    """An exception escaping the dispatch must not leave profiles fenced."""
+    cv, _ = _setup_compare_world(tmp_path, monkeypatch, num_filler_pairs=2)
+    profiles = _real_profiles(tmp_path, 2)
+    monkeypatch.setattr(cv, "_discover_profiles", lambda: list(profiles))
+    runner_for, _tracker = _make_profile_tracking_runner_factory("t")
+
+    # The FIRST _runner_for call is compare()'s coverage probe (it must
+    # succeed, or the dispatch takes the shared-profile fallback and never
+    # builds the pool). The pool build that follows — after the locks are
+    # already held — is what blows up here.
+    calls = {"n": 0}
+
+    def _boom_after_probe(profile):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return runner_for(profile)
+        raise FileNotFoundError("forge jar missing")
+
+    monkeypatch.setattr(cv, "_runner_for", _boom_after_probe)
+
+    with pytest.raises(FileNotFoundError):
+        cv.compare(
+            old_deck=OLD, new_deck=NEW,
+            bracket=3, games_per_pod=2, filler_pairs=2,
+            runner=_injected_for(profiles[0]),
+            out_dir=tmp_path / "_compare",
+            parallel=True, early_stop=False,
+        )
+
+    for p in profiles:
+        assert not _lockfile(p).exists()

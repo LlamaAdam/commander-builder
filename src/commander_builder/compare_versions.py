@@ -71,6 +71,18 @@ from .forge_runner import (
     _discover_profiles,
     _runner_for,
 )
+# Cross-invocation profile locking (2026-08-16). Imported from forge_batch
+# itself rather than through forge_runner's re-export tail: forge_runner is
+# already fully loaded by the import above (it re-exports forge_batch at its
+# tail), so this cannot re-enter a partially-initialized module. compare()'s
+# isolated pool is a profile CHECKOUT exactly like run_ab_parallel's, and the
+# web UI runs it on a background thread (/api/propose_swap_async) — so a second
+# job must not be handed a profile this one is already simulating in.
+from .forge_batch import (
+    ProfileLockError,  # noqa: F401 — re-exported for callers/tests
+    acquire_profile_pool,
+    release_profile_pool,
+)
 from .game_analyzer import analyze
 from .log_parser import _normalize, parse
 from .run_match import _fallback_opponents, _load_pool
@@ -1045,6 +1057,7 @@ def compare(
                     profiles = profiles[pivot:] + profiles[:pivot]
         isolated = len(profiles) >= 2 and runner_is_pool_covered
         free_runners: "Optional[queue.Queue]" = None
+        profile_locks: list = []
         if isolated:
             # WORKER-vs-POD assignment (think carefully — this is the crux).
             # A profile may be used by at most ONE pod at a time: concurrent
@@ -1064,7 +1077,27 @@ def compare(
             # run_ab_batch, which multiplexes many ABJobs over few profile-bound
             # runners.)
             workers = min(workers, len(profiles))
-            pool_runners = [_runner_for(p) for p in profiles[:workers]]
+            # CROSS-PROCESS FENCE. The free-runner queue below only fences the
+            # pods of THIS compare() call — a second background sim job (the
+            # web UI launches them) or a concurrent CLI run re-enumerates the
+            # same vendor/forge* dirs and would happily pick the profile whose
+            # forge.log a live JVM here is writing. Take the advisory lock on
+            # each pooled profile and hold it until the dispatch below is done;
+            # profiles another process owns are skipped (we simply run
+            # narrower), and if EVERY profile is busy acquire_profile_pool
+            # raises ProfileLockError with an actionable message rather than
+            # letting two sims collide (or queueing behind a multi-hour soak).
+            profile_locks = acquire_profile_pool(profiles, workers)
+            try:
+                pool_profiles = [lk.profile for lk in profile_locks]
+                workers = len(pool_profiles)
+                pool_runners = [_runner_for(p) for p in pool_profiles]
+            except BaseException:
+                # Pool construction failed AFTER we took the locks (e.g.
+                # _runner_for can't find the jar) — drop them before the
+                # exception leaves, or the profiles stay fenced for 6h.
+                release_profile_pool(profile_locks)
+                raise
             free_runners = queue.Queue()
             for _pooled in pool_runners:
                 free_runners.put(_pooled)
@@ -1110,65 +1143,72 @@ def compare(
             finally:
                 free_runners.put(pooled)
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            if isolated:
-                # Each pod acquires its own profile from the free-runner queue
-                # inside _run_pod_isolated (per-worker, distinct, real tail).
-                futures = {
-                    ex.submit(_run_pod_isolated, i, pod): i
-                    for i, pod in enumerate(pods)
-                }
-            else:
-                # Shared-profile fallback: every pod uses the one ``runner`` and
-                # blanks its tail. Submit shape (positional pod_index at args[4])
-                # is load-bearing for the scripted-executor drain test.
-                futures = {
-                    ex.submit(
-                        _run_one_pod, runner, pod, mode, games_per_pod, i, len(pods),
-                        shared_profile_parallel=True,
-                    ): i
-                    for i, pod in enumerate(pods)
-                }
-            # `stop_decided` latches the first decisive verdict so late
-            # absorptions can't re-trigger (or un-trigger) the early-stop
-            # decision: after the cancel sweep every future is done,
-            # running, or cancelled — there is nothing left to cancel, and
-            # nothing restarts a cancelled future.
-            stop_decided = False
-            for fut in as_completed(futures):
-                if fut.cancelled():
-                    # Cancelled == never started (Future.cancel() only
-                    # succeeds on not-yet-running futures), so there is no
-                    # result to absorb — and .result() would raise
-                    # CancelledError. Skipping here can't misalign the
-                    # report: _absorb keys completed_pods on each result's
-                    # OWN pod_index, so absent indices simply don't appear.
-                    continue
-                _absorb(fut.result())
-                _fire_progress()
-                if stop_decided or not _check_early_stop():
-                    continue
-                # Verdict locked in. Cancel any still-QUEUED pods —
-                # already-running pods can't be interrupted (the Forge
-                # subprocess won't honor a thread cancel), so their full
-                # wall-clock cost is paid regardless of what we do next.
-                # That is exactly why we do NOT `break` here: the old
-                # break-out still blocked on the executor's shutdown join
-                # for as long as the in-flight JVMs took, but silently
-                # threw their fully-played games away. Keep draining
-                # as_completed instead and absorb in-flight pods through
-                # the same _absorb path (same failure classification, same
-                # seat/pod-index bookkeeping) when they land.
-                stop_decided = True
-                canceled = sum(1 for f in futures if f.cancel())
-                if canceled:
-                    report.stopped_early = True
-                    print(
-                        f"--- Early stop: verdict locked in, canceled "
-                        f"{canceled} pending pod(s); draining pods already "
-                        f"in flight ---",
-                        flush=True,
-                    )
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                if isolated:
+                    # Each pod acquires its own profile from the free-runner queue
+                    # inside _run_pod_isolated (per-worker, distinct, real tail).
+                    futures = {
+                        ex.submit(_run_pod_isolated, i, pod): i
+                        for i, pod in enumerate(pods)
+                    }
+                else:
+                    # Shared-profile fallback: every pod uses the one ``runner`` and
+                    # blanks its tail. Submit shape (positional pod_index at args[4])
+                    # is load-bearing for the scripted-executor drain test.
+                    futures = {
+                        ex.submit(
+                            _run_one_pod, runner, pod, mode, games_per_pod, i, len(pods),
+                            shared_profile_parallel=True,
+                        ): i
+                        for i, pod in enumerate(pods)
+                    }
+                # `stop_decided` latches the first decisive verdict so late
+                # absorptions can't re-trigger (or un-trigger) the early-stop
+                # decision: after the cancel sweep every future is done,
+                # running, or cancelled — there is nothing left to cancel, and
+                # nothing restarts a cancelled future.
+                stop_decided = False
+                for fut in as_completed(futures):
+                    if fut.cancelled():
+                        # Cancelled == never started (Future.cancel() only
+                        # succeeds on not-yet-running futures), so there is no
+                        # result to absorb — and .result() would raise
+                        # CancelledError. Skipping here can't misalign the
+                        # report: _absorb keys completed_pods on each result's
+                        # OWN pod_index, so absent indices simply don't appear.
+                        continue
+                    _absorb(fut.result())
+                    _fire_progress()
+                    if stop_decided or not _check_early_stop():
+                        continue
+                    # Verdict locked in. Cancel any still-QUEUED pods —
+                    # already-running pods can't be interrupted (the Forge
+                    # subprocess won't honor a thread cancel), so their full
+                    # wall-clock cost is paid regardless of what we do next.
+                    # That is exactly why we do NOT `break` here: the old
+                    # break-out still blocked on the executor's shutdown join
+                    # for as long as the in-flight JVMs took, but silently
+                    # threw their fully-played games away. Keep draining
+                    # as_completed instead and absorb in-flight pods through
+                    # the same _absorb path (same failure classification, same
+                    # seat/pod-index bookkeeping) when they land.
+                    stop_decided = True
+                    canceled = sum(1 for f in futures if f.cancel())
+                    if canceled:
+                        report.stopped_early = True
+                        print(
+                            f"--- Early stop: verdict locked in, canceled "
+                            f"{canceled} pending pod(s); draining pods already "
+                            f"in flight ---",
+                            flush=True,
+                        )
+        finally:
+            # Release on EVERY exit path — clean finish, early-stop
+            # cancel sweep, or an exception out of a pod — so a crashed
+            # run can never brick a profile for the next sim. No-op when
+            # the shared-profile fallback took no locks at all.
+            release_profile_pool(profile_locks)
     else:
         for i, pod in enumerate(pods):
             _absorb(
