@@ -13,6 +13,28 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Added
 
+- **Politics guard (on by default).** Forge's AI does not negotiate,
+  pick an archenemy, or model an opponent's incentive to pay a tax, so
+  goad / monarch / vote / tempting-offer / Rhystic-tax / pillow-fort
+  cards read to the sim as no-ops — and a loop that cuts what doesn't
+  move the margin will "empirically" cut exactly the cards that define
+  multiplayer Commander. `staples` now tags them from oracle text (six
+  tags, with guards so cumulative-upkeep "unless you pay" and soft-
+  counter "unless its controller pays" don't match), and all three cut
+  paths exempt them: the heuristic loop, `card_score`'s ranking, and
+  the orchestrator (the only path Claude's and bracket-peers' cuts
+  traverse). Skips are disclosed as `AdviceReport.skipped_for_politics`.
+  Per-deck opt-out: `[metadata] PoliticsGuard=off`, carried across
+  re-imports, failing safe to ON on any unrecognized value.
+- **Archidekt is a real single-deck import lane** (`import_deck(source=)`
+  / `--archidekt`). Acquisition previously rode Moxfield's undocumented
+  private API alone, so one ToS or CDN change stranded imports,
+  harvest, bracket peers and meta-test references simultaneously.
+  Fallback fires on 5xx/403/URLError/parse failures but NOT on 404 — a
+  working API saying "no such deck" must not silently import a
+  different one — and no id translation is attempted. Moxfield-only
+  capabilities (bulk bracket harvest, top-likes search) now name the
+  working alternative when they fail.
 - **`measurement_era` on every knowledge-log row** (schema v3). The log
   spans four incompatible measurement regimes — pre-seat-attribution,
   mixed win-rate denominators, head-to-head margin verdicts, and
