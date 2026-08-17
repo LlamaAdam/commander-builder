@@ -32,17 +32,47 @@ from tests.fixtures.real_oracles import ORACLES, oracle
 # focused on holding the Scryfall data — the assertion of what role
 # each card SHOULD be lives in the test module that enforces it.
 EXPECTED_ROLE: dict[str, str] = {
-    "Arcane Signet":       "ramp",
-    "Coalition Victory":   "win_condition",
-    "Craterhoof Behemoth": "win_condition",
-    "Crux of Fate":        "wipe",
-    "Cyclonic Rift":       "wipe",
-    "Damnation":           "wipe",          # control value
-    "Mystical Tutor":      "tutor",
-    "Sylvan Library":      "draw",
-    "Three Visits":        "ramp",
-    "Toxic Deluge":        "wipe",
-    "Wrath of God":        "wipe",          # control value
+    "Animate Dead":           "other",       # reanimation-pricing fixture
+    "Arcane Signet":          "ramp",
+    "Ashnod's Altar":         "ramp",        # edict guard: "you sacrifice"
+    "Big Score":              "draw",        # draw clause outranks treasure
+    "Bloodbraid Elf":         "threat",      # impulse-draw guard (cascade)
+    "Chain Reaction":         "wipe",        # "damage equal to" each creature
+    "Coalition Victory":      "win_condition",
+    "Corpse Dance":           "other",       # reanimation-pricing fixture
+    "Craterhoof Behemoth":    "win_condition",
+    "Crux of Fate":           "wipe",
+    "Cyclonic Rift":          "wipe",
+    "Damnation":              "wipe",        # control value
+    "Dance of the Dead":      "other",       # reanimation-pricing fixture
+    "Diabolic Edict":         "removal",     # edict
+    "Dockside Extortionist":  "ramp",        # treasure plural
+    "Dovin's Veto":           "removal",     # restricted counterspell
+    "Earthquake":             "wipe",        # X-damage to each creature
+    "Eternal Witness":        "threat",      # one-shot rebuy (chain-enabler)
+    "Light Up the Stage":     "draw",        # impulse draw
+    "Miirym, Sentinel Wyrm":  "threat",      # intrinsic ward is NOT protection
+    "Mystical Tutor":         "tutor",
+    "Necromancy":             "other",       # reanimation-pricing fixture
+    "Negate":                 "removal",     # restricted counterspell
+    "Persist":                "other",       # reanimation-pricing fixture
+    "Phyrexian Fleshgorger":  "threat",      # intrinsic ward, em-dash form
+    "Prey Upon":              "removal",     # fight
+    "Prosper, Tome-Bound":    "draw",
+    "Ram Through":            "removal",     # bite: damage equal to power
+    "Reanimate":              "other",       # reanimation-pricing fixture
+    "Soul Shatter":           "removal",     # edict
+    "Spell Pierce":           "removal",     # restricted counterspell
+    "Sun Titan":              "threat",      # reanimation NEGATIVE fixture
+    "Swan Song":              "removal",     # restricted counterspell
+    "Sylvan Library":         "draw",
+    "Three Visits":           "ramp",
+    "Toxic Deluge":           "wipe",
+    "Victimize":              "other",       # reanimation hard-tag fixture
+    "Widespread Brutality":   "wipe",        # damage equal to power, each
+    "Worldgorger Dragon":     "threat",      # reanimator combo half
+    "Wrath of God":           "wipe",        # control value
+    "Wrenn's Resolve":        "draw",        # impulse draw, plural form
 }
 
 

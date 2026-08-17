@@ -806,14 +806,25 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"protection from", None, 60),
         (r"shroud", None, 50),
         (r"can't be the target of", None, 50),
-        # Ward — "ward {2}" (Miirym) / "ward—pay 1 life" (Raffine) /
-        # "ward—sacrifice ..." lines. Round-2 evergreen audit
-        # 2026-08-16: the evergreen keyword postdates the original
-        # pattern table entirely. Requiring the cost marker (``{`` or
-        # the em-dash) right after the keyword keeps card-name mentions
-        # ("Ward of Bones") and words containing "ward" (``\b`` blocks
-        # "toward"/"reward") from matching.
-        (r"\bward\s*(?:\{|—)", None, 50),
+        # Ward, but only where the card GRANTS it — "equipped creature
+        # has ward {2}", "creatures you control gain ward {1}".
+        #
+        # Round-2 evergreen audit 2026-08-16 added ward (the keyword
+        # postdates the original table); the first cut matched the bare
+        # keyword, which swept in every creature that merely HAS ward
+        # (Miirym, Phyrexian Fleshgorger). That is the wrong reading for
+        # THIS taxonomy: the ``protection`` role feeds a ROLE_TARGETS
+        # quota that exists to ensure a deck can protect its commander
+        # and key permanents. A Dragon with ward {2} protects nothing
+        # but itself, and counting it would satisfy the quota with
+        # bodies — suppressing the advisor's genuine protection
+        # recommendations (Swiftfoot Boots and friends). Intrinsic ward
+        # is resilience on a threat; granted ward is a protection slot.
+        #
+        # The cost marker (``{`` or em-dash) is still required after the
+        # keyword, so card-name mentions ("Ward of Bones") never match,
+        # and ``\b``-anchoring blocks "toward"/"reward".
+        (r"(?:have|has|gains?)\s+ward\s*(?:\{|—)", None, 50),
     ]),
     ("tutor", [
         (r"search your library for a (?:card|creature|artifact|enchantment|instant|sorcery|planeswalker|legendary)", None, 80),

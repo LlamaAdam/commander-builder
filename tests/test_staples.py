@@ -429,10 +429,32 @@ def test_classify_role_wipe_damage_equal_to_each_creature():
     "Miirym, Sentinel Wyrm",      # ward {2} in a keyword line
     "Phyrexian Fleshgorger",      # Ward—Pay ... em-dash cost form
 ])
-def test_classify_role_protection_ward(name):
+def test_classify_role_intrinsic_ward_is_not_a_protection_slot(name):
+    """A creature that merely HAS ward is a resilient threat, not a
+    protection card. The ``protection`` role feeds a ROLE_TARGETS quota
+    meant to guarantee a deck can protect its commander — filling it
+    with ward-carrying bodies would suppress the advisor's real
+    protection recommendations. Only GRANTED ward counts (see
+    ``test_classify_role_protection_granted_ward``)."""
     from tests.fixtures.real_oracles import oracle
     o = oracle(name)
-    assert classify_role(o["oracle_text"], o["type_line"]) == "protection"
+    assert classify_role(o["oracle_text"], o["type_line"]) != "protection"
+
+
+@pytest.mark.parametrize("text", [
+    # Equipment / Aura phrasings.
+    "Equipped creature gets +1/+1 and has ward {2}.",
+    "Enchanted creature has ward—Pay 3 life.",
+    # Instant / static grants, singular and plural subjects.
+    "Target creature you control gains ward {1} until end of turn.",
+    "Creatures you control have ward {1}.",
+])
+def test_classify_role_protection_granted_ward(text):
+    """Synthetic POSITIVE guard for the grant phrasings. Kept synthetic
+    deliberately: these are template shapes, not one card's text, and
+    the real-oracle fixture discipline covers the negative cases above
+    with verbatim Scryfall data."""
+    assert classify_role(text, "Artifact — Equipment") == "protection"
 
 
 def test_classify_role_ward_guard_requires_cost_marker():
