@@ -28,6 +28,7 @@ against ``k/krenko_mob_boss.txt``, ``s/sol_ring.txt``, etc.
 from __future__ import annotations
 
 import re
+import threading
 import unicodedata
 import zipfile
 from dataclasses import dataclass
@@ -121,6 +122,14 @@ class CardsLoader:
         self._zip_path = zip_path
         self._directory = directory
         self._zip_handle: Optional[zipfile.ZipFile] = None
+        # Guards lazy one-time initialization (_ensure_zip and the DFC
+        # index build) so a loader shared across threads — e.g. the
+        # module-level memoized instance the web dashboard keeps (Flask's
+        # threaded server + background job threads) — never opens two zip
+        # handles or runs the ~32k-file DFC scan twice concurrently.
+        # RLock, not Lock: _get_dfc_index holds it across iter_all(),
+        # which re-enters via _ensure_zip on the zip path.
+        self._lock = threading.RLock()
         # DFC fallback index. Lazily built on first lookup miss so
         # the loader pays no cost when callers only look up regular
         # cards. Maps ``front_face_slug`` → ``full_dfc_slug``
@@ -161,9 +170,14 @@ class CardsLoader:
         return LoaderSource(kind="directory", path=self._directory)
 
     def _ensure_zip(self) -> zipfile.ZipFile:
+        # Double-checked: the fast path is a plain attribute read; the
+        # lock only serializes the one-time open so two threads can't
+        # each create a handle (one of which would leak).
         if self._zip_handle is None:
-            assert self._zip_path is not None
-            self._zip_handle = zipfile.ZipFile(self._zip_path, mode="r")
+            with self._lock:
+                if self._zip_handle is None:
+                    assert self._zip_path is not None
+                    self._zip_handle = zipfile.ZipFile(self._zip_path, mode="r")
         return self._zip_handle
 
     def load_one(self, name: str) -> Optional[str]:
@@ -230,9 +244,21 @@ class CardsLoader:
         files; total scan is ~1-2s on a warm zip / SSD.
 
         Result lives on the instance — subsequent lookups are O(1).
+
+        Thread-safe (double-checked lock): a shared long-lived loader
+        must never run the full-corpus scan twice because two request
+        threads both missed on an MDFC front face at the same moment.
         """
         if self._dfc_index is not None:
             return self._dfc_index
+        with self._lock:
+            if self._dfc_index is not None:
+                return self._dfc_index
+            return self._build_dfc_index()
+
+    def _build_dfc_index(self) -> dict[str, str]:
+        """The actual corpus scan behind ``_get_dfc_index``. Caller must
+        hold ``self._lock``."""
         index: dict[str, str] = {}
         for full_slug, raw in self.iter_all():
             # Cheap scan for two ``Name:`` lines.
@@ -251,6 +277,18 @@ class CardsLoader:
                         break
         self._dfc_index = index
         return index
+
+    def warm(self) -> None:
+        """Eagerly build the DFC fallback index (the one full-corpus
+        scan this loader ever pays).
+
+        Long-lived shared loaders (the web dashboard's memoized
+        instance) call this once at construction time — inside their
+        own build lock — so no user-facing request thread is the one
+        that stumbles into the 1-2s lazy scan. Idempotent and
+        thread-safe; a no-op when the index already exists.
+        """
+        self._get_dfc_index()
 
     def iter_all(self) -> Iterator[tuple[str, str]]:
         """Yield ``(slug, raw_text)`` for every card script. Order is

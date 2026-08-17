@@ -679,9 +679,17 @@ def test_dashboard_includes_printing_savings_key_offline(client):
     resp = client.get("/api/dashboard?deck=Alpha")
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["printing_savings"] == {
-        "total": 0.0, "count": 0, "suggestions": [],
-    }
+    savings = body["printing_savings"]
+    # Subset, not equality: the block is an ADDITIVE contract (the price
+    # freshness fields are a later addition), and the invariant this
+    # test guards is "the offline shape is a well-formed zero", not
+    # "these are the only three keys". Equality here made every future
+    # additive field a false failure.
+    for key, expected in (
+        ("total", 0.0), ("count", 0), ("suggestions", []),
+    ):
+        assert key in savings
+        assert savings[key] == expected
 
 
 def test_dashboard_printing_savings_with_cheaper_printings(client, monkeypatch):
@@ -946,6 +954,128 @@ def test_static_js_renders_sim_coverage_pill(client):
     js = client.get("/static/app.js").get_data(as_text=True)
     assert "sim_coverage" in js
     assert "showSimCoverageAlert" in js
+
+
+# ---------------------------------------------------------------------------
+# M1: the Forge corpus loader is memoized across requests
+# ---------------------------------------------------------------------------
+# _sim_coverage used to build a throwaway CardsLoader per request. Any
+# MDFC front face (or any unsupported card) misses the direct slug lookup
+# and falls through to the loader's DFC index — a full ~32k-file corpus
+# scan — which the NEXT dashboard load then paid all over again on a
+# brand-new instance. The loader is now memoized at module level, keyed
+# on a corpus signature so a Forge upgrade still invalidates it.
+
+class _CountingCardsLoader:
+    """CardsLoader stand-in that records how many times the expensive
+    corpus index got built (``warm``) vs. how many instances existed."""
+
+    def __init__(self, counts):
+        self._counts = counts
+        counts["constructed"] += 1
+
+    def warm(self):
+        self._counts["indexed"] += 1
+
+    def load_one(self, name):
+        return "Name:x" if name.lower() == "forest" else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+
+@pytest.fixture
+def fake_corpus(tmp_path, monkeypatch):
+    """Point VENDOR_FORGE at a tmp tree that LOOKS like an unzipped
+    Forge cards corpus (``res/cardsfolder/<letter>/``), and hand back a
+    counting CardsLoader.locate stand-in plus its counter dict.
+
+    A real corpus is absent from this checkout, so without this the
+    memo path never engages (``_corpus_signature`` returns None and
+    ``_corpus_loader`` deliberately falls through uncached).
+    """
+    from commander_builder.web import routes_dashboard
+
+    forge_dir = tmp_path / "forge"
+    cardsfolder = forge_dir / "res" / "cardsfolder"
+    (cardsfolder / "f").mkdir(parents=True)
+    (cardsfolder / "f" / "forest.txt").write_text("Name:Forest\n")
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.VENDOR_FORGE", forge_dir,
+    )
+
+    counts = {"constructed": 0, "indexed": 0}
+    monkeypatch.setattr(
+        "commander_builder.forge_cards_loader.CardsLoader.locate",
+        lambda forge_dir: _CountingCardsLoader(counts),
+    )
+    routes_dashboard._reset_corpus_cache()
+    try:
+        yield cardsfolder, counts
+    finally:
+        # Never leak a memoized fake into another test's process state.
+        routes_dashboard._reset_corpus_cache()
+
+
+def test_dashboard_builds_corpus_index_once_across_requests(
+    client, fake_corpus,
+):
+    """Two consecutive dashboard payloads share ONE loader and pay the
+    corpus index build exactly once — the M1 regression."""
+    _cardsfolder, counts = fake_corpus
+
+    first = client.get("/api/dashboard/core?deck=Alpha")
+    assert first.status_code == 200
+    assert first.get_json()["sim_coverage"]["available"] is True
+    assert counts == {"constructed": 1, "indexed": 1}
+
+    second = client.get("/api/dashboard/core?deck=Alpha")
+    assert second.status_code == 200
+    # Same answer, no second corpus scan.
+    assert (
+        second.get_json()["sim_coverage"]
+        == first.get_json()["sim_coverage"]
+    )
+    assert counts == {"constructed": 1, "indexed": 1}
+
+
+def test_dashboard_corpus_cache_invalidates_when_forge_corpus_changes(
+    client, fake_corpus,
+):
+    """A Forge upgrade (corpus mtime moves) must NOT be served from the
+    stale memo — otherwise the dashboard reports coverage for the old
+    card DB until the process restarts."""
+    cardsfolder, counts = fake_corpus
+
+    client.get("/api/dashboard/core?deck=Alpha")
+    assert counts["constructed"] == 1
+
+    # Simulate re-extracting the corpus: same path, newer mtime.
+    import os as _os
+    st = cardsfolder.stat()
+    _os.utime(cardsfolder, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+
+    resp = client.get("/api/dashboard/core?deck=Alpha")
+    assert resp.status_code == 200
+    assert resp.get_json()["sim_coverage"]["available"] is True
+    assert counts == {"constructed": 2, "indexed": 2}
+
+
+def test_dashboard_sim_coverage_still_fail_quiet_with_memoized_loader(
+    client, monkeypatch,
+):
+    """The memo must not turn a corpus failure into a 500: with no
+    vendored corpus the loader lookup still raises and the payload keeps
+    the fail-quiet unavailable shape."""
+    from commander_builder.web import routes_dashboard
+
+    routes_dashboard._reset_corpus_cache()
+    resp = client.get("/api/dashboard/core?deck=Alpha")
+    assert resp.status_code == 200
+    assert resp.get_json()["sim_coverage"]["available"] is False
 
 
 def test_dashboard_core_and_section_share_deck_and_bracket_validation(client):
@@ -2285,6 +2415,128 @@ def test_deck_text_put_400_on_empty(client):
     assert resp.status_code == 400
 
 
+# --- M2: restamp + shape gate + atomic write -------------------------------
+# This route was the one deck writer that took raw user-pasted text and
+# did a bare write_text: no Name= restamp (so pasting deck A's text into
+# deck B stored Name=A under B's filename, and Forge then attributed
+# every one of B's wins to a name no filename normalizes to), no shape
+# check, no atomicity.
+
+def test_deck_text_put_restamps_foreign_name_to_file_stem(client, deck_dir):
+    """Pasting Bravo's text into Alpha's editor must land under
+    ``Name=Alpha`` — the filename is the deck's identity."""
+    foreign = (deck_dir / "Bravo.dck").read_text(encoding="utf-8")
+    assert "Name=Bravo" in foreign  # precondition: it really is Bravo's
+
+    resp = client.put("/api/deck_text?deck=Alpha", json={"text": foreign})
+    assert resp.status_code == 200
+    assert resp.get_json()["saved"] is True
+
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert "Name=Alpha" in on_disk
+    assert "Name=Bravo" not in on_disk
+
+
+def test_deck_text_put_restamp_leaves_card_content_intact(client, deck_dir):
+    """Only the Name= line is touched — every card line and every other
+    metadata key survives the save byte-for-byte."""
+    new_body = (
+        "[metadata]\nName=Some Other Deck\nMoxfield=https://example/x\n\n"
+        "[Commander]\n1 New Cmdr\n\n"
+        "[Main]\n1 Forest\n2 Cultivate\n"
+    )
+    resp = client.put("/api/deck_text?deck=Alpha", json={"text": new_body})
+    assert resp.status_code == 200
+
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert on_disk == new_body.replace("Name=Some Other Deck", "Name=Alpha")
+
+
+def test_deck_text_put_synthesizes_name_when_absent(client, deck_dir):
+    """A paste with no Name= at all still comes out stamped, rather than
+    leaving Forge to invent a display name nothing maps back."""
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[Commander]\n1 New Cmdr\n\n[Main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+    assert "Name=Alpha" in (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+
+
+def test_deck_text_put_400_without_main_section(client, deck_dir):
+    """A partial paste (no [Main]) must not replace a working deck."""
+    before = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[Commander]\n1 New Cmdr\n",
+    })
+    assert resp.status_code == 400
+    assert "[Main]" in resp.get_json()["error"]
+    # Rejected write left the deck untouched.
+    assert (deck_dir / "Alpha.dck").read_text(encoding="utf-8") == before
+
+
+def test_deck_text_put_accepts_lowercase_main_header(client, deck_dir):
+    """Section headers are case-insensitive everywhere else in the
+    codebase (dck_utils.iter_section_lines); the gate matches."""
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+
+
+def test_deck_text_put_leaves_no_temp_files_behind(client, deck_dir):
+    """The atomic write's temp file is renamed away, and never matches
+    the ``*.dck`` glob every deck enumerator uses."""
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[Main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+    assert sorted(p.name for p in deck_dir.iterdir()) == [
+        "Alpha.dck", "Bravo.dck",
+    ]
+
+
+def test_deck_text_put_preserves_file_mode(client, deck_dir):
+    """mkstemp creates 0600; the saved deck must keep the mode it had,
+    not silently become owner-only on every edit."""
+    target = deck_dir / "Alpha.dck"
+    target.chmod(0o644)
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[Main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_deck_text_put_flags_bracket_tag_unverified_on_main_change(
+    client, deck_dir,
+):
+    """Bonus hint: a bracket-tagged filename whose mainboard just
+    changed gets ``bracket_tag_unverified`` so the UI can offer a
+    re-check. The bracket itself is NOT re-estimated in the request."""
+    from urllib.parse import quote
+
+    tagged = _write_deck(deck_dir, "[USER] Gamma [B3]")
+    url = f"/api/deck_text?deck={quote('[USER] Gamma [B3]')}"
+
+    unchanged = tagged.read_text(encoding="utf-8")
+    resp = client.put(url, json={"text": unchanged})
+    assert resp.status_code == 200
+    assert resp.get_json()["bracket_tag_unverified"] is False
+
+    changed = unchanged.replace("1 Cultivate\n", "1 Sol Ring\n", 1)
+    resp = client.put(url, json={"text": changed})
+    assert resp.status_code == 200
+    assert resp.get_json()["bracket_tag_unverified"] is True
+
+
+def test_deck_text_put_no_bracket_flag_on_untagged_filename(client, deck_dir):
+    """No [B<n>] in the filename → nothing to be unverified about."""
+    body = "[metadata]\nName=Alpha\n\n[Main]\n1 Island\n"
+    resp = client.put("/api/deck_text?deck=Alpha", json={"text": body})
+    assert resp.status_code == 200
+    assert resp.get_json()["bracket_tag_unverified"] is False
+
+
 def test_deck_text_delete_removes(client, deck_dir):
     assert (deck_dir / "Alpha.dck").exists()
     # Bodyless DELETE still needs the JSON content type: the app-wide
@@ -3449,10 +3701,20 @@ def test_correlation_summary_endpoint_reports_enabled_state(client, monkeypatch)
     assert resp.get_json()["enabled"] is True
 
 
-def test_log_error_writes_to_log_file(client, tmp_path, deck_dir):
+def test_log_error_writes_to_log_file(client, tmp_path, deck_dir, monkeypatch):
     """JS error collector appends to a server-side log; we don't read
     it back via API (avoid making this an exfiltration vector), so
-    the test inspects the file directly."""
+    the test inspects the file directly.
+
+    The sink moved to the per-user config home on 2026-08-16 — it used
+    to be derived positionally as ``deck_dir.parent.parent``, which put
+    runtime telemetry inside the vendored Forge tree. Path-resolution
+    edge cases, the legacy breadcrumb, and the byte cap are covered in
+    test_web_meta_paths.py; this pins that the payload still lands."""
+    config_home = tmp_path / "js_error_cfghome"
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG", str(config_home / "config.json")
+    )
     payload = {
         "kind": "error",
         "message": "ReferenceError: foo is not defined",
@@ -3465,9 +3727,10 @@ def test_log_error_writes_to_log_file(client, tmp_path, deck_dir):
     body = resp.get_json()
     assert body["ok"] is True
     assert "ref" in body and body["ref"]
-    # Log file lives next to the deck_dir's grandparent (vendor/forge → vendor).
-    log_path = deck_dir.parent.parent / "_js_errors.log"
+    log_path = config_home / "_js_errors.log"
     assert log_path.exists()
+    # And emphatically NOT in the old positional location.
+    assert not (deck_dir.parent.parent / "_js_errors.log").exists()
     contents = log_path.read_text(encoding="utf-8")
     assert "ReferenceError: foo is not defined" in contents
     assert "runProposeSwap" in contents
@@ -3479,15 +3742,19 @@ def test_log_error_400_on_missing_message(client):
     assert resp.status_code == 400
 
 
-def test_log_error_caps_oversized_payload(client, deck_dir):
+def test_log_error_caps_oversized_payload(client, tmp_path, monkeypatch):
     """Defense against runaway browser dumps — message capped at 2000
     chars, stack at 4000."""
+    config_home = tmp_path / "js_cap_cfghome"
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG", str(config_home / "config.json")
+    )
     huge = "x" * 5000
     resp = client.post("/api/log_error", json={
         "message": huge, "stack": huge,
     })
     assert resp.status_code == 200
-    log_path = deck_dir.parent.parent / "_js_errors.log"
+    log_path = config_home / "_js_errors.log"
     contents = log_path.read_text(encoding="utf-8")
     # Should contain at most 2000 'x' in the MSG line and 4000 in STACK.
     msg_line = next(
@@ -7029,11 +7296,15 @@ def test_deck_audit_and_dashboard_gc_counts_agree_on_mixed_case(
 # log_error size cap (item 4)
 # ---------------------------------------------------------------------------
 
-def test_log_error_stops_writing_past_cap(client, deck_dir, monkeypatch):
+def test_log_error_stops_writing_past_cap(client, tmp_path, monkeypatch):
     """Past the size cap the endpoint returns 200 with logged:false and
     the file stops growing — best-effort sink, never errors the client
     (a browser error handler must not see its own sink fail)."""
-    log_path = deck_dir.parent.parent / "_js_errors.log"
+    config_home = tmp_path / "js_capstop_cfghome"
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG", str(config_home / "config.json")
+    )
+    log_path = config_home / "_js_errors.log"
     # The log lives in a directory shared across tests in this session;
     # start clean so the tiny monkeypatched cap is meaningful.
     if log_path.exists():

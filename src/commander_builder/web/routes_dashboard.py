@@ -49,6 +49,7 @@ refactor (tier-3 issue #3.1).
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -152,6 +153,110 @@ _SIM_COVERAGE_UNAVAILABLE = {
 }
 
 
+# --- Memoized Forge corpus loader (M1 fix, 2026-08) --------------------
+#
+# ``_sim_coverage`` used to construct a fresh ``CardsLoader`` per request
+# and throw it away. Any deck containing an MDFC front-face reference (or
+# any unsupported card) misses the direct slug lookup and falls through
+# to the loader's DFC index — a full ~32k-file corpus scan (~1-2s) —
+# which the next dashboard load then paid AGAIN on a brand-new instance.
+#
+# The fix: one long-lived ``CardsLoader`` shared at module level, keyed
+# on a cheap corpus signature (path + mtime of whichever layout
+# ``CardsLoader.locate`` would pick). A Forge upgrade — new
+# ``cardsfolder.zip`` or refreshed unzipped tree — changes the signature
+# and transparently rebuilds the loader on the next request. The DFC
+# index is warmed at build time, so request threads only ever do O(1)
+# lookups.
+#
+# Thread-safety: ``_CORPUS_LOCK`` serializes cache check + build (Flask's
+# threaded server plus the routes_decks/routes_sim background job threads
+# can hit this concurrently); the loader itself is also internally locked
+# (see forge_cards_loader) so sharing one instance across threads is
+# safe. An evicted loader is deliberately NOT ``close()``d — another
+# request thread may still be reading from it; its zip handle is
+# reclaimed with the object (one dangling handle per Forge upgrade, at
+# most).
+_CORPUS_LOCK = threading.Lock()
+_CORPUS_LOADER = None  # Optional[CardsLoader], but keep import lazy
+_CORPUS_SIG: Optional[tuple] = None
+
+
+def _corpus_signature() -> Optional[tuple]:
+    """Cheap identity of the vendored Forge card corpus, or None when
+    no corpus is present on disk.
+
+    Mirrors ``CardsLoader.locate``'s preference order (unzipped letter
+    tree first, then the zip bundle) so the signature tracks the same
+    source the loader would read. mtime granularity is enough for the
+    case that matters: a Forge upgrade ships a new ``cardsfolder.zip``
+    (mtime + size both move) or re-extracts the tree (the cardsfolder
+    dir's own mtime moves as its letter subdirs are recreated).
+
+    Deliberately NOT a content hash. Known blind spot: editing a single
+    card script in place under ``cardsfolder/<letter>/`` leaves the
+    parent dir's mtime untouched, so the memo survives. That is a
+    hand-editing-Forge-internals scenario, not a supported upgrade path,
+    and paying a 32k-file hash on every dashboard request to catch it
+    would reintroduce exactly the cost this memo removes. Restart the
+    server (or bump the cardsfolder dir) after such an edit.
+    """
+    from ..forge_runner import VENDOR_FORGE
+
+    base = Path(VENDOR_FORGE) / "res" / "cardsfolder"
+    zip_path = base / "cardsfolder.zip"
+    try:
+        if base.is_dir() and any(p.is_dir() for p in base.iterdir()):
+            return ("directory", str(base), base.stat().st_mtime_ns)
+        if zip_path.is_file():
+            st = zip_path.stat()
+            return ("zip", str(zip_path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    return None
+
+
+def _corpus_loader():
+    """Return the shared, memoized ``CardsLoader`` for the vendored
+    Forge corpus, (re)building it when the corpus signature changed.
+
+    When no corpus signature is computable (fresh checkout, CI), this
+    falls through to a plain ``CardsLoader.locate`` call — uncached —
+    which raises ``FileNotFoundError`` exactly like before, preserving
+    ``_sim_coverage``'s fail-quiet unavailable contract (and letting
+    tests that monkeypatch ``locate`` keep their per-request fakes).
+    """
+    global _CORPUS_LOADER, _CORPUS_SIG
+    from ..forge_cards_loader import CardsLoader
+    from ..forge_runner import VENDOR_FORGE
+
+    sig = _corpus_signature()
+    if sig is None:
+        return CardsLoader.locate(VENDOR_FORGE)
+    with _CORPUS_LOCK:
+        if _CORPUS_SIG == sig and _CORPUS_LOADER is not None:
+            return _CORPUS_LOADER
+        loader = CardsLoader.locate(VENDOR_FORGE)
+        # Pay the one-time DFC scan HERE, inside the build lock, so no
+        # request thread ever trips the lazy 1-2s scan mid-response.
+        # getattr-guarded: test fakes only need load_one().
+        warm = getattr(loader, "warm", None)
+        if callable(warm):
+            warm()
+        _CORPUS_LOADER = loader
+        _CORPUS_SIG = sig
+        return loader
+
+
+def _reset_corpus_cache() -> None:
+    """Drop the memoized corpus loader. Test hook — production code
+    never needs it (signature comparison handles invalidation)."""
+    global _CORPUS_LOADER, _CORPUS_SIG
+    with _CORPUS_LOCK:
+        _CORPUS_LOADER = None
+        _CORPUS_SIG = None
+
+
 def _sim_coverage(path: Path) -> dict:
     """Forge sim coverage for one deck: which cards the vendored Forge
     build has NO card script for.
@@ -176,8 +281,6 @@ def _sim_coverage(path: Path) -> dict:
     """
     try:
         from .. import dck_utils
-        from ..forge_cards_loader import CardsLoader
-        from ..forge_runner import VENDOR_FORGE
 
         text = path.read_text(encoding="utf-8")
         names: list[str] = []
@@ -190,10 +293,13 @@ def _sim_coverage(path: Path) -> dict:
                     names.append(name.strip())
         if not names:
             return dict(_SIM_COVERAGE_UNAVAILABLE)
-        with CardsLoader.locate(VENDOR_FORGE) as loader:
-            unsupported = sorted(
-                n for n in names if loader.load_one(n) is None
-            )
+        # Shared memoized loader (M1 fix) — NOT a context manager here:
+        # the instance outlives the request, so closing it would break
+        # every other in-flight and future dashboard load.
+        loader = _corpus_loader()
+        unsupported = sorted(
+            n for n in names if loader.load_one(n) is None
+        )
         return {
             "available": True,
             "checked_count": len(names),

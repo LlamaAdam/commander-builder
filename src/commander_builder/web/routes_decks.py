@@ -19,6 +19,8 @@ refactor (tier-3 issue #3.1).
 
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +39,69 @@ from ._helpers import (
 _BRACKET_NAMES = {
     1: "Exhibition", 2: "Core", 3: "Upgraded", 4: "Optimized", 5: "cEDH",
 }
+
+
+# ---------------------------------------------------------------------------
+# .dck write primitives (M2 fix, 2026-08) — see the deck_text PUT docstring
+# for the WHY. Kept module-level rather than in ``_helpers`` because this
+# blueprint is the only writer that takes raw user-pasted text.
+# ---------------------------------------------------------------------------
+
+def _has_main_section(text: str) -> bool:
+    """True when ``text`` contains a ``[Main]`` section header.
+
+    Header matching mirrors ``dck_utils.iter_section_lines``: the line is
+    stripped and compared case-insensitively against the whole bracket
+    token, so ``[MAIN]`` counts and ``[Maindeck]`` does not. Deliberately
+    checks for the HEADER, not for card lines under it — an intentionally
+    emptied mainboard is a legal (if bad) deck, whereas a body with no
+    ``[Main]`` at all is a partial paste or a wholly different file
+    format, which is what this gate is here to reject.
+    """
+    return any(
+        line.strip().lower() == "[main]" for line in text.splitlines()
+    )
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace ``path``'s contents with ``text`` atomically.
+
+    Writes a temp file in the SAME directory (``os.replace`` is only
+    atomic within one filesystem) and renames it over the target, so a
+    crash / full disk mid-write leaves the previous deck intact instead
+    of a truncated one. The temp name is dot-prefixed and ends in
+    ``.tmp`` — never ``.dck`` — so the deck enumerators that glob
+    ``*.dck`` can never pick up a half-written file.
+
+    ``fsync`` before the rename so the rename cannot be reordered ahead
+    of the data on a crash. The replacement inherits the ORIGINAL file's
+    mode — ``mkstemp`` creates 0600, and silently narrowing a deck file
+    to owner-only on every save would be an invisible side effect of an
+    unrelated fix. Raises ``OSError`` like ``write_text``.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = None
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        # Only reachable when the rename did NOT happen (a successful
+        # os.replace consumes tmp_name), so this never deletes live data.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +239,42 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         - GET   → {"deck", "path", "text"} for the file
         - PUT   body {"text": ...} overwrites in place
         - DELETE removes the file
+
+        PUT hardening (M2 fix, 2026-08). This route used to be the ONE
+        deck writer that did a bare ``path.write_text(new_text)``:
+
+        - No ``Name=`` restamp: pasting deck A's text into deck B's
+          editor stored ``Name=A`` under B's filename — the exact
+          filename↔``Name=`` win-attribution invariant ``dck_meta``
+          exists to protect (Forge reports match wins by ``Name=``;
+          every aggregation queries by filename stem). Every other
+          writer (import, build, snapshot, proposer) restamps; now this
+          one does too, via ``dck_meta.rewrite_name(text, path.stem)``.
+          ``rewrite_name`` rather than ``stamp_name_preserving_display``
+          deliberately: an editor PUT edits an EXISTING deck whose
+          identity is its filename — promoting a foreign pasted
+          ``Name=`` into ``DisplayName=`` would relabel deck B with
+          deck A's pretty name in every display surface. A
+          ``DisplayName=`` already in the body passes through untouched.
+        - No shape check: any non-empty string was accepted, so garbage
+          (or a partial paste with no ``[Main]`` section) silently
+          replaced a working deck. Now 400 with a clear message. The
+          frontend always PUTs the full .dck it fetched via GET (see
+          app.js runProposeSwap save path), which always carries
+          ``[Main]`` — legitimate saves are unaffected.
+        - No atomicity: a crash mid-``write_text`` truncated the deck.
+          Now writes go to a temp file in the same directory followed by
+          ``os.replace`` (atomic on POSIX and Windows within one
+          filesystem). The temp name does not end in ``.dck`` so deck
+          enumeration / the stale-file sweep can never see a partial
+          file.
+
+        Additive response field ``bracket_tag_unverified``: true when
+        the filename carries a ``[B<n>]`` bracket tag AND the mainboard
+        changed in this save — a hand-edit can silently push a de facto
+        B4 deck around under a ``[B3]`` filename, and re-estimating the
+        bracket is too costly for a synchronous PUT, so the UI gets a
+        hint to offer re-validation instead.
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
@@ -206,12 +307,51 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             new_text = payload.get("text") or ""
             if not new_text.strip():
                 return jsonify({"error": "text is empty"}), 400
+            if not _has_main_section(new_text):
+                return jsonify({
+                    "error": (
+                        "deck text has no [Main] section — refusing to "
+                        "overwrite the deck with what looks like a "
+                        "partial paste"
+                    ),
+                }), 400
+
+            from ..dck_meta import rewrite_name
+
+            # THE restamp. Pasted text carries whatever deck's Name= it
+            # was copied from; the file's identity is its filename.
+            new_text = rewrite_name(new_text, path.stem)
+
+            # Bonus hint (additive, never blocks the save): a
+            # bracket-tagged filename whose mainboard just changed may
+            # no longer match its declared bracket. Comparing two
+            # {name: qty} maps is pure string work — no Scryfall, no
+            # bracket re-estimation on the request path. Only pays the
+            # pre-image read when the filename actually carries a tag,
+            # and a read failure degrades to "no hint", never a 500.
+            bracket_tag_unverified = False
+            if _bracket_from_filename(path.name):
+                from .. import dck_utils
+                try:
+                    old_text = path.read_text(encoding="utf-8")
+                except OSError:
+                    old_text = None
+                if old_text is not None:
+                    bracket_tag_unverified = (
+                        dck_utils.main_card_quantities(old_text)
+                        != dck_utils.main_card_quantities(new_text)
+                    )
+
             try:
-                path.write_text(new_text, encoding="utf-8")
+                _atomic_write_text(path, new_text)
             except OSError as exc:
                 return jsonify({"error": str(exc)}), 500
-            return jsonify({"deck": deck_id, "path": str(path),
-                            "saved": True})
+            return jsonify({
+                "deck": deck_id,
+                "path": str(path),
+                "saved": True,
+                "bracket_tag_unverified": bracket_tag_unverified,
+            })
 
         # DELETE
         try:
