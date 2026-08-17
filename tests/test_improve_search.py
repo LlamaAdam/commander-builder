@@ -368,6 +368,74 @@ def test_search_round_writes_iteration_row_via_existing_machinery(tmp_path):
     assert json.loads(row["sim_report"])["wins_b"] == 20
 
 
+def _replication_double(verdict):
+    """replicate_fn double recording its calls; ``verdict`` is the
+    scripted SECOND-run outcome."""
+    calls: list[tuple] = []
+
+    def fn(base_path, candidate_path, args, iteration_id=None):
+        calls.append((Path(base_path), Path(candidate_path), iteration_id))
+        return improve.Replication(
+            verdict=verdict, confirmed=verdict == "kept",
+            notes=f"replication_{'confirmed' if verdict == 'kept' else 'failed'}",
+        )
+
+    fn.calls = calls  # type: ignore[attr-defined]
+    return fn
+
+
+def test_search_round_inherits_the_replication_gate(tmp_path):
+    """The search path shares run_improve_loop's ACCEPT path, so the
+    2026-08-17 replication gate applies to it with no code of its own:
+    the round's own 'kept' verdict sim is unchanged, but the base only
+    moves when a second independent A/B over the same base-vs-applied
+    pairing agrees."""
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path, replicate=True)
+
+    def arm_builder(deck_path, bracket, source, *, protected=(), max_arms=None):
+        return [SearchArm(key="+Good / -OldCard A", add="Good",
+                          cut="OldCard A")]
+
+    sim = _scripted_sim()
+    rep = _replication_double("neutral")
+    res = run_improve_loop(deck, "foo", 1, args,
+                           round_fn=make_search_round_fn(
+                               arm_builder=arm_builder, sim_fn=sim),
+                           replicate_fn=rep)
+
+    rr = res.history[0]
+    assert rr.advanced is False               # unconfirmed -> no advance
+    assert rr.verdict == "neutral"            # the second run's verdict
+    assert rr.replicated is False
+    assert Path(res.final_deck) == deck       # base unchanged
+    # Same pairing the round's verdict sim used: base vs the applied v2.
+    assert rep.calls[0][0] == deck
+    assert rep.calls[0][1].name == "[USER] Foo v2 [B3].dck"
+    # The round itself is untouched: pulls + one verdict sim, no more.
+    assert len(sim.calls) == args.search_budget + 1
+
+
+def test_search_round_advances_when_replication_confirms(tmp_path):
+    """...and a confirmed swap still advances, exactly as before."""
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path, replicate=True)
+
+    def arm_builder(deck_path, bracket, source, *, protected=(), max_arms=None):
+        return [SearchArm(key="+Good / -OldCard A", add="Good",
+                          cut="OldCard A")]
+
+    rep = _replication_double("kept")
+    res = run_improve_loop(deck, "foo", 1, args,
+                           round_fn=make_search_round_fn(
+                               arm_builder=arm_builder,
+                               sim_fn=_scripted_sim()),
+                           replicate_fn=rep)
+    assert res.history[0].advanced is True
+    assert res.history[0].replicated is True
+    assert Path(res.final_deck).name == "[USER] Foo v2 [B3].dck"
+
+
 def test_search_round_legality_guard_kills_illegal_swap(tmp_path):
     """A swap the shared apply path refuses (here: add already in the
     deck — singleton rule) must die at PROBE time without burning a

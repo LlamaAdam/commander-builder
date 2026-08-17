@@ -3160,6 +3160,130 @@ def test_auto_curate_main_post_sim_reports_actual_decisive_shortfall(
     assert its[0].verdict == "inconclusive"
 
 
+# ---------------------------------------------------------------------------
+# --run-sim defaults to the verdict floor (2026-08-17 owner decision)
+#
+# --sim-games used to default to 5 (~2 expected decisive games), so the
+# flagship close-the-loop flag could only ever record 'inconclusive' —
+# structurally unable to close the loop it exists for. The default now
+# derives from _proposer_sim.min_sim_games_for_verdict(); --smoke carries
+# the old cheap behaviour and says up front that it records inconclusive.
+# ---------------------------------------------------------------------------
+
+def _run_sim_cli(tmp_path, monkeypatch, extra_argv, *, ab_wins=(10, 30),
+                 ab_games=40):
+    """Drive auto_curate_main through --run-sim with every external
+    dependency stubbed (Anthropic, advisor, Forge). Returns (rc, db path,
+    list of the ``games`` values run_ab_simulation was called with)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A"], "cuts": ["C"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    from commander_builder.forge_runner import ABResult
+    seen_games: list[int] = []
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        seen_games.append(games)
+        return ABResult(
+            deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+            wins_a=ab_wins[0], wins_b=ab_wins[1], games=ab_games,
+            status="done",
+        )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation", fake_ab_sim,
+    )
+
+    deck = tmp_path / "[USER] Floor [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Floor\nMoxfield=floor-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B.dck").write_text("a", encoding="utf-8")
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db), "--run-sim",
+        *extra_argv,
+    ])
+    return rc, db, seen_games
+
+
+def test_auto_curate_main_default_games_come_from_the_verdict_constant(
+    tmp_path, monkeypatch, capsys,
+):
+    """The default must be DERIVED from the gate, not a second hardcoded
+    copy of it: whatever min_sim_games_for_verdict() returns is what a
+    bare --run-sim plays. Pinned end-to-end (the number the sim actually
+    receives), not just at the parser."""
+    from commander_builder._proposer_sim import min_sim_games_for_verdict
+
+    rc, db, seen_games = _run_sim_cli(tmp_path, monkeypatch, [])
+    assert rc == 0
+    assert seen_games == [min_sim_games_for_verdict()]
+    assert seen_games == [40]  # ceil(20 decisive / 0.5) — pinned
+
+    captured = capsys.readouterr()
+    # Up-front cost line, in the repo's voice: what it costs, why, and
+    # the cheap alternative.
+    assert "running 40 pod games" in captured.out
+    assert "min)" in captured.out
+    assert "--smoke" in captured.out
+    # At the floor the sub-threshold warning must NOT fire ...
+    assert "WARNING" not in captured.err
+    # ... and the verdict can actually resolve, which is the whole point.
+    from commander_builder.knowledge_log import iterations_for_deck
+    assert iterations_for_deck("floor-id", db_path=db)[0].verdict == "kept"
+
+
+def test_auto_curate_main_smoke_restores_five_games_and_warns(
+    tmp_path, monkeypatch, capsys,
+):
+    """--smoke is the old cheap behaviour, kept as an explicit opt-in —
+    and it must SAY that its verdict will be 'inconclusive' rather than
+    letting the operator discover it from the row afterwards."""
+    from commander_builder._proposer_cli import SMOKE_SIM_GAMES
+
+    rc, db, seen_games = _run_sim_cli(
+        tmp_path, monkeypatch, ["--smoke"], ab_wins=(2, 3), ab_games=5,
+    )
+    assert rc == 0
+    assert SMOKE_SIM_GAMES == 5
+    assert seen_games == [5]
+
+    captured = capsys.readouterr()
+    assert "running 5 pod games" in captured.out
+    assert "inconclusive" in captured.out          # stated BEFORE the sim
+    assert "NOT a verdict" in captured.out
+    # The pre-existing sub-threshold warning still fires on stderr.
+    assert "WARNING" in captured.err
+    # ... and the row really does land 'inconclusive', as advertised.
+    from commander_builder.knowledge_log import iterations_for_deck
+    assert (iterations_for_deck("floor-id", db_path=db)[0].verdict
+            == "inconclusive")
+
+
+def test_auto_curate_main_explicit_sim_games_beats_smoke(
+    tmp_path, monkeypatch, capsys,
+):
+    """--sim-games N stays the exact override. When it disagrees with
+    --smoke the typed number wins (the operator meant it) — but the CLI
+    says so instead of silently honouring one of two conflicting flags."""
+    rc, _db, seen_games = _run_sim_cli(
+        tmp_path, monkeypatch, ["--smoke", "--sim-games", "60"])
+    assert rc == 0
+    assert seen_games == [60]
+    err = capsys.readouterr().err
+    assert "--smoke and --sim-games 60" in err
+
+
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
     """Bracket validation lives in the CLI, not the library — the
     library functions accept any int. Out-of-range → exit 2."""

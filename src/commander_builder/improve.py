@@ -14,6 +14,22 @@ survives as a back-compat minimum-margin pre-filter on top).
 the candidate ``.dck`` is left on disk but not built upon. That's the
 greedy keep-if-better contract.
 
+Replication (2026-08-17, owner decision)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+An UNATTENDED run no longer advances the base on ONE ``kept``. A first
+``kept`` triggers a SECOND independent A/B over the same old-vs-new
+pairing, and the base moves only if that run says ``kept`` too. Rationale:
+at ``alpha`` 0.05 a truly neutral swap still earns a ``kept`` about 1 run
+in 40, and an overnight loop chains its rounds — one false positive
+becomes the base every later round is measured against, so the error is
+not just recorded, it is *compounded*. Two independent significant runs
+in the same direction cut that per-advance false-positive rate to ~1 in
+1,600. The cost is honest and stated up front: a confirmed swap costs 2x
+sim time. ``--replicate`` / ``--no-replicate`` control it; the default is
+ON for the unattended round loop (greedy / ``--search-budget``) and OFF
+for the interactive ``--strategy bandit`` explorer (see
+``resolve_replicate_default``).
+
 What this slice deliberately is NOT (still parked under the full FP-012):
 no multi-arm-bandit / Bayesian swap selection, no intent learning, no
 unbounded convergence — just a fixed-N greedy loop. It *composes* the
@@ -73,6 +89,17 @@ class RoundResult:
     applied_adds: int = 0
     applied_cuts: int = 0
     error: Optional[str] = None
+    # Replication (2026-08-17). ``replicated`` is None when no confirming
+    # run was attempted (replication off, or the round wasn't 'kept'),
+    # True when the second A/B agreed, False when it disagreed.
+    # ``replication_verdict`` is the SECOND run's own verdict in the
+    # existing vocabulary -- no new label is invented, so every consumer
+    # of ``verdict`` keeps working. When the second run disagrees,
+    # ``verdict`` above holds that second verdict (the honest,
+    # non-advancing outcome) while this field keeps it legible next to
+    # the 'kept' that triggered the re-run.
+    replicated: Optional[bool] = None
+    replication_verdict: Optional[str] = None
 
 
 @dataclass
@@ -207,6 +234,156 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
     )
 
 
+@dataclass
+class Replication:
+    """Outcome of the confirming SECOND A/B behind a first ``kept``.
+
+    ``verdict`` is that second run's own verdict, drawn from the existing
+    kept / reverted / neutral / inconclusive / pending vocabulary --
+    deliberately not a new label, because ``knowledge_log`` constrains the
+    verdict column to exactly that set and every dashboard/report query
+    reads it. A failed replication is therefore recorded as the second
+    run's honest verdict PLUS a ``replication_failed`` annotation in the
+    notes (``notes`` below), which is the field the schema does leave
+    free-text.
+    """
+
+    verdict: str
+    confirmed: bool
+    notes: str
+    margin: Optional[int] = None
+
+
+def _run_confirm_sim(base_path: Path, candidate_path: Path, args):
+    """Run ONE fresh A/B over ``base_path`` vs ``candidate_path``.
+
+    The whole confirm path is deliberately a BARE sim call, not another
+    round / bandit pull: a round would re-curate (a different swap, so
+    not a replication at all) and, more importantly, its own ``kept``
+    would want confirming in turn. Straight-line code here is what makes
+    "a replication can never itself recurse" a structural property rather
+    than a flag someone has to remember to unset.
+
+    Returns ``(ab_result_or_None, fillers, error_message)``.
+    """
+    from .forge_runner import run_ab_simulation
+    from ._proposer_sim import _pick_filler_decks
+
+    deck_dir = base_path.parent
+    if getattr(args, "sim_fillers", None):
+        fillers = [f.strip() for f in args.sim_fillers.split(",") if f.strip()]
+    else:
+        # Fillers are RE-DRAWN (same bracket-matched rule, fresh shuffle)
+        # rather than replayed. The pairing under test -- old deck vs new
+        # deck -- is what must stay identical for this to be a
+        # replication; re-seating the same two opponents would also
+        # re-inherit whatever filler matchup helped produce run 1's
+        # split, which is the failure mode a confirmation is supposed to
+        # catch.
+        fillers = _pick_filler_decks(
+            deck_dir, exclude_paths=[base_path, candidate_path], count=2,
+            target_bracket=args.bracket,
+        )
+    if len(fillers) < 2:
+        return None, fillers, (
+            f"need 2 filler decks in {deck_dir} for a 4-player pod, "
+            f"found {len(fillers)}"
+        )
+    ab = run_ab_simulation(
+        deck_a_path=base_path, deck_b_path=candidate_path,
+        games=args.sim_games, fillers=fillers,
+    )
+    return ab, fillers, None
+
+
+def _default_replicate_fn(
+    base_path: Path,
+    candidate_path: Path,
+    args,
+    iteration_id: Optional[int] = None,
+) -> Replication:
+    """Confirm a round's first ``kept`` with a second independent A/B.
+
+    Runs the fresh sim, maps it through the SAME ``_verdict_from_ab``
+    machinery every other verdict goes through (significance test +
+    decisive gate + ``--sim-margin`` pre-filter), and folds the outcome
+    back into the round's knowledge_log row so the persisted history
+    reflects what actually happened:
+
+      - confirmed  → verdict stays 'kept', notes gain a
+        ``replication_confirmed`` line with the second run's split.
+      - disagreed  → the row is rewritten to the SECOND run's verdict
+        (the non-advancing one) with a ``replication_failed`` note
+        naming both verdicts and the second split. Run 1's numbers stay
+        in the row's ``sim_report`` / win-rate columns, which is why
+        this writer deliberately doesn't overwrite them: the note adds
+        the confirming evidence rather than replacing the measured
+        record. Leaving 'kept' on a row whose deck never
+        became the base would tell every later reader -- the dashboard,
+        FP-013's high-confidence counter, a future Phase 3 training set
+        -- that a swap was adopted when it wasn't.
+
+    Anything that stops the confirm sim from producing a verdict (no
+    fillers, crashed JVM) counts as NOT confirmed: unattended replication
+    is a gate, and an unrunnable gate stays shut.
+
+    Knowledge_log failures are non-fatal, matching every other writer in
+    this pipeline -- the .dck is on disk and the loop's decision is
+    already made; losing the row shouldn't sink the run.
+    """
+    from ._proposer_sim import _verdict_from_ab
+
+    ab, _fillers, error = _run_confirm_sim(base_path, candidate_path, args)
+    if ab is None:
+        rep = Replication(
+            verdict="pending", confirmed=False,
+            notes=(f"replication_failed: confirming A/B could not run "
+                   f"({error}); base NOT advanced"),
+        )
+    else:
+        verdict = _verdict_from_ab(ab, margin=args.sim_margin)
+        wins_a = getattr(ab, "wins_a", None)
+        wins_b = getattr(ab, "wins_b", None)
+        margin = (wins_b - wins_a) if (wins_a is not None
+                                       and wins_b is not None) else None
+        split = (f"old={wins_a} new={wins_b} over "
+                 f"{getattr(ab, 'games', 0)} games")
+        if verdict == "kept":
+            rep = Replication(
+                verdict=verdict, confirmed=True, margin=margin,
+                notes=(f"replication_confirmed: run 1 kept, run 2 kept "
+                       f"({split}); base advanced"),
+            )
+        else:
+            rep = Replication(
+                verdict=verdict, confirmed=False, margin=margin,
+                notes=(f"replication_failed: run 1 kept, run 2 {verdict} "
+                       f"({split}); base NOT advanced -- the second "
+                       f"independent A/B did not confirm the first"),
+            )
+
+    if iteration_id is not None:
+        from .knowledge_log import update_iteration_sim
+        try:
+            update_iteration_sim(
+                iteration_id=iteration_id,
+                # 'kept' only survives a confirmation; otherwise the row
+                # carries the second run's verdict. sim_report / win
+                # rates are deliberately NOT overwritten -- run 1's
+                # numbers stay the row's measured record and both splits
+                # are named in the note.
+                verdict=rep.verdict,
+                notes=rep.notes,
+                db_path=Path(args.db_path) if getattr(args, "db_path", None)
+                else None,
+            )
+        except Exception as exc:  # noqa: BLE001 — history loss, not a crash
+            if not getattr(args, "json", False):
+                _safe_print(f"[improve] WARN: could not persist replication "
+                            f"outcome: {type(exc).__name__}: {exc}", flush=True)
+    return rep
+
+
 def run_improve_loop(
     deck_path: Path,
     deck_id: str,
@@ -214,6 +391,7 @@ def run_improve_loop(
     args,
     *,
     round_fn: Callable[[Path, int, object], RoundResult] = _default_round_fn,
+    replicate_fn: Callable[..., Replication] = _default_replicate_fn,
 ) -> ImproveResult:
     """Greedy keep-if-better loop over ``rounds`` auto-curate rounds.
 
@@ -222,6 +400,18 @@ def run_improve_loop(
     advances the base deck on a ``kept`` verdict. Injecting ``round_fn``
     lets tests drive the loop with scripted verdicts and never touch
     Forge / Anthropic.
+
+    Replication (2026-08-17): when ``args.replicate`` is true, a first
+    ``kept`` does not advance on its own -- ``replicate_fn`` runs a
+    second independent A/B over the same old-vs-new pairing and the base
+    moves only if that run is ``kept`` too (see this module's docstring
+    for why, and ``_default_replicate_fn`` for how the disagreement is
+    recorded). The gate lives HERE, in the loop, rather than in either
+    round_fn, because both round shapes -- the curator round and
+    ``improve_search``'s bandit-search round -- reach the base-advance
+    decision through this one place. ``args`` without a ``replicate``
+    attribute means off, which keeps the library callable (and every
+    pre-2026-08-17 caller) single-shot unless the CLI resolved a default.
 
     Stop conditions:
       - a round errors (verdict='error') → stop, record the round.
@@ -234,6 +424,7 @@ def run_improve_loop(
     history: list[RoundResult] = []
     kept = 0
     converged = False
+    replicate = bool(getattr(args, "replicate", False))
 
     for r in range(1, rounds + 1):
         rr = round_fn(current, r, args)
@@ -250,11 +441,34 @@ def run_improve_loop(
             converged = True
             break
 
-        # Greedy advance: only build on the new deck when it won.
+        # Greedy advance: only build on the new deck when it won -- and,
+        # under replication, only when a second independent A/B agrees.
         if rr.verdict == "kept" and rr.output_deck:
-            current = Path(rr.output_deck)
-            rr.advanced = True
-            kept += 1
+            advance = True
+            if replicate:
+                if not getattr(args, "json", False):
+                    _safe_print(
+                        f"[improve] round {r}: first A/B says 'kept'; "
+                        f"running the confirming second A/B before "
+                        f"advancing the base...", flush=True,
+                    )
+                rep = replicate_fn(current, Path(rr.output_deck), args,
+                                   rr.iteration_id)
+                rr.replicated = rep.confirmed
+                rr.replication_verdict = rep.verdict
+                advance = rep.confirmed
+                if not rep.confirmed:
+                    # Report the outcome the EVIDENCE supports: the
+                    # second run's verdict, not the unconfirmed 'kept'.
+                    # rr.replication_verdict keeps the pair legible.
+                    rr.verdict = rep.verdict
+                if not getattr(args, "json", False):
+                    _safe_print(f"[improve] round {r}: {rep.notes}",
+                                flush=True)
+            if advance:
+                current = Path(rr.output_deck)
+                rr.advanced = True
+                kept += 1
 
         history.append(rr)
 
@@ -341,6 +555,15 @@ def _print_summary(result: ImproveResult) -> None:
             f"  [{marker}] round {rr.round}: {rr.verdict}"
             f"  +{rr.applied_adds}/-{rr.applied_cuts}{wr}"
         )
+        # Replication is invisible in the verdict alone: a round that
+        # reads 'neutral' here may have been a 'kept' the confirming run
+        # refused, and the operator deciding whether to trust the run
+        # needs to see which. (None = no confirming run was attempted.)
+        if rr.replicated is True:
+            line += "  [replicated]"
+        elif rr.replicated is False:
+            line += (f"  [replication FAILED: run 1 kept, run 2 "
+                     f"{rr.replication_verdict} -- not advanced]")
         if rr.iteration_id is not None:
             line += f"  iter#{rr.iteration_id}"
         if rr.error:
@@ -429,6 +652,18 @@ def _make_swap_evaluator(state: dict, args):
     pull count or mean. The old behavior mapped every failure to a 0.0
     reward, entering crashed sims into the bandit's statistics as
     measured ties.
+
+    Replication (2026-08-17): OFF by default on this path (see
+    ``resolve_replicate_default``) but honored when the operator asks for
+    it with ``--replicate``. When on, a ``kept`` pull triggers one
+    confirming A/B of the same base-vs-candidate pairing and the base
+    advances only if that run is ``kept`` too; a disagreeing run leaves
+    ``accepted=False`` and reports the SECOND run's verdict, so the arm's
+    outcome reflects the non-advance. The pull's REWARD stays run 1's
+    measurement: one pull is one budget unit, and folding a second sim
+    into the mean would silently double-weight exactly the arms that
+    reached the gate. The confirm run is a bare sim (``_run_confirm_sim``)
+    and can never recurse into another pull.
     """
     from .proposer import Proposal, apply_proposal_to_deck
     from .forge_runner import run_ab_simulation
@@ -477,6 +712,27 @@ def _make_swap_evaluator(state: dict, args):
         # verdict path uses (--sim-margin stays a pre-filter inside it).
         verdict = _verdict_from_ab(ab, margin=args.sim_margin)
         accepted = verdict == "kept"
+        if accepted and bool(getattr(args, "replicate", False)):
+            confirm_ab, _f, err = _run_confirm_sim(base, candidate, args)
+            confirm_verdict = (
+                _verdict_from_ab(confirm_ab, margin=args.sim_margin)
+                if confirm_ab is not None else "pending"
+            )
+            if confirm_verdict != "kept":
+                # Non-advance, recorded as such: the arm keeps run 1's
+                # reward (a real measurement) but reports the second
+                # run's verdict, so nothing downstream reads this pull
+                # as an adopted swap.
+                print(f"[bandit] replication failed on {arm.key}: run 1 "
+                      f"kept, run 2 {confirm_verdict}"
+                      + (f" ({err})" if err else "")
+                      + "; base NOT advanced.",
+                      file=sys.stderr, flush=True)
+                return PullOutcome(reward=reward, accepted=False,
+                                   verdict=confirm_verdict)
+            print(f"[bandit] replication confirmed on {arm.key}: two "
+                  f"independent A/Bs both 'kept'; base advanced.",
+                  file=sys.stderr, flush=True)
         if accepted:
             state["deck"] = candidate  # advance the base deck
         return PullOutcome(reward=reward, accepted=accepted, verdict=verdict)
@@ -539,6 +795,35 @@ def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
     else:
         _print_bandit_summary(deck_id, result, state["deck"])
     return 0
+
+
+def resolve_replicate_default(args) -> bool:
+    """Resolve the tri-state ``--replicate`` / ``--no-replicate`` flag.
+
+    An explicit flag always wins. Left unset (``None``), the default
+    keys on the run's SHAPE, because the two entry points differ in
+    exactly the way the owner's decision cares about:
+
+      - the round loop (``--strategy greedy``, with or without
+        ``--search-budget``) is the UNATTENDED one: it runs for hours,
+        CHAINS its rounds -- each advance becomes the base every later
+        round is measured against -- and nobody is watching to sanity-
+        check a lucky split. A false 'kept' there compounds. Default ON.
+      - ``--strategy bandit`` is the interactive single-swap explorer:
+        one swap per pull, the operator reading arm stats as they land,
+        and UCB1 already RE-PULLS promising arms, so the policy supplies
+        its own repeat measurements. Doubling every accepting pull's
+        Forge bill to re-litigate a decision the bandit revisits anyway
+        is cost without much information. Default OFF.
+
+    Returns the effective boolean; ``improve_main`` writes it back onto
+    ``args`` so ``run_improve_loop`` / the evaluator see one resolved
+    value rather than re-deriving policy.
+    """
+    explicit = getattr(args, "replicate", None)
+    if explicit is not None:
+        return bool(explicit)
+    return getattr(args, "strategy", "greedy") != "bandit"
 
 
 def improve_main(argv: Optional[list[str]] = None) -> int:
@@ -637,6 +922,27 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--sim-fillers", default=None,
                    help="Comma-separated filler .dck filenames for the pod. "
                         "Default: auto-pick 2 bracket-matched opponents.")
+    # Tri-state: None = "use the shape-dependent default" (see
+    # resolve_replicate_default). argparse's store_true/store_false pair
+    # on one dest is this CLI's existing idiom for an on/off flag whose
+    # default isn't a constant (cf. --sim-games' None sentinel in
+    # _proposer_cli).
+    p.add_argument("--replicate", dest="replicate", action="store_true",
+                   default=None,
+                   help="Require a SECOND independent A/B (same old-vs-new "
+                        "pairing, fresh sim) to also say 'kept' before the "
+                        "base deck advances. Default ON for the unattended "
+                        "round loop (greedy / --search-budget), OFF for "
+                        "--strategy bandit. COST: a confirmed swap runs two "
+                        "sims, i.e. ~2x the Forge time of an advancing "
+                        "round. Buys a ~40x lower per-advance "
+                        "false-positive rate on a loop that compounds its "
+                        "own mistakes.")
+    p.add_argument("--no-replicate", dest="replicate", action="store_false",
+                   help="Single-shot: one significance-passing 'kept' "
+                        "advances the base, no confirming run (the "
+                        "pre-2026-08-17 behaviour). This is already the "
+                        "default for --strategy bandit.")
     p.add_argument("--db-path", default=None,
                    help="Override the knowledge_log SQLite path.")
     p.add_argument("--protect", action="append", default=[], metavar="CARD",
@@ -884,7 +1190,23 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr, flush=True,
         )
 
+    # Resolve replication BEFORE any Forge/LLM spend and state the cost
+    # implication up front -- an operator who typed neither flag is
+    # entitled to know, before the first sim, that an advancing round now
+    # runs two of them.
+    args.replicate = resolve_replicate_default(args)
+
     if not args.json:
+        if args.replicate:
+            print(f"[improve] replication: ON -- a first 'kept' is re-tested "
+                  f"with a second independent A/B before the base advances, "
+                  f"so a CONFIRMED swap costs 2x sim time "
+                  f"(~2 x {args.sim_games} pod games for that round). Pass "
+                  f"--no-replicate for single-shot advancing.", flush=True)
+        else:
+            print("[improve] replication: OFF -- a single 'kept' advances "
+                  "the base (single-shot). Pass --replicate to require a "
+                  "confirming second A/B.", flush=True)
         search_note = (f", search-budget={args.search_budget} pulls/round"
                        if args.search_budget else "")
         if args.search_budget and args.screen:

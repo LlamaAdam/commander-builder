@@ -622,6 +622,413 @@ def test_normalized_reward_keeps_ucb1_exploration_alive(monkeypatch, tmp_path):
     assert min(a.pulls for a in arms) >= 2
 
 
+# --- replication: unattended advances need a confirming second A/B ---------
+#
+# 2026-08-17 owner decision. At alpha 0.05 a truly neutral swap still
+# earns a 'kept' about 1 run in 40, and the loop CHAINS its rounds — a
+# false positive becomes the base every later round is measured against.
+# Unattended runs therefore re-test a first 'kept' with a second
+# independent A/B and advance only if it agrees; interactive single-swap
+# (--strategy bandit) runs stay single-shot. These tests pin the gate at
+# the loop, the default resolution, and the honest recording of a
+# disagreement.
+
+def _replicate_args(**over):
+    import argparse
+    base = dict(replicate=True, json=False, bracket=3, sim_games=40,
+                sim_margin=1, sim_fillers="F1.dck,F2.dck", db_path=None,
+                strategy="greedy")
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _scripted_replicate_fn(verdicts):
+    """replicate_fn double: returns a scripted second-run verdict per
+    call and records (base, candidate, iteration_id) per invocation."""
+    calls: list[tuple] = []
+
+    def fn(base_path, candidate_path, args, iteration_id=None):
+        v = verdicts[len(calls)]
+        calls.append((Path(base_path), Path(candidate_path), iteration_id))
+        confirmed = v == "kept"
+        return improve.Replication(
+            verdict=v, confirmed=confirmed,
+            notes=("replication_confirmed" if confirmed
+                   else f"replication_failed: run 1 kept, run 2 {v}"),
+        )
+
+    fn.calls = calls  # type: ignore[attr-defined]
+    return fn
+
+
+def test_single_kept_does_not_advance_under_replication():
+    """The decision in one line: under replication, one 'kept' is not
+    enough. The loop must consult the confirming run BEFORE advancing,
+    and a non-confirming answer leaves the base where it was."""
+    fn = _make_script(["kept"])
+    rep = _scripted_replicate_fn(["neutral"])
+    res = run_improve_loop(Path("/decks/start.dck"), "start", 1,
+                           _replicate_args(), round_fn=fn, replicate_fn=rep)
+
+    assert len(rep.calls) == 1                 # the gate was consulted
+    assert res.rounds_kept == 0
+    assert res.history[0].advanced is False
+    assert Path(res.final_deck) == Path("/decks/start.dck")
+
+
+def test_kept_plus_kept_advances():
+    """A confirmed swap still advances — replication is a gate, not a
+    block. The confirming run gets the SAME pairing the first one had
+    (current base vs this round's candidate) and the round's iteration
+    id, so the outcome can be written back to the right row."""
+    fn = _make_script(["kept", "kept"])
+    rep = _scripted_replicate_fn(["kept", "kept"])
+    res = run_improve_loop(Path("/decks/start.dck"), "start", 2,
+                           _replicate_args(), round_fn=fn, replicate_fn=rep)
+
+    assert res.rounds_kept == 2
+    assert [r.advanced for r in res.history] == [True, True]
+    assert [r.replicated for r in res.history] == [True, True]
+    assert [r.replication_verdict for r in res.history] == ["kept", "kept"]
+    assert Path(res.final_deck) == Path("/decks/v2.dck")
+    # Same pairing: round 1 confirms start-vs-v1, round 2 v1-vs-v2.
+    assert rep.calls[0][:2] == (Path("/decks/start.dck"), Path("/decks/v1.dck"))
+    assert rep.calls[1][:2] == (Path("/decks/v1.dck"), Path("/decks/v2.dck"))
+    assert rep.calls[0][2] == 101  # iteration_id from the round result
+
+
+def test_kept_plus_neutral_does_not_advance_and_is_recorded(capsys):
+    """A disagreement must be recorded honestly, in the EXISTING verdict
+    vocabulary: the round reports the second run's verdict (the
+    non-advancing one), keeps the unconfirmed 'kept' legible in
+    replication_verdict, and says so in the printed output."""
+    fn = _make_script(["kept", "kept"])
+    rep = _scripted_replicate_fn(["neutral", "kept"])
+    res = run_improve_loop(Path("/decks/start.dck"), "start", 2,
+                           _replicate_args(), round_fn=fn, replicate_fn=rep)
+
+    r1, r2 = res.history
+    assert r1.verdict == "neutral"          # not the unconfirmed 'kept'
+    assert r1.replicated is False
+    assert r1.replication_verdict == "neutral"
+    assert r1.advanced is False
+    # Round 2 built on the ORIGINAL base, since round 1 never advanced.
+    assert fn.calls[1] == Path("/decks/start.dck")
+    assert r2.advanced is True
+    assert res.rounds_kept == 1
+
+    out = capsys.readouterr().out
+    assert "replication_failed" in out       # the reason is visible
+    assert "confirming second A/B" in out
+
+    # ... and it survives into the run summary the operator reads last.
+    improve._print_summary(res)
+    summary = capsys.readouterr().out
+    assert "replication FAILED" in summary
+    assert "run 2 neutral" in summary
+
+
+def test_replication_off_keeps_single_shot_behaviour():
+    """--no-replicate (and every pre-2026-08-17 caller, whose args carry
+    no 'replicate' attribute at all) advances on one 'kept' and never
+    spends the second sim."""
+    fn = _make_script(["kept"])
+    rep = _scripted_replicate_fn(["kept"])
+    res = run_improve_loop(Path("/decks/start.dck"), "start", 1,
+                           _replicate_args(replicate=False),
+                           round_fn=fn, replicate_fn=rep)
+    assert rep.calls == []                   # no confirming sim was run
+    assert res.rounds_kept == 1
+    assert res.history[0].advanced is True
+    assert res.history[0].replicated is None  # not attempted, not "failed"
+
+    # Same for a bare args object with no replicate attribute.
+    fn2 = _make_script(["kept"])
+    rep2 = _scripted_replicate_fn(["kept"])
+    res2 = run_improve_loop(Path("/decks/start.dck"), "start", 1, object(),
+                            round_fn=fn2, replicate_fn=rep2)
+    assert rep2.calls == [] and res2.rounds_kept == 1
+
+
+def test_non_kept_rounds_never_trigger_a_confirming_sim():
+    """Replication gates the ADVANCE, so it costs nothing on rounds that
+    weren't going to advance anyway."""
+    fn = _make_script(["neutral", "reverted", "pending"])
+    rep = _scripted_replicate_fn([])
+    res = run_improve_loop(Path("/decks/start.dck"), "start", 3,
+                           _replicate_args(), round_fn=fn, replicate_fn=rep)
+    assert rep.calls == []
+    assert res.rounds_kept == 0
+
+
+# --- replication defaults + CLI wiring -------------------------------------
+
+def test_replicate_default_is_on_for_the_unattended_round_loop():
+    """Unattended = the greedy/search round loop: it chains rounds for
+    hours with nobody watching, so a false 'kept' compounds. ON."""
+    import argparse
+    args = argparse.Namespace(replicate=None, strategy="greedy")
+    assert improve.resolve_replicate_default(args) is True
+    # --search-budget runs INSIDE the greedy loop; same default.
+    args = argparse.Namespace(replicate=None, strategy="greedy",
+                              search_budget=8)
+    assert improve.resolve_replicate_default(args) is True
+
+
+def test_replicate_default_is_off_for_the_interactive_bandit_explorer():
+    """--strategy bandit is the single-swap explorer the operator reads
+    live, and UCB1 re-pulls promising arms on its own — doubling every
+    accepting pull's Forge bill buys little. OFF (but overridable)."""
+    import argparse
+    args = argparse.Namespace(replicate=None, strategy="bandit")
+    assert improve.resolve_replicate_default(args) is False
+    # An explicit flag always wins over the shape-based default.
+    assert improve.resolve_replicate_default(
+        argparse.Namespace(replicate=True, strategy="bandit")) is True
+    assert improve.resolve_replicate_default(
+        argparse.Namespace(replicate=False, strategy="greedy")) is False
+
+
+def test_main_resolves_replicate_on_by_default_and_states_the_cost(
+    tmp_path, monkeypatch, capsys,
+):
+    """The 2x sim cost must be in the operator's face BEFORE the first
+    sim, not discovered from the wall clock."""
+    captured = {}
+
+    def stub(deck_path, deck_id, rounds, args, **kw):
+        captured["replicate"] = args.replicate
+        return ImproveResult(
+            deck_id=deck_id, start_deck=str(deck_path),
+            final_deck=str(deck_path), rounds_requested=rounds, rounds_run=0,
+            rounds_kept=0, converged=False,
+        )
+    monkeypatch.setattr(improve, "run_improve_loop", stub)
+
+    deck = tmp_path / "[USER] Rep [B3].dck"
+    deck.write_text("[metadata]\nName=Rep\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "1"])
+
+    assert rc == 0
+    assert captured["replicate"] is True
+    out = capsys.readouterr().out
+    assert "replication: ON" in out
+    assert "2x sim time" in out
+    assert "--no-replicate" in out
+
+
+def test_main_no_replicate_flag_turns_it_off(tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    def stub(deck_path, deck_id, rounds, args, **kw):
+        captured["replicate"] = args.replicate
+        return ImproveResult(
+            deck_id=deck_id, start_deck=str(deck_path),
+            final_deck=str(deck_path), rounds_requested=rounds, rounds_run=0,
+            rounds_kept=0, converged=False,
+        )
+    monkeypatch.setattr(improve, "run_improve_loop", stub)
+
+    deck = tmp_path / "[USER] Rep [B3].dck"
+    deck.write_text("[metadata]\nName=Rep\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "1", "--no-replicate"])
+
+    assert rc == 0
+    assert captured["replicate"] is False
+    assert "replication: OFF" in capsys.readouterr().out
+
+
+def test_replicate_help_documents_the_default_and_the_cost(capsys):
+    with pytest.raises(SystemExit):
+        improve_main(["--help"])
+    out = capsys.readouterr().out
+    assert "--replicate" in out and "--no-replicate" in out
+    # argparse re-wraps, so match words that survive wrapping.
+    assert "Default ON" in out
+    assert "bandit" in out
+
+
+# --- _default_replicate_fn: the real confirming run ------------------------
+
+class _RepAB:
+    """ABResult stand-in with only the fields the confirm path reads."""
+
+    def __init__(self, wins_a, wins_b, *, status="done", games=None):
+        self.wins_a, self.wins_b, self.status = wins_a, wins_b, status
+        self.games = games if games is not None else wins_a + wins_b
+
+
+def _patch_confirm_sim(monkeypatch, ab, *, fillers=("F1.dck", "F2.dck")):
+    """Stub the confirm run's two externals (filler pick + Forge) and
+    record the sim calls. No JVM, no network."""
+    calls: list[dict] = []
+
+    def fake_sim(deck_a_path, deck_b_path, games, fillers):
+        calls.append({"a": Path(deck_a_path), "b": Path(deck_b_path),
+                      "games": games, "fillers": list(fillers)})
+        return ab
+    monkeypatch.setattr("commander_builder.forge_runner.run_ab_simulation",
+                        fake_sim)
+    monkeypatch.setattr(
+        "commander_builder._proposer_sim._pick_filler_decks",
+        lambda deck_dir, exclude_paths, count, target_bracket: list(fillers),
+    )
+    return calls
+
+
+def _seed_pending_row(db_path) -> int:
+    from commander_builder.knowledge_log import (
+        Iteration, init_db, record_iteration,
+    )
+    init_db(db_path)
+    return record_iteration(Iteration(
+        deck_id="rep", deck_name="rep", bracket=3,
+        audit_manifest={"added": ["A"], "removed": ["B"]},
+        verdict="kept",
+    ), db_path=db_path)
+
+
+def test_default_replicate_fn_confirms_a_repeated_significant_win(
+    tmp_path, monkeypatch,
+):
+    """A second significant win in the SAME direction confirms: the row
+    keeps 'kept' and the note records that two runs agreed."""
+    from commander_builder.knowledge_log import get_iteration
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db)
+    calls = _patch_confirm_sim(monkeypatch, _RepAB(15, 30, games=45))
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    rep = improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+
+    assert rep.confirmed is True and rep.verdict == "kept"
+    assert "replication_confirmed" in rep.notes
+    assert len(calls) == 1 and calls[0]["games"] == 40
+    row = get_iteration(iid, db_path=db)
+    assert row.verdict == "kept"
+    assert "replication_confirmed" in row.verdict_notes
+
+
+def test_default_replicate_fn_records_a_failed_replication(tmp_path,
+                                                           monkeypatch):
+    """A coin-flip second run (23-22 = not significant) refuses the
+    advance, and the row is rewritten from 'kept' to the second run's
+    verdict with a replication_failed note — leaving 'kept' on a deck
+    that never became the base would tell every later reader (dashboard,
+    FP-013 counter, a future training set) a swap was adopted when it
+    wasn't."""
+    from commander_builder.knowledge_log import get_iteration
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db)
+    _patch_confirm_sim(monkeypatch, _RepAB(22, 23, games=45))
+    args = _replicate_args(db_path=str(db))
+
+    rep = improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+
+    assert rep.confirmed is False
+    assert rep.verdict == "neutral"          # existing vocabulary, no new label
+    assert "replication_failed" in rep.notes
+    assert "run 1 kept, run 2 neutral" in rep.notes
+
+    row = get_iteration(iid, db_path=db)
+    assert row.verdict == "neutral"          # reflects the NON-advance
+    assert "replication_failed" in row.verdict_notes
+
+
+def test_default_replicate_fn_unrunnable_gate_stays_shut(tmp_path,
+                                                         monkeypatch):
+    """No fillers = no confirming evidence. An unattended gate that
+    can't run must NOT wave the candidate through."""
+    _patch_confirm_sim(monkeypatch, _RepAB(0, 0, status="skipped"),
+                       fillers=("only-one.dck",))
+    args = _replicate_args(sim_fillers=None, db_path=None)
+    rep = improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, None)
+    assert rep.confirmed is False
+    assert rep.verdict == "pending"
+    assert "replication_failed" in rep.notes
+
+
+def test_replication_cannot_recurse(tmp_path, monkeypatch):
+    """A confirming run is a BARE A/B sim: it must never re-enter the
+    round machinery (which would re-curate, and whose own 'kept' would
+    want confirming in turn — an unbounded confirm chain). Pinned by
+    exploding if auto-curate is touched and by counting sims."""
+    def boom(*a, **kw):  # pragma: no cover - must never be called
+        raise AssertionError("replication re-entered the round pipeline")
+    monkeypatch.setattr("commander_builder._proposer_cli.auto_curate_main",
+                        boom)
+    calls = _patch_confirm_sim(monkeypatch, _RepAB(15, 30, games=45))
+
+    fn = _make_script(["kept"])
+    res = run_improve_loop(Path(tmp_path / "start.dck"), "start", 1,
+                           _replicate_args(db_path=None), round_fn=fn)
+    assert len(calls) == 1                   # exactly one confirming sim
+    assert res.history[0].replicated is True
+
+
+# --- replication on the bandit path (opt-in there) -------------------------
+
+def test_bandit_evaluator_replication_blocks_an_unconfirmed_advance(
+    monkeypatch, tmp_path, capsys,
+):
+    """With --replicate on, a 'kept' pull whose confirming run disagrees
+    reports the SECOND verdict, keeps accepted=False (so the arm records
+    a non-advance) and leaves the base deck alone. The pull keeps run 1's
+    reward — one pull is one budget unit."""
+    args = _eval_args(replicate=True)
+    sims = [_AB(15, 30, games=45), _AB(23, 22, games=45)]
+    # Patch the sim BEFORE rebuilding the evaluator: the closure binds
+    # run_ab_simulation at build time (the confirm path resolves it
+    # lazily), so both runs must see the same scripted function.
+    state, base, _cand, _ = _make_eval(
+        monkeypatch, tmp_path, ab=None, args=args)
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: sims.pop(0),
+    )
+    evaluate = improve._make_swap_evaluator(state, args)
+
+    out = evaluate(_arm())
+    assert out.accepted is False
+    assert out.verdict == "neutral"          # the SECOND run's verdict
+    assert out.reward == pytest.approx(15 / 45)  # ... run 1's measurement
+    assert state["deck"] == base             # base did NOT advance
+    assert "replication failed" in capsys.readouterr().err
+    assert sims == []                        # exactly two sims, no recursion
+
+
+def test_bandit_evaluator_replication_confirms(monkeypatch, tmp_path):
+    """Two independent 'kept' runs on the same pull advance the base."""
+    args = _eval_args(replicate=True)
+    sims = [_AB(15, 30, games=45), _AB(14, 31, games=45)]
+
+    state, _base, candidate, _ = _make_eval(
+        monkeypatch, tmp_path, ab=None, args=args)
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: sims.pop(0),
+    )
+    evaluate = improve._make_swap_evaluator(state, args)
+    out = evaluate(_arm())
+    assert out.accepted is True and out.verdict == "kept"
+    assert state["deck"] == candidate
+
+
+def test_bandit_evaluator_is_single_shot_by_default(monkeypatch, tmp_path):
+    """Default OFF on this path: one significant pull still advances,
+    exactly as before 2026-08-17."""
+    state, _base, candidate, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45))
+    out = evaluate(_arm())
+    assert out.accepted is True
+    assert state["deck"] == candidate
+
+
 # --- --health: FP-013 gate progress ----------------------------------------
 #
 # The fp013-scope memo asked for a row-count health check that reports

@@ -29,7 +29,14 @@ that lives INSIDE an improve round**. Each round:
    machinery unchanged: one more A/B sim of base-vs-applied, verdict
    via ``_verdict_from_ab``, knowledge_log row updated via
    ``update_iteration_sim``, and ``run_improve_loop`` advances the base
-   only on 'kept'.
+   only on 'kept' — and, since 2026-08-17, only when a SECOND
+   independent A/B confirms that 'kept' (replication is ON by default
+   for this unattended path). The confirming run lives in
+   ``run_improve_loop`` / ``improve._default_replicate_fn``, not here,
+   precisely because this module's contract is "decide what the round
+   proposes, never whether the outcome advances the base" — so the
+   search path inherits the gate with no code of its own, and the
+   round's own verdict sim is unchanged.
 
 Why Claude is excluded from the search inner loop
 -------------------------------------------------
@@ -50,9 +57,11 @@ Honest cost model
 -----------------
 Each pull costs ONE full A/B sim ≈ ``--sim-games`` Forge pod games
 (~10+ minutes at the 45-game default), plus one more sim for the
-round's final verdict. A round with ``--search-budget 8`` therefore
-burns ≈ 9 × sim_games pod games. The budget flag exists precisely so
-that cost is a deliberate, bounded choice.
+round's final verdict — plus, when that verdict is 'kept' and
+replication is on (the default here), one more for the confirming run.
+A round with ``--search-budget 8`` therefore burns ≈ 9 × sim_games pod
+games, or ≈ 10 × on a round that actually advances the deck. The budget
+flag exists precisely so that cost is a deliberate, bounded choice.
 
 UCB1 math (why this policy)
 ---------------------------
