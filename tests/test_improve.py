@@ -385,6 +385,243 @@ def test_bandit_strategy_runs_with_injected_arms_and_sim(tmp_path, monkeypatch):
     assert rc == 0
 
 
+# --- P03: the bandit evaluator's accept path -------------------------------
+#
+# Pre-2026-08-16 the evaluator advanced the base deck on
+# ``reward >= args.sim_margin`` with reward = raw (wins_b - wins_a) and
+# --sim-margin defaulting to 1 — i.e. ANY one-win edge promoted the
+# candidate, with no significance test and no minimum-decisive gate,
+# bypassing the discipline _proposer_sim._verdict_from_ab enforces
+# everywhere else. Every failure mode (apply exception, <2 fillers, sim
+# not done) also returned 0.0, entering crashed sims into the arm
+# statistics as measured ties. These tests pin both fixes.
+
+class _AB:
+    """Minimal ABResult stand-in (only the fields the evaluator reads)."""
+
+    def __init__(self, wins_a, wins_b, *, status="done", error=None,
+                 games=None):
+        self.wins_a = wins_a
+        self.wins_b = wins_b
+        self.status = status
+        self.error = error
+        self.games = games if games is not None else (wins_a + wins_b) * 2
+
+
+def _eval_args(**over):
+    import argparse
+    base = dict(sim_fillers=None, bracket=4, sim_games=90, sim_margin=1)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _make_eval(monkeypatch, tmp_path, *, ab=None, apply_exc=None,
+               fillers=("f1.dck", "f2.dck"), args=None):
+    """Build the REAL ``_make_swap_evaluator`` closure with only its
+    outermost dependencies stubbed (apply / filler pick / Forge sim), so
+    the accept decision under test is the production one."""
+    base = tmp_path / "base.dck"
+    base.write_text("[metadata]\nName=Base\n", encoding="utf-8")
+    candidate = tmp_path / "candidate.dck"
+    candidate.write_text("[metadata]\nName=Cand\n", encoding="utf-8")
+
+    def fake_apply(deck_path, proposal, dry_run=False):
+        if apply_exc is not None:
+            raise apply_exc
+        return candidate
+
+    monkeypatch.setattr("commander_builder.proposer.apply_proposal_to_deck",
+                        fake_apply)
+    monkeypatch.setattr(
+        "commander_builder._proposer_sim._pick_filler_decks",
+        lambda deck_dir, exclude_paths, count, target_bracket: list(fillers),
+    )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: ab,
+    )
+    state = {"deck": base}
+    return state, base, candidate, improve._make_swap_evaluator(
+        state, args or _eval_args())
+
+
+def _arm(key="+Good / -Bad"):
+    from commander_builder.bandit import Arm
+    return Arm(key=key, add="Good", cut="Bad")
+
+
+def test_evaluator_does_not_advance_base_on_23_22_split(monkeypatch, tmp_path):
+    """(a) REGRESSION: a 23-22 coin-flip split over 45 decisive games is
+    not significant (exact two-sided binomial p = 1.0), so the base deck
+    must NOT advance. The old ``reward >= sim_margin`` rule accepted it."""
+    state, base, candidate, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(22, 23, games=45))
+    out = evaluate(_arm())
+    assert out.verdict == "neutral"
+    assert out.accepted is False
+    assert state["deck"] == base  # base did NOT advance
+    assert out.skipped is False
+    assert out.reward == pytest.approx(1 / 45)  # a real, tiny measurement
+
+
+def test_evaluator_advances_base_on_significant_split(monkeypatch, tmp_path):
+    """(b) A significance-passing split (30-15 over 45 decisive,
+    p = 0.036 < VERDICT_ALPHA) MUST advance the base."""
+    state, base, candidate, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45))
+    out = evaluate(_arm())
+    assert out.verdict == "kept"
+    assert out.accepted is True
+    assert state["deck"] == candidate  # base advanced
+    assert out.reward == pytest.approx(15 / 45)
+
+
+def test_evaluator_never_advances_on_a_significant_loss(monkeypatch, tmp_path):
+    """The mirror image: a significant split the WRONG way is 'reverted'
+    and obviously must not advance — but it is still a real measurement,
+    so it feeds the arm's stats with a negative reward."""
+    state, base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(30, 15, games=45))
+    out = evaluate(_arm())
+    assert out.verdict == "reverted"
+    assert out.accepted is False
+    assert state["deck"] == base
+    assert out.reward == pytest.approx(-15 / 45)
+
+
+def test_evaluator_respects_the_min_decisive_gate(monkeypatch, tmp_path):
+    """A lopsided but tiny sample (12-3 = 15 decisive, under
+    MIN_DECISIVE_GAMES_FOR_VERDICT) is 'inconclusive', never 'kept' —
+    the decisive gate the rest of the branch enforces applies here too."""
+    from commander_builder._proposer_sim import MIN_DECISIVE_GAMES_FOR_VERDICT
+    assert 15 < MIN_DECISIVE_GAMES_FOR_VERDICT
+    state, base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(3, 12, games=30))
+    out = evaluate(_arm())
+    assert out.verdict == "inconclusive"
+    assert out.accepted is False
+    assert state["deck"] == base
+
+
+def test_evaluator_sim_margin_stays_a_back_compat_prefilter(monkeypatch,
+                                                            tmp_path):
+    """--sim-margin survives as a PRE-filter: raising it above what
+    significance demands still blocks the accept (30-15 is significant
+    but its margin of 15 is under a --sim-margin of 20)."""
+    state, base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45),
+        args=_eval_args(sim_margin=20))
+    out = evaluate(_arm())
+    assert out.verdict == "neutral"
+    assert out.accepted is False
+    assert state["deck"] == base
+
+
+@pytest.mark.parametrize("kwargs,expect", [
+    ({"apply_exc": RuntimeError("boom"), "ab": None}, "apply_failed"),
+    ({"ab": _AB(0, 0, status="failed", error="jvm died")}, "sim_failed"),
+    ({"ab": _AB(0, 0, status="skipped")}, "sim_skipped"),
+    ({"ab": _AB(0, 0)}, "zero_decisive_games"),
+    ({"ab": _AB(1, 1), "fillers": ("only-one.dck",)}, "fillers_unavailable"),
+])
+def test_evaluator_failure_modes_are_skips_not_zero_rewards(
+        monkeypatch, tmp_path, capsys, kwargs, expect):
+    """(c) REGRESSION: every failure mode returns a SKIP (no reward), not
+    the old 0.0 'measured tie', and logs its reason."""
+    state, base, _cand, evaluate = _make_eval(monkeypatch, tmp_path, **kwargs)
+    out = evaluate(_arm())
+    assert out.skipped is True
+    assert out.reward is None
+    assert out.accepted is False
+    assert expect in out.skip_reason
+    assert state["deck"] == base
+    assert "skipped" in capsys.readouterr().err
+
+
+def test_failed_pull_leaves_arm_statistics_untouched(monkeypatch, tmp_path):
+    """(c) End-to-end through ``run_bandit``: a crashed pull must leave
+    the arm's pull count and reward statistics unchanged and be logged
+    as skipped. Previously it landed as a 0.0-reward pull, so a broken
+    swap looked exactly like a perfectly neutral one."""
+    import random
+    from commander_builder.bandit import run_bandit, make_policy
+
+    _state, _base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, apply_exc=ValueError("illegal cut"), ab=None)
+    arms = [_arm("+Good / -Bad")]
+    res = run_bandit(arms, 3, evaluate, make_policy("ucb1"),
+                     rng=random.Random(0))
+    assert arms[0].pulls == 0
+    assert arms[0].total_reward == 0.0
+    assert arms[0].mean == 0.0
+    assert arms[0].skips == 1
+    assert "illegal cut" in arms[0].skip_reason
+    assert res.skipped == 1
+    assert res.accepted == 0
+    assert res.total_reward == 0.0
+    assert res.best_arm_key is None  # nothing was ever measured
+
+
+# --- P16: reward normalization --------------------------------------------
+
+def test_signed_margin_reward_bounds():
+    """(d) The reward handed to the bandit is bounded in [-1, +1] — the
+    O(1) scale UCB1's c=1.4 and Thompson's unit obs_var assume. The old
+    raw margin was O(±20) at 45-game pulls, which swamped the
+    exploration bonus and collapsed both policies to greedy."""
+    f = improve._signed_margin_reward
+    assert f(45, 0) == -1.0        # new deck lost every decisive game
+    assert f(0, 45) == 1.0         # ...and won every one
+    assert f(22, 23) == pytest.approx(1 / 45)
+    assert f(23, 23) == 0.0        # exact tie = break-even
+    for wins_a in range(0, 46):
+        for wins_b in range(0, 46):
+            if wins_a + wins_b == 0:
+                continue
+            assert -1.0 <= f(wins_a, wins_b) <= 1.0
+
+
+def test_signed_margin_reward_none_on_zero_decisive():
+    """No decisive games = no signal. Returning 0.0 would launder
+    'nothing measured' into 'measured break-even'."""
+    assert improve._signed_margin_reward(0, 0) is None
+
+
+def test_signed_margin_reward_is_the_affine_sibling_of_search_reward():
+    """The normalization matches the convention improve_search already
+    uses: (m + 1) / 2 == margin_reward's wins_b / decisive."""
+    from commander_builder.improve_search import margin_reward
+    for wins_a, wins_b in [(30, 15), (15, 30), (22, 23), (0, 45), (45, 0)]:
+        m = improve._signed_margin_reward(wins_a, wins_b)
+        assert (m + 1) / 2 == pytest.approx(margin_reward(wins_a, wins_b))
+
+
+def test_normalized_reward_keeps_ucb1_exploration_alive(monkeypatch, tmp_path):
+    """P16 in behavioral terms: with rewards on the normalized scale,
+    UCB1's exploration bonus is comparable to the means, so a single
+    lucky pull cannot lock the policy onto one arm. On the old raw
+    margin scale (O(±20)) the bonus was noise by comparison."""
+    import random
+    from commander_builder.bandit import Arm, run_bandit, make_policy
+
+    # Arm 'lucky' wins its first pull outright (reward +1.0), then is
+    # mediocre; 'steady' is consistently good. With a live exploration
+    # term every arm keeps getting sampled.
+    seen = {"lucky": 0, "steady": 0}
+
+    def evaluate(arm):
+        seen[arm.key] += 1
+        if arm.key == "lucky":
+            return 1.0 if seen["lucky"] == 1 else -0.2
+        return 0.4
+
+    arms = [Arm("lucky"), Arm("steady")]
+    run_bandit(arms, 20, evaluate, make_policy("ucb1", c=1.4),
+               rng=random.Random(0))
+    assert seen["steady"] >= 5, "exploration collapsed to greedy-on-one-pull"
+    assert min(a.pulls for a in arms) >= 2
+
+
 # --- --health: FP-013 gate progress ----------------------------------------
 #
 # The fp013-scope memo asked for a row-count health check that reports

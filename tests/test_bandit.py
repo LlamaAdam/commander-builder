@@ -13,9 +13,11 @@ from commander_builder.bandit import (
     Arm,
     BanditResult,
     EpsilonGreedy,
+    PullOutcome,
     ThompsonSampling,
     UCB1,
     make_policy,
+    record_skip,
     run_bandit,
     update_arm,
 )
@@ -245,6 +247,116 @@ def test_make_policy_thompson_with_hyperparams():
 def test_make_policy_unknown_still_raises():
     with pytest.raises(ValueError):
         make_policy("gp_bo")
+
+
+# --- skip API + PullOutcome (P03: failures are not observations) ----------
+
+def test_record_skip_leaves_reward_stats_unchanged():
+    a = Arm("a", pulls=2, total_reward=1.0)
+    record_skip(a, "apply_failed: boom")
+    assert a.pulls == 2
+    assert a.total_reward == 1.0
+    assert a.mean == 0.5
+    assert a.skips == 1
+    assert a.skip_reason == "apply_failed: boom"
+
+
+def test_run_bandit_skipped_pull_does_not_update_arm_and_retires_it():
+    """Regression (P03): a crashed/apply-failed pull must leave the
+    arm's pull count and statistics unchanged — the old code folded
+    failures in as 0.0-reward 'measured ties'. The failing arm is also
+    retired so the budget flows to measurable arms."""
+    outcomes = {
+        "fails": PullOutcome.skip("apply_failed: RuntimeError: boom"),
+        "works": PullOutcome(reward=0.5, accepted=False, verdict="neutral"),
+    }
+    arms = [Arm("fails"), Arm("works")]
+    res = run_bandit(
+        arms, rounds=4, evaluate=lambda arm: outcomes[arm.key],
+        policy=UCB1(), rng=random.Random(0),
+    )
+    failing = next(a for a in arms if a.key == "fails")
+    working = next(a for a in arms if a.key == "works")
+    # The failed pull entered NO statistics...
+    assert failing.pulls == 0
+    assert failing.total_reward == 0.0
+    assert failing.mean == 0.0
+    # ...but is recorded as a skip with its reason.
+    assert failing.skips == 1
+    assert "apply_failed" in failing.skip_reason
+    assert res.skipped == 1
+    skip_rows = [h for h in res.history if h.skipped]
+    assert len(skip_rows) == 1
+    assert skip_rows[0].reward is None and skip_rows[0].accepted is False
+    # The remaining budget went to the arm that produces signal.
+    assert working.pulls == 3
+    assert res.total_reward == 1.5
+    # A skipped pull never counts toward total_reward or best-arm mean.
+    assert res.best_arm_key == "works"
+
+
+def test_run_bandit_none_reward_is_a_skip_and_all_dead_stops_early():
+    arms = [Arm("a")]
+    res = run_bandit(arms, rounds=5, evaluate=lambda arm: None,
+                     policy=UCB1(), rng=random.Random(0))
+    assert arms[0].pulls == 0
+    assert arms[0].skips == 1
+    assert res.skipped == 1
+    assert res.rounds_run == 1  # the only arm retired -> early stop
+    assert res.best_arm_key is None
+
+
+def test_pull_outcome_accept_decouples_from_reward_threshold():
+    """Acceptance rides the significance verdict the evaluator reports,
+    not a raw reward-vs-threshold comparison: a small-but-significant
+    reward can accept while a large-but-insignificant one must not."""
+    seq = iter([
+        PullOutcome(reward=0.1, accepted=True, verdict="kept"),
+        PullOutcome(reward=0.9, accepted=False, verdict="inconclusive"),
+    ])
+    arms = [Arm("a")]
+    res = run_bandit(arms, rounds=2, evaluate=lambda arm: next(seq),
+                     policy=UCB1(), accept_threshold=1.0,
+                     rng=random.Random(0))
+    assert res.accepted == 1
+    assert [h.accepted for h in res.history] == [True, False]
+    assert [h.verdict for h in res.history] == ["kept", "inconclusive"]
+    assert arms[0].pulls == 2  # both were real measurements
+
+
+def test_bare_float_evaluator_keeps_threshold_semantics():
+    """Back-compat: scripted float rewards still accept via
+    accept_threshold, and never skip."""
+    arms = [Arm("a")]
+    res = run_bandit(arms, rounds=3, evaluate=lambda arm: 2.0,
+                     policy=UCB1(), accept_threshold=1.0,
+                     rng=random.Random(0))
+    assert res.accepted == 3
+    assert res.skipped == 0
+    assert arms[0].pulls == 3
+
+
+def test_unskipped_outcome_without_reward_raises():
+    bad = PullOutcome(reward=None, accepted=True)  # contract violation
+    with pytest.raises(ValueError):
+        run_bandit([Arm("a")], rounds=1, evaluate=lambda arm: bad,
+                   policy=UCB1(), rng=random.Random(0))
+
+
+def test_skip_fields_json_serializable():
+    import json
+    arms = [Arm("a"), Arm("b")]
+    seq = iter([PullOutcome.skip("sim_failed: jvm died"),
+                PullOutcome(reward=0.25, accepted=False, verdict="neutral")])
+    res = run_bandit(arms, rounds=2, evaluate=lambda arm: next(seq),
+                     policy=UCB1(), rng=random.Random(0))
+    blob = json.loads(json.dumps(res.to_dict()))
+    assert blob["skipped"] == 1
+    assert blob["history"][0]["skipped"] is True
+    assert "sim_failed" in blob["history"][0]["skip_reason"]
+    stats_by_key = {s["key"]: s for s in blob["arm_stats"]}
+    assert stats_by_key["a"]["skips"] == 1
+    assert stats_by_key["b"]["pulls"] == 1
 
 
 def test_thompson_result_json_serializable():

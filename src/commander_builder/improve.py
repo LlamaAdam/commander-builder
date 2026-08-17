@@ -5,7 +5,11 @@ agent). Runs the existing ``commander-auto-curate`` pipeline (advisor →
 Claude curator → apply → Forge A/B sim → knowledge_log) on ONE deck for
 ``--rounds N`` iterations, advancing **greedily**: a round's proposed
 deck becomes the base for the next round *only* when the seat-attributed
-A/B sim verdict is ``kept`` (the new deck won by the configured margin).
+A/B sim verdict is ``kept`` — the new deck's decisive-game split beat
+the old deck with statistical significance (exact two-sided binomial
+test at ``_proposer_sim.VERDICT_ALPHA`` over at least
+``MIN_DECISIVE_GAMES_FOR_VERDICT`` decisive games; ``--sim-margin``
+survives as a back-compat minimum-margin pre-filter on top).
 ``reverted`` / ``neutral`` / ``pending`` rounds keep the current base —
 the candidate ``.dck`` is left on disk but not built upon. That's the
 greedy keep-if-better contract.
@@ -375,20 +379,68 @@ def _build_arms_from_advice(deck_path: Path, bracket: int, source: str) -> list:
     return arms
 
 
+def _signed_margin_reward(wins_a: int, wins_b: int) -> Optional[float]:
+    """Normalize an A/B sim outcome onto the bandit's O(1) reward scale.
+
+    Returns the signed decisive margin ``(wins_b - wins_a) / decisive``
+    ∈ [-1, +1] (decisive = wins_a + wins_b — filler wins and draws
+    carry no information about the swap). The raw margin the evaluator
+    used to return is O(±20) at 45-game pulls, which dwarfed UCB1's
+    ``c·sqrt(ln N / n)`` bonus (c=1.4 assumes O(1) rewards) and
+    Thompson's unit ``obs_var`` — collapsing both policies to
+    greedy-on-one-noisy-pull. Normalizing HERE, at the improve.py
+    boundary, was chosen over rescaling the exploration constant
+    because it matches the codebase's existing convention:
+    ``improve_search.margin_reward`` already normalizes to
+    ``wins_b / decisive`` ∈ [0, 1], the affine sibling of this map
+    ((m + 1) / 2 = wins_b / decisive). The signed form is kept for
+    this path so reward signs still read as improvement/regression in
+    the CLI summary and JSON, as the raw margin's sign did.
+
+    Returns ``None`` when decisive == 0: there is no head-to-head
+    signal to score, and fabricating a 0.0 "tie" would launder
+    no-signal into break-even evidence (the caller skips instead).
+    """
+    decisive = (wins_a or 0) + (wins_b or 0)
+    if decisive <= 0:
+        return None
+    return (wins_b - wins_a) / decisive
+
+
 def _make_swap_evaluator(state: dict, args):
     """Build the real per-arm evaluator: apply one swap to the current
-    best deck, A/B-sim it, and return the seat-attributed win margin as
-    the reward. On a positive margin the candidate becomes the new base
-    (greedy accept), so later pulls build on improvements.
+    best deck, A/B-sim it, and return a ``bandit.PullOutcome`` whose
+    reward is the NORMALIZED signed decisive margin ∈ [-1, +1] (see
+    ``_signed_margin_reward``). The candidate becomes the new base
+    (greedy accept) only when ``_proposer_sim._verdict_from_ab`` calls
+    the split ``kept`` — a statistically significant win (exact
+    two-sided binomial at VERDICT_ALPHA) over at least the standard
+    decisive-games gate, with ``--sim-margin`` retained as the
+    back-compat minimum-margin pre-filter. A raw one-win margin can no
+    longer advance the base (pre-2026-08-16 bug: ``reward >=
+    sim_margin`` with the default margin of 1 accepted any 23-22
+    coin-flip split).
 
-    ``state`` is a mutable ``{"deck": Path}`` the closure advances. Never
-    raises — sim/filler failures map to a 0.0 reward.
+    ``state`` is a mutable ``{"deck": Path}`` the closure advances.
+    Never raises — but failures are NOT rewards: apply errors, missing
+    fillers, incomplete sims, and zero-decisive runs return
+    ``PullOutcome.skip(reason)`` (logged to stderr), which
+    ``run_bandit`` records via the skip API without touching the arm's
+    pull count or mean. The old behavior mapped every failure to a 0.0
+    reward, entering crashed sims into the bandit's statistics as
+    measured ties.
     """
     from .proposer import Proposal, apply_proposal_to_deck
     from .forge_runner import run_ab_simulation
-    from ._proposer_sim import _pick_filler_decks
+    from ._proposer_sim import _pick_filler_decks, _verdict_from_ab
+    from .bandit import PullOutcome
 
-    def evaluate(arm) -> float:
+    def _skip(arm, reason: str) -> PullOutcome:
+        print(f"[bandit] pull on {arm.key} skipped ({reason}); "
+              f"arm statistics unchanged.", file=sys.stderr, flush=True)
+        return PullOutcome.skip(reason)
+
+    def evaluate(arm) -> PullOutcome:
         base = state["deck"]
         proposal = Proposal(
             adds=[arm.add] if arm.add else [],
@@ -396,8 +448,8 @@ def _make_swap_evaluator(state: dict, args):
         )
         try:
             candidate = apply_proposal_to_deck(base, proposal, dry_run=False)
-        except Exception:  # noqa: BLE001
-            return 0.0
+        except Exception as exc:  # noqa: BLE001
+            return _skip(arm, f"apply_failed: {type(exc).__name__}: {exc}")
         deck_dir = base.parent
         if args.sim_fillers:
             fillers = [f.strip() for f in args.sim_fillers.split(",") if f.strip()]
@@ -407,17 +459,27 @@ def _make_swap_evaluator(state: dict, args):
                 target_bracket=args.bracket,
             )
         if len(fillers) < 2:
-            return 0.0
+            return _skip(arm, f"fillers_unavailable: need 2 for a "
+                              f"4-player pod, found {len(fillers)}")
         ab = run_ab_simulation(
             deck_a_path=base, deck_b_path=candidate,
             games=args.sim_games, fillers=fillers,
         )
-        if getattr(ab, "status", None) != "done":
-            return 0.0
-        reward = float((ab.wins_b or 0) - (ab.wins_a or 0))
-        if reward >= args.sim_margin:
+        status = getattr(ab, "status", None)
+        if status != "done":
+            err = getattr(ab, "error", None)
+            return _skip(arm, f"sim_{status or 'unknown'}"
+                              + (f": {err}" if err else ""))
+        reward = _signed_margin_reward(ab.wins_a or 0, ab.wins_b or 0)
+        if reward is None:
+            return _skip(arm, "zero_decisive_games")
+        # Accept through the SAME significance machinery every other
+        # verdict path uses (--sim-margin stays a pre-filter inside it).
+        verdict = _verdict_from_ab(ab, margin=args.sim_margin)
+        accepted = verdict == "kept"
+        if accepted:
             state["deck"] = candidate  # advance the base deck
-        return reward
+        return PullOutcome(reward=reward, accepted=accepted, verdict=verdict)
 
     return evaluate
 
@@ -427,16 +489,21 @@ def _print_bandit_summary(deck_id: str, result, final_deck: Path) -> None:
     # characters a cp1252/cp437 console can't encode (same failure mode
     # as the Δ in _print_summary).
     _safe_print()
+    skip_note = (f", {result.skipped} skipped"
+                 if getattr(result, "skipped", 0) else "")
     _safe_print(f"Bandit improve run on {deck_id} ({result.rounds_run} pulls, "
-                f"{result.accepted} accepted)")
+                f"{result.accepted} accepted{skip_note})")
     _safe_print(f"  best swap:  {result.best_arm_key} (mean reward "
                 f"{result.best_arm_mean:+.2f})")
     _safe_print(f"  final deck: {final_deck.name}")
     _safe_print()
-    _safe_print("  Arm stats (by mean reward):")
+    _safe_print("  Arm stats (by mean reward; normalized margin in [-1, 1]):")
     for a in result.arm_stats:
         if a["pulls"]:
             _safe_print(f"    {a['mean']:+.2f}  ({a['pulls']}x)  {a['key']}")
+        elif a.get("skips"):
+            _safe_print(f"    skipped ({a['skips']}x: "
+                        f"{a.get('skip_reason') or 'no signal'})  {a['key']}")
 
 
 def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
@@ -455,6 +522,10 @@ def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
     policy = make_policy(args.bandit_policy, epsilon=args.epsilon, c=args.ucb_c)
     state = {"deck": deck_path}
     evaluate = _make_swap_evaluator(state, args)
+    # The real evaluator returns PullOutcome objects, so acceptance is
+    # decided by _verdict_from_ab (significance + decisive gate +
+    # --sim-margin pre-filter) inside the evaluator; accept_threshold
+    # only applies to bare-float evaluators (the back-compat/test path).
     result = run_bandit(
         arms, args.rounds, evaluate, policy,
         accept_threshold=args.sim_margin, rng=random.Random(),
@@ -555,8 +626,14 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                         "old 5-game default -- budget a couple of "
                         "hours per round, not minutes.")
     p.add_argument("--sim-margin", type=int, default=1,
-                   help="Min (wins_new - wins_old) margin to call 'kept' "
-                        "(default 1). Within margin = neutral.")
+                   help="Minimum |wins_new - wins_old| PRE-FILTER for a "
+                        "kept/reverted call (default 1). The verdict "
+                        "additionally requires statistical significance "
+                        "(exact two-sided binomial test — see "
+                        "_proposer_sim._verdict_from_ab); at the default "
+                        "of 1 the significance test is strictly stricter, "
+                        "so raise this only to demand a LARGER minimum "
+                        "effect than significance alone.")
     p.add_argument("--sim-fillers", default=None,
                    help="Comma-separated filler .dck filenames for the pod. "
                         "Default: auto-pick 2 bracket-matched opponents.")

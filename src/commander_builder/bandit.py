@@ -5,14 +5,35 @@ instead of blindly accepting whatever the curator proposes each round,
 treat the candidate card *swaps* as bandit arms and learn — across A/B
 sims — which swaps actually move the win rate. Each arm is a concrete
 ``(add, cut)`` swap; pulling it applies that swap to the current best
-deck and sims it; the reward is the seat-attributed win margin.
+deck and sims it; the reward is the NORMALIZED seat-attributed decisive
+margin ``(wins_b - wins_a) / decisive`` ∈ [-1, +1] (see
+``improve._signed_margin_reward``). Normalizing at the integration
+boundary is what makes the policies' O(1)-reward assumptions actually
+hold: UCB1's ``c ≈ sqrt(2)`` bonus and Thompson's unit ``obs_var`` are
+calibrated for O(1) rewards, and the pre-2026-08-16 raw win margins
+(O(±20) at 45-game pulls) dwarfed the exploration term, collapsing both
+policies to greedy-on-one-noisy-pull.
 
 This module is the **pure core**: the arm model, two policies
 (epsilon-greedy + UCB1), and a ``run_bandit`` loop driven by an injected
 ``evaluate`` callable. It has no Forge / Anthropic / disk dependency, so
 the search logic is fully unit-testable; ``improve.py`` supplies the real
-evaluator (apply swap → ``run_ab_simulation`` → margin) when wired to the
-``commander-improve --strategy bandit`` CLI.
+evaluator (apply swap → ``run_ab_simulation`` → normalized margin +
+significance verdict) when wired to the ``commander-improve --strategy
+bandit`` CLI.
+
+Failed pulls are NOT observations: an ``evaluate`` that couldn't
+measure anything (apply error, missing fillers, crashed sim, zero
+decisive games) returns a skip (``PullOutcome.skip(reason)`` or bare
+``None``) and ``run_bandit`` records it via ``record_skip`` — the arm's
+``pulls`` / ``total_reward`` stay untouched, so a crashed sim can never
+enter the statistics as a measured tie.
+
+State compatibility: nothing in this module is persisted or reloaded —
+``BanditResult.to_dict`` feeds one-shot CLI JSON/display only and
+``improve``'s ``state`` dict holds just the current deck path — so the
+2026-08-16 reward-scale change (raw margin → normalized) required no
+stored-state migration or versioning.
 
 Why a bandit and not just greedy: greedy commits to the first swap that
 sims better and never revisits alternatives. A bandit balances
@@ -37,6 +58,9 @@ class Arm:
     ``add`` / ``cut`` are card names (either may be ``None`` for an
     add-only or cut-only arm). ``pulls`` and ``total_reward`` accumulate
     as the arm is sampled; ``mean`` is the running average reward.
+    ``skips`` counts pulls that produced NO usable measurement (apply /
+    sim failure); they deliberately do not touch ``pulls`` or
+    ``total_reward`` so failures can never masquerade as measured ties.
     """
 
     key: str
@@ -44,6 +68,8 @@ class Arm:
     cut: Optional[str] = None
     pulls: int = 0
     total_reward: float = 0.0
+    skips: int = 0
+    skip_reason: Optional[str] = None  # most recent skip's reason
 
     @property
     def mean(self) -> float:
@@ -54,6 +80,20 @@ def update_arm(arm: Arm, reward: float) -> None:
     """Fold a reward into an arm's running stats (policy-independent)."""
     arm.pulls += 1
     arm.total_reward += reward
+
+
+def record_skip(arm: Arm, reason: Optional[str] = None) -> None:
+    """Record a failed pull WITHOUT polluting the arm's reward stats.
+
+    The explicit skip API for evaluators whose pull produced no usable
+    signal (apply exception, missing fillers, sim didn't complete, zero
+    decisive games). ``pulls`` / ``total_reward`` — and therefore
+    ``mean`` — are untouched; only the ``skips`` counter and the latest
+    ``skip_reason`` move, so the failure is visible in the arm stats
+    while the policy's estimate of the arm stays evidence-only.
+    """
+    arm.skips += 1
+    arm.skip_reason = reason or "no_signal"
 
 
 class BanditPolicy(ABC):
@@ -91,7 +131,13 @@ class EpsilonGreedy(BanditPolicy):
 
 class UCB1(BanditPolicy):
     """UCB1: pull each arm once, then maximize ``mean + c·sqrt(ln N /
-    n_arm)`` so under-sampled arms keep an exploration bonus."""
+    n_arm)`` so under-sampled arms keep an exploration bonus.
+
+    The regret analysis behind the default ``c = 1.4 ≈ sqrt(2)``
+    assumes O(1)-bounded rewards; callers must normalize (see the
+    module docstring) or the exploration term is dwarfed by the means
+    and selection degenerates to greedy-on-one-noisy-pull.
+    """
 
     name = "ucb1"
 
@@ -116,13 +162,71 @@ class UCB1(BanditPolicy):
 
 
 @dataclass
+class PullOutcome:
+    """What one ``evaluate(arm)`` call actually observed.
+
+    The rich return type for evaluators (``run_bandit`` also still
+    accepts a bare float, coerced via ``accept_threshold``, and bare
+    ``None`` as an unreasoned skip — back-compat for scripted tests):
+
+    ``reward``
+        The normalized observation to fold into the arm's stats
+        (``None`` only when ``skipped``).
+    ``accepted``
+        Whether the pull advanced the base deck. Decoupled from any
+        reward threshold on purpose: the integration layer decides
+        acceptance via ``_proposer_sim._verdict_from_ab`` (exact
+        binomial significance + decisive-games gate + --sim-margin
+        pre-filter), not via a raw margin comparison.
+    ``skipped`` / ``skip_reason``
+        The pull produced no usable measurement; ``run_bandit`` records
+        it with ``record_skip`` and does NOT update the arm.
+    ``verdict``
+        Optional verdict label ('kept'/'neutral'/...) for the history
+        row, so JSON output can explain each accept/reject.
+    """
+
+    reward: Optional[float] = None
+    accepted: bool = False
+    skipped: bool = False
+    skip_reason: Optional[str] = None
+    verdict: Optional[str] = None
+
+    @classmethod
+    def skip(cls, reason: str) -> "PullOutcome":
+        return cls(reward=None, accepted=False, skipped=True,
+                   skip_reason=reason)
+
+
+def _coerce_outcome(raw, accept_threshold: float) -> PullOutcome:
+    """Normalize an evaluator's return value into a ``PullOutcome``.
+
+    Back-compat: a bare float keeps the historical threshold-accept
+    semantics; ``None`` is a skip with no stated reason.
+    """
+    if isinstance(raw, PullOutcome):
+        if not raw.skipped and raw.reward is None:
+            raise ValueError(
+                "PullOutcome with reward=None must be marked skipped "
+                "(use PullOutcome.skip(reason))")
+        return raw
+    if raw is None:
+        return PullOutcome.skip("no_signal")
+    reward = float(raw)
+    return PullOutcome(reward=reward, accepted=reward >= accept_threshold)
+
+
+@dataclass
 class BanditRound:
     """Record of one pull."""
 
     round: int
     arm_key: str
-    reward: float
-    accepted: bool  # reward cleared the accept threshold (kept as new base)
+    reward: Optional[float]  # None = skipped pull (no measurement)
+    accepted: bool  # the pull advanced the base deck (verdict 'kept')
+    skipped: bool = False
+    skip_reason: Optional[str] = None
+    verdict: Optional[str] = None
 
 
 @dataclass
@@ -132,6 +236,7 @@ class BanditResult:
     best_arm_key: Optional[str]
     best_arm_mean: float
     total_reward: float
+    skipped: int = 0  # pulls that produced no measurement (see record_skip)
     arm_stats: list[dict] = field(default_factory=list)
     history: list[BanditRound] = field(default_factory=list)
 
@@ -171,7 +276,11 @@ class ThompsonSampling(BanditPolicy):
     obs_var:
         Assumed observation noise variance (default 1.0).  Should
         be set to the rough squared scale of the reward signal; the
-        default is appropriate for win-margin rewards O(1-5).
+        default is appropriate for the normalized signed-margin
+        rewards in [-1, 1] that ``improve._signed_margin_reward``
+        supplies (raw win margins O(±20) would need obs_var on the
+        order of margin² — exactly the mis-scaling the boundary
+        normalization removes).
 
     Cold-start: untried arms have no posterior mean -- we sample
     from the prior directly so they're explored with the same
@@ -241,21 +350,30 @@ def make_policy(name: str, *, epsilon: float = 0.2, c: float = 1.4,
 def run_bandit(
     arms: list[Arm],
     rounds: int,
-    evaluate: Callable[[Arm], float],
+    evaluate: Callable[[Arm], "PullOutcome | float | None"],
     policy: BanditPolicy,
     *,
     accept_threshold: float = 1.0,
     rng: Optional[random.Random] = None,
 ) -> BanditResult:
-    """Run ``rounds`` bandit pulls over ``arms``.
+    """Run up to ``rounds`` bandit pulls over ``arms``.
 
-    Each round: ``policy.select`` chooses an arm, ``evaluate(arm)`` returns
-    its reward (e.g. an A/B sim win margin), the arm's stats update, and
-    the round counts as "accepted" when the reward clears
-    ``accept_threshold``. The integration layer's ``evaluate`` is
-    responsible for any side effects (applying the swap, advancing the
-    base deck on accept, logging). The core stays pure so it's testable
-    with scripted rewards.
+    Each round: ``policy.select`` chooses an arm and ``evaluate(arm)``
+    reports what it observed — ideally a ``PullOutcome`` (normalized
+    reward + verdict-based ``accepted`` + skip signaling); a bare float
+    (accepted iff ``reward >= accept_threshold``) or ``None`` (skip)
+    are accepted for back-compat. The integration layer's ``evaluate``
+    owns all side effects (applying the swap, advancing the base deck
+    on a significance-passing 'kept' verdict, logging). The core stays
+    pure so it's testable with scripted rewards.
+
+    Skips are not observations: a skipped pull calls ``record_skip``
+    (the arm's ``pulls``/``mean`` are untouched) and RETIRES the arm
+    from further selection — the same conservative kill-on-no-signal
+    choice ``improve_search.SearchArm`` makes, since these failures
+    (illegal apply, broken sim) are typically structural and re-pulling
+    would burn budget re-measuring garbage. When every arm is retired
+    the loop stops early (``rounds_run`` < ``rounds``).
 
     ``rng`` is injectable for deterministic tests.
     """
@@ -268,25 +386,38 @@ def run_bandit(
 
     history: list[BanditRound] = []
     accepted = 0
+    skipped = 0
     total_reward = 0.0
 
     for r in range(1, rounds + 1):
-        arm = policy.select(arms, rng)
-        reward = evaluate(arm)
-        update_arm(arm, reward)
-        total_reward += reward
-        was_accepted = reward >= accept_threshold
-        if was_accepted:
+        eligible = [a for a in arms if a.skips == 0]
+        if not eligible:
+            break  # every arm retired on failures — nothing left to measure
+        arm = policy.select(eligible, rng)
+        outcome = _coerce_outcome(evaluate(arm), accept_threshold)
+        if outcome.skipped:
+            record_skip(arm, outcome.skip_reason)
+            skipped += 1
+            history.append(BanditRound(
+                round=r, arm_key=arm.key, reward=None, accepted=False,
+                skipped=True, skip_reason=arm.skip_reason,
+            ))
+            continue
+        update_arm(arm, outcome.reward)
+        total_reward += outcome.reward
+        if outcome.accepted:
             accepted += 1
         history.append(BanditRound(
-            round=r, arm_key=arm.key, reward=reward, accepted=was_accepted,
+            round=r, arm_key=arm.key, reward=outcome.reward,
+            accepted=outcome.accepted, verdict=outcome.verdict,
         ))
 
     pulled = [a for a in arms if a.pulls > 0]
     best = max(pulled, key=lambda a: a.mean) if pulled else None
     arm_stats = sorted(
         ({"key": a.key, "add": a.add, "cut": a.cut,
-          "pulls": a.pulls, "mean": round(a.mean, 4)} for a in arms),
+          "pulls": a.pulls, "mean": round(a.mean, 4),
+          "skips": a.skips, "skip_reason": a.skip_reason} for a in arms),
         key=lambda d: d["mean"], reverse=True,
     )
     return BanditResult(
@@ -295,6 +426,7 @@ def run_bandit(
         best_arm_key=best.key if best else None,
         best_arm_mean=round(best.mean, 4) if best else 0.0,
         total_reward=round(total_reward, 4),
+        skipped=skipped,
         arm_stats=arm_stats,
         history=history,
     )
