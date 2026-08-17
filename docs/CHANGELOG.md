@@ -6,6 +6,47 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-17 — owner-decision batch 1: honesty, scope, and provenance
+
+Follows the 2026-08-17 review of the sixteen open product decisions
+raised by three AI review rounds plus a negative-mode critique.
+
+#### Added
+
+- **`measurement_era` on every knowledge-log row** (schema v3). The log
+  spans four incompatible measurement regimes — pre-seat-attribution,
+  mixed win-rate denominators, head-to-head margin verdicts, and
+  significance-based verdicts — and nothing marked which row belonged
+  to which, so any pooled analysis silently mixed them. Date decides
+  the era and id only breaks ties; rows whose era can't be established
+  stay NULL rather than guessed. Supersedes the `--min-id 314`
+  heuristic in STATUS.
+- **`COMMANDER_BUILDER_REBUILD_TIER`** — auto-mode may now select the
+  30+30 rebuild tier only when this is set. That tier is a ~6x cost
+  multiplier gated on the deck-health score, which has never been
+  validated (the same epistemic class as CardScore, which failed three
+  pre-registered gates). `--mode rebuild` is unaffected.
+
+#### Changed
+
+- **Host-header validation on the web server.** The `before_request`
+  hook now rejects any request whose Host isn't loopback
+  (`127.0.0.1` / `localhost` / `::1`, optional port), closing the
+  DNS-rebinding path by which a malicious page could become
+  same-origin with the local UI and read decks or `PUT /api/config`.
+  Serving with `--host 0.0.0.0` now 403s LAN Host headers — the
+  intended trade for a personal localhost tool.
+- **`[REF]` decks no longer fill sim filler seats.** They were
+  popularity-selected (Moxfield top-likes) exactly like `[PREMADE]`
+  decks, which are excluded for that reason; `[REF]` remains a pool
+  *candidate*, since a ranked seat and an unranked filler seat are
+  different jobs.
+- **README states the bot-meta caveat** where it makes the
+  ground-truth claim: a `kept` verdict certifies "better against
+  Forge's AI" — an AI that misplays whole card classes and loops ~25%
+  of soak games — not "better at your table."
+
+
 ### 2026-08-14 — AI-review roadmap: five correctness/currency fixes
 
 Implements the joint top-5 roadmap from the 2026-08-13 two-AI review

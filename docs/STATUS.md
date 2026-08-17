@@ -190,7 +190,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full breakdown. Highlights:
   credited wins by deck *name*, but A and B routinely share the same
   internal `Name=` → wins funnelled to one side. Now attributed by
   **seat**. ⚠️ Prior FP-002 labels (78 kept / 153 reverted) are
-  measurement artifacts — train only on post-fix rows (`--min-id 314`).
+  measurement artifacts — train only on post-fix rows. As of schema v3
+  (2026-08-17) prefer the `measurement_era` column over the old
+  `--min-id 314` heuristic: era 1 is exactly this pre-attribution
+  set, era 2 mixed win-rate denominators, era 3 head-to-head margin
+  verdicts, era 4 significance-based verdicts. Rows whose era can't
+  be established are NULL rather than guessed.
 - **FP-002 concluded NOT VIABLE** via this pipeline — with correct
   attribution the curator's swaps almost never make a deck worse
   (detune depths 0–10 → 11 kept / 3 neutral / 0 reverted), so the

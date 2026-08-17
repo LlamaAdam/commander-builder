@@ -470,6 +470,7 @@ noted.
 | `COMMANDER_BUILDER_KEEP_GAME_LOGS` | `forge_runner` | Keep raw Forge stdout per game (soak debugging; large) |
 | `COMMANDER_BUILDER_LOCK_DIR` | `forge_batch` | Override where per-profile `.commander-builder.lock` files live |
 | `COMMANDER_BUILDER_CARD_SCORE` | `card_score` | Enable the FP-015 CardScore path (default OFF — failed three pre-registered gates) |
+| `COMMANDER_BUILDER_REBUILD_TIER` | `change_budget` | Allow auto-mode to select the 30+30 rebuild tier (default OFF — that 6× cost multiplier is gated on an unvalidated health score; `--mode rebuild` is unaffected) |
 | `COMMANDER_BUILDER_CORPUS_NORMS` | `corpus_themes` | Blend mined per-cluster role norms into targets (default OFF — pending A/B) |
 | `COMMANDER_BUILDER_CORRELATE_FORGE_PY` | `forge_py_correlation` | Log paired forge_py↔Forge verdicts to `_forge_py_correlation.csv` |
 | `COMMANDER_BUILDER_FORGEPY_SCREEN` | `forge_py_screen` | Pre-screen candidates with forge_py before spending JVM time |
