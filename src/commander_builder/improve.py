@@ -1034,7 +1034,11 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     # Every improve run grows this number, so surfacing it here keeps the
     # gate visible exactly where the data gets generated.
     if args.health:
-        from .knowledge_log import DEFAULT_DB_PATH, fp013_gate_progress
+        from .knowledge_log import (
+            DEFAULT_DB_PATH,
+            FP013_RELABELABLE_ERA,
+            fp013_gate_progress,
+        )
         db_path = Path(args.db_path) if args.db_path else DEFAULT_DB_PATH
         progress = fp013_gate_progress(db_path=db_path)
         if args.json:
@@ -1045,9 +1049,29 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                 f"{progress['count']} / {progress['target']} "
                 f"({progress['pct']}%) toward FP-013 "
                 f"(>= {progress['min_games']}-game decided verdicts "
-                f"with an audit manifest)",
+                f"with an audit manifest, measurement era "
+                f">= {progress['min_era']})",
                 flush=True,
             )
+            # Disclose what the era floor held back, so the headline
+            # number never reads as "that's all the history there is".
+            if progress["relabelable"]:
+                print(
+                    f"  + {progress['relabelable']} era-"
+                    f"{FP013_RELABELABLE_ERA} rows are recoverable: "
+                    f"sound measurement, but their verdicts came from "
+                    f"the old margin threshold. Re-scoring their stored "
+                    f"sim reports with the current significance test "
+                    f"would promote them.",
+                    flush=True,
+                )
+            if progress["excluded_by_era"]:
+                print(
+                    f"  - {progress['excluded_by_era']} rows excluded: "
+                    f"labels from a superseded measurement regime, or "
+                    f"unstamped provenance. Archive only.",
+                    flush=True,
+                )
         return 0
 
     # Exactly one of {positional path, --deck id} must be supplied.

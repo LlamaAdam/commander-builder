@@ -953,3 +953,103 @@ def test_fp013_gate_progress_min_games_override(db):
     progress = _gate_progress(db_path=db, min_games=5)
     assert progress["count"] == 1
     assert progress["min_games"] == 5
+
+
+# --- measurement-era floor (2026-08-17) ------------------------------------
+#
+# The triple's SHAPE was never the whole question. A row from before the
+# seat-attribution fix can carry a manifest, a decided verdict and a
+# 60-game sim report and still be worthless as training data, because its
+# wins were credited to the wrong deck. The fine-tune learns the VERDICT,
+# so the era that matters is the one that produced the LABEL.
+
+def _era_row(db, era, *, games=40, verdict="kept"):
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        audit_manifest={"added": ["A"], "removed": ["B"]},
+        verdict=verdict, sim_report={"games": games},
+        measurement_era=era,
+    )
+    return record_iteration(it, db_path=db)
+
+
+@pytest.mark.parametrize("era", [1, 2])
+def test_fp013_gate_excludes_unrecoverable_eras(db, era):
+    """Eras 1-2 are archive-only: era 1's wins are attributed to the
+    wrong deck, era 2's rates aren't comparable across rows. They meet
+    the triple and must still not count."""
+    _era_row(db, era)
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    assert progress["excluded_by_era"] == 1
+    assert progress["relabelable"] == 0
+
+
+def test_fp013_gate_reports_era_3_as_relabelable_not_counted(db):
+    """Era 3's measurement is sound but its verdicts came from the
+    game-count-invariant |margin| >= 4. Not gate-quality as-is, and not
+    lost either — re-scoring the stored sim report promotes it. It must
+    be disclosed rather than silently dropped."""
+    _era_row(db, 3)
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    assert progress["relabelable"] == 1
+    assert progress["excluded_by_era"] == 0
+
+
+def test_fp013_gate_counts_current_era(db):
+    _era_row(db, 4)
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 1
+    assert progress["min_era"] == 4
+    assert progress["relabelable"] == 0
+    assert progress["excluded_by_era"] == 0
+
+
+def test_fp013_gate_unstamped_row_fails_closed(db):
+    """Unknown provenance is not evidence of good provenance.
+
+    A NULL era can't be forced by blanking the column: every
+    ``init_db`` re-runs the idempotent v3 backfill, which re-derives an
+    era from ``created_at``. The rows this actually models are the ones
+    the backfill *cannot* classify — here, a row measured on the
+    2026-07-19 boundary, the mixed-writer day between the margin and
+    decisive-denominator regimes, which ``measurement_era_for``
+    deliberately refuses to guess at."""
+    import sqlite3
+
+    row_id = _era_row(db, 4)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE iterations SET measurement_era = NULL, "
+            "created_at = '2026-07-19T12:00:00Z' WHERE id = ?",
+            (row_id,),
+        )
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    assert progress["excluded_by_era"] == 1
+
+
+def test_fp013_gate_min_era_override_admits_relabelable(db):
+    """An explicit floor lets an analysis opt into era-3 rows once it
+    has re-scored them."""
+    _era_row(db, 3)
+    _era_row(db, 4)
+    progress = _gate_progress(db_path=db, min_era=3)
+    assert progress["count"] == 2
+    assert progress["min_era"] == 3
+    assert progress["relabelable"] == 0
+
+
+def test_fp013_gate_era_floor_does_not_bypass_the_triple(db):
+    """A current-era row still needs the manifest, the decided verdict
+    and the game count — the era floor is an ADDITIONAL gate, not a
+    replacement for the original three."""
+    _era_row(db, 4, games=5)
+    _era_row(db, 4, verdict="pending")
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    # Neither row reached the era check, so neither is reported as an
+    # era exclusion — they failed earlier, for their own reasons.
+    assert progress["excluded_by_era"] == 0
+    assert progress["relabelable"] == 0

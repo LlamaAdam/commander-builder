@@ -782,12 +782,31 @@ def stats_summary(db_path: Optional[Path] = None) -> dict:
 FP013_GATE_TARGET = 1000
 FP013_MIN_GAMES = 40
 
+#: Measurement-era floor for training rows (2026-08-17). The fine-tune
+#: learns the VERDICT, so the era that matters is the one that produced
+#: the LABEL, not the one that produced the raw counts. Era 4 is the
+#: first whose kept/reverted comes from the significance test; era 3's
+#: came from a game-count-invariant ``|margin| >= 4`` that labels ~half
+#: of neutral swaps confidently at 20 decisive games (see
+#: MEASUREMENT_ERAS[3]). Training on those teaches the model to be
+#: confident exactly where the evidence isn't.
+FP013_MIN_TRAINING_ERA = 4
+
+#: Era 3 is not lost, just mislabelled: its measurement is sound (same
+#: decisive denominator as era 4), so a row can be recovered by
+#: re-scoring its stored ``sim_report`` with the current significance
+#: test. Reported separately so the backlog is visible rather than
+#: silently discarded. Eras 1-2 are NOT recoverable — era 1's wins are
+#: attributed to the wrong deck, era 2's rates aren't comparable.
+FP013_RELABELABLE_ERA = 3
+
 
 def fp013_gate_progress(
     db_path: Optional[Path] = None,
     *,
     min_games: int = FP013_MIN_GAMES,
     target: int = FP013_GATE_TARGET,
+    min_era: int = FP013_MIN_TRAINING_ERA,
 ) -> dict:
     """Count high-confidence curator iterations toward the FP-013 gate.
 
@@ -798,17 +817,41 @@ def fp013_gate_progress(
     the count as ``games``; compare_versions' ComparisonReport as
     ``total_games``). Soak rows live outside this DB and never count —
     they are labels without the question they answered.
+
+    Since 2026-08-17 the row must ALSO come from measurement era
+    ``min_era`` or later. The triple's shape was never the whole
+    question: a pre-e8777b6 row can carry a manifest, a verdict and a
+    60-game sim report and still be worthless, because its wins were
+    credited to the wrong deck. Counting those toward a training gate
+    reports readiness the data doesn't have. An unstamped row (era
+    NULL) fails closed — unknown provenance is not evidence of good
+    provenance, and every row written from now on carries a stamp.
+
+    The returned dict discloses what the floor removed rather than
+    quietly shrinking the number:
+
+    ``relabelable``
+        Rows that meet the triple and come from era
+        ``FP013_RELABELABLE_ERA``, whose measurement is sound but whose
+        verdict came from the old margin threshold. Re-scoring their
+        stored ``sim_report`` with the current significance test
+        promotes them; they are a backlog, not a loss.
+    ``excluded_by_era``
+        Rows that meet the triple but whose labels are unrecoverable
+        (eras 1-2) or unknown (NULL).
     """
     db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT sim_report FROM iterations "
+            "SELECT sim_report, measurement_era FROM iterations "
             "WHERE audit_manifest IS NOT NULL "
             "AND verdict IN ('kept', 'reverted', 'neutral') "
             "AND sim_report IS NOT NULL"
         ).fetchall()
     count = 0
+    relabelable = 0
+    excluded_by_era = 0
     for row in rows:
         try:
             report = json.loads(row["sim_report"])
@@ -817,12 +860,22 @@ def fp013_gate_progress(
         if not isinstance(report, dict):
             continue
         games = report.get("games") or report.get("total_games") or 0
-        if isinstance(games, (int, float)) and games >= min_games:
+        if not (isinstance(games, (int, float)) and games >= min_games):
+            continue
+        era = row["measurement_era"]
+        if isinstance(era, int) and era >= min_era:
             count += 1
+        elif era == FP013_RELABELABLE_ERA:
+            relabelable += 1
+        else:
+            excluded_by_era += 1
     return {
         "count": count,
         "target": target,
         "min_games": min_games,
+        "min_era": min_era,
+        "relabelable": relabelable,
+        "excluded_by_era": excluded_by_era,
         "pct": round(100.0 * count / target, 1) if target else 0.0,
     }
 
