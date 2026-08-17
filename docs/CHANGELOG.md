@@ -29,6 +29,21 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Changed
 
+- **`--sim-games` defaults to the verdict floor** (40 pod games, from
+  `min_sim_games_for_verdict()`) instead of 5. At 5 games `--run-sim`
+  could only ever record `inconclusive`, so the flagship
+  close-the-loop flag structurally could not close the loop. A cost
+  line prints before the spend, and `--smoke` restores the 5-game
+  sanity check while saying plainly it will record inconclusive.
+- **Unattended improve runs replicate before advancing.** A candidate
+  now needs a SECOND independent A/B in the same direction before it
+  becomes the base deck. Greedy round-chaining defaults ON (a false
+  `kept` otherwise becomes the baseline every later round is measured
+  against); the interactive bandit explorer defaults OFF, since UCB1
+  already re-pulls arms. `--replicate` / `--no-replicate` override.
+  A failed replication invents no new verdict label: the row takes the
+  second run's verdict plus a `replication_failed:` note, with run 1's
+  sim report intact. Confirmed swaps cost 2x sim time.
 - **Host-header validation on the web server.** The `before_request`
   hook now rejects any request whose Host isn't loopback
   (`127.0.0.1` / `localhost` / `::1`, optional port), closing the
