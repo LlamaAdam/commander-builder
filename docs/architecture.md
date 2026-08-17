@@ -441,12 +441,40 @@ in scope across the module boundary after the split.
 | `vendor/forge/userdata/decks/commander/_pools/B<n>_analysis.json` | `pool_curator` | Per-pod `MatchAnalysis` |
 | `vendor/forge/userdata/decks/commander/_matches/*.json` | `run_match` | User-vs-pool `MatchupReports` |
 | `vendor/forge/userdata/decks/commander/_compare/*.json` | `compare_versions` | A/B `ComparisonReports` |
-| `vendor/_js_errors.log` | `web/app.py` | Browser-side error reports via `/api/log_error` |
+| `~/.commander-builder/_js_errors.log` | `web/routes_meta.py` | Browser-side error reports via `/api/log_error` (moved out of `vendor/` 2026-08-16 — telemetry doesn't belong in a vendored tree, and the old path was derived positionally from the deck dir) |
 | `vendor/forge/build.txt` | (bundled) | Forge build timestamp; consumed by `detect_forge_version` |
 | `knowledge_log.sqlite` (repo root, or `COMMANDER_BUILDER_KNOWLEDGE_DB` override) | `knowledge_log` | Iteration history |
 | `.cache/scryfall/*.json` and `C:\dev\mtg_cards\oracle_snapshots\*.json` | `scryfall_client` | Card metadata cache (shared with `forge_py`) |
 | `.cache/edhrec/*.json` | `edhrec_client` | EDHREC page cache (24 h TTL) |
 | `_forge_py_correlation.csv` (repo root) | `forge_py_correlation` | Paired-verdict log (opt-in) |
+
+---
+
+## Environment variables
+
+Every `COMMANDER_BUILDER_*` flag in the codebase, in one place (added
+2026-08-16 — before this, several were documented only in CHANGELOG
+archaeology). Paths win over defaults; feature flags are opt-in unless
+noted.
+
+| Variable | Owner | Effect |
+|----------|-------|--------|
+| `COMMANDER_BUILDER_DECK_DIR` | `dck_utils` / web | Override the Forge deck directory (default `vendor/forge/userdata/decks/commander`) |
+| `COMMANDER_BUILDER_KNOWLEDGE_DB` | `knowledge_log` | Path to the SQLite iteration log (default repo-root `knowledge_log.sqlite`) |
+| `COMMANDER_BUILDER_CONFIG` | `config_store` | Path to `config.json` (default `~/.commander-builder/config.json`) |
+| `COMMANDER_BUILDER_CREDENTIALS` | `_secrets` | Path to the credentials file holding `ANTHROPIC_API_KEY` (default `~/.commander-builder/credentials`) |
+| `COMMANDER_BUILDER_SECRET_KEY` | `web/app.py` | Flask session secret; generated per-run when unset |
+| `COMMANDER_BUILDER_COLLECTION` | `collection` | Path to the owned-cards collection export |
+| `COMMANDER_BUILDER_REPLAY_DIR` | `replay_store` | Where replay-lite game records are written |
+| `COMMANDER_BUILDER_REPLAY_CAP_MB` | `replay_store` | Byte cap for the replay store before eviction |
+| `COMMANDER_BUILDER_KEEP_GAME_LOGS` | `forge_runner` | Keep raw Forge stdout per game (soak debugging; large) |
+| `COMMANDER_BUILDER_LOCK_DIR` | `forge_batch` | Override where per-profile `.commander-builder.lock` files live |
+| `COMMANDER_BUILDER_CARD_SCORE` | `card_score` | Enable the FP-015 CardScore path (default OFF — failed three pre-registered gates) |
+| `COMMANDER_BUILDER_CORPUS_NORMS` | `corpus_themes` | Blend mined per-cluster role norms into targets (default OFF — pending A/B) |
+| `COMMANDER_BUILDER_CORRELATE_FORGE_PY` | `forge_py_correlation` | Log paired forge_py↔Forge verdicts to `_forge_py_correlation.csv` |
+| `COMMANDER_BUILDER_FORGEPY_SCREEN` | `forge_py_screen` | Pre-screen candidates with forge_py before spending JVM time |
+| `COMMANDER_BUILDER_LOG_DECISIONS` | `_advisor_logging` | Write advisor decision traces for debugging |
+| `MTG_CARDS_DIR` | `scryfall_client` | Oracle-snapshot directory shared with `forge_py` (defaults to an OS-appropriate path; historically a Windows dev path) |
 
 ---
 
