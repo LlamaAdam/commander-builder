@@ -13,7 +13,10 @@ Three implementations sharing one interface:
                     system, deck content as user input. Currently a stub
                     that raises NotImplementedError until the anthropic SDK
                     is installed and ANTHROPIC_API_KEY is set.
-  OllamaProposer  -- local model variant. Stub. Lower-quality but free.
+  OllamaProposer  -- RETIRED (decision A4, 2026-08-18). A local model
+                    cannot execute the audit workflow; see
+                    `local_model.py` for what local models are now used
+                    for and `ollama_propose` below for why.
 
 The router `propose()` picks based on `ProposerConfig`. Default is Manual
 because it's the only path that works without external dependencies; flip
@@ -103,8 +106,16 @@ class ProposerConfig:
     """Knobs for the proposer router. Mirrors `analyst.AnalystConfig` shape
     so they're interchangeable in user-facing CLIs."""
     use_claude: bool = False
+    #: RETIRED (decision A4). Accepted so existing callers/configs still
+    #: construct, but the proposal path it used to select is gone: the
+    #: router now prints ``OLLAMA_PROPOSE_RETIRED_NOTE`` and goes
+    #: straight to manual. Local models do narrow, oracle-supplied
+    #: classification in ``local_model.py``; they do not propose swaps.
     use_ollama: bool = False
     claude_model: str = "claude-sonnet-4-5"
+    #: RETIRED alongside ``use_ollama``. The live local-model endpoint
+    #: config lives in ``local_model.LocalModelConfig`` /
+    #: ``COMMANDER_BUILDER_LOCAL_MODEL_NAME`` / ``..._URL``.
     ollama_model: str = "llama3.2:3b"
     ollama_url: str = "http://localhost:11434/api/generate"
     # Path the manual proposer reads from. Default is the `audit_manifest.json`
@@ -117,7 +128,8 @@ class ProposerConfig:
 def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> ProposerOutput:
     """Route a proposer call through the configured ladder.
 
-    Order: Claude (if enabled) -> Ollama (if enabled) -> Manual fallback.
+    Order: Claude (if enabled) -> Manual fallback. (The Ollama rung was
+    retired by decision A4; `use_ollama=True` now only prints a note.)
     Manual is the safety net because it's the only path guaranteed to work
     without external deps. If you set `use_claude=True` but the SDK isn't
     installed, the call falls back to manual rather than crashing the loop.
@@ -150,17 +162,13 @@ def propose(input_: ProposerInput, config: Optional[ProposerConfig] = None) -> P
             raise  # Garbage response — surface it; see contract above.
         except Exception as exc:  # noqa: BLE001
             print(f"  WARN: claude_propose failed ({type(exc).__name__}); "
-                  f"falling back to ollama/manual.")
-    if config.use_ollama:
-        try:
-            return ollama_propose(input_, config)
-        except NotImplementedError:
-            pass
-        except LLMJsonError:
-            raise  # Same rule as Claude: garbage output is a loud error.
-        except Exception as exc:  # noqa: BLE001
-            print(f"  WARN: ollama_propose failed ({type(exc).__name__}); "
                   f"falling back to manual.")
+    if config.use_ollama:
+        # RETIRED (A4): no call is made — not even to check the daemon.
+        # Silently ignoring the flag would be worse than the dead path it
+        # replaces, so say plainly that the setting no longer does
+        # anything and where local models went.
+        print(f"  WARN: {OLLAMA_PROPOSE_RETIRED_NOTE}")
     return manual_propose(input_, config)
 
 
@@ -288,78 +296,50 @@ def claude_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOut
     )
 
 
-# --- Ollama backend (stub) -------------------------------------------------
+# --- Ollama backend: RETIRED (decision A4, 2026-08-18) ---------------------
+
+#: Printed verbatim by ``propose()`` when a caller still sets
+#: ``use_ollama=True``, and carried in ``ollama_propose``'s exception.
+#: Names the replacement AND the reason, because "this setting does
+#: nothing now" is useless without both.
+OLLAMA_PROPOSE_RETIRED_NOTE = (
+    "ProposerConfig.use_ollama is retired (decision A4): a local model "
+    "cannot execute the audit workflow, so the proposal path was removed "
+    "rather than left as dead code. Proposal + verdict work stays on "
+    "Claude; local models now handle narrow, oracle-supplied "
+    "classification (card role tagging, deck archetype tagging) via "
+    "commander_builder.local_model — opt in with "
+    "COMMANDER_BUILDER_LOCAL_MODEL=1. Falling back to the manual manifest."
+)
+
 
 def ollama_propose(input_: ProposerInput, config: ProposerConfig) -> ProposerOutput:
-    """Render a swap manifest via a local Ollama model.
+    """RETIRED. Always raises ``NotImplementedError``.
 
-    POSTs to `config.ollama_url` with the audit prompt as instruction +
-    deck contents. Free at runtime; quality depends on the model. The audit
-    workflow's blind-build-then-diff approach is meaningfully harder than
-    the analyst's verdict task, so expect lower fidelity than `claude_propose`
-    on a small local model. Useful as a fallback when API access is
-    unavailable.
+    WHAT THIS USED TO DO, AND WHY IT COULD NOT WORK
+    ==============================================
+    It POSTed the full 706-line ``prompts/moxfield_audit_v3.md`` — a
+    browser-driven workflow prompt written for Claude, opening with
+    "STEP 0 — ASK ME FIRST" and driving `javascript_tool` fetches — to a
+    tool-less local ``llama3.2:3b`` and expected a complete swap manifest
+    back. The model has no tools, no EDHREC data, and no reliable recall
+    of the Commander card pool, so the two available outcomes were
+    unparseable output or a fabricated manifest of legal-but-unevidenced
+    cards. Nothing in ``src/`` ever set ``use_ollama``, so this never
+    fired in production; it was dead code promising something a 3B model
+    cannot deliver.
 
-    Falls back to NotImplementedError if the daemon isn't reachable."""
-    import urllib.error
-    import urllib.request
+    KEPT AS A LOUD STUB rather than deleted, because ``use_ollama``
+    survives in ``ProposerConfig`` for construction back-compat and this
+    function is imported by name (tests, and any out-of-tree caller). An
+    ``ImportError`` would say nothing; this says where local models went.
 
-    if not _CLAUDE_SYSTEM_PROMPT_FILE.exists():
-        raise FileNotFoundError(
-            f"audit prompt missing: {_CLAUDE_SYSTEM_PROMPT_FILE}"
-        )
-    system_prompt = _CLAUDE_SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
-    deck_text = input_.deck_text or input_.deck_path.read_text(encoding="utf-8")
-
-    instruction = (
-        f"{system_prompt}\n\n"
-        f"Run the audit on this deck. Target bracket: {input_.bracket}. Skip "
-        f"Step 5.6 -- compare_versions handles that downstream.\n\n"
-        f"Deck (Forge .dck format):\n{deck_text}\n\n"
-        f"Output ONLY the audit_manifest JSON. No prose, no code fences."
-    )
-    body = json.dumps({
-        "model": config.ollama_model,
-        "prompt": instruction,
-        "stream": False,
-        "format": "json",
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        config.ollama_url, data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            payload = json.loads(resp.read())
-    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
-        raise NotImplementedError(
-            f"Ollama daemon not reachable at {config.ollama_url}: {exc}"
-        ) from exc
-
-    text = payload.get("response", "")
-    if not text:
-        raise RuntimeError("ollama_propose: empty response from daemon")
-    # format:"json" makes Ollama emit syntactically valid JSON, but small
-    # local models still occasionally wrap it or truncate. Same shared
-    # extractor + same loud-failure contract as claude_propose: a garbage
-    # response raises LLMJsonError, which propose() re-raises instead of
-    # burying it under manual_propose's "No manifest" error.
-    manifest = extract_json_object(
-        text,
-        context=(
-            f"ollama_propose (model={config.ollama_model}, "
-            f"response {len(text)} chars)"
-        ),
-    )
-    return ProposerOutput(
-        added=list(manifest.get("added", []) or []),
-        removed=list(manifest.get("removed", []) or []),
-        rationale=str(manifest.get("rationale", "")),
-        audit_version=str(manifest.get("audit_version", "v3")),
-        audit_timestamp=manifest.get("audit_timestamp"),
-        deck_id=input_.deck_id or manifest.get("deck_id"),
-        source="ollama",
-    )
+    WHERE LOCAL MODELS WENT: ``local_model.py`` — narrow tasks where the
+    oracle text is SUPPLIED in the prompt and the answer is one member of
+    an existing closed taxonomy, each with a deterministic fallback that
+    already ships. Proposal and verdict work stays on Claude.
+    """
+    raise NotImplementedError(OLLAMA_PROPOSE_RETIRED_NOTE)
 
 
 # ===========================================================================
