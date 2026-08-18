@@ -16,9 +16,11 @@ from-atoms synthesizer: coherence is borrowed from EDHREC's community
 aggregate and the improve loop does the tuning (see FP-014 in
 [docs/future-plans.md](docs/future-plans.md)). It's not a Moxfield clone,
 not a real-time game client. At its core it's still an iteration engine
-where Forge provides ground-truth simulation and an LLM (Claude or local
-Ollama) acts as the analyst that reads sim deltas and decides what to try
-next.
+where Forge provides ground-truth simulation and Claude acts as the
+analyst that reads sim deltas and decides what to try next. A local
+model (Ollama) can be enabled for narrow tagging work — deck archetype
+and card roles, with the oracle text supplied — but it does not produce
+proposals or verdicts; see `local_model.py`.
 
 **What that ground truth is, exactly.** The opponents are bots. A `kept`
 verdict certifies "this version wins more against Forge's AI" — an AI

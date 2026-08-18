@@ -103,7 +103,8 @@ read any layer. Everything else honors the invariant.
 | `scryfall_client` | Card lookups, disk cache, color identity, forced refresh | Anything beyond card metadata (archetype is its own thing). |
 | `edhrec_client` | EDHREC commander page + average-deck fetch, schema-tolerant `__NEXT_DATA__` walk, retry-with-backoff (5xx/429/URLError, `Retry-After` honored, capped at 30 s) | What to do with the data. Heuristic advisor + meta-test consume. |
 | `staples` | `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`, `classify_role_extended` (canonical), frequency labels, confidence tiers, role saturation thresholds, manabase essentials, tribal essentials | Recommendation logic. Advisors use these. |
-| `archetype` | Heuristic deck-classifier (filename hint → keyword scan → midrange fallback) | LLM escalation. Stubs exist for Claude/Ollama. |
+| `archetype` | Deck-classifier v2: oracle-derived signals (combos+tutors, interaction, stax patterns, tribal, curve) with a filename hint and a midrange default | Proposing changes. The old Claude/Ollama stubs are GONE (pinned by `test_llm_stubs_are_gone`); local tagging now lives in `local_model`. |
+| `local_model` | Local-model tier (A4): preflight, schema-first tasks with the evidence supplied, closed-taxonomy validation, degrade-to-deterministic routers, agreement harness | Proposals and verdicts — those stay on Claude. It also owns no taxonomy of its own; it imports `staples`' and `archetype`'s. |
 | `game_changers` | WotC Game Changers list (HTML scrape, 7-day cache, bundled fallback) | Bracket-fitting. The advisor + dashboard consume. |
 | `pool_curator` | Round-robin tournament, candidate ranking, top-6 split with archetype/color diversity, persisted pool JSON | Picking candidates. That's the user / `moxfield_import`. |
 | `run_match` | User deck vs curated pool (or fallback opponents), `MatchupReport` | Improvement decisions. That's the analyst loop. |
@@ -121,7 +122,7 @@ read any layer. Everything else honors the invariant.
 | `_advisor_role_helpers` | Thin role-classifier wrapper for advisor use | Core classification. That's `staples.classify_role_extended`. |
 | `analyst` | Verdict (`kept` / `reverted` / `neutral`) with confidence + reasoning + lessons | Running the comparison itself. |
 | `_llm_json` | Shared robust JSON extraction for LLM responses: `try_extract_json_object` (fence strip / brace-scan recovery) + `extract_json_object` raising a loud `LLMJsonError` with context + response snippets | Prompting or calling the LLM. Analyst / proposer / curator / advisor call it on the raw reply. |
-| `proposer` (orchestrator) | Router for manual / Claude / Ollama proposers; the `Proposal` dataclass; `auto_propose()` curator pipeline; `apply_proposal_to_deck`; `_extract_curator_json` | Validating proposals. `compare_versions` + `analyst` do. |
+| `proposer` (orchestrator) | Router for manual / Claude proposers; the `Proposal` dataclass; `auto_propose()` curator pipeline; `apply_proposal_to_deck`; `_extract_curator_json` | Validating proposals (`compare_versions` + `analyst` do). Local-model proposing — retired 2026-08-17, see `local_model`. |
 | `_proposer_filters` | Post-response curator filters: `enforce_bracket_caps` (game-changers stripped at B1/B2), `enforce_color_identity` (off-color adds rejected via Scryfall CI), `_load_game_changers` | Recommendation logic. The advisor / curator generate; filters reject. |
 | `_proposer_sim` | Forge A/B sim glue: `_verdict_from_ab` (binomial-significance verdict → kept/reverted/neutral), `_ab_to_iteration_fields`, bracket-aware `_pick_filler_decks`, `_run_sim_and_record`, `_log_auto_curate_iteration` | Running the sim itself. `forge_runner` + `compare_versions` do. |
 | `_proposer_cli` | `auto_curate_main` (the `commander-auto-curate` console_script) — argparse + end-to-end orchestration of advisor → curator → apply → sim | Pipeline stages themselves; lives here only as a thin wrapper. |
@@ -471,6 +472,9 @@ noted.
 | `COMMANDER_BUILDER_LOCK_DIR` | `forge_batch` | Override where per-profile `.commander-builder.lock` files live |
 | `COMMANDER_BUILDER_CARD_SCORE` | `card_score` | Enable the FP-015 CardScore path (default OFF — failed three pre-registered gates) |
 | `COMMANDER_BUILDER_REBUILD_TIER` | `change_budget` | Allow auto-mode to select the 30+30 rebuild tier (default OFF — that 6× cost multiplier is gated on an unvalidated health score; `--mode rebuild` is unaffected) |
+| `COMMANDER_BUILDER_LOCAL_MODEL` | `local_model` | Enable the local-model tier for narrow tagging (default OFF — unmeasured; run the agreement harness first) |
+| `COMMANDER_BUILDER_LOCAL_MODEL_NAME` | `local_model` | Ollama model tag for that tier (default `llama3.2:3b`) |
+| `COMMANDER_BUILDER_LOCAL_MODEL_URL` | `local_model` | Base URL of the Ollama-compatible daemon (default `http://localhost:11434`) |
 | `COMMANDER_BUILDER_CORPUS_NORMS` | `corpus_themes` | Blend mined per-cluster role norms into targets (default OFF — pending A/B) |
 | `COMMANDER_BUILDER_CORRELATE_FORGE_PY` | `forge_py_correlation` | Log paired forge_py↔Forge verdicts to `_forge_py_correlation.csv` |
 | `COMMANDER_BUILDER_FORGEPY_SCREEN` | `forge_py_screen` | Pre-screen candidates with forge_py before spending JVM time |
@@ -489,7 +493,7 @@ require changing module boundaries.
 |------|---------|--------------|
 | `improvement_advisor.advise(source=...)` | `"heuristic"` (EDHREC inclusion%/synergy) | `"bracket_peers"` (Moxfield peer rankings), `"claude"` (LLM-synthesized via `_advisor_claude`); each mapped to a different module |
 | `analyst.analyze()` router | `heuristic_verdict` | `claude_verdict` (anthropic SDK; `ANTHROPIC_API_KEY` or BYO-key header), `ollama_verdict` (HTTP POST to `localhost:11434/api/generate`) |
-| `proposer.propose()` router | `manual_propose` (read `audit_manifest.json`) | `claude_propose`, `ollama_propose` |
+| `proposer.propose()` router | `manual_propose` (read `audit_manifest.json`) | `claude_propose` (`ollama_propose` retired 2026-08-17 — a tool-less 3B model could not execute the 706-line browser audit prompt; local models moved to `local_model`'s narrow tasks) |
 | `forge_runner` AI | Forge built-in heuristic AI | Phase 4 (out of scope today): Claude-as-pilot via decision-point hooks |
 | `moxfield_push._api_push` | `NotImplementedError` (WON'T-DO for personal-use scope) | — |
 | `forge_py_correlation` execution | OFF | `COMMANDER_BUILDER_CORRELATE_FORGE_PY=1` opts in to paired-verdict logging |
@@ -689,31 +693,52 @@ independent value before committing to a full sim.
 
 ---
 
-## Where Ollama (or another local LLM) could plug in
+## Where local models plug in — BUILT (`local_model.py`, 2026-08-17)
 
-The audit prompt itself currently runs on Claude — it's a complex
-multi-step workflow with web fetches and structured JSON manipulation.
-Several **simpler tasks** in the broader pipeline are good candidates
-for routing to a local Ollama model to save Claude tokens:
+Owner decision A4. This section used to describe a deferred sketch
+called `llm_router.py`; the tier is now built, and the routing question
+it deferred has been answered with a policy rather than a threshold.
 
-| Task | Complexity | Frequency | Good fit for local? |
-|------|-----------|-----------|---------------------|
-| Archetype classification (one-shot: aggro/midrange/control/combo/stax) | Low | Per-deck, occasional | ✅ Strong fit |
-| Color identity from commander name | Low | Per-deck, occasional | ✅ Strong fit |
-| Card role tagging for sim (regex first, LLM only on ambiguous) | Low | Per-card, batched | ✅ Strong fit |
-| Card-pair synergy hint ("does X synergize with Y") | Medium | Per-swap | ⚠️ Maybe — quality-sensitive |
-| Audit's blind ideal build | High | Per-deck audit | ❌ Stay on Claude |
-| Audit's swap rationale generation | Medium-High | Per-deck audit | ❌ Stay on Claude |
-| Phase 2 analyst verdict | High | Per-iteration | ❌ Stay on Claude |
-| Phase 2 proposer | High | Per-iteration | ❌ Stay on Claude |
+**The policy: local models get tasks where the evidence is SUPPLIED and
+the answer comes from a closed list.** Not "low complexity" — that was
+the wrong axis. What predicts whether a small model succeeds is whether
+it must *recall* Magic (unreliable below frontier scale, and the source
+of invented card names) or merely *read* text it was handed and pick a
+label. Proposal and verdict work stays on Claude — not because it is
+complex, but because it needs judgment over knowledge the model has to
+bring itself.
 
-When we're ready, the natural shape is a thin `llm_router.py` module:
+| Task | Status |
+|------|--------|
+| Card role tagging (oracle text supplied → one of `staples`' roles) | ✅ Built — `local_model` task `role_tag` |
+| Archetype classification (deck signals supplied → one `Archetype`) | ✅ Built — `local_model` task `archetype_tag` |
+| Color identity from commander name | ➖ Not worth a model — already deterministic in `scryfall_client` |
+| Card-pair synergy hint | ⚠️ Open — quality-sensitive, and no deterministic fallback to degrade to |
+| Audit's blind ideal build / swap rationale | ❌ Stays on Claude (policy, not deferral) |
+| Phase 2 analyst verdict / proposer | ❌ Stays on Claude (policy, not deferral) |
 
-```python
-def classify(prompt: str, *, complexity: str = "auto") -> str:
-    # complexity: "low" → Ollama, "high" → Claude API, "auto" → router decides
-    ...
-```
+Shape of the built module:
 
-Decisions about routing thresholds, prompt format, and quality
-fallbacks are deferred until there's concrete cost pressure.
+- **Preflight** checks the daemon *and* that the model is pulled, naming
+  the exact `ollama pull <model>` command. Silent, confusing failure was
+  the original complaint against this path.
+- **Schema-first**: each task owns a short purpose-written prompt, a
+  JSON schema, and its own validation. An answer outside the taxonomy is
+  a malformed response, not data.
+- **Degrade, never fabricate**: every failure returns `None` and the
+  caller falls back to the deterministic classifier. A local answer is
+  never a silent default.
+- **Taxonomies are imported** from `staples` / `archetype`, never copied,
+  so they cannot drift from the classifiers they back up.
+- **An agreement harness** measures the tier against the deterministic
+  classifier. It reports agreement, explicitly not accuracy — whether
+  this tier earns production use is a question for data.
+
+No production call site is wired to it yet, and the flag is off by
+default. That is deliberate: wiring an unmeasured classifier into the
+dashboard would be the same unvalidated-default move this decision was
+reacting against.
+
+Retired at the same time: `proposer.ollama_propose`, which fed all 706
+lines of the browser audit prompt to `llama3.2:3b` and waited 600
+seconds for a full swap manifest.

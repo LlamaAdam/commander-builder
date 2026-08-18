@@ -13,6 +13,20 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Added
 
+- **Local-model tier for narrow tagging** (`local_model.py`, decision
+  A4 — the question this review started from). Local models stop doing
+  proposal/verdict work and start doing tasks where the evidence is
+  *supplied* and the answer comes from a closed list: `role_tag` and
+  `archetype_tag`, each degrading to the existing deterministic
+  classifier on any failure. Preflight checks the daemon *and* that the
+  model is pulled, naming the exact `ollama pull` command. Taxonomies
+  are imported from `staples`/`archetype` rather than copied, so they
+  cannot drift. Ships with an agreement harness that measures the tier
+  against the deterministic classifier — reporting agreement, expressly
+  not accuracy — because whether this tier earns production use is a
+  question for data. Off by default behind
+  `COMMANDER_BUILDER_LOCAL_MODEL`; no production call site is wired to
+  it yet, deliberately.
 - **Politics guard (on by default).** Forge's AI does not negotiate,
   pick an archenemy, or model an opponent's incentive to pay a tax, so
   goad / monarch / vote / tempting-offer / Rhystic-tax / pillow-fort
@@ -51,6 +65,16 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Changed
 
+- **`proposer.ollama_propose` retired.** It fed all 706 lines of the
+  browser audit prompt — which opens "STEP 0 — ASK ME FIRST" — to
+  `llama3.2:3b` and waited 600 seconds for a complete swap manifest. A
+  tool-less 3B model could only fail to parse or fabricate, and nothing
+  in `src/` ever enabled the path anyway. It is now a loud
+  `NotImplementedError` pointing at `local_model` (deleting it would
+  turn imports into an `ImportError` that explains nothing), and
+  `propose()` no longer calls it at all — a raise inside the router
+  ladder would have been swallowed by the quiet fall-through contract,
+  recreating the silent degrade this fixes.
 - **`--sim-games` defaults to the verdict floor** (40 pod games, from
   `min_sim_games_for_verdict()`) instead of 5. At 5 games `--run-sim`
   could only ever record `inconclusive`, so the flagship
