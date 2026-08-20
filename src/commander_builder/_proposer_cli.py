@@ -756,6 +756,17 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
               f"{len(proposal.dropped_for_protection)}")
         for c in proposal.dropped_for_protection:
             print(f"  [LOCKED] {c}")
+    if proposal.dropped_for_politics:
+        # Decision C2 / R2-P09 (2026-08-20). Printed with the shared
+        # shield sentence so the CLI, the advisor's skip records and any
+        # UI pill all disclose the same refusal in the same words —
+        # the guard removing a cut has to be visible, not silent.
+        from .staples import POLITICS_SHIELD_REASON
+        print(f"Dropped by the politics guard: "
+              f"{len(proposal.dropped_for_politics)}")
+        print(f"  ({POLITICS_SHIELD_REASON})")
+        for c in proposal.dropped_for_politics:
+            print(f"  [POLITICS] {c}")
     if proposal.dropped_for_color_identity:
         print(f"Dropped for color identity (off-color): "
               f"{len(proposal.dropped_for_color_identity)}")

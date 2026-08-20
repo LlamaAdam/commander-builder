@@ -474,6 +474,67 @@ def test_classify_role_ward_guard_requires_cost_marker():
     ) != "protection"
 
 
+def test_classify_role_protection_phasing_real_oracle():
+    """Teferi's Protection classifies protection with phasing in the
+    table (round-2 review 2026-08-20, R2-P11)."""
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Teferi's Protection")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "protection"
+
+
+def test_phasing_pattern_fires_on_real_phase_out_text():
+    """The phasing PATTERN itself matches Teferi's Protection, not just
+    the card's classification.
+
+    Needed because Teferi's Protection also carries "protection from
+    everything", so the classification test above would pass even if
+    the phasing pattern were deleted — this asserts the new pattern is
+    what does the work for phase-out text. Reads the pattern out of the
+    public ``_ROLE_PATTERNS`` table (those strings are the contract —
+    ``interaction.py`` imports them too) rather than re-typing the
+    regex, so a rewrite can't leave this test silently passing.
+    """
+    import re
+
+    from commander_builder.staples import _ROLE_PATTERNS
+    from tests.fixtures.real_oracles import oracle
+
+    protection = dict(_ROLE_PATTERNS)["protection"]
+    phasing = [p for p, _t, _s in protection if "phase" in p]
+    assert phasing, (
+        "no phasing pattern in the protection role table — R2-P11 "
+        "regressed"
+    )
+    text = oracle("Teferi's Protection")["oracle_text"].lower()
+    assert any(re.search(p, text) for p in phasing)
+
+
+def test_classify_role_protection_granted_shield_counter_real_oracle():
+    """Take Up the Shield's only protection signal is the shield
+    counter it grants — its +2/+2 and lifelink riders match nothing
+    else in the role table, so this is an isolated pin for the new
+    pattern."""
+    from tests.fixtures.real_oracles import oracle
+    o = oracle("Take Up the Shield")
+    assert classify_role(o["oracle_text"], o["type_line"]) == "protection"
+
+
+@pytest.mark.parametrize("text,type_line", [
+    # Synthetic NEGATIVE guards, same reasoning as intrinsic ward: a
+    # permanent that arrives with its OWN shield counter protects
+    # nothing but itself and must not fill the protection quota. The
+    # "enters with" templating carries no "put ... on", which is what
+    # the pattern keys on.
+    ("Flying\nThis creature enters with two shield counters on it.",
+     "Creature — Angel Soldier"),
+    ("This creature enters with a shield counter on it.",
+     "Creature — Soldier"),
+])
+def test_classify_role_intrinsic_shield_counter_is_not_protection(
+        text, type_line):
+    assert classify_role(text, type_line) != "protection"
+
+
 def test_classify_role_ramp_treasure_plural_dockside():
     # "create X Treasure tokens" — the singular "create a treasure
     # token" pattern missed every plural/variable Treasure producer.
@@ -1228,6 +1289,13 @@ def test_essential_manabase_tier_order_untapped_before_tapped():
 # Sentinels, Marchesa's Decree, Council's Judgment, Tempt with Discovery,
 # Propaganda and Disrupt Decorum to real_oracles.py (plus their entries in
 # test_real_oracle_fixture.EXPECTED_ROLE) and re-point the positives here.
+#
+# 2026-08-20 (R2-P10): the first politics card DID land in the fixture —
+# Smothering Tithe, whose punisher-tax template the guard was missing.
+# Network was still blocked, so its body is an OFFLINE TRANSCRIPTION
+# marked as such in the fixture module; re-verify it with the rest of the
+# follow-up list. Its negative twin (Dance of the Dead's "If the player
+# does" branch) is verbatim Scryfall text that was already in the fixture.
 
 from commander_builder.staples import (  # noqa: E402
     POLITICS_SHIELD_REASON,
@@ -1282,6 +1350,49 @@ def test_politics_positive_shapes(text, expected_tag):
     """Each printed politics template is detected and tagged."""
     assert is_politics_card(text) is True
     assert expected_tag in politics_tags(text)
+
+
+def test_politics_tax_punisher_template_real_smothering_tithe():
+    """The flagship tax card, on REAL oracle text (R2-P10, 2026-08-20).
+
+    Smothering Tithe's offer and consequence are two sentences with no
+    "unless" ("that player may pay {2}. If the player doesn't, ...") —
+    the original pattern returned no tags for the card the guard's own
+    comment named as covered. This is the one positive politics case
+    that is NOT synthetic; see the provenance note in
+    tests/fixtures/real_oracles.py for how the text was sourced with
+    Scryfall unreachable.
+    """
+    data = oracle("Smothering Tithe")
+    assert is_politics_card(data["oracle_text"], data["type_line"]) is True
+    assert "tax" in politics_tags(data["oracle_text"])
+
+
+def test_politics_tax_punisher_positive_branch_is_not_a_tax():
+    """"If the player DOES" is an optional cost, not a punisher tax.
+
+    Dance of the Dead's upkeep line ("that player may pay {1}{B}. If
+    the player does, untap that creature") has the same opening clause
+    as Smothering Tithe but rewards paying instead of punishing not
+    paying — nobody is being taxed, so the card must stay cuttable.
+    Real fixture text, because a false positive is by definition text
+    nobody expected to match.
+    """
+    data = oracle("Dance of the Dead")
+    assert "that player may pay" in data["oracle_text"]
+    assert is_politics_card(data["oracle_text"], data["type_line"]) is False
+
+
+def test_politics_tax_punisher_sibling_subjects():
+    """The subject alternation covers the each-opponent phrasing.
+
+    SYNTHETIC — written to the printed template (Protection
+    Racket-shaped upkeep punishers), not to one card's text, per the
+    provenance rule at the top of this section.
+    """
+    body = ("At the beginning of your upkeep, each opponent may pay 3 "
+            "life. If they don't, you draw a card.")
+    assert "tax" in politics_tags(body)
 
 
 @pytest.mark.parametrize("card_name", [

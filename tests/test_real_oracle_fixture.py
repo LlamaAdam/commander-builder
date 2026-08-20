@@ -61,11 +61,14 @@ EXPECTED_ROLE: dict[str, str] = {
     "Prosper, Tome-Bound":    "draw",
     "Ram Through":            "removal",     # bite: damage equal to power
     "Reanimate":              "other",       # reanimation-pricing fixture
+    "Smothering Tithe":       "ramp",        # punisher-tax politics fixture
     "Soul Shatter":           "removal",     # edict
     "Spell Pierce":           "removal",     # restricted counterspell
     "Sun Titan":              "threat",      # reanimation NEGATIVE fixture
     "Swan Song":              "removal",     # restricted counterspell
     "Sylvan Library":         "draw",
+    "Take Up the Shield":     "protection",  # shield counter (granted)
+    "Teferi's Protection":    "protection",  # phasing (+ protection from)
     "Three Visits":           "ramp",
     "Toxic Deluge":           "wipe",
     "Victimize":              "other",       # reanimation hard-tag fixture

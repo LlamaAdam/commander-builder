@@ -153,6 +153,10 @@ def _materialize_proposed_deck(
     # breaking the manifest↔diff invariant this function exists to keep.
     manifest["dropped_for_bracket"] = list(proposal.dropped_for_bracket)
     manifest["dropped_for_protection"] = list(proposal.dropped_for_protection)
+    # Politics-shielded cuts (decision C2 / R2-P09, 2026-08-20) — same
+    # key the other manifest writer (_proposer_sim._log_auto_curate_
+    # iteration) uses, so both writers keep producing one manifest shape.
+    manifest["dropped_for_politics"] = list(proposal.dropped_for_politics)
     manifest["dropped_for_color_identity"] = list(
         proposal.dropped_for_color_identity)
     manifest["dropped_for_balance"] = list(proposal.dropped_for_balance)

@@ -428,6 +428,22 @@ class Proposal:
     # same defensive pattern as bracket caps + color identity. Empty
     # unless the caller opted into owned-only curation.
     dropped_for_unowned: list[str] = field(default_factory=list)
+    # Cards Claude proposed for CUT that use a mechanic Forge's AI
+    # cannot value — goad / monarch / vote / tempting offer / Rhystic
+    # tax / pillow-fort deterrent (decision C2, ``staples.politics_*``).
+    # Round-2 review 2026-08-20 (R2-P09): the candidate cuts handed to
+    # the curator are ALREADY politics-filtered upstream (``advise()``
+    # runs ``_filter_for_politics`` over every source) and the curator
+    # prompt tells Claude to pick from those candidates — but there was
+    # no post-response net, so a curator DEVIATION could still cut
+    # Rhystic Study on the unattended ``commander-auto-curate`` /
+    # ``commander-improve`` loop, which is the exact margin-driven cut
+    # loop decision C2 was written for. This is the enforcement half,
+    # built on the same reasoning as the color-identity and ownership
+    # nets above ("Claude can propose cards outside the candidate
+    # pool"). Empty when the deck opts out via
+    # ``[metadata] PoliticsGuard=off``.
+    dropped_for_politics: list[str] = field(default_factory=list)
     # Populated by apply_proposal_to_deck. Empty until that call.
     applied_adds: list[str] = field(default_factory=list)
     applied_cuts: list[str] = field(default_factory=list)
@@ -446,8 +462,11 @@ class Proposal:
     #                             violation.
     #   dropped_commander_add  -- the add names the [Commander] card.
     # Every dropped swap appears under EXACTLY ONE reason field —
-    # protected cuts live only in dropped_for_protection, balance
-    # surplus only in dropped_for_balance, validated pairs here.
+    # protected cuts live only in dropped_for_protection, politics-
+    # shielded cuts only in dropped_for_politics (the politics net runs
+    # over the protection filter's survivors, so the two can't both
+    # claim a card), balance surplus only in dropped_for_balance,
+    # validated pairs here.
     dropped_unmatched_cut: list[dict] = field(default_factory=list)
     dropped_duplicate_add: list[dict] = field(default_factory=list)
     dropped_commander_add: list[dict] = field(default_factory=list)
@@ -889,6 +908,50 @@ def auto_propose(
         else:
             kept_cuts.append(c)
 
+    # Politics filter: strip any cut Claude proposed against a card
+    # Forge's AI structurally cannot value (decision C2). Round-2
+    # review 2026-08-20 (R2-P09) found this net missing: the ADD side
+    # got three post-response nets precisely because "Claude can
+    # propose cards outside the candidate pool", but the CUT side had
+    # only the Protect= net — so on the unattended loop (the one whose
+    # margin "empirically" cuts exactly the cards that define
+    # multiplayer Commander) a curator deviation could still cut a
+    # Rhystic Study the upstream candidate filter had already shielded.
+    #
+    # Runs AFTER the protection filter and only over its survivors, so
+    # a cut that is BOTH protected and political appears in exactly one
+    # bucket — the invariant the dropped_* fields document. Also runs
+    # BEFORE the max_cuts slice, same as protection, so the cap counts
+    # only allowed cuts.
+    #
+    # Name resolution is CACHE-ONLY, matching the in-path shield in
+    # ``_advisor_heuristic`` (which reads its own ``_cached_scryfall``).
+    # Reasons, in order: (1) the advisor stage that produced this
+    # proposal resolved the deck's own cards moments earlier, so the
+    # names a cut can legally reach are already snapshotted; (2) a
+    # networked lookup here would add one 20s-timeout-capable round trip
+    # per proposed cut to every round of an unattended loop; (3) an
+    # unresolvable name yields NO tags and is therefore NOT shielded —
+    # the same fail-safe direction ``politics_tags_for_name`` documents,
+    # so a cold cache degrades to "the upstream candidate filter is the
+    # only guard", never to "no cuts can be proposed". The per-deck
+    # ``PoliticsGuard=off`` opt-out short-circuits the loop entirely,
+    # matching ``_filter_for_politics``.
+    from .staples import is_politics_card_name, politics_guard_enabled
+
+    dropped_for_politics: list[str] = []
+    if politics_guard_enabled(deck_text):
+        def _cached_only(name: str):
+            return lookup_card(name, cache_only=True)
+
+        surviving_cuts: list[str] = []
+        for c in kept_cuts:
+            if is_politics_card_name(c, _cached_only):
+                dropped_for_politics.append(c)
+            else:
+                surviving_cuts.append(c)
+        kept_cuts = surviving_cuts
+
     capped_adds = kept_adds[:max_adds]
     capped_cuts = kept_cuts[:max_cuts]
 
@@ -901,6 +964,7 @@ def auto_propose(
         dropped_for_protection=dropped_for_protection,
         dropped_for_color_identity=dropped_for_color_identity,
         dropped_for_unowned=dropped_for_unowned,
+        dropped_for_politics=dropped_for_politics,
     )
 
 

@@ -172,6 +172,120 @@ def test_stale_lock_is_not_reported_as_locked_by_discovery_peek(tmp_path):
     assert is_profile_locked(profile) is False
 
 
+# --- reclaim races (round-2 review 2026-08-20, R2-P15) ---------------------
+#
+# Both windows below are real interleavings of two processes, but neither
+# needs threads to reproduce: the whole point is that each step is an
+# ordinary filesystem call, so the race is expressed as a SEQUENCE. Driving
+# it by hand also makes the test deterministic — a threaded version would
+# pass by luck on the buggy code most of the time.
+
+
+def test_two_reclaimers_cannot_both_win_one_stale_lock(tmp_path):
+    """Interleaving A:stat, B:stat, A:reclaim+create, B:reclaim.
+
+    The old code's B did ``os.unlink(lock_path)`` — which by then pointed at
+    A's FRESH lock — and then created its own, so both runs believed they
+    owned the profile. Renaming to a unique name makes B's arbitration step
+    fail (there is no stale file to take), so B reports busy.
+    """
+    from commander_builder.forge_batch import _reclaim_stale_lock
+
+    (profile,) = _profiles(tmp_path, 1)
+    stale = _foreign_lock(profile, age_sec=_PROFILE_LOCK_STALE_SEC + 60)
+
+    # Both reclaimers observe the same stale lock.
+    assert _lock_file(profile).exists()
+
+    # A reclaims and takes the profile.
+    a = _try_acquire_profile(profile)
+    assert a is not None and a.reclaimed_stale is True
+
+    # B's reclaim step, running a moment later against what is now A's live
+    # lock, must NOT succeed — and must not destroy A's lock.
+    assert _reclaim_stale_lock(_lock_file(profile)) is False
+    assert stale.exists()
+    assert stale.read_text(encoding="utf-8") == a.payload
+
+    # ...and B's full acquire reports busy.
+    assert _try_acquire_profile(profile) is None
+    a.release()
+
+
+def test_reclaimer_restores_a_lock_that_turned_out_to_be_live(tmp_path):
+    """The reclaim step re-checks WHAT IT GOT.
+
+    A run can stat a stale lock, then have the holder refresh (or a
+    reclaimer replace) it before the rename lands. Renaming a LIVE lock away
+    would unfence the profile, so the file is put back and the caller
+    reports failure."""
+    from commander_builder.forge_batch import _reclaim_stale_lock
+
+    (profile,) = _profiles(tmp_path, 1)
+    live = _foreign_lock(profile)  # fresh mtime
+    body = live.read_text(encoding="utf-8")
+
+    assert _reclaim_stale_lock(_lock_file(profile)) is False
+    assert live.exists()
+    assert live.read_text(encoding="utf-8") == body
+    assert is_profile_locked(profile)
+    # No reclaim temp files left behind.
+    assert [p.name for p in profile.iterdir()] == [_PROFILE_LOCK_NAME]
+
+
+def test_release_refuses_to_delete_a_lock_it_does_not_own(tmp_path):
+    """The mirror-image race: a run that outlived the stale window.
+
+    Sequence: A acquires -> A's lock goes stale (A is still running, wedged
+    JVM or a 6h serial sim) -> B reclaims it and starts its own sim -> A
+    finishes and releases. A's release used to unlink BY PATH, deleting B's
+    LIVE lock and letting a third run in. It must now decline.
+    """
+    (profile,) = _profiles(tmp_path, 1)
+
+    a = _try_acquire_profile(profile)
+    assert a is not None and a.path is not None
+    # A is still running, but its lock now looks abandoned.
+    when = time.time() - (_PROFILE_LOCK_STALE_SEC + 60)
+    os.utime(a.path, (when, when))
+
+    b = _try_acquire_profile(profile)
+    assert b is not None and b.reclaimed_stale is True
+
+    a.release()  # A finally exits its finally-block.
+
+    assert b.path is not None and b.path.exists(), (
+        "A's release deleted the reclaimer's live lock"
+    )
+    assert b.path.read_text(encoding="utf-8") == b.payload
+    assert is_profile_locked(profile)
+    # And a third run still can't get in.
+    assert _try_acquire_profile(profile) is None
+
+    b.release()
+    assert not b.path.exists()
+
+
+def test_release_still_removes_an_empty_lockfile(tmp_path):
+    """The payload write is diagnostics and is allowed to fail. An EMPTY
+    lockfile must still count as ours, or a filesystem that refused the
+    write would leak the profile for a full stale window."""
+    (profile,) = _profiles(tmp_path, 1)
+    lock = _try_acquire_profile(profile)
+    assert lock is not None and lock.path is not None
+    lock.path.write_text("", encoding="utf-8")
+    lock.release()
+    assert not lock.path.exists()
+
+
+def test_release_is_still_idempotent_with_payload_checking(tmp_path):
+    (profile,) = _profiles(tmp_path, 1)
+    lock = _try_acquire_profile(profile)
+    assert lock is not None
+    lock.release()
+    lock.release()  # must not raise
+
+
 # --- pool acquisition ------------------------------------------------------
 
 

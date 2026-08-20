@@ -834,6 +834,31 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         # keyword, so card-name mentions ("Ward of Bones") never match,
         # and ``\b``-anchoring blocks "toward"/"reward".
         (r"(?:have|has|gains?)\s+ward\s*(?:\{|—)", None, 50),
+        # Phasing — "phases out" / "phase out" (Teferi's Protection,
+        # Slip Out the Back, Guardian of Faith). Round-2 review 2026-08-20
+        # (R2-P11): the 2026-08-16 evergreen sweep added ward but not the
+        # two protection families printed since: phasing and shield
+        # counters. A phased-out permanent is treated as though it doesn't
+        # exist, which is the strongest form of "answer the removal spell
+        # on the stack" the game has — functionally the hexproof/
+        # indestructible slot, and decks leaning on it were reading as
+        # protection-deficient and being offered redundant
+        # Swiftfoot-Boots-class adds against a full quota.
+        #
+        # ``phases?`` covers both the singular ("target creature you
+        # control phases out") and the plural-subject form ("all
+        # permanents you control phase out"). ``\b`` on both sides keeps
+        # it off "phase" as a noun in unrelated text.
+        (r"\bphases? out\b", None, 50),
+        # Shield counters — the DMU-era damage/destruction shield.
+        # Deliberately the ``put ... on`` (GRANTING) form only, for the
+        # same reason intrinsic ward is excluded above: a creature that
+        # merely "enters with a shield counter on it" protects nothing
+        # but itself and would satisfy the ROLE_TARGETS protection quota
+        # with a body. The "enters with N shield counters" templating
+        # uses no "put", so that form falls through to threat as intended.
+        (r"\bputs? (?:a|an|one|two|three|four|x|\d+) shield counters? on\b",
+         None, 50),
     ]),
     ("tutor", [
         (r"search your library for a (?:card|creature|artifact|enchantment|instant|sorcery|planeswalker|legendary)", None, 80),
@@ -1038,14 +1063,52 @@ _POLITICS_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
     ("vote", re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)),
     # Tempting offer — named mechanic, one pattern.
     ("tempting_offer", re.compile(r"\btempting offer\b", re.IGNORECASE)),
-    # Rhystic-style taxes (Rhystic Study, Mystic Remora, Smothering
-    # Tithe). The load-bearing half is WHO pays: "unless that player pays"
-    # is always an OPPONENT being handed a decision. Deliberately NOT
-    # matched: "unless you pay" (your own upkeep cost — cumulative upkeep,
-    # Braid of Fire) and "unless its controller pays" (Spell Pierce and
-    # the rest of the soft-counter family, which the AI plays perfectly
-    # well as ordinary interaction). Both are pinned by tests.
+    # Rhystic-style taxes (Rhystic Study, Mystic Remora). The load-bearing
+    # half is WHO pays: "unless that player pays" is always an OPPONENT
+    # being handed a decision. Deliberately NOT matched: "unless you pay"
+    # (your own upkeep cost — cumulative upkeep, Braid of Fire) and
+    # "unless its controller pays" (Spell Pierce and the rest of the
+    # soft-counter family, which the AI plays perfectly well as ordinary
+    # interaction). Both are pinned by tests.
     ("tax", re.compile(r"\bunless that player pays\b", re.IGNORECASE)),
+    # The PUNISHER form of the same tax, which carries no "unless" at all:
+    # "that player may pay {2}. If the player doesn't, you create a
+    # Treasure token." Round-2 review 2026-08-20 (R2-P10) found that
+    # Smothering Tithe — the card the comment above used to name as a
+    # covered example — matched nothing, because modern templating splits
+    # the offer and the consequence across a SENTENCE BREAK instead of
+    # joining them with "unless". Same politics content as Rhystic Study
+    # (an opponent is handed a pay-or-concede decision the AI can't
+    # value), so it earns the same ``tax`` tag.
+    #
+    # The window therefore has to cross exactly one period: ``[^.]{0,40}``
+    # spans the cost ("{2}", "3 life"), ``\.?\s*`` eats the sentence
+    # break, and the consequence clause must be the NEGATIVE branch
+    # ("doesn't"/"don't"). The positive branch ("If the player does,
+    # untap that creature" — Dance of the Dead's upkeep option) is an
+    # ordinary optional cost, not a tax, and is pinned as a real-oracle
+    # negative in test_staples.py. Subject alternation covers the
+    # each-opponent siblings (Protection Racket-style upkeep punishers).
+    ("tax", re.compile(
+        r"\b(?:that player|that opponent|each opponent) may pay\b"
+        r"[^.]{0,40}\.?\s*\bif (?:the player|that player|they) "
+        r"(?:doesn't|don't)\b",
+        re.IGNORECASE)),
+    #
+    # SCOPED OUT, deliberately: the initiative ("takes the initiative" /
+    # Undercity). It is the same sim-invisible class as the monarch — a
+    # contested crown whose defense depends on table threat assessment
+    # Forge's AI does not perform — and a one-line pattern
+    # (``\btakes? the initiative\b``) would cover it. It is NOT added here
+    # because every pattern in this table is pinned by a card whose oracle
+    # text the repo can check, and this session had no Scryfall access
+    # (see the provenance note in tests/fixtures/real_oracles.py), so the
+    # initiative pattern would ship unpinned — precisely the synthetic-
+    # fixture failure mode the real-oracle discipline exists to prevent.
+    # Recorded as a known gap, not as coverage: initiative cards remain
+    # cuttable by the margin loop until a session with network can add
+    # the pattern together with a real fixture (an Undercity card plus a
+    # "can't take the initiative" hate card, mirroring the monarch pair).
     # Deterrent / pillow-fort (Propaganda, Ghostly Prison, Norn's Annex).
     # The attack-tax clause can carry a rider between "you" and "unless"
     # ("...you or planeswalkers you control unless..."), so the window is

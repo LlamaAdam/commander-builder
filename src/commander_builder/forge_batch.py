@@ -22,6 +22,7 @@ import queue
 import re
 import socket
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -575,9 +576,14 @@ def run_gauntlet_simulation(
 # * STALE POLICY — mtime, not pid liveness. A JVM that is SIGKILLed (or a box
 #   that loses power) leaves the lockfile behind, and a profile bricked forever
 #   is worse than an occasional double-book. Any lock whose mtime is older than
-#   ``_PROFILE_LOCK_STALE_SEC`` is deleted and re-acquired through the SAME
-#   O_EXCL create, so two runs reclaiming one abandoned lock still can't both
-#   win. We chose this over pid-liveness checks on purpose: psutil is not a
+#   ``_PROFILE_LOCK_STALE_SEC`` is RENAMED to a unique name (the arbitration
+#   step — ``_reclaim_stale_lock``) and the profile is then re-acquired through
+#   the SAME O_EXCL create, so two runs reclaiming one abandoned lock still
+#   can't both win. Corrected 2026-08-20 (R2-P15): the original reclaim
+#   unlinked by PATH, which made that last sentence false — the loser's unlink
+#   could delete the winner's fresh lock. Releasing verifies the payload for
+#   the mirror-image failure (a reclaimed holder deleting its successor's
+#   lock). We chose mtime over pid-liveness checks on purpose: psutil is not a
 #   hard dependency here, os.kill(pid, 0) does not exist on Windows, and raw
 #   pid checks are wrong after pid reuse anyway. The pid/host/timestamp payload
 #   we write is DIAGNOSTICS for a human reading the file — never the policy.
@@ -634,14 +640,51 @@ class ProfileLock:
     #: True when this lock took over an abandoned (stale) lockfile.
     reclaimed_stale: bool = False
     released: bool = False
+    #: The exact bytes WE wrote into the lockfile. ``release`` compares the
+    #: file against this before unlinking, so a run that outlived the stale
+    #: window (and was legitimately reclaimed) can no longer delete its
+    #: SUCCESSOR's lock on the way out — see the R2-P15 note on ``release``.
+    payload: Optional[str] = None
+
+    def _file_is_ours(self) -> bool:
+        """Does the lockfile still carry OUR payload?
+
+        An unreadable or EMPTY file counts as ours: ``_create_lock_file``
+        creates the file first and writes the payload second, and that write
+        is allowed to fail (it is diagnostics, per the module notes).
+        Treating empty as foreign would leak the lock for a full stale
+        window on a filesystem that refused the write. Any OTHER content
+        means a different run created the file after ours was reclaimed.
+        """
+        if self.path is None or self.payload is None:
+            return True
+        try:
+            body = self.path.read_text(encoding="utf-8")
+        except OSError:
+            return True
+        return body == "" or body == self.payload
 
     def release(self) -> None:
         """Drop the lock. Idempotent, and never raises — a release that fails
-        must not mask the exception that sent us into the ``finally``."""
+        must not mask the exception that sent us into the ``finally``.
+
+        Round-2 review 2026-08-20 (R2-P15): this used to unlink BY PATH with
+        no ownership check. A run that outlives ``_PROFILE_LOCK_STALE_SEC``
+        (a wedged JVM, or a fully serial sim past the 6h window) has its lock
+        reclaimed by a second run, keeps going, and its ``finally`` then
+        deleted the RECLAIMER's live lock — letting a third run in and
+        double-booking the profile this mechanism exists to fence. The
+        payload check closes that: we only ever delete the file we wrote.
+        """
         if self.released:
             return
         self.released = True
         if self.path is None:
+            return
+        if not self._file_is_ours():
+            # Our lock was stale-reclaimed while we ran. The file at this path
+            # belongs to the run that reclaimed it; deleting it would unfence
+            # a live sim.
             return
         try:
             os.unlink(self.path)
@@ -665,22 +708,37 @@ def _profile_lock_path(profile: "Path | str") -> Path:
 
 
 def _lock_payload() -> str:
-    """Diagnostics written INSIDE the lockfile — for a human, never for policy
-    (stale detection is mtime-based; see the module notes)."""
+    """Diagnostics written INSIDE the lockfile — for a human, never for STALE
+    policy (that stays mtime-based; see the module notes).
+
+    The ``lock_id`` line is the one non-diagnostic part: since 2026-08-20
+    (R2-P15) ``ProfileLock.release`` compares the file against the payload it
+    wrote before unlinking, and pid+host+second is NOT unique — the same
+    process reclaiming a lock inside the same second would produce identical
+    bytes and could then delete its successor's file, which is the exact bug
+    the check exists to stop. A uuid4 makes each acquisition distinguishable.
+    """
     return (
         f"pid={os.getpid()}\n"
         f"host={socket.gethostname()}\n"
+        f"lock_id={uuid.uuid4().hex}\n"
         f"acquired_at={time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
         f"acquired_epoch={time.time():.0f}\n"
     )
 
 
-def _create_lock_file(lock_path: Path) -> "Optional[bool]":
-    """Atomically create ``lock_path``.
+def _create_lock_file(
+    lock_path: Path, payload: "Optional[str]" = None,
+) -> "Optional[bool]":
+    """Atomically create ``lock_path``, writing ``payload`` into it.
 
     Returns True when WE created it, False when it already existed (busy), and
     None when lockfiles are unusable at this path at all (dir missing,
     read-only, exotic FS) — the caller treats that as "unfenced but usable".
+
+    ``payload`` defaults to a freshly generated one; callers that need to
+    REMEMBER what they wrote (so ``ProfileLock.release`` can verify ownership
+    — R2-P15) generate it themselves and pass it in.
     """
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -689,12 +747,94 @@ def _create_lock_file(lock_path: Path) -> "Optional[bool]":
     except OSError:
         return None
     try:
-        os.write(fd, _lock_payload().encode("utf-8"))
+        os.write(fd, (payload or _lock_payload()).encode("utf-8"))
     except OSError:  # noqa: BLE001 — payload is diagnostics; the lock is the file
         pass
     finally:
         os.close(fd)
     return True
+
+
+def _reclaim_stale_lock(
+    lock_path: Path, *, stale_after: float = _PROFILE_LOCK_STALE_SEC,
+) -> bool:
+    """Take the abandoned lockfile at ``lock_path`` out of the way, atomically.
+
+    Returns True when THIS caller removed a genuinely stale lock (the path is
+    now the O_EXCL create's problem), False when it did not — because another
+    reclaimer got there first, or because the file turned out to be live.
+
+    Round-2 review 2026-08-20 (R2-P15). The old reclaim was
+    ``stat -> os.unlink(lock_path) -> create``, which is a TOCTOU: unlink
+    targets a PATH, not the specific stale file, so the interleaving
+    ``A:stat, B:stat, A:unlink, A:create, B:unlink, B:create`` has B deleting
+    A's FRESH lock and both runs believing they own the profile. The
+    docstring's "exactly one of them wins" was false for that ordering.
+
+    The arbitration primitive here is ``os.rename`` to a UNIQUE name: only
+    one caller can rename a given file away, and the loser's rename fails
+    with ENOENT instead of silently destroying the winner's new lock. Two
+    checks make it safe end to end:
+
+    1. After the rename we re-stat what we actually got. If it is FRESH, we
+       renamed a live lock created between our stat and our rename — so we
+       put it back (see ``_restore_lock``) and report failure.
+    2. The caller still treats the following O_EXCL create as the real
+       arbiter, exactly as before: winning the rename is permission to try,
+       not the lock itself.
+
+    Never raises — a failed reclaim degrades to "busy", which is the safe
+    direction for a fence.
+    """
+    tmp = lock_path.with_name(
+        f"{lock_path.name}.reclaim.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    )
+    try:
+        os.rename(str(lock_path), str(tmp))
+    except OSError:
+        # Gone, or another reclaimer renamed it first. Either way this caller
+        # is not the one that cleared the path.
+        return False
+
+    age = _lock_age_sec(tmp)
+    if age is None or age > stale_after:
+        # Genuinely abandoned (or it vanished under us) — drop the corpse.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return True
+
+    # We grabbed a LIVE lock. Put it back and stand down.
+    _restore_lock(tmp, lock_path)
+    return False
+
+
+def _restore_lock(tmp: Path, lock_path: Path) -> None:
+    """Put a mistakenly-renamed live lockfile back, without clobbering.
+
+    ``os.link`` (not ``os.replace``) on purpose: link FAILS when the
+    destination exists, so if a third run has already created its own lock at
+    ``lock_path`` in the microseconds we held the file, we leave that lock
+    alone and discard our copy. The displaced owner is protected by the
+    payload check in ``ProfileLock.release`` either way — it will decline to
+    delete a file it did not write.
+    """
+    try:
+        os.link(str(tmp), str(lock_path))
+    except OSError:
+        # Destination taken (a newer lock owns the path) or hardlinks are
+        # unsupported here. Best effort: restore only if the path is free.
+        if not lock_path.exists():
+            try:
+                os.rename(str(tmp), str(lock_path))
+                return
+            except OSError:
+                pass
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
 
 
 def _lock_age_sec(lock_path: Path) -> "Optional[float]":
@@ -726,9 +866,11 @@ def _try_acquire_profile(
 ) -> "Optional[ProfileLock]":
     """Atomically take ``profile``'s lock; None when another sim holds it.
 
-    Stale locks (mtime older than ``stale_after``) are deleted and re-acquired
-    through the same O_EXCL create, so if two runs reclaim the same abandoned
-    lock simultaneously exactly one of them wins.
+    Stale locks (mtime older than ``stale_after``) are RENAMED out of the way
+    (``_reclaim_stale_lock`` — atomic arbitration between simultaneous
+    reclaimers) and the profile is then re-acquired through the same O_EXCL
+    create, which stays the real arbiter. Losing either step reports busy,
+    which is the safe direction for a fence.
     """
     profile = Path(profile)
     if not profile.is_dir():
@@ -737,11 +879,12 @@ def _try_acquire_profile(
         return ProfileLock(profile=profile, path=None)
 
     lock_path = _profile_lock_path(profile)
-    state = _create_lock_file(lock_path)
+    payload = _lock_payload()
+    state = _create_lock_file(lock_path, payload)
     if state is None:
         return ProfileLock(profile=profile, path=None)
     if state:
-        return ProfileLock(profile=profile, path=lock_path)
+        return ProfileLock(profile=profile, path=lock_path, payload=payload)
 
     # Busy. Stale?
     age = _lock_age_sec(lock_path)
@@ -749,19 +892,22 @@ def _try_acquire_profile(
         return None
     # age is None -> the holder released it between our create and our stat;
     # fall through and let the O_EXCL retry decide (it is the real arbiter).
-    if age is not None:
-        try:
-            os.unlink(lock_path)
-        except OSError:
-            # Another run reclaimed it first — the retry below will just see
-            # its fresh lock and report busy.
-            pass
-    state = _create_lock_file(lock_path)
+    if age is not None and not _reclaim_stale_lock(
+        lock_path, stale_after=stale_after,
+    ):
+        # Another reclaimer won the rename, or the lock turned out to be
+        # live. Report busy rather than racing the winner: the previous code
+        # retried the create here, which is how two runs could both end up
+        # "holding" one profile (R2-P15).
+        return None
+    payload = _lock_payload()
+    state = _create_lock_file(lock_path, payload)
     if state is None:
         return ProfileLock(profile=profile, path=None)
     if state:
         return ProfileLock(
-            profile=profile, path=lock_path, reclaimed_stale=age is not None,
+            profile=profile, path=lock_path, payload=payload,
+            reclaimed_stale=age is not None,
         )
     return None
 

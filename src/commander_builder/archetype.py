@@ -62,11 +62,19 @@ is not an error — the oracle rungs abstain and the ladder falls through
 to the name scan, exactly as v1 behaved. The name-based rungs (combo
 detection, tutor density) need no oracle text and still fire; only
 stax/control/aggro are gated on ``MIN_ORACLE_COVERAGE``.
+
+It is not an error, but as of 2026-08-20 it is no longer SILENT: when
+``classify`` has to fall through to the name scan AND coverage was the
+reason, it prints one stderr warning per process (see the R2-P12 note
+next to ``_warn_cold_cache_once``). A deck that still gets an
+oracle-free label — combo via tutor density, say — needed no coverage
+and prints nothing.
 """
 
 from __future__ import annotations
 
 import re
+import sys as _sys
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
@@ -747,10 +755,90 @@ def _oracle_scan(
     deck_text: str, lookup: Optional[CardLookup] = None,
 ) -> Optional[Archetype]:
     """The rung-2 label for a deck's text, or None to fall through."""
+    label, _available = _oracle_scan_with_coverage(deck_text, lookup)
+    return label
+
+
+def _oracle_scan_with_coverage(
+    deck_text: str, lookup: Optional[CardLookup] = None,
+) -> tuple[Optional[Archetype], bool]:
+    """``(label, oracle_available)`` for one deck's text.
+
+    Splits the coverage flag out of ``derive_archetype_signals`` so
+    ``classify`` can tell "the oracle rungs looked and abstained" from
+    "the oracle rungs could not look" without changing its own
+    ``(Path) -> Archetype`` signature. On an internal failure the flag is
+    False — an unreadable scan is a blind one.
+    """
     try:
-        return derive_archetype_signals(deck_text, lookup=lookup)["label"]
+        signals = derive_archetype_signals(deck_text, lookup=lookup)
     except Exception:  # noqa: BLE001 — classification must not raise
-        return None
+        return None, False
+    return signals["label"], bool(signals.get("oracle_available"))
+
+
+# --- Cold-cache disclosure (round-2 review 2026-08-20, R2-P12) -------------
+#
+# THE PROBLEM. When the snapshot cache is cold (fresh machine, CI, a
+# misconfigured MTG_CARDS_DIR), the stax/control/aggro rungs abstain, most
+# decks fall through to the name scan and land on "midrange" — and
+# ``pool_curator._slice_violates`` then reads near-uniform labels as a
+# diversity violation on EVERY arrangement, which is exactly the v1 no-op
+# this module was written to replace. Nothing printed; no caller could
+# tell a MEASURED midrange from a BLIND one.
+#
+# WHY A WARNING AND NOT AN API CHANGE. The two options on the table were
+# (a) print one warning per classify batch, or (b) return
+# ``oracle_available`` to ``pool_curator`` so its diversity check can
+# abstain. (b) is the more invasive by a wide margin: ``classify``'s
+# ``(Path) -> Archetype`` signature is load-bearing for five callers
+# (pool_curator, bracket_estimator, deck_dashboard, intent, card_score),
+# and teaching the diversity rule a third state ("unknown") changes which
+# opponent pools get built — i.e. it changes Forge spend and the decks a
+# curation ships, on a path with no way to validate the new behavior
+# offline. (a) changes no behavior at all: it converts a silent
+# degradation into a visible one, which is the actual finding. The
+# ``oracle_available`` flag stays available on
+# ``derive_archetype_signals`` for a future caller that wants (b).
+#
+# ONCE PER BATCH. ``pool_curator`` classifies ~60 decks per curation; one
+# line per deck would be noise the operator learns to skip. The flag below
+# makes it one line per process, which for every shipped caller (a CLI
+# run, a curation) is one line per batch. ``reset_cold_cache_warning()``
+# re-arms it — used by tests, and available to a long-lived process (the
+# web app) that wants a fresh disclosure per request batch.
+_COLD_CACHE_WARNED = False
+
+
+def reset_cold_cache_warning() -> None:
+    """Re-arm the once-per-process cold-cache warning. See above."""
+    global _COLD_CACHE_WARNED
+    _COLD_CACHE_WARNED = False
+
+
+def _warn_cold_cache_once(deck_path: Path) -> None:
+    """Disclose, once, that the oracle rungs are blind for lack of cached
+    oracle text. Never raises — a broken stderr must not break
+    classification."""
+    global _COLD_CACHE_WARNED
+    if _COLD_CACHE_WARNED:
+        return
+    _COLD_CACHE_WARNED = True
+    try:
+        print(
+            f"[archetype] WARN: oracle snapshot coverage below "
+            f"{MIN_ORACLE_COVERAGE:.0%} for {deck_path.name!r} — the "
+            f"stax/control/aggro rungs are abstaining and labels are "
+            f"coming from the card-NAME scan (v1 behavior). Most decks "
+            f"will read 'midrange', which downstream diversity checks "
+            f"cannot distinguish from a measured 'midrange'. Warm the "
+            f"snapshot store (`commander-oracle-refresh --from-bulk`) or "
+            f"point MTG_CARDS_DIR at a populated one. Reported once per "
+            f"process.",
+            file=_sys.stderr, flush=True,
+        )
+    except Exception:  # noqa: BLE001 — disclosure must not break the caller
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -781,10 +869,14 @@ def classify(deck_path: Path) -> Archetype:
     except (OSError, ValueError, UnicodeDecodeError):
         return "midrange"
 
-    # Rung 2 — oracle-backed signals.
-    label = _oracle_scan(deck_text)
+    # Rung 2 — oracle-backed signals. When the rung abstained because the
+    # snapshot cache is too cold to read (not because the deck simply
+    # tripped no threshold), say so once — see the R2-P12 note above.
+    label, oracle_available = _oracle_scan_with_coverage(deck_text)
     if label:
         return label
+    if not oracle_available:
+        _warn_cold_cache_once(deck_path)
 
     # Rung 3 — the v1 card-NAME scan (degradation path).
     winner, _score = _content_scan(dck_utils.main_card_names(deck_text))

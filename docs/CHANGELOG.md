@@ -34,10 +34,18 @@ raised by three AI review rounds plus a negative-mode critique.
   move the margin will "empirically" cut exactly the cards that define
   multiplayer Commander. `staples` now tags them from oracle text (six
   tags, with guards so cumulative-upkeep "unless you pay" and soft-
-  counter "unless its controller pays" don't match), and all three cut
-  paths exempt them: the heuristic loop, `card_score`'s ranking, and
-  the orchestrator (the only path Claude's and bracket-peers' cuts
+  counter "unless its controller pays" don't match), and the advisor's
+  cut paths exempt them: the heuristic loop, `card_score`'s ranking,
+  and the orchestrator (the only path Claude's and bracket-peers' cuts
   traverse). Skips are disclosed as `AdviceReport.skipped_for_politics`.
+  *Correction 2026-08-20 (round-2 review R2-P09/P10): the original
+  entry claimed "all three cut paths" as if that were every cut path in
+  the program — `auto_propose`'s curation stage was NOT covered (its
+  candidate pool was filtered, but its post-response net enforced only
+  `Protect=`, so a curator deviation could still cut politics cards),
+  and the tax pattern missed the punisher template ("that player may
+  pay... If the player doesn't"), i.e. Smothering Tithe — the card the
+  pattern's own comment named. Both fixed in the round-2 batch.*
   Per-deck opt-out: `[metadata] PoliticsGuard=off`, carried across
   re-imports, failing safe to ON on any unrecognized value.
 - **Archidekt is a real single-deck import lane** (`import_deck(source=)`

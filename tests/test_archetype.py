@@ -1001,3 +1001,108 @@ def test_llm_stubs_are_gone():
     change; this pins that they stay gone."""
     assert not hasattr(archetype, "claude_archetype")
     assert not hasattr(archetype, "ollama_archetype")
+
+
+# ---------------------------------------------------------------------------
+# Cold-cache disclosure (round-2 review 2026-08-20, R2-P12)
+# ---------------------------------------------------------------------------
+#
+# The finding: on a cold snapshot cache the oracle rungs abstain, decks
+# land on "midrange" via the name scan, and ``pool_curator``'s diversity
+# check trusts that answer with no way to tell it from a measured one.
+# The fix is disclosure, not a behavior change — these tests pin BOTH
+# halves (the warning fires; the labels are unchanged).
+
+@pytest.fixture
+def rearm_cold_warning():
+    """The warning is once-per-process; re-arm around each test so
+    ordering can't make one of them pass for the wrong reason."""
+    archetype.reset_cold_cache_warning()
+    yield
+    archetype.reset_cold_cache_warning()
+
+
+def _cold_cache(monkeypatch):
+    """Every lookup misses — the fresh-machine / misconfigured
+    MTG_CARDS_DIR case."""
+    monkeypatch.setattr(archetype, "_cached_scryfall", lambda name: None)
+
+
+def test_cold_cache_classify_warns_once_per_process(
+        tmp_path, monkeypatch, capsys, rearm_cold_warning):
+    _cold_cache(monkeypatch)
+    decks = [
+        _write_dck(tmp_path, f"[USER] Mystery {i} [B4].dck",
+                   ["Sol Ring", "Arcane Signet", "Command Tower"])
+        for i in range(3)
+    ]
+    labels = [classify(p) for p in decks]
+
+    # Behavior unchanged: still the honest v1 fallback.
+    assert labels == ["midrange", "midrange", "midrange"]
+
+    err = capsys.readouterr().err
+    assert err.count("[archetype] WARN") == 1, (
+        "expected exactly one cold-cache disclosure for the batch, got:\n"
+        f"{err}"
+    )
+    # The message has to name the cause AND the remedy — a warning the
+    # operator can't act on is noise.
+    assert "coverage" in err
+    assert "MTG_CARDS_DIR" in err
+
+
+def test_warm_cache_classify_stays_silent(
+        tmp_path, offline_cache, capsys, rearm_cold_warning):
+    """A deck whose cards all resolve prints nothing, whatever label it
+    gets — the warning must mean 'blind', not 'midrange'."""
+    p = _write_dck(tmp_path, "[USER] Mystery E [B3].dck", MIDRANGE_MAIN,
+                   commander=["Atraxa, Praetors' Voice"])
+    assert classify(p) == "midrange"
+    assert "[archetype] WARN" not in capsys.readouterr().err
+
+
+def test_cold_cache_label_from_name_rung_still_warns(
+        tmp_path, monkeypatch, capsys, rearm_cold_warning):
+    """The name scan CAN produce a label on a cold cache (rung 3). That
+    label is still name-derived, so the disclosure fires."""
+    _cold_cache(monkeypatch)
+    p = _write_dck(
+        tmp_path, "[USER] Mystery Z [B4].dck",
+        ["Cyclonic Rift", "Propaganda", "Ghostly Prison",
+         "Teferi, Hero of Dominaria", "Sol Ring"],
+    )
+    assert classify(p) == "control"
+    assert "[archetype] WARN" in capsys.readouterr().err
+
+
+def test_reset_cold_cache_warning_re_arms(
+        tmp_path, monkeypatch, capsys, rearm_cold_warning):
+    """A long-lived process (the web app) can re-arm the disclosure per
+    batch instead of getting one line for its whole lifetime."""
+    _cold_cache(monkeypatch)
+    p = _write_dck(tmp_path, "[USER] Mystery Y [B4].dck", ["Sol Ring"])
+    classify(p)
+    capsys.readouterr()
+    classify(p)
+    assert "[archetype] WARN" not in capsys.readouterr().err
+    archetype.reset_cold_cache_warning()
+    classify(p)
+    assert "[archetype] WARN" in capsys.readouterr().err
+
+
+def test_oracle_scan_with_coverage_reports_blindness():
+    """The seam classify branches on: cold lookup -> (None, False);
+    a readable deck -> the flag is True."""
+    from commander_builder.archetype import _oracle_scan_with_coverage
+    label, available = _oracle_scan_with_coverage(
+        _deck_text(["Test Commander"], ["Sol Ring", "Forest"]),
+        lambda name: None,
+    )
+    assert (label, available) == (None, False)
+
+    label, available = _oracle_scan_with_coverage(
+        _deck_text(["Baral, Chief of Compliance"], STAX_MAIN), _lookup,
+    )
+    assert available is True
+    assert label == "stax"

@@ -51,6 +51,28 @@ including the ``\\n`` paragraph breaks and the typographic dashes.
 Do NOT paraphrase, normalize, or "clean up" the text. Real Scryfall
 data has em-dashes, bullet glyphs, and trailing newlines that
 matter — the classifier must handle them as Scryfall ships them.
+
+## When Scryfall is unreachable (added 2026-08-20)
+
+Some sessions run in a sandbox whose egress policy blocks
+``api.scryfall.com`` outright (403 at the proxy) and whose local
+``.cache/scryfall`` snapshot directory is empty — the same
+constraint the politics tests already record
+(tests/test_politics_guard.py's provenance note). The round-2
+review fixes (R2-P10 / R2-P11) needed fixtures in exactly such a
+session. The rule for that case, and ONLY that case:
+
+1. Transcribe the printed oracle text. Never invent templating and
+   never write "close enough" text that merely satisfies the regex
+   under test — that is the synthetic-fixture failure mode this
+   module exists to prevent.
+2. Mark the entry ``PROVENANCE: offline transcription <date>``,
+   naming what could not be verified. An unmarked entry is a claim
+   of byte-exactness; an unmarked-but-unverified entry is worse
+   than no fixture, because it makes a pattern LOOK pinned by real
+   data.
+3. Re-verify marked entries in the next session with network and
+   drop the marker once the API confirms them.
 """
 
 from __future__ import annotations
@@ -443,6 +465,30 @@ ORACLES: dict[str, dict[str, str]] = {
         "type_line": "Sorcery",
     },
 
+    # Smothering Tithe — the punisher-tax template the politics guard
+    # missed until 2026-08-20 (R2-P10). The offer and its consequence sit
+    # in TWO sentences ("that player may pay {2}. If the player doesn't,
+    # ...") with no "unless" anywhere, so the original
+    # ``\bunless that player pays\b`` pattern returned no tags for the
+    # most-played tax in the format — the card the guard's own comment
+    # named as covered. Classifies as ``ramp`` (the Treasure clause); the
+    # politics tag is orthogonal to the role, which is the point: the
+    # shield is a cut exemption, not a score.
+    #
+    # PROVENANCE: offline transcription 2026-08-20 — api.scryfall.com is
+    # blocked by this sandbox's egress policy (403 at the proxy) and
+    # .cache/scryfall is empty. Treasure tokens carry no reminder text in
+    # Scryfall's oracle (cross-checked against the Dockside Extortionist
+    # and Big Score entries above, both live-sourced), so this body is
+    # believed complete; re-verify when network is available.
+    "Smothering Tithe": {
+        "oracle_text": (
+            "Whenever an opponent draws a card, that player may pay {2}. "
+            "If the player doesn't, you create a Treasure token."
+        ),
+        "type_line": "Enchantment",
+    },
+
     # Soul Shatter — modern each-opponent edict wording ("Each
     # opponent sacrifices a creature or planeswalker with the
     # highest mana value ...").
@@ -502,6 +548,50 @@ ORACLES: dict[str, dict[str, str]] = {
             "life or put the card on top of your library."
         ),
         "type_line": "Enchantment",
+    },
+
+    # Take Up the Shield — the shield-counter protection template
+    # (R2-P11, 2026-08-20). Its ONLY protection signal is
+    # "Put a shield counter on it": the +2/+2 and lifelink riders match
+    # nothing in the role table, so this fixture isolates the new pattern
+    # — if the shield-counter regex regresses, this entry drops to
+    # "other" and the parametrized fixture test names the card.
+    #
+    # PROVENANCE: offline transcription 2026-08-20 (see the module
+    # docstring). Shield counters carry a reminder paragraph on some
+    # printings; it is omitted here because it could not be verified, and
+    # the pattern is sentence-local so its presence would not change the
+    # classification. Re-verify with network.
+    "Take Up the Shield": {
+        "oracle_text": (
+            "Target creature gets +2/+2 and gains lifelink until end of "
+            "turn. Put a shield counter on it."
+        ),
+        "type_line": "Instant",
+    },
+
+    # Teferi's Protection — the phasing protection template (R2-P11,
+    # 2026-08-20). NOTE it also matches "protection from", so its
+    # classification alone does NOT prove the phasing pattern fires;
+    # test_staples.py asserts the phasing regex against this text
+    # directly for that reason. Kept as the phasing fixture anyway
+    # because it is the format's canonical phase-out card and pins that
+    # the two protection patterns coexist without either shadowing the
+    # role.
+    #
+    # PROVENANCE: offline transcription 2026-08-20 (see the module
+    # docstring). The parenthetical phasing reminder printed on the C17
+    # card is omitted because its exact wording could not be verified;
+    # the load-bearing sentences are transcribed as printed. Re-verify
+    # with network before using this entry for any paragraph-crossing
+    # pattern.
+    "Teferi's Protection": {
+        "oracle_text": (
+            "Until your next turn, your life total can't change and you "
+            "have protection from everything. All permanents you control "
+            "phase out."
+        ),
+        "type_line": "Instant",
     },
 
     # Three Visits — "Search your library for a Forest card" (basic

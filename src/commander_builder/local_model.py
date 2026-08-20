@@ -203,9 +203,19 @@ class LocalModelUnavailable(RuntimeError):
 # drift into rejecting valid roles.
 
 #: Every label ``staples.classify_role_extended`` can return: the base
-#: ``_ROLE_PATTERNS`` roles, plus the three the classifier produces
-#: without a pattern table (``threat`` for an unmatched creature,
-#: ``other`` for no match) and the two extended buckets.
+#: ``_ROLE_PATTERNS`` roles, plus the TWO the classifier produces without a
+#: pattern table (``threat`` for an unmatched creature, ``other`` for no
+#: match) and the two extended buckets (``land_payoff``,
+#: ``win_condition``). Count corrected 2026-08-20 (R2-P25b): this said
+#: "the three ... " and then listed two.
+#:
+#: Those four names are a hand-maintained SNAPSHOT — the honest caveat on
+#: the "IMPORTED, never copied" heading above, which holds for the
+#: pattern-table roles only. Nothing in ``staples`` exports them as a
+#: list, so a new pattern-free bucket added there must be added here too.
+#: The net under that: tests/test_local_model.py classifies the whole
+#: real-oracle fixture corpus and fails if any role it produces is
+#: missing from this tuple.
 ROLE_TAXONOMY: tuple[str, ...] = tuple(dict.fromkeys(
     [role for role, _patterns in _staples._ROLE_PATTERNS_COMPILED]
     + ["threat", "other", "land_payoff", "win_condition"]

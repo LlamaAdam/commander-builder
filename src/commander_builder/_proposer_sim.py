@@ -192,6 +192,64 @@ def _ab_to_iteration_fields(ab_result) -> dict:
     return fields
 
 
+#: Filename prefixes that are never filler-eligible. One tuple so the picker
+#: and the "why did I get zero fillers?" census (R2-P22, 2026-08-20) can
+#: never drift apart — the census exists to EXPLAIN this exact list, and a
+#: second hand-maintained copy would eventually explain the wrong one.
+#: Rationale per prefix lives in ``_pick_filler_decks``' docstring.
+_FILLER_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "[USER]", "[CONTROL]", "[PREMADE]", "[REF]",
+)
+
+
+def _filler_exclusion_census(
+    deck_dir: Path, exclude_paths: "list[Path]",
+) -> dict:
+    """Why the filler pool is what it is: ``{total, pair, eligible,
+    excluded, by_prefix}``.
+
+    ``exclude_paths`` (the v_n / v_n+1 decks being compared) is checked
+    FIRST and counted as ``pair``, never as a prefix exclusion: those two
+    files are the subject of the sim, and blaming their ``[USER]`` prefix
+    for the empty pool would explain the wrong thing to the operator.
+
+    Round-2 review 2026-08-20 (R2-P22). Adding ``[REF]`` to the exclusion
+    list (2026-08-17) can zero out the filler pool on a box that never ran a
+    bracket harvest — a deck dir of imports plus meta-test references is a
+    realistic non-harvest setup, and it regressed from "ran the sim" to
+    "Sim skipped", with a message that named only the count. An operator
+    staring at a directory full of .dck files was told, in effect, that the
+    files they can see do not exist.
+
+    Called ONLY on the failure path, so the extra directory walk costs
+    nothing in the normal case.
+    """
+    by_prefix: dict[str, int] = {}
+    exclude_set = {p.name for p in exclude_paths}
+    total = eligible = pair = 0
+    for p in deck_dir.glob("*.dck"):
+        total += 1
+        if p.name in exclude_set:
+            pair += 1
+            continue
+        matched = next(
+            (pre for pre in _FILLER_EXCLUDED_PREFIXES
+             if p.name.startswith(pre)),
+            None,
+        )
+        if matched is not None:
+            by_prefix[matched] = by_prefix.get(matched, 0) + 1
+        else:
+            eligible += 1
+    return {
+        "total": total,
+        "pair": pair,
+        "eligible": eligible,
+        "excluded": sum(by_prefix.values()),
+        "by_prefix": by_prefix,
+    }
+
+
 def _pick_filler_decks(
     deck_dir: Path,
     exclude_paths: list[Path],
@@ -250,10 +308,7 @@ def _pick_filler_decks(
     exclude_set = {p.name for p in exclude_paths}
     candidates = [
         p.name for p in deck_dir.glob("*.dck")
-        if not p.name.startswith("[USER]")
-        and not p.name.startswith("[CONTROL]")  # never use a calibration deck as filler
-        and not p.name.startswith("[PREMADE]")  # popularity-ranked; would skew filler strength
-        and not p.name.startswith("[REF]")  # 2026-08-17: same popularity bias as [PREMADE]
+        if not p.name.startswith(_FILLER_EXCLUDED_PREFIXES)
         and p.name not in exclude_set
     ]
     if not candidates:
@@ -347,6 +402,34 @@ def _run_sim_and_record(
             f"[sim] Need 2+ filler decks in {deck_dir} for a 4-player "
             f"Commander pod; found {len(filler_names)}. Sim skipped."
         )
+        # Say WHY, when the reason is the prefix exclusion rather than an
+        # empty directory (R2-P22, 2026-08-20). "found 0" in a directory
+        # full of .dck files reads as a bug in the tool; naming the rule
+        # and the two remedies makes it an actionable state. Only added
+        # for auto-picked fillers — an explicit --sim-fillers list that
+        # came up short is a typo, not a policy question.
+        if not args.sim_fillers:
+            census = _filler_exclusion_census(
+                deck_dir, [args.deck_path, out_path],
+            )
+            if census["excluded"] and not census["eligible"]:
+                breakdown = ", ".join(
+                    f"{pre} x{n}"
+                    for pre, n in sorted(census["by_prefix"].items())
+                )
+                msg += (
+                    f" All {census['excluded']} of the other .dck files "
+                    f"there are prefix-excluded from filler duty "
+                    f"({breakdown}): [USER] decks are yours, [CONTROL] "
+                    f"are calibration decks, and [PREMADE]/[REF] are "
+                    f"popularity-ranked imports whose strength would "
+                    f"silently set the A/B baseline. Fix it by harvesting "
+                    f"an opponent pool (`commander-import --harvest "
+                    f"{args.bracket}`) or by "
+                    f"naming seats explicitly with --sim-fillers "
+                    f"\"<file1.dck>,<file2.dck>\" (which bypasses the "
+                    f"exclusion)."
+                )
         if not args.json:
             print(msg, flush=True)
         # Still write 'pending' verdict explicitly so the row's state
@@ -513,6 +596,11 @@ def _log_auto_curate_iteration(
         "source": proposal.source,
         "dropped_for_bracket": list(proposal.dropped_for_bracket),
         "dropped_for_protection": list(proposal.dropped_for_protection),
+        # Politics-shielded cuts (decision C2 / R2-P09, 2026-08-20).
+        # Persisted beside the other refusal buckets so a later reader
+        # can tell "the curator proposed no cuts" apart from "the guard
+        # refused the cuts the curator proposed".
+        "dropped_for_politics": list(proposal.dropped_for_politics),
         "dropped_for_color_identity": list(proposal.dropped_for_color_identity),
         "dropped_for_balance": list(proposal.dropped_for_balance),
         # Pair-drops from apply-time decklist validation — each entry

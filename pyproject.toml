@@ -65,6 +65,13 @@ commander-corpus-themes = "commander_builder.corpus_themes:main"
 commander-tournament  = "commander_builder.edhtop16_client:main"
 commander-builder-desktop = "commander_builder.desktop:main"
 commander-builder-bootstrap = "commander_builder.bootstrap:main"
+# The local-model tier's CLI, including the agreement harness the
+# COMMANDER_LOCAL_MODEL opt-in is gated on. Registered 2026-08-20 (R2-P17):
+# the module documents `python -m commander_builder.local_model`, but the
+# repo's own "when you add a module" checklist ends with "register the
+# console script", and the harness a user must run BEFORE deciding whether
+# to enable the tier should not require knowing the module path.
+commander-local-model = "commander_builder.local_model:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -161,6 +161,26 @@ def test_taxonomies_are_imported_not_copied():
     }
 
 
+def test_role_taxonomy_covers_what_the_classifier_actually_returns():
+    """The check above mirrors the hand-maintained snapshot, so it can
+    only catch a deletion — not a NEW pattern-free bucket added to
+    ``staples`` (2026-08-20, R2-P25b: that snapshot is the honest caveat
+    on "taxonomies imported, never copied"). This is independent
+    evidence: classify the whole real-oracle corpus and require every
+    role it produces to be answerable by the local tier."""
+    from tests.fixtures.real_oracles import ORACLES
+    produced = {
+        staples.classify_role_extended(o["oracle_text"], o["type_line"])
+        for o in ORACLES.values()
+    }
+    missing = produced - set(lm.ROLE_TAXONOMY)
+    assert not missing, (
+        f"classify_role_extended returns {sorted(missing)}, which the "
+        f"local tier would reject as malformed. Add them to "
+        f"local_model.ROLE_TAXONOMY."
+    )
+
+
 # --- preflight -------------------------------------------------------------
 
 def test_preflight_daemon_down_is_actionable():
@@ -544,3 +564,21 @@ def test_cli_agreement_over_a_cards_file(monkeypatch, tmp_path, capsys):
     assert report["answered"] == 2
     assert report["agreed"] == 1                      # Three Visits only
     assert report["disagreements"] == [["Wrath of God", "ramp", "wipe"]]
+
+
+def test_local_model_cli_is_registered_as_a_console_script():
+    """R2-P17 (2026-08-20). The tier is opt-in and its agreement harness
+    is the evidence a user needs to decide whether to enable it — so the
+    harness must be runnable without knowing the module path. Pins both
+    halves: the entry exists in pyproject, and its target is real."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    scripts = tomllib.loads(
+        pyproject.read_text(encoding="utf-8")
+    )["project"]["scripts"]
+    assert scripts.get("commander-local-model") == (
+        "commander_builder.local_model:main"
+    )
+    assert callable(lm.main)
