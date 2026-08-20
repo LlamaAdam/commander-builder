@@ -570,15 +570,19 @@ def test_local_model_cli_is_registered_as_a_console_script():
     """R2-P17 (2026-08-20). The tier is opt-in and its agreement harness
     is the evidence a user needs to decide whether to enable it — so the
     harness must be runnable without knowing the module path. Pins both
-    halves: the entry exists in pyproject, and its target is real."""
-    import tomllib
+    halves: the entry exists in pyproject, and its target is real.
+
+    Text-match rather than ``tomllib``: tomllib is stdlib only from
+    Python 3.11 and this repo supports 3.10 (the import broke CI's 3.10
+    lane on 2026-08-20). The exact-line assertion is just as strong for
+    a tripwire — pyproject's scripts table is one flat line per entry —
+    and needs no parser on any supported version."""
     from pathlib import Path
 
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    scripts = tomllib.loads(
-        pyproject.read_text(encoding="utf-8")
-    )["project"]["scripts"]
-    assert scripts.get("commander-local-model") == (
-        "commander_builder.local_model:main"
-    )
+    text = pyproject.read_text(encoding="utf-8")
+    assert (
+        'commander-local-model = "commander_builder.local_model:main"'
+        in text
+    ), "commander-local-model console script missing from pyproject.toml"
     assert callable(lm.main)
