@@ -45,6 +45,18 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Added
 
+- **LLM deck judge, Phase 1** (`deck_judge.py`, FP-016 — observe-only,
+  off by default behind `COMMANDER_BUILDER_DECK_JUDGE`). A blinded
+  panel of six judgments (three per presentation order, agreement
+  counted on the deck so position bias is a detector, 5-of-panel
+  supermajority else `inconclusive`) answers the question the sim
+  cannot: is the candidate better built for its intent at a real
+  table. Stored as schema-v4 `judge_verdict`/`judge_report` beside —
+  never instead of — the sim verdict; it cannot advance a deck or gate
+  anything, and `scripts/judge_agreement.py` tracks the pre-registered
+  kill criteria that decide whether it ever becomes more. Blinding is
+  enforced structurally (the prompt builder can only see card names —
+  deck files' `Name=` lines carry v1/v2 and would leak the answer).
 - **Round-2 decisions implemented (R2-D1..D6, owner review 2026-08-20).**
   `--strategy bandit` finally writes history: one knowledge-log row per
   ACCEPTED pull (manifest = the single swap, snapshot = the candidate,
