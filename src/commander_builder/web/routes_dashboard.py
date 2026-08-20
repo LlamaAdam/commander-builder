@@ -37,6 +37,15 @@ such cards ("An unsupported card was requested" in the logs, which
 ``log_parser`` counts but nothing ever showed a user), so the dashboard
 now flags the gap before anyone trusts a sim verdict built on them.
 
+BRACKET RE-VERIFICATION (2026-08-20). The dashboard is otherwise
+read-only, with ONE deliberate exception: when its bracket estimate
+agrees with the filename's ``[B<n>]`` tag, it retires the deck's
+``BracketUnverified=`` marker (written by the deck-editor PUT — see
+``routes_decks`` and ``dck_meta``). This is the only place in the app
+that recomputes a bracket rather than reading one, so it is the only
+place that can honestly say the tag has a measurement behind it again.
+See ``_clear_verified_bracket_marker`` for the exact conditions.
+
 Built via ``make_dashboard_blueprint(deck_dir, knowledge_db,
 list_decks, resolve_deck_path)``. The two helper functions are
 passed in (rather than imported) because they're still defined in
@@ -73,6 +82,7 @@ from ._helpers import (
     _build_suggested_adds,
     _iteration_to_dict,
     _resolve_deck_path,
+    atomic_write_text,
 )
 from .deck_pricing import printing_savings_for_deck_text
 
@@ -315,6 +325,70 @@ def _sim_coverage(path: Path) -> dict:
         return dict(_SIM_COVERAGE_UNAVAILABLE)
 
 
+# --- Bracket re-verification (2026-08-20) ------------------------------
+#
+# THE OTHER HALF of the ``BracketUnverified=`` marker the deck-editor PUT
+# writes (``routes_decks.deck_text`` / ``dck_meta``). A marker that only
+# ever gets set is a permanent scold, so it needs the one place where the
+# declared bracket genuinely regains a measurement.
+#
+# WHERE THAT IS. ``build_dashboard`` runs ``bracket_estimator`` over the
+# deck text as it exists on disk RIGHT NOW and reports estimate-versus-
+# declared — it is what renders the Bracket tile's "Estimated bracket: 3
+# — declared 3 ✓". That IS the re-estimation the editor's warning asks
+# for ("Re-estimate the bracket before using it as a bracket-tagged
+# reference deck"), and there is no other endpoint that computes a
+# bracket rather than reading the filename (``/api/deck_audit`` and
+# ``/api/audit`` both take the declared bracket as INPUT).
+#
+# WHY ONLY AGREEMENT CLEARS IT. A mismatch/check verdict is the estimator
+# saying the tag is wrong — clearing on that would delete the warning
+# precisely when it was right. And a ``low_signal`` verdict is the
+# module's own name for signal starvation, not evidence, so it cannot
+# retire anything either: decks the estimator can't read are exactly the
+# ones a false all-clear would hurt. Only ``mismatch_level is None``
+# (estimate == declared) counts.
+#
+# WHY THE FILENAME, NOT THE REQUEST'S BRACKET. ``?bracket=`` is the tile's
+# override dropdown — a what-if, not a re-declaration. Verifying against
+# an overridden bracket would let "show me this as a B5" clear a [B3]
+# deck's marker.
+
+def _clear_verified_bracket_marker(
+    path: Path, estimate: Optional[dict],
+) -> None:
+    """Drop the ``BracketUnverified=`` marker when ``estimate`` confirms.
+
+    No-ops unless all of: the filename carries a ``[B<n>]`` tag, the deck
+    actually holds a marker for THAT bracket, and ``estimate`` is an
+    agreeing verdict computed against the same declared bracket. So the
+    common case (no marker) costs one metadata scan of text already read.
+
+    Fail-quiet by contract: this is a side effect of a read-only route,
+    and a read-only deck directory or a lost race with a concurrent save
+    must degrade to "the warning persists", never to a dashboard 500.
+    """
+    declared = _bracket_from_filename(path.name)
+    if declared is None or not estimate:
+        return
+    if estimate.get("declared") != declared:
+        return
+    if estimate.get("estimate") != declared:
+        return
+    if estimate.get("mismatch_level") is not None:
+        return
+    try:
+        from .. import dck_meta
+        text = path.read_text(encoding="utf-8")
+        if dck_meta.read_bracket_unverified(text) != declared:
+            return
+        atomic_write_text(path, dck_meta.clear_bracket_unverified(text))
+    except Exception as exc:  # noqa: BLE001 — never break a dashboard load
+        current_app.logger.warning(
+            "bracket marker clear failed for %s: %s", path.name, exc,
+        )
+
+
 def make_dashboard_blueprint(
     deck_dir: Path,
     knowledge_db: Optional[Path],
@@ -405,6 +479,12 @@ def make_dashboard_blueprint(
         # and the core payloads — fast, offline, fail-quiet, so it needs
         # no deferred-section round trip.
         payload["sim_coverage"] = _sim_coverage(path)
+        # build_dashboard just re-estimated the bracket from the CURRENT
+        # deck text; if it agrees with the filename tag, the tag has a
+        # measurement behind it again. That is the re-verification the
+        # editor's "NOT re-verified" warning asks for, so retire the
+        # marker here (see _clear_verified_bracket_marker).
+        _clear_verified_bracket_marker(path, payload.get("bracket_estimate"))
         return payload
 
     @bp.route("/api/dashboard")

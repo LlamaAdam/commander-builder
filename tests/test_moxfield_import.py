@@ -1151,6 +1151,33 @@ def test_reimport_preserves_protect_and_stamped_name(tmp_path, monkeypatch):
     assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p1.stem
 
 
+def test_reimport_preserves_bracket_unverified_marker(tmp_path, monkeypatch):
+    """A same-id re-import REPLACES the mainboard — the very event the
+    ``BracketUnverified=`` marker (dck_meta, 2026-08-20) exists to flag.
+    If the merge dropped it, "re-import the deck" would silently clear a
+    bracket warning while making the bracket less verified than before."""
+    from commander_builder import dck_meta, moxfield_import as mi
+
+    decks = {"pid-1": _deck_json(name=_UGLY_NAME, pid="pid-1")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    p1.write_text(
+        dck_meta.set_bracket_unverified(p1.read_text(encoding="utf-8"), 3),
+        encoding="utf-8",
+    )
+
+    decks["pid-1"] = _deck_json(
+        name=_UGLY_NAME, pid="pid-1", main_card="Arcane Signet",
+    )
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert p2 == p1
+    merged = p1.read_text(encoding="utf-8")
+    assert "Arcane Signet" in merged  # fresh content landed
+    assert dck_meta.read_bracket_unverified(merged) == 3
+    assert merged.count("BracketUnverified=") == 1
+
+
 def test_reimport_preserves_locally_edited_displayname(tmp_path, monkeypatch):
     """dck_meta's documented contract: user edits to DisplayName= survive
     re-imports. The mechanism is two-part and ORDER-dependent —

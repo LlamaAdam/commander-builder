@@ -56,13 +56,20 @@ if str(SRC) not in sys.path:
 #: what ``_list_decks`` uses to decide a deck is user-owned (and so
 #: shown in the sidebar by default); the ``[B3]`` suffix is what
 #: ``_bracket_from_filename`` reads, and is the trigger for the
-#: ``bracket_tag_unverified`` hint on a mainboard-changing PUT.
+#: ``bracket_tag_unverified`` hint on a mainboard-changing PUT (and the
+#: ``BracketUnverified=`` [metadata] marker that now persists it).
 DECKS = {
     # Verdict / save-flow subject.
     "[USER] Smoke Alpha [B3]": "Test Cmdr",
     # Deck-editor subject WITH a bracket tag -> exercises the
     # bracket_tag_unverified save-status warning.
     "[USER] Smoke Bravo [B3]": "Test Cmdr",
+    # Second bracket-tagged subject. The warning is now a DURABLE
+    # ``BracketUnverified=`` marker in the deck's [metadata] rather than
+    # a per-response flag, so a spec that raises it leaves state behind:
+    # the reopen-the-editor spec needs a deck no other spec has marked,
+    # or it would pass without proving anything.
+    "[USER] Smoke Delta [B3]": "Test Cmdr",
     # Deck-editor subject WITHOUT a bracket tag -> plain "Saved." path,
     # and the Name= restamp subject.
     "[USER] Smoke Charlie": "Test Cmdr",

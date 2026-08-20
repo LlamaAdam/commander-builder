@@ -52,6 +52,22 @@ body {
 .topbar-btn.primary:hover { filter: brightness(1.1); }
 .muted { color: var(--muted); font-size: 13px; }
 
+/* Status line carrying a WARNING rather than routine chatter
+   (2026-08-20). The deck editor's "the [B] tag was NOT re-verified"
+   message rendered in .muted — the same grey as "Saving…" / "Saved." —
+   so the one status the user is asked to ACT on looked exactly like the
+   two they are meant to ignore, and the Playwright smoke could only
+   tell them apart by reading the sentence. Same --warn token and the
+   same bordered-box idiom as .replay-truncated-banner, the other
+   "something needs your attention" line in this app; no new palette. */
+.status-warn {
+  color: var(--warn);
+  font-size: 13px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
 /* Visually-hidden text for screen readers — carries state that is
    otherwise conveyed by color alone (WCAG 1.4.1). */
 .sr-only {

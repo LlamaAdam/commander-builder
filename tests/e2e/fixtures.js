@@ -17,6 +17,9 @@ const STATE_DIR =
 const DECKS = {
   verdict: "[USER] Smoke Alpha [B3]",
   editorTagged: "[USER] Smoke Bravo [B3]",
+  // Second bracket-tagged deck: the unverified marker now persists on
+  // disk, so a spec that raises it must not reuse another spec's deck.
+  editorTagged2: "[USER] Smoke Delta [B3]",
   editorPlain: "[USER] Smoke Charlie",
   eraMix: "[USER] Era Mix [B3]",
   eraPure: "[USER] Era Pure [B3]",

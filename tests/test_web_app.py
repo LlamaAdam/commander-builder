@@ -2584,6 +2584,271 @@ def test_deck_text_put_no_bracket_flag_on_untagged_filename(client, deck_dir):
     assert resp.get_json()["bracket_tag_unverified"] is False
 
 
+# ---------------------------------------------------------------------------
+# BracketUnverified= marker lifecycle (2026-08-20)
+#
+# The flag used to be derived per-request from "did THIS save change the
+# mainboard?", so it described a state that outlived the request with an
+# answer that didn't. These pin the four legs of the real lifecycle: set
+# on change, PERSIST across a no-op save, cleared by the flow that
+# actually re-estimates the bracket, and absent for untagged decks.
+# ---------------------------------------------------------------------------
+
+_GAMMA = "[USER] Gamma [B3]"
+
+
+def _deck_text_url(deck_id: str) -> str:
+    from urllib.parse import quote
+    return f"/api/deck_text?deck={quote(deck_id)}"
+
+
+def test_bracket_marker_persists_across_a_no_op_save(client, deck_dir):
+    """THE regression (Playwright smoke, 2026-08-20). First save changes
+    the mainboard → flagged. The user then clicks "Save changes" again
+    without touching anything: the server compares the new on-disk text
+    against the identical submitted text, sees no change — and must STILL
+    report the tag unverified, because nothing has re-verified it."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    assert client.put(url, json={"text": changed}).get_json()[
+        "bracket_tag_unverified"
+    ] is True
+
+    # Re-save the text the editor now holds — byte-identical to disk.
+    resaved = client.get(url).get_json()["text"]
+    for _ in range(2):
+        body = client.put(url, json={"text": resaved}).get_json()
+        assert body["bracket_tag_unverified"] is True
+
+
+def test_bracket_marker_is_stored_in_deck_metadata(client, deck_dir):
+    """It survives the request because it is written into the deck's own
+    ``[metadata]`` block — the ``Protect=`` / ``PoliticsGuard=``
+    precedent, which Forge ignores and which travels with the file."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+
+    from commander_builder import dck_meta, dck_utils
+    on_disk = tagged.read_text(encoding="utf-8")
+    assert dck_meta.read_bracket_unverified(on_disk) == 3
+    # In the metadata block, above the first card section...
+    lines = on_disk.splitlines()
+    assert lines.index("BracketUnverified=3") < lines.index("[Commander]")
+    # ...and therefore invisible to the mainboard comparison that set it.
+    assert (
+        dck_utils.main_card_quantities(on_disk)
+        == dck_utils.main_card_quantities(changed)
+    )
+
+
+def test_bracket_marker_survives_a_hand_deleted_line(client, deck_dir):
+    """The marker is read from DISK, not from the submitted body: the
+    editor round-trips the file through a textarea, so reading the
+    submitted copy would let a user dismiss a safety warning by deleting
+    a line."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+
+    stripped = "".join(
+        ln for ln in client.get(url).get_json()["text"].splitlines(True)
+        if not ln.startswith("BracketUnverified=")
+    )
+    assert "BracketUnverified" not in stripped
+    body = client.put(url, json={"text": stripped}).get_json()
+    assert body["bracket_tag_unverified"] is True
+
+
+def test_deck_text_get_reports_the_persisted_marker(client, deck_dir):
+    """GET carries the flag too, so reopening the editor still shows the
+    warning — the point of moving it off the one PUT response."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    assert client.get(url).get_json()["bracket_tag_unverified"] is False
+
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+    assert client.get(url).get_json()["bracket_tag_unverified"] is True
+
+
+def test_bracket_marker_goes_stale_when_the_tag_is_renamed(client, deck_dir):
+    """The user's answer to the warning may be "you're right, it IS a B4
+    deck" — they rename the file. The marker stores the bracket it was
+    raised for, so a marker for [B3] stops describing a [B4] filename,
+    and the next save sweeps the stale line."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+
+    retagged_id = "[USER] Gamma [B4]"
+    retagged = deck_dir / f"{retagged_id}.dck"
+    tagged.rename(retagged)
+    retagged_url = _deck_text_url(retagged_id)
+
+    assert client.get(retagged_url).get_json()[
+        "bracket_tag_unverified"
+    ] is False
+    body = client.put(
+        retagged_url,
+        json={"text": retagged.read_text(encoding="utf-8")},
+    ).get_json()
+    assert body["bracket_tag_unverified"] is False
+    assert "BracketUnverified" not in retagged.read_text(encoding="utf-8")
+
+
+def test_untagged_deck_never_gets_a_bracket_marker(client, deck_dir):
+    """No declared bracket, nothing to invalidate — and no directive
+    written into a file that has no use for it."""
+    url = "/api/deck_text?deck=Alpha"
+    body = client.get(url).get_json()["text"].replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    resp = client.put(url, json={"text": body}).get_json()
+    assert resp["bracket_tag_unverified"] is False
+    assert "BracketUnverified" not in (
+        deck_dir / "Alpha.dck"
+    ).read_text(encoding="utf-8")
+    assert client.get(url).get_json()["bracket_tag_unverified"] is False
+
+
+def _mark_unverified(client, deck_dir, deck_id: str = _GAMMA):
+    """Drive a real mainboard-changing save so the marker is set the way
+    production sets it (no hand-written fixture to drift)."""
+    path = _write_deck(deck_dir, deck_id)
+    url = _deck_text_url(deck_id)
+    changed = path.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    assert client.put(url, json={"text": changed}).get_json()[
+        "bracket_tag_unverified"
+    ] is True
+    return path, url
+
+
+def _stub_estimate(monkeypatch, estimate: int, level=None, confidence="high"):
+    """Pin ``bracket_estimator.estimate_bracket``'s verdict. The dashboard
+    imports it inside ``build_dashboard``, so patching the source module
+    is what the call actually resolves."""
+    def fake(deck_text, declared=None, **_kw):
+        return {
+            "estimate": estimate,
+            "floor": 1,
+            "confidence": confidence,
+            "reasons": [],
+            "signals": {},
+            "declared": declared,
+            "mismatch": level == "mismatch",
+            "mismatch_level": level,
+        }
+    monkeypatch.setattr(
+        "commander_builder.bracket_estimator.estimate_bracket", fake,
+    )
+
+
+def test_dashboard_clears_marker_when_the_estimate_confirms_the_tag(
+    client, deck_dir, monkeypatch,
+):
+    """The dashboard is the ONLY endpoint that recomputes a bracket
+    rather than reading the filename, so it is the only one that can say
+    the tag has a measurement behind it again."""
+    from commander_builder import dck_meta
+    from urllib.parse import quote
+
+    path, url = _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, 3, level=None)
+
+    resp = client.get(f"/api/dashboard/core?deck={quote(_GAMMA)}")
+    assert resp.status_code == 200
+    assert dck_meta.read_bracket_unverified(
+        path.read_text(encoding="utf-8"),
+    ) is None
+    assert client.get(url).get_json()["bracket_tag_unverified"] is False
+
+
+@pytest.mark.parametrize(
+    "estimate,level,confidence",
+    [
+        (4, "mismatch", "high"),   # estimator says the tag is WRONG
+        (4, "check", "medium"),    # soft disagreement
+        (2, "low_signal", "low"),  # signal starvation, not evidence
+    ],
+)
+def test_dashboard_keeps_marker_when_the_estimate_does_not_confirm(
+    client, deck_dir, monkeypatch, estimate, level, confidence,
+):
+    """Clearing on a disagreement would delete the warning exactly when
+    it was right; clearing on ``low_signal`` would hand an all-clear to
+    the decks the estimator admits it cannot read."""
+    from commander_builder import dck_meta
+    from urllib.parse import quote
+
+    path, url = _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, estimate, level=level, confidence=confidence)
+
+    assert client.get(
+        f"/api/dashboard/core?deck={quote(_GAMMA)}",
+    ).status_code == 200
+    assert dck_meta.read_bracket_unverified(
+        path.read_text(encoding="utf-8"),
+    ) == 3
+    assert client.get(url).get_json()["bracket_tag_unverified"] is True
+
+
+def test_dashboard_bracket_override_cannot_clear_the_marker(
+    client, deck_dir, monkeypatch,
+):
+    """``?bracket=`` is the tile's override dropdown — a what-if, not a
+    re-declaration. "Show me this as a B5" must not verify a [B3] tag."""
+    from commander_builder import dck_meta
+    from urllib.parse import quote
+
+    path, _url = _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, 5, level=None)
+
+    assert client.get(
+        f"/api/dashboard/core?deck={quote(_GAMMA)}&bracket=5",
+    ).status_code == 200
+    assert dck_meta.read_bracket_unverified(
+        path.read_text(encoding="utf-8"),
+    ) == 3
+
+
+def test_dashboard_marker_clear_never_breaks_the_load(
+    client, deck_dir, monkeypatch,
+):
+    """A read-only deck dir (or a lost race with a concurrent save) must
+    degrade to "the warning persists", never to a dashboard 500."""
+    from urllib.parse import quote
+
+    _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, 3, level=None)
+
+    def boom(_path, _text):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(
+        "commander_builder.web.routes_dashboard.atomic_write_text", boom,
+    )
+    resp = client.get(f"/api/dashboard/core?deck={quote(_GAMMA)}")
+    assert resp.status_code == 200
+
+
 def test_deck_text_delete_removes(client, deck_dir):
     assert (deck_dir / "Alpha.dck").exists()
     # Bodyless DELETE still needs the JSON content type: the app-wide

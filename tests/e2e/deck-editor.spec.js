@@ -12,13 +12,20 @@
 //    hand-edited B4 list under a [B3] filename stayed invisible. It has
 //    to reach the save-status line, and the modal has to STAY OPEN (a
 //    warning that asks the user to act cannot ride on a modal that
-//    just closed).
+//    just closed). Since 2026-08-20 it also has to SURVIVE the next
+//    click and LOOK like a warning — see the two tests below.
 // 3. A 400 (body with no [Main] section) must surface as a visible
 //    error. The failure mode being guarded against is a silent success:
 //    status says nothing / says "Saved.", modal closes, deck unchanged.
 
 const { test, expect } = require("@playwright/test");
-const { DECKS, gotoApp, openEditor, selectDeck } = require("./fixtures");
+const {
+  DECKS,
+  cssEscape,
+  gotoApp,
+  openEditor,
+  selectDeck,
+} = require("./fixtures");
 
 test("saving edited text restamps Name= to the deck's own filename", async ({
   page,
@@ -80,6 +87,103 @@ test("a mainboard change under a [B3] filename warns in the save-status line and
   await expect(status).toContainText("Re-estimate the bracket");
   // Deliberately still open — the user is being asked to do something.
   await expect(page.locator("#propose-modal")).toBeVisible();
+
+  // SEVERITY (2026-08-20). The warning used to render in `.muted` — the
+  // same grey as the "Saving…"/"Saved." chatter it replaces — so the one
+  // status the user must act on was typographically identical to the two
+  // they are meant to ignore. It gets its own class; `.muted` is now
+  // exclusively routine.
+  await expect(status).toHaveClass("status-warn");
+  await expect(status).not.toHaveClass("muted");
+
+  // PERSISTENCE (2026-08-20). THE regression this test exists for: the
+  // user's most natural next click was "Save changes" again. The server
+  // then compared the freshly written text against the identical
+  // submitted text, found the mainboard unchanged, answered
+  // bracket_tag_unverified:false — and the status flipped to "Saved."
+  // and the modal closed, leaving the deck with an unverified [B3] tag
+  // and no warning at all. Two clicks, because one is exactly what the
+  // old per-request derivation survived.
+  for (let i = 0; i < 2; i++) {
+    // Wait on the PUT itself: the status line still carries the previous
+    // save's warning, so a bare toContainText could pass before the new
+    // response even lands (green for the wrong reason).
+    const put = page.waitForResponse(
+      (r) =>
+        r.url().includes("/api/deck_text") &&
+        r.request().method() === "PUT",
+    );
+    await page.locator("#propose-run").click();
+    expect((await (await put).json()).bracket_tag_unverified).toBe(true);
+    await expect(status).toContainText("was NOT re-verified");
+    await expect(status).toHaveClass("status-warn");
+    await expect(page.locator("#propose-modal")).toBeVisible();
+  }
+
+  // The soft dashboard refresh each save kicks off must not blank the
+  // sidebar selection for the deck it just saved.
+  await expect(
+    page.locator(`#deck-list li[data-id="${cssEscape(DECKS.editorTagged)}"]`),
+  ).toHaveAttribute("aria-current", "true");
+});
+
+test("the unverified bracket tag is still flagged after closing and reopening the editor", async ({
+  page,
+  request,
+}) => {
+  await gotoApp(page);
+  await selectDeck(page, DECKS.editorTagged2);
+  await openEditor(page);
+
+  const original = await page.locator("#propose-text").inputValue();
+  await page
+    .locator("#propose-text")
+    .fill(original.replace("60 Forest", "58 Forest").replace("39 Cultivate", "41 Cultivate"));
+  await page.locator("#propose-run").click();
+  await expect(page.locator("#propose-status")).toContainText(
+    "was NOT re-verified",
+  );
+
+  // The marker lives in the deck's own [metadata], which is what lets it
+  // outlive the one response that used to carry it. Read it back through
+  // the API the rest of the pipeline reads.
+  const body = await (
+    await request.get(
+      `/api/deck_text?deck=${encodeURIComponent(DECKS.editorTagged2)}`,
+    )
+  ).json();
+  expect(body.text).toContain("BracketUnverified=3");
+  expect(body.bracket_tag_unverified).toBe(true);
+  // ...and outside [Main], so it can never read as a mainboard change.
+  expect(body.text.indexOf("BracketUnverified=")).toBeLessThan(
+    body.text.indexOf("[Main]"),
+  );
+
+  // Close the modal entirely and come back: the warning is still there,
+  // still styled as a warning, before the user has touched anything.
+  await page.locator("#propose-close").click();
+  await expect(page.locator("#propose-modal")).toBeHidden();
+  await openEditor(page);
+  const status = page.locator("#propose-status");
+  await expect(status).toContainText("was NOT re-verified");
+  await expect(status).toHaveClass("status-warn");
+});
+
+test("routine save chatter keeps the muted styling", async ({ page }) => {
+  // The other half of the severity split: an ordinary save on an
+  // untagged deck must NOT borrow the warning styling.
+  await gotoApp(page);
+  await selectDeck(page, DECKS.editorPlain);
+  await openEditor(page);
+
+  const original = await page.locator("#propose-text").inputValue();
+  await page.locator("#propose-text").fill(original);
+  await page.locator("#propose-run").click();
+
+  const status = page.locator("#propose-status");
+  await expect(status).toHaveText("Saved.");
+  await expect(status).toHaveClass("muted");
+  await expect(status).not.toHaveClass("status-warn");
 });
 
 test("a body with no [Main] section surfaces the 400 as a visible error", async ({

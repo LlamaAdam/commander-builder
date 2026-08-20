@@ -19,8 +19,6 @@ refactor (tier-3 issue #3.1).
 
 from __future__ import annotations
 
-import os
-import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +31,7 @@ from ._helpers import (
     _bracket_from_filename,
     _normalize_pasted_deck,
     _resolve_deck_path,
+    atomic_write_text,
 )
 
 
@@ -43,8 +42,10 @@ _BRACKET_NAMES = {
 
 # ---------------------------------------------------------------------------
 # .dck write primitives (M2 fix, 2026-08) — see the deck_text PUT docstring
-# for the WHY. Kept module-level rather than in ``_helpers`` because this
-# blueprint is the only writer that takes raw user-pasted text.
+# for the WHY. The atomic writer moved to ``_helpers.atomic_write_text`` on
+# 2026-08-20 when ``routes_dashboard`` became a second (marker-clearing)
+# writer; the shape gate below is still specific to this blueprint, which
+# remains the only route that takes raw user-pasted deck text.
 # ---------------------------------------------------------------------------
 
 def _has_main_section(text: str) -> bool:
@@ -63,45 +64,26 @@ def _has_main_section(text: str) -> bool:
     )
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Replace ``path``'s contents with ``text`` atomically.
+def _bracket_tag_unverified(path: Path, text: str) -> bool:
+    """Does ``path``'s ``[B<n>]`` filename tag still lack a measurement?
 
-    Writes a temp file in the SAME directory (``os.replace`` is only
-    atomic within one filesystem) and renames it over the target, so a
-    crash / full disk mid-write leaves the previous deck intact instead
-    of a truncated one. The temp name is dot-prefixed and ends in
-    ``.tmp`` — never ``.dck`` — so the deck enumerators that glob
-    ``*.dck`` can never pick up a half-written file.
+    True only when the deck carries a ``BracketUnverified=`` marker whose
+    digit MATCHES the bracket the filename currently declares. The match
+    requirement is what honors a retag without a rename route existing:
+    a user who answers the warning with "you're right, it's a B4 deck"
+    renames the file, the stored ``=3`` stops describing anything, and
+    the warning stops — while a marker for the bracket still on the
+    filename keeps flagging for as long as it is there.
 
-    ``fsync`` before the rename so the rename cannot be reordered ahead
-    of the data on a crash. The replacement inherits the ORIGINAL file's
-    mode — ``mkstemp`` creates 0600, and silently narrowing a deck file
-    to owner-only on every save would be an invisible side effect of an
-    unrelated fix. Raises ``OSError`` like ``write_text``.
+    An untagged filename has nothing to be unverified about and is always
+    False, marker or not. See the ``deck_text`` PUT docstring for the
+    lifecycle and ``dck_meta`` for the on-disk format.
     """
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError:
-        mode = None
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        if mode is not None:
-            os.chmod(tmp_name, mode)
-        os.replace(tmp_name, path)
-    except BaseException:
-        # Only reachable when the rename did NOT happen (a successful
-        # os.replace consumes tmp_name), so this never deletes live data.
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    declared = _bracket_from_filename(path.name)
+    if declared is None:
+        return False
+    from ..dck_meta import read_bracket_unverified
+    return read_bracket_unverified(text) == declared
 
 
 # ---------------------------------------------------------------------------
@@ -269,12 +251,35 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
           enumeration / the stale-file sweep can never see a partial
           file.
 
-        Additive response field ``bracket_tag_unverified``: true when
-        the filename carries a ``[B<n>]`` bracket tag AND the mainboard
-        changed in this save — a hand-edit can silently push a de facto
-        B4 deck around under a ``[B3]`` filename, and re-estimating the
-        bracket is too costly for a synchronous PUT, so the UI gets a
+        Additive response field ``bracket_tag_unverified`` (on GET and
+        PUT alike): true while the filename's ``[B<n>]`` bracket tag has
+        no measurement behind it — a hand-edit can silently push a de
+        facto B4 deck around under a ``[B3]`` filename, and re-estimating
+        the bracket is too costly for a synchronous PUT, so the UI gets a
         hint to offer re-validation instead.
+
+        PERSISTENCE (2026-08-20). This used to be computed fresh per
+        request as "did THIS save change the mainboard?", which made it
+        true for exactly one response: the user clicked "Save changes" a
+        second time without touching anything, the route compared the
+        just-written text against itself, answered false, and the warning
+        disappeared while the tag stayed just as unverified — the
+        pool-poisoning path the hint exists to close, reopened by the
+        most natural next click (Playwright smoke, 2026-08-20). The state
+        now outlives the request in the deck's own ``[metadata]`` block
+        as ``BracketUnverified=<n>`` (see ``dck_meta``), so every later
+        GET/PUT reports it regardless of what that request changed. It is
+        cleared by the flow that actually re-verifies the bracket — the
+        dashboard's ``bracket_estimate`` agreeing with the declared tag
+        (``routes_dashboard._clear_verified_bracket_marker``) — or by the
+        user renaming the file to a different ``[B<n>]``, which makes the
+        stored digit stale by construction.
+
+        The marker is read from the ON-DISK text, not from the submitted
+        body: the editor round-trips the file through a textarea, so a
+        user who deletes the line by hand would otherwise dismiss a
+        safety warning by editing around it. It is re-stamped into the
+        text being written, so it survives the save.
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
@@ -294,6 +299,9 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 "deck": deck_id,
                 "path": str(path),
                 "text": text,
+                "bracket_tag_unverified": _bracket_tag_unverified(
+                    path, text,
+                ),
             })
 
         if request.method == "PUT":
@@ -329,21 +337,38 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             # bracket re-estimation on the request path. Only pays the
             # pre-image read when the filename actually carries a tag,
             # and a read failure degrades to "no hint", never a 500.
+            #
+            # The verdict is the OR of "this save changed the mainboard"
+            # and "a previous save already marked the tag unverified and
+            # nothing has re-verified it since" — the second half is what
+            # survives a no-op re-save. When neither holds we actively
+            # strip any marker still in the text, which is how a marker
+            # left behind by a tag rename (stored digit != current tag)
+            # gets swept.
             bracket_tag_unverified = False
-            if _bracket_from_filename(path.name):
-                from .. import dck_utils
+            declared = _bracket_from_filename(path.name)
+            if declared is not None:
+                from .. import dck_meta, dck_utils
                 try:
                     old_text = path.read_text(encoding="utf-8")
                 except OSError:
                     old_text = None
-                if old_text is not None:
-                    bracket_tag_unverified = (
-                        dck_utils.main_card_quantities(old_text)
-                        != dck_utils.main_card_quantities(new_text)
-                    )
+                changed = old_text is not None and (
+                    dck_utils.main_card_quantities(old_text)
+                    != dck_utils.main_card_quantities(new_text)
+                )
+                still_marked = (
+                    dck_meta.read_bracket_unverified(old_text) == declared
+                )
+                bracket_tag_unverified = changed or still_marked
+                new_text = (
+                    dck_meta.set_bracket_unverified(new_text, declared)
+                    if bracket_tag_unverified
+                    else dck_meta.clear_bracket_unverified(new_text)
+                )
 
             try:
-                _atomic_write_text(path, new_text)
+                atomic_write_text(path, new_text)
             except OSError as exc:
                 return jsonify({"error": str(exc)}), 500
             return jsonify({

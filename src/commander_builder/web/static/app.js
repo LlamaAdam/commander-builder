@@ -303,17 +303,39 @@ async function loadDecks() {
   }
 }
 
-function highlight(li) {
-  document.querySelectorAll(".deck-list li").forEach((n) => {
+// Move the sidebar selection to `li`, or — when the caller doesn't hold
+// the row — to whichever row carries `deckId`.
+//
+// The no-row case is NOT "clear the selection" (2026-08-20). Callers pass
+// null when a querySelector missed, which happens routinely: the Edit-deck
+// save path re-selects the deck it just wrote, and when the sidebar filter
+// hides that deck its row simply isn't in the DOM. The old code cleared
+// .active / aria-current from every row on the way past, so a save while
+// the sidebar was filtered left NOTHING selected even though the dashboard
+// kept showing that very deck — the highlight lied about which deck was
+// open, and screen readers lost aria-current entirely. Matching by id
+// first recovers the row whenever it exists; when it genuinely isn't
+// rendered we keep the current highlight rather than blanking a selection
+// the user still has.
+function highlight(li, deckId) {
+  const rows = document.querySelectorAll(".deck-list li");
+  let target = li;
+  if (!target && deckId != null) {
+    // dataset comparison rather than an attribute selector: deck ids are
+    // filenames and may carry quotes/backslashes that would need escaping.
+    for (const n of rows) {
+      if (n.dataset.id === deckId) { target = n; break; }
+    }
+  }
+  if (!target) return;
+  rows.forEach((n) => {
     n.classList.remove("active");
     n.removeAttribute("aria-current");
   });
-  if (li) {
-    li.classList.add("active");
-    // Mirror the .active highlight for screen readers (WCAG 1.4.1 —
-    // the selected deck was conveyed by background color alone).
-    li.setAttribute("aria-current", "true");
-  }
+  target.classList.add("active");
+  // Mirror the .active highlight for screen readers (WCAG 1.4.1 —
+  // the selected deck was conveyed by background color alone).
+  target.setAttribute("aria-current", "true");
 }
 
 // --- Mobile sidebar drawer -------------------------------------------
@@ -468,7 +490,7 @@ async function selectDeck(deckId, li, opts) {
     _auditAbortController = null;
   }
   _activeDeckId = deckId;
-  highlight(li);
+  highlight(li, deckId);
   // Selecting a deck on mobile closes the slide-in drawer so the freshly
   // loaded dashboard is visible. Inert on desktop (no drawer-open class).
   closeDrawer();
@@ -595,12 +617,39 @@ function updateGamesEta() {
   span.textContent = `${simEta(games, mode, bracket).str} on B${bracket}`;
 }
 
+// The deck editor's save-status line carries two very different kinds of
+// message through one element: routine chatter ("Saving…", "Saved.",
+// "Running 10 pod games…") and things the user is being asked to act on.
+// Until 2026-08-20 both rendered in `.muted`, so the bracket-tag warning
+// was the same grey as the "Saved." it replaced — a Playwright smoke
+// could only tell them apart by reading the sentence, which is a fair
+// proxy for how well a user distinguishes them at a glance. `kind`
+// selects the severity class; every writer goes through here so a warn
+// class can never be left behind on the next routine message.
+function setProposeStatus(text, kind) {
+  const node = $("propose-status");
+  if (!node) return;
+  node.className = kind === "warn" ? "status-warn" : "muted";
+  node.textContent = text;
+}
+
+// One copy of the bracket-tag warning: it is shown both when a save
+// raises the flag AND when the editor is reopened on a deck whose
+// marker is still set, and those two must not drift apart.
+const BRACKET_UNVERIFIED_MSG =
+  "Saved — but the mainboard changed and this deck's [B] filename tag "
+  + "was NOT re-verified. Re-estimate the bracket before using it as a "
+  + "bracket-tagged reference deck.";
+const BRACKET_UNVERIFIED_PENDING_MSG =
+  "This deck's [B] filename tag was NOT re-verified after an earlier "
+  + "mainboard change. Re-estimate the bracket before using it as a "
+  + "bracket-tagged reference deck.";
+
 async function openProposeModal(opts) {
   if (!_activeDeckId) return;
   _proposeMode = (opts && opts.saveOnly) ? "save" : "ab";
   const modal = $("propose-modal");
   const ta = $("propose-text");
-  const status = $("propose-status");
   const result = $("propose-result");
   const runBtn = $("propose-run");
   const radios = document.querySelector(".games-radio");
@@ -614,7 +663,7 @@ async function openProposeModal(opts) {
     if (radios) radios.style.display = "";
     modal.querySelector(".modal h2").textContent = "Propose changes";
   }
-  status.textContent = "";
+  setProposeStatus("");
   result.innerHTML = "";
   updateGamesEta();  // show the time hint for the current selection on open
   ta.value = "Loading…";
@@ -625,9 +674,15 @@ async function openProposeModal(opts) {
     );
     ta.value = body.text || "";
     ta.focus();
+    // The GET reports the persisted marker too, so an unverified tag is
+    // still visible after the user closes and reopens the editor — the
+    // whole point of moving the flag out of the one PUT response.
+    if (body.bracket_tag_unverified) {
+      setProposeStatus(BRACKET_UNVERIFIED_PENDING_MSG, "warn");
+    }
   } catch (e) {
     ta.value = "";
-    status.textContent = `Could not load deck: ${e.message}`;
+    setProposeStatus(`Could not load deck: ${e.message}`);
   }
 }
 
@@ -638,14 +693,13 @@ function closeProposeModal() {
 async function runProposeSwap() {
   if (!_activeDeckId) return;
   const ta = $("propose-text");
-  const status = $("propose-status");
   const result = $("propose-result");
   const btn = $("propose-run");
 
   if (_proposeMode === "save") {
     // Edit-only path: PUT the new text and reload the dashboard.
     btn.disabled = true;
-    status.textContent = "Saving…";
+    setProposeStatus("Saving…");
     try {
       const resp = await fetch(
         `/api/deck_text?deck=${encodeURIComponent(_activeDeckId)}`,
@@ -657,33 +711,34 @@ async function runProposeSwap() {
       );
       const body = await resp.json();
       if (!resp.ok) {
-        status.textContent = `Error: ${body.error || resp.status}`;
+        setProposeStatus(`Error: ${body.error || resp.status}`);
         return;
       }
-      // bracket_tag_unverified: the server noticed this deck's filename
-      // carries a [B<n>] tag AND the mainboard just changed, so the
-      // declared bracket no longer has a measurement behind it. The
-      // server has computed and returned this since the deck_text PUT
-      // hardening; nothing rendered it, so the hand-edited-B4-under-a-
-      // [B3]-filename pool-poisoning path stayed as invisible to the
-      // user as before the fix (2026-08-20). Surfaced in the save-status
-      // line, and the modal deliberately stays OPEN in that case: a
-      // 4-second toast on a modal we just closed is not a warning
-      // anybody reads, and this one asks the user to do something.
+      // bracket_tag_unverified: this deck's filename carries a [B<n>]
+      // tag whose declared bracket has no measurement behind it. Since
+      // 2026-08-20 the server keeps that state in the deck's own
+      // [metadata] (BracketUnverified=), so it stays true across saves
+      // that change nothing — the second click of "Save changes" used to
+      // clear the warning while the tag stayed exactly as unverified.
+      // Surfaced in the save-status line with warn styling, and the modal
+      // deliberately stays OPEN: a 4-second toast on a modal we just
+      // closed is not a warning anybody reads, and this one asks the user
+      // to do something (open the dashboard, which re-estimates the
+      // bracket and retires the marker when it agrees).
       const unverified = !!body.bracket_tag_unverified;
-      status.textContent = unverified
-        ? "Saved — but the mainboard changed and this deck's [B] filename "
-          + "tag was NOT re-verified. Re-estimate the bracket before using "
-          + "it as a bracket-tagged reference deck."
-        : "Saved.";
-      if (!unverified) hideModal("propose-modal");
+      if (unverified) {
+        setProposeStatus(BRACKET_UNVERIFIED_MSG, "warn");
+      } else {
+        setProposeStatus("Saved.");
+        hideModal("propose-modal");
+      }
       // Soft-refresh: keep the prior dashboard visible while the new
       // data fetches in background. Avoids the 5+s "Loading…" blank
       // when Edit added cards Scryfall hasn't cached yet.
-      const li = document.querySelector(`.deck-list li[data-id="${_activeDeckId}"]`);
+      const li = document.querySelector(`.deck-list li[data-id="${cssEscape(_activeDeckId)}"]`);
       selectDeck(_activeDeckId, li, { soft: true });
     } catch (e) {
-      status.textContent = `Save failed: ${e.message}`;
+      setProposeStatus(`Save failed: ${e.message}`);
     } finally {
       btn.disabled = false;
     }
@@ -709,8 +764,10 @@ async function runProposeSwap() {
   // ETA via the shared estimator (see simEta) so the run-status line and the
   // live Games hint never disagree.
   const etaStr = simEta(games, mode, bracket).str;
-  status.textContent = `Running ${games} ${mode === "pod" ? "pod" : "1v1"} `
-    + `games on B${bracket} via Forge — ${etaStr}…`;
+  setProposeStatus(
+    `Running ${games} ${mode === "pod" ? "pod" : "1v1"} `
+    + `games on B${bracket} via Forge — ${etaStr}…`,
+  );
   btn.disabled = true;
   // Guard against the stale-response race (the _activeDeckId pattern from
   // 13f16de): a pod sim can run for minutes, and the user may switch decks
@@ -742,9 +799,9 @@ async function runProposeSwap() {
       // Validation/staging/availability errors still come back
       // synchronously here (before any job is created), so surface them
       // exactly as before.
-      status.textContent = `Error: ${startBody.error || startResp.status}${
+      setProposeStatus(`Error: ${startBody.error || startResp.status}${
         startBody.detail ? " — " + startBody.detail : ""
-      }`;
+      }`);
       return;
     }
     const jobId = startBody.job_id;
@@ -782,9 +839,10 @@ async function runProposeSwap() {
           if (_activeDeckId === simDeckId) {
             const prog = job.progress;
             if (prog && prog.pods_total) {
-              status.textContent =
+              setProposeStatus(
                 `Running ${games} ${mode === "pod" ? "pod" : "1v1"} games `
-                + `on B${bracket} via Forge — pod ${prog.pods_done}/${prog.pods_total}…`;
+                + `on B${bracket} via Forge — pod ${prog.pods_done}/${prog.pods_total}…`,
+              );
             }
           }
           delay = Math.min(delay + 500, 5000);
@@ -798,14 +856,14 @@ async function runProposeSwap() {
 
     // A poll that resolved after the user switched decks must not render.
     if (_activeDeckId !== simDeckId) return;
-    status.textContent = `Done. ${body.total_games} games played.`;
+    setProposeStatus(`Done. ${body.total_games} games played.`);
     _lastSimReport = body;
     renderProposeResult(result, body);
   } catch (e) {
     // Swallow the deck-switch sentinel silently — it isn't an error, the
     // user just moved on.
     if (e && e.message === "__deck_switched__") return;
-    status.textContent = `Network error: ${e.message}`;
+    setProposeStatus(`Network error: ${e.message}`);
   } finally {
     // Only re-enable the button if we're still on the deck we started on;
     // a deck switch rebuilt the panel and its own button.
@@ -2072,8 +2130,9 @@ function renderAuditResult(container, body) {
       // openProposeModal pre-fills the textarea from /api/deck_text;
       // overwrite with the proposed text after that returns.
       $("propose-text").value = _lastAuditProposed;
-      $("propose-status").textContent =
-        "Proposed deck loaded. Pick a game count and run the A/B sim.";
+      setProposeStatus(
+        "Proposed deck loaded. Pick a game count and run the A/B sim.",
+      );
     });
   });
   container.appendChild(useBtn);
@@ -4092,8 +4151,9 @@ function renderBuildSummary(container, result) {
   loadBtn.addEventListener("click", () => {
     hideModal("new-deck-modal");
     // The row can be absent when the sidebar filter hides the freshly
-    // built deck. selectDeck tolerates a null row (highlight() no-ops),
-    // so load it anyway rather than making the button silently dead.
+    // built deck. selectDeck tolerates a null row (highlight() keeps the
+    // existing selection), so load it anyway rather than making the
+    // button silently dead.
     const li = document.querySelector(`.deck-list li[data-id="${cssEscape(result.id)}"]`);
     selectDeck(result.id, li);
   });

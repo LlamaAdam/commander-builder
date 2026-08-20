@@ -72,7 +72,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 0 — web surface                                          │
 │    web/app.py               (Flask app orchestrator)            │
-│      ├─ _helpers.py         (pure Flask-independent helpers)   │
+│      ├─ _helpers.py         (Flask-independent helpers)        │
 │      ├─ routes_audit.py     (audit + advise endpoints)         │
 │      ├─ routes_sim.py       (propose-swap + iteration CRUD)    │
 │      ├─ routes_decks.py     (deck CRUD + import + GC)          │
@@ -110,7 +110,7 @@ read any layer. Everything else honors the invariant.
 | `run_match` | User deck vs curated pool (or fallback opponents), `MatchupReport` | Improvement decisions. That's the analyst loop. |
 | `compare_versions` | Old-vs-new head-to-head A/B sim; parallel pod dispatch; adaptive early-stop; intra-pod abort; card-level diff | Whether the new version is "better". That's `analyst`. |
 | `snapshot_deck` | File-copy `.dck` to versioned filename; refuse-clobber semantics | What to do with the snapshot. Workflow / iteration_loop owns. |
-| `dck_meta` | The filename↔`Name=` win-attribution invariant: `rewrite_name_to_stem` rewrites `[metadata] Name=` to the filename stem (original kept as `DisplayName=`) in every deck writer that copies/splices an existing `.dck` | Deciding filenames. Callers (snapshot / proposer / meta-test / import) pick the name. |
+| `dck_meta` | The filename↔`Name=` win-attribution invariant: `rewrite_name_to_stem` rewrites `[metadata] Name=` to the filename stem (original kept as `DisplayName=`) in every deck writer that copies/splices an existing `.dck`. Also the filename↔`[B<n>]` half: `read/set/clear_bracket_unverified` maintain the `BracketUnverified=<n>` marker (2026-08-20) that keeps "this declared bracket has no measurement behind it" alive across saves | Deciding filenames. Callers (snapshot / proposer / meta-test / import) pick the name. Deciding when a bracket counts as re-verified — that is `web/routes_dashboard`. |
 | `meta_test` | Pull top-likes Moxfield + EDHREC Average Deck for a commander; compare-versus-references; must-add / consider / off-meta | Acting on the recommendations. The user does. |
 | `improvement_advisor` (orchestrator) | Dispatch to multi-source recommenders; `advise()` entry point; `_advise_steps()` streaming generator; name validation + pricing snapshot | Running the sim. That's `compare_versions`. |
 | `_advisor_models` | `DeckDiagnosis`, `SwapRecommendation`, `AdviceReport`, `AdvicePhase` dataclasses | Serialization schema. JSON mapping is implicit. |
@@ -141,11 +141,11 @@ read any layer. Everything else honors the invariant.
 | `deck_builder_personalize` (FP-014.3) | Three net-zero like-for-like nonland-spell passes — lift co-occurrence picks (skips without a ≥10-deck corpus), bracket-steer, owned-collection bias — each preserving exactly-99 / singleton / color-identity | Sourcing, rendering, re-validation. `deck_builder` owns those. |
 | `forge_py_correlation` | Paired-verdict logging (Forge vs forge_py); CSV append; agreement-rate summary | Driving forge_py. Imported lazily; opt-in via env var. |
 | `web/app.py` (orchestrator) | Flask app creation; blueprint registration; `create_app()` entry point; stale file cleanup; deck listing; path resolution | Business logic. Blueprints call into the layers above. |
-| `web/_helpers.py` | Pure Flask-independent helpers (`_apply_swaps_to_dck`, `_normalize_pasted_deck`, `_format_added_line`, etc.); `_BASIC_LANDS` constant | Route-specific logic. Each blueprint uses as needed. |
+| `web/_helpers.py` | Flask-independent helpers (`_apply_swaps_to_dck`, `_normalize_pasted_deck`, `_format_added_line`, etc.); `_BASIC_LANDS` constant; `atomic_write_text`, the crash-safe `.dck` overwrite shared by the two blueprints that write decks | Route-specific logic. Each blueprint uses as needed. |
 | `web/routes_audit.py` | Audit + streaming (`GET /api/audit`, `GET /api/audit/stream`, `GET /api/advise`); wires `improvement_advisor` | Other route groups. Each lives in its own blueprint. |
 | `web/routes_sim.py` | Propose-swap + iteration CRUD (`POST /api/propose_swap`, `POST /api/save_iteration`, `GET /api/iteration/<id>`, comparisons, snapshots) | Other endpoints. Organized by business domain. |
 | `web/routes_decks.py` | Deck CRUD + import/GC (`GET/PUT/DELETE /api/deck_text`, `POST /api/import_deck`, `GET/PUT /api/deck_source`, manabase verification, audit) | Other routes. Grouped by deck lifecycle. |
-| `web/routes_dashboard.py` | Dashboard data (`GET /api/decks`, `/api/dashboard`, `/api/iterations`, `/api/pricing_series`, `/api/verdict_breakdown`) | Audit/sim routes. Dashboard-specific aggregation. |
+| `web/routes_dashboard.py` | Dashboard data (`GET /api/decks`, `/api/dashboard`, `/api/iterations`, `/api/pricing_series`, `/api/verdict_breakdown`); the one write it makes: retiring a deck's `BracketUnverified=` marker when its own bracket estimate agrees with the filename tag | Audit/sim routes. Dashboard-specific aggregation. Setting the marker — that is the `deck_text` PUT. |
 | `web/routes_meta.py` | Meta/utility routes (`GET /`, `/api/health`, `/api/forge_version`, `/api/correlation_summary`, `POST /api/log_error`) | Business routes. Ops + topbar concerns. |
 | `prompts/moxfield_audit_v3.md` | Current LLM proposer (manual paste workflow) + audit_manifest.json writeback JS | Validation. `compare_versions` + `analyst` do. |
 
@@ -361,7 +361,7 @@ web/app.py (orchestrator)
 ├── _list_decks()                       # Enumerate [USER] decks
 └── _resolve_deck_path()                # Validate path against deck_dir
 
-web/_helpers.py (pure, Flask-independent)
+web/_helpers.py (Flask-independent)
 ├── _apply_swaps_to_dck()               # Apply swap manifest to deck text
 ├── _normalize_pasted_deck()            # Canonicalize deck format
 ├── _format_added_line()                # Render added card for output

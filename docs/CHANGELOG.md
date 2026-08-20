@@ -6,6 +6,38 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-20 — three defects the new Playwright smokes found
+
+#### Fixed
+
+- **The unverified bracket tag now survives the next click.** The
+  deck-editor PUT's `bracket_tag_unverified` flag was derived per
+  request from "did THIS save change the mainboard?", so clicking
+  "Save changes" a second time without touching anything compared the
+  just-written text against itself, answered false, and closed the modal
+  with the warning gone — the [B3]-filename-over-a-B4-list pool-poisoning
+  path reopened by the most natural next click. The state now lives in
+  the deck's own `[metadata]` block as `BracketUnverified=<n>` (new
+  helpers in `dck_meta`, following the `Protect=` / `PoliticsGuard=`
+  precedent Forge ignores), is reported by every `deck_text` GET and PUT,
+  and is retired only where a bracket is genuinely recomputed: the
+  dashboard's `bracket_estimate` agreeing with the filename tag. Storing
+  the DIGIT is what makes a retag self-clearing — rename the file to
+  `[B4]` and a `=3` marker stops describing anything.
+  `moxfield_import._merge_local_metadata` carries the marker across
+  same-id re-imports alongside `Protect=` / `PoliticsGuard=`: a re-import
+  rewrites the mainboard, so it must never be the thing that retires it.
+- **The bracket warning looks like a warning.** It rendered in `.muted`,
+  the same grey as the "Saving…"/"Saved." chatter it replaced. New
+  `.status-warn` class (`--warn` token, same bordered idiom as
+  `.replay-truncated-banner`); `.muted` is now routine status only, and
+  every writer to the save-status line goes through one helper so a warn
+  class cannot linger on the next message.
+- **A soft dashboard refresh no longer blanks the sidebar selection.**
+  `highlight(null)` cleared `.active` / `aria-current` from every deck
+  row before checking whether it had a row to select; it now resolves the
+  row by deck id and, failing that, keeps the current selection.
+
 ### 2026-08-17 — owner-decision batch 1: honesty, scope, and provenance
 
 Follows the 2026-08-17 review of the sixteen open product decisions

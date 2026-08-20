@@ -929,6 +929,15 @@ _POLITICS_GUARD_META = re.compile(r"^PoliticsGuard=.*$",
 # the stamp below falls back to the fresh render's pretty name. (Mirrors
 # dck_meta._DISPLAY_NAME_LINE, which also requires a value.)
 _DISPLAY_META = re.compile(r"^DisplayName=.+$", re.MULTILINE)
+# `BracketUnverified=`: the durable "this deck's [B<n>] filename tag has no
+# measurement behind it" marker (see dck_meta, 2026-08-20). Machine-written
+# rather than user-authored, but it is carried for a stronger reason than
+# the others: a same-id re-import REPLACES the mainboard wholesale, which is
+# the very event the marker exists to flag. Dropping it would mean
+# "re-import the deck" silently clears a bracket warning while making the
+# bracket *less* verified than it already was.
+_BRACKET_UNVERIFIED_META = re.compile(r"^BracketUnverified=.*$",
+                                      re.MULTILINE | re.IGNORECASE)
 
 
 def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
@@ -936,10 +945,13 @@ def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
     freshly rendered import.
 
     `to_dck` only regenerates `Name=`/`Moxfield=`; a plain same-id overwrite
-    would silently wipe local-only metadata. Three keys are carried:
+    would silently wipe local-only metadata. Four keys are carried:
 
     - `Protect=` pet-card locks (all lines),
-    - `PoliticsGuard=` (all lines) — the decision-C2 per-deck opt-out, and
+    - `PoliticsGuard=` (all lines) — the decision-C2 per-deck opt-out,
+    - `BracketUnverified=` (all lines) — the unverified-bracket marker; a
+      re-import rewrites the mainboard, so it must never be the thing that
+      retires it, and
     - `DisplayName=` (first line) — dck_meta documents that user edits to
       the display name survive re-imports, and this carry is what makes
       that true: import_deck runs this merge BEFORE
@@ -951,6 +963,7 @@ def _merge_local_metadata(old_text: str, fresh_dck: str) -> str:
     section header)."""
     carried = _PROTECT_META.findall(old_text)
     carried += _POLITICS_GUARD_META.findall(old_text)
+    carried += _BRACKET_UNVERIFIED_META.findall(old_text)
     local_display = _DISPLAY_META.search(old_text)
     if local_display:
         # Local DisplayName wins over the fresh render's. to_dck never emits
