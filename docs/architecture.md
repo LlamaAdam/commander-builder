@@ -500,6 +500,35 @@ require changing module boundaries.
 
 ---
 
+## Data sources — risk tiers (2026-08-20, decision C3)
+
+Every external source this program depends on, ranked by how likely it
+is to break underneath us and what breaks with it. "Blast radius" is
+what stops working the day the source changes; "fallback" is what the
+code does about it TODAY (not aspirationally).
+
+| Source | Interface | Risk | Blast radius | Fallback today |
+|--------|-----------|------|--------------|----------------|
+| Moxfield | **Undocumented private API** (`api2.moxfield.com`) | **High** — no contract, ToS-gray, CDN/bot-shield changes have broken it before | Single-deck import, bulk bracket harvest, top-likes search, bracket peers, meta-test references — most acquisition at once | Archidekt lane for single-deck import (`import_deck(source=)`); harvest/top-likes have NO fallback and now say so when they fail |
+| EDHREC | JSON twin first (`json.edhrec.com`), HTML `__NEXT_DATA__` scrape second | **Medium** — JSON endpoint is undocumented but stable; the scrape is schema-tolerant and has survived redesigns | Heuristic advisor candidates, average-deck comparisons, theme pages | Two lanes internally (JSON → scrape); 24 h cache absorbs outages; advisor degrades to bracket-peers/manual sources |
+| Scryfall | **Documented public API** + bulk oracle snapshots | **Low** — versioned, documented, explicitly third-party-friendly | Card metadata, color identity, oracle text for every classifier | Disk cache + bulk snapshots mean a total outage only blocks NEW cards; everything cached keeps working offline |
+| Archidekt | **Documented public API** | **Low-Medium** — documented but less battle-tested here; no like-count, bracket usually null | The fallback lane itself; commander-keyed reference decks (partial) | It IS the fallback; if both it and Moxfield are down, single-deck import is paste-from-clipboard (`import_formats`) |
+| WotC Game Changers page | HTML scrape | **Medium** — marketing pages get redesigned without notice | Bracket legality's game-changer list | 7-day cache + bundled snapshot fallback ships in the repo |
+| Forge | Vendored JAR, local | **None** (pinned) — but upgrades change the card corpus | The sim itself; unsupported-card preflight | Version-detected (`detect_forge_version`); corpus mtime keys the sim-coverage cache so an upgrade invalidates it |
+
+Rules of thumb this table encodes:
+
+- Anything that exists ONLY via Moxfield's private API (bulk harvest,
+  top-likes) is accepted as best-effort: failures must name what broke
+  and what still works, never masquerade as "no decks exist."
+- A documented API beats a scrape, and a scrape with a bundled/cached
+  fallback beats a bare scrape. New acquisition features should enter
+  at the lowest-risk tier that can serve them.
+- Caches are the real resilience layer: every source above is cached on
+  disk, so the failure mode is "stale," not "dark" — and staleness is
+  surfaced (legality TTL warnings, `price_data_age_days`, oracle-age
+  warnings in `commander-doctor`).
+
 ## Working principles
 
 These are how sessions should operate on this project. Follow them.
