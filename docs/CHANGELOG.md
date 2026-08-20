@@ -45,6 +45,34 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Added
 
+- **Round-2 decisions implemented (R2-D1..D6, owner review 2026-08-20).**
+  `--strategy bandit` finally writes history: one knowledge-log row per
+  ACCEPTED pull (manifest = the single swap, snapshot = the candidate,
+  provenance-stamped sim report, parent-chained) — restoring revert,
+  lineage and FP-013 counting for the one strategy that had none; only
+  accepting pulls log, since a pull is an iteration exactly when it
+  changes the deck. A confirmation that could not RUN now labels its
+  row `inconclusive` instead of the self-contradictory `pending`.
+  Skip-retirement splits structural (retires immediately) from
+  transient (never retires) with every reason explicitly classified —
+  and fixing that exposed two cold-start bugs the decision alone would
+  have shipped (a flaky arm could starve siblings of their first pull,
+  then monopolize the remaining rounds; `_cold_start_order` now
+  interleaves by skip count). The unattended loop is repositioned in
+  copy as a false-positive-proof screen whose expected overnight
+  outcome is "nothing advanced", with the corrected throughput numbers
+  (0.13%/round, ~1.3% per 10-round run) printed beside the 1-in-1,600
+  figure. `backfill_web_margins.py --era-boundary-report` lists the
+  2026-08-14 rows for the owner's era-boundary call, zero writes.
+- **Archidekt adapter pinned against the real API** (R2-P18, from a
+  live CI capture of an owner-provided deck). The documented
+  `includedInDeck` invariant was FALSE against real data (a Sideboard
+  can be `true` — the flag is per-deck user state, not a category-name
+  property); `fetch_deck` now raises when the API omits card data
+  (`intentionallySkippedCardData`), closing a path that wrote a 0-card
+  deck and printed success. Nine card entries kept byte-for-byte
+  verbatim with provenance; the MDFC name shape remains an open,
+  test-asserted gap.
 - **`commander` umbrella CLI + guided `commander-init`** (decisions B1
   and B2). One front door aliases all 28 hyphenated scripts 1:1 with
   grouped help; a tripwire test fails when a script is added without a
