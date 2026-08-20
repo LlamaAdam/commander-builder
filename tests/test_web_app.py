@@ -1761,6 +1761,53 @@ def test_propose_swap_runs_compare_and_returns_summary(client, monkeypatch):
     assert any("Lotus Cobra" in s for s in body["diff"]["added"])
 
 
+# --- R2-P20: the save default is computed server-side ----------------------
+#
+# app.js used to derive it from ComparisonReport.winner (ANY lead) plus a
+# bare 20-decisive gate — the era-3 rule the 2026-08-14 significance fix
+# retired — and save_iteration stores the checked radio verbatim into a row
+# stamped with the CURRENT era. The sim response now carries the verdict
+# the CLI's binomial test would assign, and the p-value behind it.
+
+def test_propose_swap_returns_a_significance_based_suggested_verdict(
+    client, monkeypatch,
+):
+    _stub_compare(monkeypatch, winner="new", old_wins=20, new_wins=21)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 10,
+    })
+    body = resp.get_json()
+    # winner still says "new" (any lead) — the SUGGESTION does not.
+    assert body["winner"] == "new"
+    sv = body["suggested_verdict"]
+    assert sv["verdict"] == "neutral"
+    assert sv["decisive"] == 41
+    assert sv["p_value"] > sv["alpha"]
+    assert sv["min_decisive"] == 20
+
+
+def test_propose_swap_suggests_kept_on_a_significant_split(
+    client, monkeypatch,
+):
+    _stub_compare(monkeypatch, winner="new", old_wins=15, new_wins=30)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 10,
+    })
+    sv = resp.get_json()["suggested_verdict"]
+    assert sv["verdict"] == "kept"
+    assert sv["p_value"] < sv["alpha"]
+
+
 def test_propose_swap_forwards_early_stop_metadata(client, monkeypatch):
     """Sprint 1B: when compare() reports it stopped early, the
     /api/propose_swap response surfaces pods_completed / pods_planned
@@ -5946,6 +5993,103 @@ def test_verdict_breakdown_400_without_deck_param(save_client):
     resp = client.get("/api/verdict_breakdown")
     assert resp.status_code == 400
     assert "deck" in resp.get_json()["error"]
+
+
+# --- R2-P19: the breakdown route carries the era split --------------------
+
+def test_verdict_breakdown_route_reports_the_era_split(save_client):
+    """Flat per-version counts stay (the dashboard pills index them), but
+    the payload now says which measurement eras they pooled — an era-3
+    'kept' (|margin| >= 4) is not an era-4 'kept' (significant test)."""
+    client, db = save_client
+    from commander_builder.knowledge_log import Iteration, record_iteration
+    for era, verdict in [(3, "kept"), (4, "kept"), (4, "reverted")]:
+        record_iteration(
+            Iteration(deck_id="Alpha", deck_name="Alpha", bracket=3,
+                      audit_version="v3", verdict=verdict,
+                      measurement_era=era),
+            db_path=db,
+        )
+    body = client.get("/api/verdict_breakdown?deck=Alpha").get_json()
+
+    assert body["breakdown"]["v3"]["kept"] == 2      # unchanged shape
+    assert body["comparable_era"] == 4
+    assert body["spans_multiple_eras"] is True
+    assert body["eras_present"] == ["3", "4"]
+    by_era = body["breakdown"]["v3"]["by_era"]
+    assert by_era["3"]["kept"] == 1
+    assert by_era["4"]["kept"] == 1 and by_era["4"]["reverted"] == 1
+
+
+def test_verdict_breakdown_route_single_era_is_not_flagged(save_client):
+    client, _ = save_client
+    client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_version": "v3", "verdict": "kept",
+    })
+    body = client.get("/api/verdict_breakdown?deck=Alpha").get_json()
+    assert body["spans_multiple_eras"] is False
+    assert body["eras_present"] == ["4"]
+
+
+# --- R2-P06: web-saved rows record the rule their verdict was offered
+#     against --------------------------------------------------------------
+
+def test_save_iteration_stamps_verdict_provenance(save_client):
+    """The stored sim_report says what the server suggested and under
+    which parameters, so a human-chosen label is auditable instead of
+    being a bare string whose bar has to be guessed from the code
+    version that wrote it."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {
+            "winner": "new", "old_wins": 15, "new_wins": 30,
+            "total_games": 45, "draws": 0,
+        },
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    report = detail["sim_report"]
+    assert report["suggested_verdict"]["verdict"] == "kept"
+    assert report["verdict_params"]["alpha"] == 0.05
+    assert report["verdict_params"]["min_decisive"] == 20
+    assert report["verdict_params"]["margin"] == 1
+    assert report["verdict_overrides_suggestion"] is False
+
+
+def test_save_iteration_records_an_override_of_the_suggestion(save_client):
+    """The user can still store any verdict — the row just says the
+    discipline suggested something else. This is the 21-20 case the old
+    web default pre-checked as 'kept' with no record at all."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {
+            "winner": "new", "old_wins": 20, "new_wins": 21,
+            "total_games": 41, "draws": 0,
+        },
+    })
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["verdict"] == "kept"                        # honored
+    report = detail["sim_report"]
+    assert report["suggested_verdict"]["verdict"] == "neutral"
+    assert report["verdict_overrides_suggestion"] is True
+
+
+def test_save_iteration_without_a_split_stamps_no_provenance(save_client):
+    """A manifest-only save has no split to score — don't fabricate one."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "pending",
+        "sim_report": {"note": "audit only"},
+    })
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert "verdict_params" not in detail["sim_report"]
+    assert "suggested_verdict" not in detail["sim_report"]
 
 
 def test_save_iteration_handles_missing_sim_report(save_client):

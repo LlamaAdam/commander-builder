@@ -38,16 +38,19 @@ from uuid import uuid4
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from ..knowledge_log import (
+    SIM_REPORT_VERDICT_PARAMS_KEY,
     Iteration,
     decisive_win_rate,
     get_iteration,
     record_iteration,
     stats_summary,
+    verdict_provenance,
 )
 from ._helpers import (
     _iteration_to_dict,
     _resolve_deck_path,
     _to_constructed_format,
+    suggested_verdict,
 )
 
 
@@ -565,6 +568,16 @@ def _execute_swap(
         "margin": report.margin,
         "total_games": report.total_games,
         "timestamp": report.timestamp,
+        # The verdict the CLI's significance test would assign to this
+        # split, plus the p-value behind it (2026-08-20). The browser
+        # used to derive its own save default from `winner`, which is
+        # ANY-lead — see suggested_verdict's docstring. Computed here so
+        # both the sync response and the async job report carry it, and
+        # so the rule lives in one place (analyst.binomial_two_sided_p)
+        # rather than being re-implemented in JavaScript.
+        "suggested_verdict": suggested_verdict(
+            report.old_stats.wins, report.new_stats.wins,
+        ),
         # Sprint 1B telemetry: tell the UI when adaptive early-stop cut the
         # run short so the user knows the verdict is robust despite fewer
         # pods running.
@@ -622,7 +635,9 @@ def make_sim_blueprint(
 
         SYNCHRONOUS — blocks until Forge finishes (10 games ~30s in 1v1;
         pod mode 4-6x slower; a 40-game pod sim can run for many minutes).
-        Returns the full ComparisonReport as JSON on success.
+        Returns the full ComparisonReport as JSON on success, plus a
+        ``suggested_verdict`` block (the label the CLI's significance
+        test would assign to this split, and the p-value behind it).
 
         This endpoint is deliberately KEPT for programmatic callers (the
         test suite, scripts, anything that wants the report in one shot).
@@ -921,6 +936,37 @@ def make_sim_blueprint(
                     margin = new_w - old_w
             except (TypeError, ValueError):
                 pass
+
+        # Verdict provenance (2026-08-20). This writer stores a
+        # HUMAN-CHOSEN verdict, era-stamped like every other row, so the
+        # row has to say what rule the choice was offered against:
+        # the significance suggestion the server computed, the
+        # parameters behind it, and — implicitly, by comparison — whether
+        # the human overrode it. Without this a web row is a bare label
+        # whose bar can only be guessed from the code version that wrote
+        # it, which is exactly the auditability hole raised for
+        # --sim-margin on the CLI side. Stamped for the sim-shaped
+        # payloads only; a manifest-only save has no split to score.
+        if isinstance(sim_report, dict) and (
+            "old_wins" in sim_report or "new_wins" in sim_report
+        ):
+            suggestion = sim_report.get("suggested_verdict")
+            if not isinstance(suggestion, dict):
+                # Hand-built / legacy payload (or one posted by a client
+                # older than the suggestion field): score it here rather
+                # than leave the row unexplained.
+                suggestion = suggested_verdict(
+                    sim_report.get("old_wins"), sim_report.get("new_wins"),
+                )
+                sim_report["suggested_verdict"] = suggestion
+            sim_report[SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
+                margin=suggestion.get("margin", 1),
+                alpha=suggestion.get("alpha", 0.05),
+                min_decisive=suggestion.get("min_decisive", 20),
+            )
+            sim_report["verdict_overrides_suggestion"] = (
+                verdict != suggestion.get("verdict")
+            )
 
         parent_id = payload.get("parent_id")
         if parent_id is not None:

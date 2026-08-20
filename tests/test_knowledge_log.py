@@ -410,6 +410,156 @@ def test_verdict_breakdown_scoped_to_one_deck(db):
     assert out["v3"]["reverted"] == 0  # d2's row excluded
 
 
+# --- R2-P19: the breakdown must not pool verdicts across eras --------------
+#
+# knowledge_log's own schema docstring: "any pooled analysis must bucket
+# rows by measurement_era". This function used to SELECT verdict alone —
+# an era-1 'kept' (seat-attribution artifact), an era-3 'kept'
+# (|margin| >= 4) and an era-4 'kept' (significant binomial test) all
+# landed in one pile and were served to the dashboard as a "kept rate".
+
+def test_verdict_breakdown_splits_counts_by_measurement_era(db):
+    for era, verdict in [(1, "kept"), (3, "kept"), (4, "kept"),
+                         (4, "reverted")]:
+        record_iteration(
+            Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                      audit_version="v3", verdict=verdict,
+                      measurement_era=era),
+            db_path=db,
+        )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+
+    # Flat totals unchanged (back-compat with the dashboard's pills).
+    assert out["v3"]["kept"] == 3
+    assert out["v3"]["total"] == 4
+    # ...but the era split now travels with them.
+    by_era = out["v3"]["by_era"]
+    assert by_era["1"]["kept"] == 1 and by_era["1"]["total"] == 1
+    assert by_era["3"]["kept"] == 1
+    assert by_era["4"]["kept"] == 1 and by_era["4"]["reverted"] == 1
+    assert by_era["4"]["total"] == 2
+
+
+def test_verdict_breakdown_buckets_null_era_as_unknown(db):
+    """An unclassifiable row (the 2026-05-21/22 fix session, the
+    07-19/20 mixed-denominator window) must read as 'unknown', never be
+    rounded into an era. Written with a real in-window timestamp so the
+    v3 backfill leaves it NULL the way it does in production."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept",
+                  created_at="2026-07-19T10:00:00+00:00"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert out["v3"]["by_era"]["unknown"]["kept"] == 1
+
+
+def test_verdict_breakdown_era_buckets_are_zero_padded(db):
+    """Same KeyError-free contract the flat buckets have."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept", measurement_era=4),
+        db_path=db,
+    )
+    bucket = verdict_breakdown_for_deck("d1", db_path=db)["v3"]["by_era"]["4"]
+    for label in ("kept", "reverted", "neutral", "inconclusive", "pending"):
+        assert label in bucket
+    assert bucket["reverted"] == 0
+
+
+# --- R2-P04 / R2-P06: second-writer semantics ------------------------------
+
+def test_update_iteration_sim_appends_notes_when_asked(db):
+    """A second writer (improve's replication confirm) must be able to
+    ADD to the note without destroying the first writer's measurement."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  verdict="kept", verdict_notes="A/B sim: old 15, new 30"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         notes="replication_confirmed: run 2 kept",
+                         notes_append=True, db_path=db)
+    notes = get_iteration(iid, db_path=db).verdict_notes
+    assert "A/B sim: old 15, new 30" in notes
+    assert "replication_confirmed: run 2 kept" in notes
+
+
+def test_update_iteration_sim_replaces_notes_by_default(db):
+    """Default stays REPLACE — the first writer owns the note."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  verdict="pending", verdict_notes="old note"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept", notes="new note",
+                         db_path=db)
+    assert get_iteration(iid, db_path=db).verdict_notes == "new note"
+
+
+def test_update_iteration_sim_append_on_a_blank_note_is_a_plain_set(db):
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="pending"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept", notes="first",
+                         notes_append=True, db_path=db)
+    assert get_iteration(iid, db_path=db).verdict_notes == "first"
+
+
+def test_update_iteration_sim_merges_into_an_existing_sim_report(db):
+    """The merge adds a key beside the measured record instead of
+    replacing the blob the first writer stored."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="kept",
+                  sim_report={"status": "done", "wins_a": 15, "wins_b": 30}),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         sim_report_merge={"replication": {"ran": True}},
+                         db_path=db)
+    report = get_iteration(iid, db_path=db).sim_report
+    assert report["wins_a"] == 15 and report["wins_b"] == 30
+    assert report["replication"] == {"ran": True}
+
+
+def test_update_iteration_sim_merge_on_a_row_with_no_sim_report(db):
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="pending"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         sim_report_merge={"verdict_params": {"margin": 1}},
+                         db_path=db)
+    assert get_iteration(iid, db_path=db).sim_report == {
+        "verdict_params": {"margin": 1}}
+
+
+def test_update_iteration_sim_merge_composes_with_a_fresh_sim_report(db):
+    """When a caller passes BOTH, the merge lands on top of the fresh
+    report — not on the stale stored one."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="pending",
+                  sim_report={"stale": True}),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         sim_report={"wins_a": 1},
+                         sim_report_merge={"extra": 2}, db_path=db)
+    report = get_iteration(iid, db_path=db).sim_report
+    assert report == {"wins_a": 1, "extra": 2}
+
+
+def test_verdict_provenance_records_the_parameters_used():
+    from commander_builder.knowledge_log import verdict_provenance
+    p = verdict_provenance(margin=6, alpha=0.05, min_decisive=20)
+    assert p["margin"] == 6
+    assert p["alpha"] == 0.05
+    assert p["min_decisive"] == 20
+    assert "binomial" in p["rule"]
+
+
 def test_pricing_series_returns_empty_for_no_iterations(db):
     """No iterations → empty list. Caller renders 'no data' state."""
     assert pricing_series_for_deck("no-such-deck", db_path=db) == []

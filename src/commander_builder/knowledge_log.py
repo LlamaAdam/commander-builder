@@ -202,6 +202,61 @@ MEASUREMENT_ERAS: dict[int, str] = {
 #: Stamped on every row written from now on.
 CURRENT_MEASUREMENT_ERA = 4
 
+#: Lowest era whose ``win_rate_old`` / ``win_rate_new`` may be pooled or
+#: differenced with a current row's. Era 3 is where every writer landed on
+#: the head-to-head decisive denominator (see MEASUREMENT_ERAS[3]) — below
+#: it a "win rate" is a different quantity (era 2's denominators vary by
+#: writer, era 1's wins are attributed to the wrong deck), so a trajectory
+#: baselined on one is a subtraction of unlike units, not a measurement.
+#: 2026-08-20: added because report.py's trajectory was doing exactly that.
+MIN_COMPARABLE_RATE_ERA = 3
+
+#: Lowest era whose ``verdict`` may be pooled with a current row's. Era 4
+#: is where kept/reverted started meaning "statistically significant"
+#: instead of "|margin| >= 4" — an era-3 'kept' and an era-4 'kept' are
+#: different claims, so verdict tallies have to name the era they counted.
+#: 2026-08-20: added for verdict_breakdown_for_deck's era split.
+MIN_COMPARABLE_VERDICT_ERA = 4
+
+#: Key under which a sim_report carries the verdict parameters that
+#: produced its row's verdict (see ``verdict_provenance``).
+SIM_REPORT_VERDICT_PARAMS_KEY = "verdict_params"
+
+#: Key under which a sim_report carries a confirming (replication) run's
+#: own split — structured, not prose (see ``update_iteration_sim``).
+SIM_REPORT_REPLICATION_KEY = "replication"
+
+
+def verdict_provenance(
+    *,
+    margin: int,
+    alpha: float,
+    min_decisive: int,
+    rule: str = "binomial_two_sided_p < alpha over >= min_decisive decisive",
+) -> dict:
+    """The verdict parameters a writer actually used, for its sim_report.
+
+    2026-08-20. ``measurement_era`` says which *convention* labeled a
+    row, but era 4 has a tunable inside it: ``--sim-margin`` is a
+    minimum-effect pre-filter, so a run with ``--sim-margin 15`` calls a
+    significant 27-13 'neutral' while the default (1) calls it 'kept'.
+    Both rows are stamped era 4 and pool as if the label meant one thing.
+    Until now the only record of the margin used was a free-text note.
+
+    Storing the triple makes a row auditable on its own terms: a
+    re-scoring pass or a pooled analysis can see what bar this verdict
+    actually cleared without knowing which code version (or which CLI
+    flags) wrote it. A plain dict inside sim_report rather than a column
+    because this is verdict *provenance*, not a queryable measurement,
+    and sim_report is already the row's "everything the sim knew" blob.
+    """
+    return {
+        "margin": int(margin),
+        "alpha": float(alpha),
+        "min_decisive": int(min_decisive),
+        "rule": rule,
+    }
+
 # Era boundaries. Dates are the ISO prefixes of ``created_at``; the id
 # boundary is the one recorded in STATUS.md for THIS repo's log.
 PRE_SEAT_ATTRIBUTION_MAX_ID = 314   # ids < 314 are era 1 (STATUS.md, e8777b6)
@@ -592,6 +647,8 @@ def update_iteration_sim(
     margin: Optional[int] = None,
     notes: Optional[str] = None,
     db_path: Optional[Path] = None,
+    notes_append: bool = False,
+    sim_report_merge: Optional[dict] = None,
 ) -> None:
     """Fold the A/B-sim outcome into a pending iteration row.
 
@@ -609,36 +666,91 @@ def update_iteration_sim(
     produced. ``None`` values preserve the existing column value
     (SQLite COALESCE-style update; we just skip those fields in
     the SET clause).
+
+    Second-writer semantics (2026-08-20)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    ``notes`` and ``sim_report`` REPLACE by default, which is right for
+    the first writer (the sim that produced the row) and wrong for a
+    second one. improve.py's replication writer is a second writer: it
+    was destroying run 1's "A/B sim: old won X, new won Y (N games,
+    margin=M)" note by passing a fresh string, so a confirmed row's only
+    surviving record of what run 1 measured was the sim_report blob.
+
+      * ``notes_append=True`` -- read the row's current ``verdict_notes``
+        and append this call's ``notes`` on a new line instead of
+        overwriting. A NULL/blank existing note degrades to a plain set.
+      * ``sim_report_merge`` -- shallow top-level merge into the row's
+        EXISTING sim_report (or into ``sim_report`` when that is also
+        passed), so a second writer can add a key
+        (``SIM_REPORT_REPLICATION_KEY``, ``SIM_REPORT_VERDICT_PARAMS_KEY``)
+        without clobbering the measured record it is annotating. A row
+        with no sim_report yet gets the merge dict as its sim_report.
+
+    Both read-modify-write inside the same connection as the UPDATE, so
+    the row never lands half-written (the same reason this function
+    exists at all).
     """
     if verdict not in {"kept", "reverted", "neutral", "inconclusive", "pending"}:
         raise ValueError(
             f"verdict must be one of kept/reverted/neutral/inconclusive/pending, "
             f"got {verdict!r}"
         )
-    set_clauses = ["verdict = ?"]
-    params: list = [verdict]
-    if notes is not None:
-        set_clauses.append("verdict_notes = ?")
-        params.append(notes)
-    if sim_report is not None:
-        set_clauses.append("sim_report = ?")
-        params.append(json.dumps(sim_report))
-    if win_rate_old is not None:
-        set_clauses.append("win_rate_old = ?")
-        params.append(float(win_rate_old))
-    if win_rate_new is not None:
-        set_clauses.append("win_rate_new = ?")
-        params.append(float(win_rate_new))
-    if margin is not None:
-        set_clauses.append("margin = ?")
-        params.append(int(margin))
-    params.append(iteration_id)
-    sql = (
-        f"UPDATE iterations SET {', '.join(set_clauses)} "
-        f"WHERE id = ?"
-    )
-    with _connect(_resolve_db_path(db_path)) as conn:
-        conn.execute(sql, params)
+    db_path = _resolve_db_path(db_path)
+    with _connect(db_path) as conn:
+        # Read-modify-write for the append/merge modes happens on THIS
+        # connection, so the SELECT and the UPDATE share one transaction
+        # and the row can't be half-written -- the same reason this
+        # function writes every sim field in one statement.
+        existing: Optional[sqlite3.Row] = None
+        if notes_append or sim_report_merge is not None:
+            cur = conn.execute(
+                "SELECT verdict_notes, sim_report FROM iterations WHERE id = ?",
+                (iteration_id,),
+            )
+            existing = cur.fetchone()
+        if notes is not None and notes_append and existing is not None:
+            prior = (existing["verdict_notes"] or "").strip()
+            if prior:
+                notes = f"{prior}\n{notes}"
+        if sim_report_merge is not None:
+            base_report = sim_report
+            if (
+                base_report is None
+                and existing is not None
+                and existing["sim_report"]
+            ):
+                try:
+                    base_report = json.loads(existing["sim_report"])
+                except (TypeError, ValueError):
+                    # A corrupt blob is not worth losing the merge over,
+                    # but it is also not ours to silently reinterpret --
+                    # start from the merge dict alone.
+                    base_report = None
+            merged = dict(base_report) if isinstance(base_report, dict) else {}
+            merged.update(sim_report_merge)
+            sim_report = merged
+        set_clauses = ["verdict = ?"]
+        params: list = [verdict]
+        if notes is not None:
+            set_clauses.append("verdict_notes = ?")
+            params.append(notes)
+        if sim_report is not None:
+            set_clauses.append("sim_report = ?")
+            params.append(json.dumps(sim_report))
+        if win_rate_old is not None:
+            set_clauses.append("win_rate_old = ?")
+            params.append(float(win_rate_old))
+        if win_rate_new is not None:
+            set_clauses.append("win_rate_new = ?")
+            params.append(float(win_rate_new))
+        if margin is not None:
+            set_clauses.append("margin = ?")
+            params.append(int(margin))
+        params.append(iteration_id)
+        conn.execute(
+            f"UPDATE iterations SET {', '.join(set_clauses)} WHERE id = ?",
+            params,
+        )
 
 
 def get_iteration(iteration_id: int, db_path: Optional[Path] = None) -> Optional[Iteration]:
@@ -930,37 +1042,66 @@ def pricing_series_for_deck(
 def verdict_breakdown_for_deck(
     deck_id: str, db_path: Optional[Path] = None,
 ) -> dict:
-    """Per-audit-version verdict counts for one deck.
+    """Per-audit-version verdict counts for one deck, split by era.
 
-    Returns ``{audit_version: {kept, reverted, neutral, pending, total}}``.
-    Rows with NULL ``audit_version`` bucket under ``"unknown"`` so the
-    report doesn't crash on legacy / partial saves. Every bucket is
-    zero-padded across all four verdict labels so the UI can index
-    directly without guarding against KeyError.
+    Returns ``{audit_version: {kept, reverted, neutral, inconclusive,
+    pending, total, by_era: {<era>: {...same six...}}}}``. Rows with NULL
+    ``audit_version`` bucket under ``"unknown"`` so the report doesn't
+    crash on legacy / partial saves. Every bucket is zero-padded across
+    all five verdict labels so the UI can index directly without guarding
+    against KeyError.
 
     Backlog #6: once a deck has ≥5 iterations the UI shows "kept 4/5
     v3 swaps, 2/3 v4 swaps" so the user can spot which audit prompt
     (or advisor source) is producing landings vs. reverts.
+
+    Era split (2026-08-20)
+    ~~~~~~~~~~~~~~~~~~~~~~
+    This function used to SELECT verdict alone and pool every row, which
+    is the one thing this module's schema docstring forbids: an era-1
+    'kept' is a seat-attribution artifact, an era-3 'kept' means
+    |margin| >= 4, and an era-4 'kept' means a significant binomial test
+    (see MEASUREMENT_ERAS). Counting them in one pile invents a "kept
+    rate" out of three incompatible labels.
+
+    The flat per-version totals are KEPT as-is for back-compat (the
+    dashboard's existing pills index them directly) and ``by_era`` is
+    added beside them, keyed by the era as a string with ``"unknown"``
+    for NULL. Consumers that want a comparable number read
+    ``by_era[str(MIN_COMPARABLE_VERDICT_ERA)]``; consumers that want the
+    old pooled number can still have it, now with the evidence that it
+    is pooled sitting next to it.
     """
     db_path = _resolve_db_path(db_path)
     init_db(db_path)
-    out: dict[str, dict[str, int]] = {}
+
+    def _empty() -> dict:
+        return {
+            "kept": 0, "reverted": 0, "neutral": 0,
+            "inconclusive": 0, "pending": 0, "total": 0,
+        }
+
+    out: dict[str, dict] = {}
     with _connect(db_path) as conn:
         cur = conn.execute(
-            "SELECT audit_version, verdict FROM iterations "
+            "SELECT audit_version, verdict, measurement_era FROM iterations "
             "WHERE deck_id = ?",
             (deck_id,),
         )
         for row in cur.fetchall():
             key = row["audit_version"] or "unknown"
-            bucket = out.setdefault(key, {
-                "kept": 0, "reverted": 0, "neutral": 0,
-                "inconclusive": 0, "pending": 0, "total": 0,
-            })
+            bucket = out.setdefault(key, {**_empty(), "by_era": {}})
+            era_key = (
+                str(row["measurement_era"])
+                if row["measurement_era"] is not None else "unknown"
+            )
+            era_bucket = bucket["by_era"].setdefault(era_key, _empty())
             verdict = row["verdict"] or "pending"
-            if verdict in bucket:
+            if verdict in era_bucket:
                 bucket[verdict] += 1
+                era_bucket[verdict] += 1
             bucket["total"] += 1
+            era_bucket["total"] += 1
     return out
 
 

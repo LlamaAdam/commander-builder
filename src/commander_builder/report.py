@@ -31,6 +31,8 @@ from typing import Optional
 # resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
 # production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
+    MIN_COMPARABLE_RATE_ERA,
+    MIN_COMPARABLE_VERDICT_ERA,
     Iteration,
     iterations_for_deck,
     recent_iterations,
@@ -169,18 +171,74 @@ def render_deck_history(
     verdict_counts = Counter(it.verdict for it in history)
     parts = [f"{v}: {c}" for v, c in sorted(verdict_counts.items())]
     lines.append(f"**Verdict tally**: {', '.join(parts)}")
+    # The tally above pools every era, and a 'kept' does not mean the
+    # same thing in each (era 3: |margin| >= 4; era 4: a significant
+    # binomial test). Name the split rather than silently pooling.
+    era_counts = Counter(
+        it.measurement_era if it.measurement_era is not None else "unknown"
+        for it in history
+    )
+    if set(era_counts) != {MIN_COMPARABLE_VERDICT_ERA}:
+        era_parts = [
+            f"era {k}: {c}" for k, c in sorted(era_counts.items(), key=str)
+        ]
+        lines.append(
+            f"**Measurement eras**: {', '.join(era_parts)} "
+            f"— verdicts are only comparable within an era "
+            f"(era {MIN_COMPARABLE_VERDICT_ERA} = significance-tested)"
+        )
     lines.append("")
 
-    # Win-rate trajectory.
-    measured = [it for it in history if it.win_rate_new is not None]
+    # Win-rate trajectory (era-gated, 2026-08-20).
+    #
+    # WHY the era filter: this used to baseline on the FIRST row with a
+    # win_rate_new anywhere in the history, which on a long-lived deck is
+    # an era-1 or era-2 row — era 1 credited wins to the wrong deck
+    # (archive only, never training data) and era 2's denominators vary
+    # by writer. Subtracting one of those from a current era-4 rate and
+    # headlining the difference as "trajectory" is unit-mixing, and this
+    # was one of the two pooled surfaces knowledge_log's schema docstring
+    # ("any pooled analysis must bucket rows by measurement_era")
+    # explicitly forbids. Era >= MIN_COMPARABLE_RATE_ERA is where every
+    # writer computes wins / head-to-head decisive, so those rates
+    # genuinely subtract.
+    def _rate_is_comparable(it: Iteration) -> bool:
+        return (
+            it.measurement_era is not None
+            and it.measurement_era >= MIN_COMPARABLE_RATE_ERA
+        )
+
+    with_rates = [it for it in history if it.win_rate_new is not None]
+    measured = [it for it in with_rates if _rate_is_comparable(it)]
+    excluded = [it for it in with_rates if not _rate_is_comparable(it)]
     if measured:
         first_wr = measured[0].win_rate_new
         last_wr = measured[-1].win_rate_new
         delta = (last_wr or 0) - (first_wr or 0)
         sign = "+" if delta >= 0 else ""
+        note = ""
+        if excluded:
+            note = (
+                f"; {len(excluded)} earlier measured iteration"
+                f"{'' if len(excluded) == 1 else 's'} excluded as "
+                f"pre-era-{MIN_COMPARABLE_RATE_ERA} / unknown-era "
+                f"(incomparable win-rate denominators)"
+            )
         lines.append(
             f"**Win-rate trajectory**: {first_wr:.0%} → {last_wr:.0%} "
-            f"({sign}{delta:.0%} over {len(measured)} measured iterations)"
+            f"({sign}{delta:.0%} over {len(measured)} measured iterations "
+            f"in era {MIN_COMPARABLE_RATE_ERA}+{note})"
+        )
+        lines.append("")
+    elif excluded:
+        # Refuse to print a number rather than print an incomparable one.
+        lines.append(
+            f"**Win-rate trajectory**: not shown — all "
+            f"{len(excluded)} measured iteration"
+            f"{'' if len(excluded) == 1 else 's'} predate era "
+            f"{MIN_COMPARABLE_RATE_ERA} (or carry an unknown era), so "
+            f"their win rates are not comparable with each other or with "
+            f"current rows."
         )
         lines.append("")
 

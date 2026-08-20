@@ -199,6 +199,85 @@ def test_render_deck_history_handles_no_measured_win_rates(tmp_path):
     assert "Win-rate trajectory" not in md
 
 
+# --- R2-P19: the trajectory must not baseline on a pre-era-3 row -----------
+#
+# This headline used to take the FIRST row anywhere in the history with a
+# non-null win_rate_new. On a long-lived deck that is an era-1 row (wins
+# credited to the wrong deck — "archive only, never training data") or an
+# era-2 row (denominators differ by writer), and the delta printed next to
+# it was a subtraction of unlike units.
+
+def test_trajectory_baselines_on_the_first_era_3_plus_row(tmp_path):
+    db = tmp_path / "kl.sqlite"
+    # An era-1 artifact rate that must NOT become the baseline...
+    _seed_iteration(db, win_rate_old=0.1, win_rate_new=0.2,
+                    measurement_era=1)
+    # ...and two comparable rows that must.
+    _seed_iteration(db, win_rate_old=0.5, win_rate_new=0.5,
+                    measurement_era=3)
+    _seed_iteration(db, win_rate_old=0.6, win_rate_new=0.7,
+                    measurement_era=4)
+
+    md = render_deck_history("abc-123", db_path=db)
+    assert "50% → 70%" in md          # baselined on the era-3 row
+    assert "20% → 70%" not in md      # NOT on the era-1 artifact
+    assert "+20%" in md
+    assert "2 measured iterations in era 3+" in md
+    assert "1 earlier measured iteration excluded" in md
+
+
+def test_trajectory_refuses_to_print_when_every_row_predates_era_3(tmp_path):
+    """No comparable rows = no number. Saying why beats printing a
+    delta between two different quantities."""
+    db = tmp_path / "kl.sqlite"
+    _seed_iteration(db, win_rate_old=0.1, win_rate_new=0.2,
+                    measurement_era=1)
+    _seed_iteration(db, win_rate_old=0.4, win_rate_new=0.6,
+                    measurement_era=2)
+
+    md = render_deck_history("abc-123", db_path=db)
+    assert "**Win-rate trajectory**: not shown" in md
+    assert "20% → 60%" not in md
+    assert "predate era 3" in md
+
+
+def test_trajectory_ignores_rows_with_an_unknown_era(tmp_path):
+    """NULL era means "we cannot tell which convention produced this".
+    An unknown is not silently promoted into the comparable pool."""
+    db = tmp_path / "kl.sqlite"
+    _seed_iteration(db, win_rate_old=0.1, win_rate_new=0.2,
+                    created_at="2026-07-19T10:00:00+00:00")  # mixed window
+    _seed_iteration(db, win_rate_old=0.5, win_rate_new=0.5,
+                    measurement_era=4)
+    _seed_iteration(db, win_rate_old=0.6, win_rate_new=0.8,
+                    measurement_era=4)
+
+    md = render_deck_history("abc-123", db_path=db)
+    assert "50% → 80%" in md
+    assert "1 earlier measured iteration excluded" in md
+
+
+def test_history_names_the_eras_its_verdict_tally_pooled(tmp_path):
+    """The tally line counts every row; the era line beside it says the
+    labels came from more than one rule."""
+    db = tmp_path / "kl.sqlite"
+    _seed_iteration(db, verdict="kept", measurement_era=3)
+    _seed_iteration(db, verdict="kept", measurement_era=4)
+
+    md = render_deck_history("abc-123", db_path=db)
+    assert "**Verdict tally**: kept: 2" in md
+    assert "**Measurement eras**:" in md
+    assert "era 3: 1" in md and "era 4: 1" in md
+
+
+def test_history_omits_the_era_line_when_every_row_is_current(tmp_path):
+    """No noise on the common case: a deck whose rows are all era 4."""
+    db = tmp_path / "kl.sqlite"
+    _seed_iteration(db, verdict="kept", measurement_era=4)
+    md = render_deck_history("abc-123", db_path=db)
+    assert "**Measurement eras**:" not in md
+
+
 # --- render_recent_iterations_summary --------------------------------------
 
 def test_render_recent_iterations_summary_empty(tmp_path):

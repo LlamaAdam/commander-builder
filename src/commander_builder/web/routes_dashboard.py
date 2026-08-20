@@ -57,6 +57,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from ..deck_dashboard import build_dashboard
 from ..knowledge_log import (
+    MIN_COMPARABLE_VERDICT_ERA,
     audit_card_diff,
     get_iteration,
     iteration_graph_for_deck,
@@ -705,12 +706,22 @@ def make_dashboard_blueprint(
 
     @bp.route("/api/verdict_breakdown")
     def verdict_breakdown_route():
-        """Per-audit-version verdict counts for one deck.
+        """Per-audit-version verdict counts for one deck, split by era.
 
-        Returns ``{deck_id, total_iterations, breakdown: {<version>:
-        {kept, reverted, neutral, pending, total}}}``. UI consumes this
-        to show "kept 4/5 v3 swaps, kept 2/3 v4 swaps" when the deck
-        has accumulated enough iterations to be meaningful (≥5).
+        Returns ``{deck_id, total_iterations, comparable_era,
+        spans_multiple_eras, breakdown: {<version>: {kept, reverted,
+        neutral, inconclusive, pending, total, by_era: {<era>: {...}}}}}``.
+        UI consumes this to show "kept 4/5 v3 swaps, kept 2/3 v4 swaps"
+        when the deck has accumulated enough iterations to be meaningful
+        (≥5).
+
+        2026-08-20: the per-version totals still pool every measurement
+        era (kept for back-compat with the dashboard's existing pills),
+        but ``by_era`` now travels with them and the two scalars say
+        outright when the pooled number mixes label conventions —
+        an era-3 'kept' means |margin| >= 4, an era-4 'kept' means a
+        significant binomial test. ``comparable_era`` is the era whose
+        verdicts mean what the current pipeline writes.
         """
         deck_id = request.args.get("deck")
         if not deck_id:
@@ -722,9 +733,15 @@ def make_dashboard_blueprint(
         except Exception as exc:  # pragma: no cover - sqlite errors
             return jsonify({"error": str(exc)}), 500
         total = sum(b.get("total", 0) for b in breakdown.values())
+        eras_seen: set[str] = set()
+        for b in breakdown.values():
+            eras_seen.update((b.get("by_era") or {}).keys())
         return jsonify({
             "deck_id": deck_id,
             "total_iterations": total,
+            "comparable_era": MIN_COMPARABLE_VERDICT_ERA,
+            "eras_present": sorted(eras_seen),
+            "spans_multiple_eras": len(eras_seen) > 1,
             "breakdown": breakdown,
         })
 

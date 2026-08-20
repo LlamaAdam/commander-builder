@@ -68,6 +68,25 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+// Replace a container's contents with a single <p class="…">message</p>.
+//
+// 2026-08-20: the five error paths that used this shape wrote
+// `node.innerHTML = \`<p class="muted">… ${e.message}</p>\``, interpolating
+// a caught Error's message straight into markup — the only sites in this
+// file that contradicted el()'s "server/API data must flow through
+// textContent" note above. Exploitability today is ~nil (fetchJSON throws
+// `${url} -> ${status}` with encodeURIComponent'd ids, or a browser-
+// generated network error), but that is a property of the CURRENT error
+// shape: the day one of these renders `body.error` — which carries card
+// names straight from user-editable deck text — the markup hole opens
+// with no code change at the call site. One helper so the safe shape is
+// also the short one.
+function setMessage(node, className, text) {
+  if (!node) return;
+  node.textContent = "";
+  node.appendChild(el("p", { class: className }, text));
+}
+
 async function loadHealth() {
   try {
     const h = await fetchJSON("/api/health");
@@ -529,7 +548,7 @@ async function selectDeck(deckId, li, opts) {
     // Same stale guard on the error path — a late failure for a deck
     // the user already left must not blank the deck they're viewing.
     if (_activeDeckId !== deckId) return;
-    dash.innerHTML = `<p class="empty-state">Error loading: ${e.message}</p>`;
+    setMessage(dash, "empty-state", `Error loading: ${e.message}`);
   } finally {
     const badge = document.getElementById("_soft-refresh-badge");
     if (badge) badge.remove();
@@ -641,8 +660,23 @@ async function runProposeSwap() {
         status.textContent = `Error: ${body.error || resp.status}`;
         return;
       }
-      status.textContent = "Saved.";
-      hideModal("propose-modal");
+      // bracket_tag_unverified: the server noticed this deck's filename
+      // carries a [B<n>] tag AND the mainboard just changed, so the
+      // declared bracket no longer has a measurement behind it. The
+      // server has computed and returned this since the deck_text PUT
+      // hardening; nothing rendered it, so the hand-edited-B4-under-a-
+      // [B3]-filename pool-poisoning path stayed as invisible to the
+      // user as before the fix (2026-08-20). Surfaced in the save-status
+      // line, and the modal deliberately stays OPEN in that case: a
+      // 4-second toast on a modal we just closed is not a warning
+      // anybody reads, and this one asks the user to do something.
+      const unverified = !!body.bracket_tag_unverified;
+      status.textContent = unverified
+        ? "Saved — but the mainboard changed and this deck's [B] filename "
+          + "tag was NOT re-verified. Re-estimate the bracket before using "
+          + "it as a bracket-tagged reference deck."
+        : "Saved.";
+      if (!unverified) hideModal("propose-modal");
       // Soft-refresh: keep the prior dashboard visible while the new
       // data fetches in background. Avoids the 5+s "Loading…" blank
       // when Edit added cards Scryfall hasn't cached yet.
@@ -850,8 +884,8 @@ function renderProposeResult(container, body) {
 
   // Save-to-knowledge-log block. Persists the audit_manifest + sim_report
   // + a manual verdict so Phase 3 ML has training rows. The default
-  // verdict is suggested by the sim outcome (winner: new → kept,
-  // winner: old → reverted, tie → neutral) but the user can override.
+  // verdict is the SERVER's `suggested_verdict` (the same exact binomial
+  // test the CLI writers use) and the user can override it.
   wrap.appendChild(renderSaveIterationBlock(body));
 
   container.appendChild(wrap);
@@ -870,15 +904,26 @@ function renderSaveIterationBlock(body) {
   // Verdict radios.
   const fs = el("fieldset", { class: "games-radio" });
   fs.appendChild(el("legend", {}, "Verdict:"));
-  // Below ~20 decisive games the result is below the noise floor, so the
-  // default verdict is "inconclusive" regardless of who edged ahead — a 3-2
-  // isn't a kept. At a trustworthy sample size, default to the winner.
+  // The default comes from the SERVER's suggested_verdict, which runs the
+  // same exact two-sided binomial test + 20-decisive floor every CLI
+  // writer uses (see web/_helpers.suggested_verdict).
+  //
+  // WHY not compute it here (2026-08-20): this used to be
+  // `_decisive < 20 ? "inconclusive" : body.winner === "new" ? "kept" : …`,
+  // and `winner` is ComparisonReport's ANY-lead field — so a 21-20 over 41
+  // decisive games (p ≈ 1.0) pre-checked "Kept (apply changes)". That is
+  // the era-3 margin rule the 2026-08-14 significance fix retired, and the
+  // save writes the checked radio verbatim into a row stamped with the
+  // CURRENT era, so accepting the default quietly put pre-fix labels into
+  // the post-fix training pool. The fallback below keeps the old shape for
+  // a report body that predates the field (a re-attached job report
+  // persisted by an older server), minus the any-lead kept/reverted: an
+  // unscored split defaults to "pending", never to an adopted swap.
+  const suggestion = body.suggested_verdict || null;
   const _decisive = (body.old_wins || 0) + (body.new_wins || 0);
-  const defaultVerdict =
-    _decisive < 20 ? "inconclusive"
-    : body.winner === "new" ? "kept"
-    : body.winner === "old" ? "reverted"
-    : "neutral";
+  const defaultVerdict = suggestion
+    ? suggestion.verdict
+    : (_decisive < 20 ? "inconclusive" : "pending");
   for (const [val, label] of [
     ["kept", "Kept (apply changes)"],
     ["reverted", "Reverted (discard)"],
@@ -894,6 +939,25 @@ function renderSaveIterationBlock(body) {
     fs.appendChild(lbl);
   }
   block.appendChild(fs);
+
+  // Show WHY that radio is pre-checked. A pre-selected label with no
+  // stated basis is how the old any-lead default went unnoticed; the
+  // p-value and the decisive-game count make the suggestion arguable
+  // (and overriding it a deliberate act) instead of invisible.
+  if (suggestion) {
+    const hint = el("p", {
+      class: "muted",
+      style: "margin: 4px 0 0; font-size: 12px;",
+    });
+    const pTxt = suggestion.p_value == null
+      ? ""
+      : ` (exact two-sided p=${Number(suggestion.p_value).toFixed(3)}, `
+        + `α=${suggestion.alpha})`;
+    hint.textContent =
+      `Suggested: ${suggestion.verdict}${pTxt} — `
+      + `${suggestion.basis || ""} You can override it.`;
+    block.appendChild(hint);
+  }
 
   // Notes textarea.
   const notesLabel = el("label", { class: "muted" }, "Notes (optional)");
@@ -2999,6 +3063,28 @@ async function loadVerdictBreakdown(deckId, dashContainer) {
         `${kept}/${total} kept (${keptPct}%)`,
       ));
       ul.appendChild(row);
+      // Era split (2026-08-20). The counts above pool every measurement
+      // era, and a 'kept' does not mean the same thing in each: era 1's
+      // wins were credited to the wrong deck, era 3's kept/reverted came
+      // from |margin| >= 4, era 4's require a significant binomial test.
+      // Show the per-era breakdown whenever a version's rows span more
+      // than one era (or sit entirely in a pre-comparable one), so the
+      // pooled ratio is never the only number on screen.
+      const byEra = b.by_era || {};
+      const eraKeys = Object.keys(byEra).sort();
+      const comparable = String(body.comparable_era);
+      if (eraKeys.length > 1 || (eraKeys.length === 1 && eraKeys[0] !== comparable)) {
+        const parts = eraKeys.map((k) => {
+          const e = byEra[k] || {};
+          return `era ${k}: ${e.kept || 0}/${e.total || 0} kept`;
+        });
+        const note = el("li", { class: "muted", style: "font-size: 12px;" });
+        note.textContent =
+          `↳ ${parts.join(" · ")} — only era ${comparable} verdicts are `
+          + "significance-tested; earlier eras used a different rule and "
+          + "do not pool with them.";
+        ul.appendChild(note);
+      }
     }
     dashContainer.appendChild(panel("Verdict by audit version", ul));
   } catch (_e) {
@@ -3203,7 +3289,7 @@ async function verifyAgainstSource() {
       body.appendChild(ul);
     }
   } catch (e) {
-    body.innerHTML = `<p class="muted">Verify failed: ${e.message}</p>`;
+    setMessage(body, "muted", `Verify failed: ${e.message}`);
   }
 }
 
@@ -3323,7 +3409,7 @@ function bracketTile(t, estimate) {
       loadDashboardSections(deckId, data.deferred_sections, newBracket);
     } catch (e) {
       if (_activeDeckId !== deckId) return;
-      dash.innerHTML = `<p class="empty-state">Error: ${e.message}</p>`;
+      setMessage(dash, "empty-state", `Error: ${e.message}`);
     }
   });
   ctrl.appendChild(sel);
@@ -3515,7 +3601,7 @@ async function showGameChangersAlert() {
       })(),
     ));
   } catch (e) {
-    body.innerHTML = `<p class="muted">Could not load Game Changers: ${e.message}</p>`;
+    setMessage(body, "muted", `Could not load Game Changers: ${e.message}`);
   }
 }
 
@@ -3556,7 +3642,7 @@ async function showIllegalAlert() {
       body.appendChild(ul);
     }
   } catch (e) {
-    body.innerHTML = `<p class="muted">Audit failed: ${e.message}</p>`;
+    setMessage(body, "muted", `Audit failed: ${e.message}`);
   }
 }
 

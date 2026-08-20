@@ -310,18 +310,39 @@ def _default_replicate_fn(
     back into the round's knowledge_log row so the persisted history
     reflects what actually happened:
 
-      - confirmed  → verdict stays 'kept', notes gain a
-        ``replication_confirmed`` line with the second run's split.
+      - confirmed  → verdict stays 'kept'; run 1's note is KEPT and a
+        ``replication_confirmed`` line is APPENDED to it with the second
+        run's split.
       - disagreed  → the row is rewritten to the SECOND run's verdict
-        (the non-advancing one) with a ``replication_failed`` note
-        naming both verdicts and the second split. Run 1's numbers stay
-        in the row's ``sim_report`` / win-rate columns, which is why
-        this writer deliberately doesn't overwrite them: the note adds
-        the confirming evidence rather than replacing the measured
-        record. Leaving 'kept' on a row whose deck never
+        (the non-advancing one) with a ``replication_failed`` line
+        appended, naming both verdicts and the second split. Run 1's
+        numbers stay in the row's ``sim_report`` / win-rate columns,
+        which is why this writer deliberately doesn't overwrite them:
+        it ADDS the confirming evidence rather than replacing the
+        measured record. Leaving 'kept' on a row whose deck never
         became the base would tell every later reader -- the dashboard,
         FP-013's high-confidence counter, a future Phase 3 training set
         -- that a swap was adopted when it wasn't.
+
+    In both cases run 2 is also persisted STRUCTURALLY, as
+    ``sim_report[SIM_REPORT_REPLICATION_KEY]`` -- its wins, games,
+    decisive count and verdict as data, not prose (2026-08-20). Two
+    things were wrong before: this writer passed a fresh ``notes``
+    string, and ``update_iteration_sim`` overwrites notes, so run 1's
+    "A/B sim: old won X, new won Y (N games, margin=M)" line was
+    DESTROYED by the confirmation -- the docstring here claimed notes
+    "gain a line" when the code replaced them. And run 2's games existed
+    nowhere structured, so a confirmed 'kept' row understated the Forge
+    games behind it by half and no pooled effort/game-count analysis
+    could see the second run at all.
+
+    The verdict parameters both runs were scored under
+    (``--sim-margin`` / alpha / decisive floor) are stamped into
+    ``sim_report[SIM_REPORT_VERDICT_PARAMS_KEY]`` at the same time, so
+    the row says what bar its verdict cleared instead of leaving it to
+    be inferred from the code version that wrote it. Run 1's verdict
+    used the same margin -- improve passes ``--sim-margin`` straight
+    through to the auto-curate subprocess that wrote the row.
 
     Anything that stops the confirm sim from producing a verdict (no
     fillers, crashed JVM) counts as NOT confirmed: unattended replication
@@ -331,7 +352,22 @@ def _default_replicate_fn(
     this pipeline -- the .dck is on disk and the loop's decision is
     already made; losing the row shouldn't sink the run.
     """
-    from ._proposer_sim import _verdict_from_ab
+    from ._proposer_sim import (
+        MIN_DECISIVE_GAMES_FOR_VERDICT,
+        VERDICT_ALPHA,
+        _verdict_from_ab,
+    )
+    from .knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY,
+        SIM_REPORT_VERDICT_PARAMS_KEY,
+        verdict_provenance,
+    )
+
+    provenance = verdict_provenance(
+        margin=args.sim_margin,
+        alpha=VERDICT_ALPHA,
+        min_decisive=MIN_DECISIVE_GAMES_FOR_VERDICT,
+    )
 
     ab, _fillers, error = _run_confirm_sim(base_path, candidate_path, args)
     if ab is None:
@@ -340,6 +376,8 @@ def _default_replicate_fn(
             notes=(f"replication_failed: confirming A/B could not run "
                    f"({error}); base NOT advanced"),
         )
+        run2: dict = {"ran": False, "error": error, "verdict": rep.verdict,
+                      "confirmed": False}
     else:
         verdict = _verdict_from_ab(ab, margin=args.sim_margin)
         wins_a = getattr(ab, "wins_a", None)
@@ -361,6 +399,23 @@ def _default_replicate_fn(
                        f"({split}); base NOT advanced -- the second "
                        f"independent A/B did not confirm the first"),
             )
+        run2 = {
+            "ran": True,
+            "verdict": verdict,
+            "confirmed": rep.confirmed,
+            "wins_old": wins_a,
+            "wins_new": wins_b,
+            "games": getattr(ab, "games", None),
+            "decisive": (
+                (wins_a or 0) + (wins_b or 0)
+                if (wins_a is not None or wins_b is not None) else None
+            ),
+            "margin": margin,
+            "status": getattr(ab, "status", None),
+        }
+    # No per-run copy of the provenance: both runs were scored with the
+    # same args, and the row carries one authoritative
+    # SIM_REPORT_VERDICT_PARAMS_KEY below. Two copies could drift.
 
     if iteration_id is not None:
         from .knowledge_log import update_iteration_sim
@@ -370,10 +425,17 @@ def _default_replicate_fn(
                 # 'kept' only survives a confirmation; otherwise the row
                 # carries the second run's verdict. sim_report / win
                 # rates are deliberately NOT overwritten -- run 1's
-                # numbers stay the row's measured record and both splits
-                # are named in the note.
+                # numbers stay the row's measured record. The confirming
+                # run is ADDED beside them (note appended, run 2 merged
+                # into sim_report under its own key), never on top of
+                # them.
                 verdict=rep.verdict,
                 notes=rep.notes,
+                notes_append=True,
+                sim_report_merge={
+                    SIM_REPORT_REPLICATION_KEY: run2,
+                    SIM_REPORT_VERDICT_PARAMS_KEY: provenance,
+                },
                 db_path=Path(args.db_path) if getattr(args, "db_path", None)
                 else None,
             )
@@ -685,6 +747,21 @@ def _make_swap_evaluator(state: dict, args):
             candidate = apply_proposal_to_deck(base, proposal, dry_run=False)
         except Exception as exc:  # noqa: BLE001
             return _skip(arm, f"apply_failed: {type(exc).__name__}: {exc}")
+        if not proposal.applied_adds and not proposal.applied_cuts:
+            # Pair validation dropped the WHOLE swap (cut not in the
+            # decklist / add already present / add is the commander), so
+            # the candidate is content-identical to the base and simming
+            # it would spend a full Forge budget measuring base-vs-base
+            # noise -- booked as this arm's real reward, and ~1 no-op run
+            # in 83 even clears the significance gate and "advances" the
+            # base to a restamped copy of itself. Same guard
+            # improve_search.py's probe evaluator and iteration_loop
+            # already had; this path was the one that missed it
+            # (2026-08-20). Routine here rather than exotic:
+            # _build_arms_from_advice cycles cuts across arms, so once
+            # any pull accepts and removes that cut from the base, every
+            # sibling arm sharing it becomes a guaranteed no-op.
+            return _skip(arm, "swap_dropped_by_legality")
         deck_dir = base.parent
         if args.sim_fillers:
             fillers = [f.strip() for f in args.sim_fillers.split(",") if f.strip()]
@@ -778,13 +855,24 @@ def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
     policy = make_policy(args.bandit_policy, epsilon=args.epsilon, c=args.ucb_c)
     state = {"deck": deck_path}
     evaluate = _make_swap_evaluator(state, args)
-    # The real evaluator returns PullOutcome objects, so acceptance is
-    # decided by _verdict_from_ab (significance + decisive gate +
-    # --sim-margin pre-filter) inside the evaluator; accept_threshold
-    # only applies to bare-float evaluators (the back-compat/test path).
+    # accept_threshold is deliberately NOT passed (2026-08-20). The real
+    # evaluator returns PullOutcome objects, so acceptance is decided by
+    # _verdict_from_ab (significance + decisive gate + --sim-margin
+    # pre-filter) inside the evaluator and the threshold is never
+    # consulted on this path at all -- it only coerces bare-float
+    # evaluators (the back-compat/test path). What used to be here was
+    # `accept_threshold=args.sim_margin`: a UNITS ERROR, and the exact
+    # class bandit.py's own docstring lectures about. --sim-margin is a
+    # raw decisive-game margin (default 1, O(±20) at 45-game pulls) while
+    # rewards were normalized to [-1, +1] in 2026-08-16, so the
+    # comparison `reward >= 1` meant "accept only a clean sweep", and any
+    # raised --sim-margin made acceptance arithmetically impossible.
+    # Dropping the kwarg rather than substituting a normalized constant:
+    # improve.py has no opinion to express about a path it cannot reach,
+    # and inventing one here would put a second, silent acceptance rule
+    # beside the significance test that actually governs this strategy.
     result = run_bandit(
-        arms, args.rounds, evaluate, policy,
-        accept_threshold=args.sim_margin, rng=random.Random(),
+        arms, args.rounds, evaluate, policy, rng=random.Random(),
     )
 
     if args.json:

@@ -416,10 +416,16 @@ def _eval_args(**over):
 
 
 def _make_eval(monkeypatch, tmp_path, *, ab=None, apply_exc=None,
-               fillers=("f1.dck", "f2.dck"), args=None):
+               fillers=("f1.dck", "f2.dck"), args=None, apply_drops_all=False):
     """Build the REAL ``_make_swap_evaluator`` closure with only its
     outermost dependencies stubbed (apply / filler pick / Forge sim), so
-    the accept decision under test is the production one."""
+    the accept decision under test is the production one.
+
+    ``apply_drops_all=True`` reproduces the pair-validation drop: the real
+    ``apply_proposal_to_deck`` writes a candidate file and returns it even
+    when it dropped the whole swap (unmatched cut / add already present),
+    leaving ``applied_adds``/``applied_cuts`` empty.
+    """
     base = tmp_path / "base.dck"
     base.write_text("[metadata]\nName=Base\n", encoding="utf-8")
     candidate = tmp_path / "candidate.dck"
@@ -428,6 +434,12 @@ def _make_eval(monkeypatch, tmp_path, *, ab=None, apply_exc=None,
     def fake_apply(deck_path, proposal, dry_run=False):
         if apply_exc is not None:
             raise apply_exc
+        # Mirror production: apply_proposal_to_deck populates the APPLIED
+        # lists on the proposal it was handed (empty when pair validation
+        # dropped the swap). The evaluator's no-op guard reads them.
+        if not apply_drops_all:
+            proposal.applied_adds = list(proposal.adds)
+            proposal.applied_cuts = list(proposal.cuts)
         return candidate
 
     monkeypatch.setattr("commander_builder.proposer.apply_proposal_to_deck",
@@ -560,6 +572,100 @@ def test_failed_pull_leaves_arm_statistics_untouched(monkeypatch, tmp_path):
     assert res.accepted == 0
     assert res.total_reward == 0.0
     assert res.best_arm_key is None  # nothing was ever measured
+
+
+# --- R2-P01: the no-op guard the bandit evaluator was missing --------------
+#
+# ``apply_proposal_to_deck`` does not RAISE when pair validation drops the
+# whole swap (cut not in the decklist, add already present, add is the
+# commander) — it writes a content-identical candidate and returns it. The
+# evaluator went straight from there into a 45-game Forge run, measuring
+# base-vs-base noise and booking it as the arm's real reward. Both sibling
+# call sites already guarded this (improve_search's probe evaluator,
+# iteration_loop's RuntimeError); this path did not.
+
+def test_evaluator_skips_a_swap_the_applier_dropped(
+    monkeypatch, tmp_path, capsys,
+):
+    """An arm whose cut card is absent from the deck: the applier drops
+    the pair, so the candidate is content-identical to the base. The pull
+    must SKIP (no Forge run, no reward, no advance), not sim a deck
+    against a copy of itself."""
+    sims: list = []
+
+    state, base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45),
+        apply_drops_all=True,
+    )
+    # Re-patch the sim to record calls: nothing may reach Forge.
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda **kw: sims.append(kw),
+    )
+
+    out = evaluate(_arm())
+
+    assert out.skipped is True
+    assert out.skip_reason == "swap_dropped_by_legality"
+    assert out.reward is None
+    assert out.accepted is False
+    assert state["deck"] == base          # base did NOT advance
+    assert sims == []                     # no Forge budget spent
+    assert "swap_dropped_by_legality" in capsys.readouterr().err
+
+
+def test_dropped_swap_never_advances_even_on_a_significant_split(
+    monkeypatch, tmp_path,
+):
+    """The point of the guard: a no-op sim CAN come back significant
+    (~1 run in 83 at the shipped gate), and without the guard that
+    'advances' the base to a restamped copy of itself. With the guard the
+    scripted 30-15 sweep never even runs."""
+    state, base, cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45),
+        apply_drops_all=True,
+    )
+    out = evaluate(_arm())
+    assert out.verdict is None            # no verdict was ever computed
+    assert state["deck"] == base != cand
+
+
+# --- R2-P07: --sim-margin is not the bandit's accept_threshold -------------
+
+def test_run_bandit_is_not_handed_sim_margin_as_accept_threshold(
+    tmp_path, monkeypatch,
+):
+    """``accept_threshold`` compares against the NORMALIZED [-1, +1]
+    reward scale; ``--sim-margin`` is a raw decisive-game margin. Passing
+    one as the other was a units error (it made `reward >= 1` = 'only a
+    clean sweep counts', and any raised --sim-margin arithmetically
+    unsatisfiable). improve must not pass the kwarg at all — acceptance
+    on this path is the evaluator's significance test."""
+    from commander_builder.bandit import Arm, BanditResult
+
+    seen: dict = {}
+
+    def fake_run_bandit(arms, rounds, evaluate, policy, **kwargs):
+        seen.update(kwargs)
+        return BanditResult(rounds_run=0, accepted=0, best_arm_key=None,
+                            best_arm_mean=0.0, total_reward=0.0)
+
+    monkeypatch.setattr("commander_builder.bandit.run_bandit", fake_run_bandit)
+    monkeypatch.setattr(
+        improve, "_build_arms_from_advice",
+        lambda deck_path, bracket, source: [
+            Arm(key="+Good / -Bad", add="Good", cut="Bad"),
+        ],
+    )
+    deck = tmp_path / "[USER] Goblins [B4].dck"
+    deck.write_text("[metadata]\nName=Goblins\n", encoding="utf-8")
+
+    rc = improve_main([str(deck), "--rounds", "2", "--strategy", "bandit",
+                       "--sim-margin", "7", "--json"])
+
+    assert rc == 0
+    assert "accept_threshold" not in seen
+    assert 7 not in seen.values()
 
 
 # --- P16: reward normalization --------------------------------------------
@@ -876,7 +982,7 @@ def _patch_confirm_sim(monkeypatch, ab, *, fillers=("F1.dck", "F2.dck")):
     return calls
 
 
-def _seed_pending_row(db_path) -> int:
+def _seed_pending_row(db_path, *, notes=None, sim_report=None) -> int:
     from commander_builder.knowledge_log import (
         Iteration, init_db, record_iteration,
     )
@@ -885,7 +991,14 @@ def _seed_pending_row(db_path) -> int:
         deck_id="rep", deck_name="rep", bracket=3,
         audit_manifest={"added": ["A"], "removed": ["B"]},
         verdict="kept",
+        verdict_notes=notes,
+        sim_report=sim_report,
     ), db_path=db_path)
+
+
+#: What run 1 (the auto-curate subprocess) leaves on the row.
+_RUN1_NOTE = "A/B sim: old won 15, new won 30, neutral=0 (45 games, margin=1)"
+_RUN1_SIM_REPORT = {"status": "done", "wins_a": 15, "wins_b": 30, "games": 45}
 
 
 def test_default_replicate_fn_confirms_a_repeated_significant_win(
@@ -951,6 +1064,137 @@ def test_default_replicate_fn_unrunnable_gate_stays_shut(tmp_path,
     assert rep.confirmed is False
     assert rep.verdict == "pending"
     assert "replication_failed" in rep.notes
+
+
+# --- R2-P04 / R2-P06: the replicate writer is a SECOND writer --------------
+#
+# It used to pass a fresh ``notes`` string into update_iteration_sim, which
+# overwrites verdict_notes — destroying run 1's split, on a row whose own
+# docstring claimed notes "gain a replication_confirmed line". And run 2's
+# games lived nowhere structured, so a confirmed 'kept' understated the
+# Forge games behind it by half.
+
+def test_replication_appends_to_run_1s_note_instead_of_replacing_it(
+    tmp_path, monkeypatch,
+):
+    from commander_builder.knowledge_log import get_iteration
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    _patch_confirm_sim(monkeypatch, _RepAB(14, 31, games=45))
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+
+    notes = get_iteration(iid, db_path=db).verdict_notes
+    assert _RUN1_NOTE in notes               # run 1 survived
+    assert "replication_confirmed" in notes  # run 2 was added
+    assert notes.index(_RUN1_NOTE) < notes.index("replication_confirmed")
+
+
+def test_replication_appends_on_a_failed_confirmation_too(
+    tmp_path, monkeypatch,
+):
+    """The disagreeing case rewrites the VERDICT but must still keep run
+    1's measured note beside the failure line."""
+    from commander_builder.knowledge_log import get_iteration
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    _patch_confirm_sim(monkeypatch, _RepAB(22, 23, games=45))
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+
+    row = get_iteration(iid, db_path=db)
+    assert row.verdict == "neutral"
+    assert _RUN1_NOTE in row.verdict_notes
+    assert "replication_failed" in row.verdict_notes
+
+
+def test_replication_persists_run_2_structurally_in_sim_report(
+    tmp_path, monkeypatch,
+):
+    """Run 2's split lands as DATA under sim_report['replication'] — and
+    run 1's sim_report is not clobbered doing it."""
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY, get_iteration,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    _patch_confirm_sim(monkeypatch, _RepAB(14, 31, games=45))
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+
+    report = get_iteration(iid, db_path=db).sim_report
+    # Run 1's measured record is untouched.
+    assert report["wins_a"] == 15 and report["wins_b"] == 30
+    run2 = report[SIM_REPORT_REPLICATION_KEY]
+    assert run2["ran"] is True
+    assert run2["verdict"] == "kept" and run2["confirmed"] is True
+    assert run2["wins_old"] == 14 and run2["wins_new"] == 31
+    assert run2["games"] == 45 and run2["decisive"] == 45
+    assert run2["margin"] == 17
+
+
+def test_replication_records_an_unrunnable_confirm_structurally(
+    tmp_path, monkeypatch,
+):
+    """A confirm that could not RUN is still a fact about the row."""
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY, get_iteration,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    _patch_confirm_sim(monkeypatch, _RepAB(0, 0, status="skipped"),
+                       fillers=("only-one.dck",))
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+
+    run2 = get_iteration(iid, db_path=db).sim_report[SIM_REPORT_REPLICATION_KEY]
+    assert run2["ran"] is False
+    assert run2["confirmed"] is False
+    assert "filler" in (run2["error"] or "")
+
+
+def test_replication_stamps_the_verdict_parameters_it_used(
+    tmp_path, monkeypatch,
+):
+    """R2-P06: the row records the margin / alpha / decisive floor its
+    verdict was scored under, so it is auditable without knowing which
+    code version (or which --sim-margin) wrote it."""
+    from commander_builder.analyst import MIN_DECISIVE_GAMES_FOR_VERDICT
+    from commander_builder._proposer_sim import VERDICT_ALPHA
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_VERDICT_PARAMS_KEY, get_iteration,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    _patch_confirm_sim(monkeypatch, _RepAB(14, 31, games=45))
+    args = _replicate_args(db_path=str(db), sim_fillers=None, sim_margin=6)
+
+    improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+
+    params = get_iteration(iid, db_path=db).sim_report[
+        SIM_REPORT_VERDICT_PARAMS_KEY]
+    assert params["margin"] == 6            # the RAISED margin, recorded
+    assert params["alpha"] == VERDICT_ALPHA
+    assert params["min_decisive"] == MIN_DECISIVE_GAMES_FOR_VERDICT
 
 
 def test_replication_cannot_recurse(tmp_path, monkeypatch):
