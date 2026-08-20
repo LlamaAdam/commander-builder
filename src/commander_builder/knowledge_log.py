@@ -175,8 +175,10 @@ MEASUREMENT_ERAS: dict[int, str] = {
         "only, never training data."
     ),
     2: (
-        "seat-attributed, mixed win-rate denominators (2026-05-22 … "
-        "2026-07-18). Wins are correctly attributed, but the three "
+        "seat-attributed, mixed win-rate denominators (2026-05-23 … "
+        "2026-07-18; rows dated 2026-05-21/22 join this era only when "
+        "id >= 314 breaks the tie, since the seat fix landed mid-session "
+        "— see _SEAT_FIX_START/_SETTLED). Wins are correctly attributed, but the three "
         "writers used three different denominators "
         "(all-games-including-draws / decisive-only / per-version-games), "
         "so win_rate_old and win_rate_new are not comparable across rows. "

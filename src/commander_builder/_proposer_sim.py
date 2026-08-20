@@ -488,6 +488,19 @@ def _run_sim_and_record(
     sim_payload = ab_result.to_dict()
     verdict = _verdict_from_ab(ab_result, margin=args.sim_margin)
     sim_fields = _ab_to_iteration_fields(ab_result)
+    # Verdict provenance (2026-08-20, R2-P06): stamp the exact
+    # parameters this verdict was computed under into the row's
+    # sim_report, so it is auditable without knowing which code
+    # version (or --sim-margin) wrote it. Same mechanism as improve's
+    # replication writer and the web save writer; this was the third
+    # and last verdict writer without it.
+    if isinstance(sim_fields.get("sim_report"), dict):
+        from .knowledge_log import SIM_REPORT_VERDICT_PARAMS_KEY, verdict_provenance
+        sim_fields["sim_report"][SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
+            margin=args.sim_margin,
+            alpha=VERDICT_ALPHA,
+            min_decisive=MIN_DECISIVE_GAMES_FOR_VERDICT,
+        )
 
     # Post-sim honesty: the pre-sim warning above is an ESTIMATE
     # (expected fraction 0.5); this reports the MEASURED outcome. When
