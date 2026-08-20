@@ -45,6 +45,24 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Added
 
+- **`commander` umbrella CLI + guided `commander-init`** (decisions B1
+  and B2). One front door aliases all 28 hyphenated scripts 1:1 with
+  grouped help; a tripwire test fails when a script is added without a
+  subcommand. `commander-init` sequences dependency check → oracle
+  prime → deck acquisition → pool curation with measured cost warnings
+  before anything expensive, `--yes`/`--dry-run`, and resumability by
+  probing real artifacts (jar present, cache count, candidates, pool
+  JSON) instead of a state file.
+- **Playwright web smokes** (decision B3) — the 4,300-line `app.js`'s
+  first automated tests: twelve hermetic smokes (verdict-radio
+  discipline with production's own p-values, `Name=` restamp, error
+  paths, era sub-lines), mutation-checked before landing, plus a
+  path-filtered `web smokes` CI job. They immediately found the
+  dismissable bracket warning (fixed same day — see below).
+- **Weekly real-Forge canary** (decision B4) — one 4-game pod against
+  the LATEST Forge release every Monday, reusing
+  `calibration_check.py`'s good-deck-vs-do-nothing-controls contract;
+  raw Forge logs upload on failure.
 - **Local-model tier for narrow tagging** (`local_model.py`, decision
   A4 — the question this review started from). Local models stop doing
   proposal/verdict work and start doing tasks where the evidence is
@@ -105,6 +123,15 @@ raised by three AI review rounds plus a negative-mode critique.
 
 #### Changed
 
+- **The bracket-unverified warning survives no-op saves** (found by the
+  new smokes on their first day): the state moved into a
+  `BracketUnverified=<n>` `[metadata]` directive — read from disk so a
+  textarea edit can't dismiss it, storing the bracket digit so a
+  retag self-invalidates, cleared only where a bracket is actually
+  computed (the dashboard estimator, matching the declared tag; a
+  `?bracket=` override can never clear it), and carried across
+  re-imports. It also gets warning styling instead of the muted
+  routine-status class.
 - **`proposer.ollama_propose` retired.** It fed all 706 lines of the
   browser audit prompt — which opens "STEP 0 — ASK ME FIRST" — to
   `llama3.2:3b` and waited 600 seconds for a complete swap manifest. A
