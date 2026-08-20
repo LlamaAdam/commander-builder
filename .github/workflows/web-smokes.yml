@@ -1,0 +1,96 @@
+name: web smokes
+
+# Playwright smokes over the browser UI (tests/e2e/), covering the
+# ~4,300 lines of ``src/commander_builder/web/static/app.js`` that the
+# pytest suite cannot reach: the save-verdict default, the deck-editor
+# save path, the error-render hardening, and the verdict-breakdown era
+# sub-line. Two review rounds found bugs in exactly those flows, and
+# every one of them was a silent failure in the browser — nothing a
+# route-level Python test would have caught.
+#
+# DELIBERATELY A SEPARATE WORKFLOW. ``test.yml`` is the offline,
+# hermetic, three-Python-matrix lane and stays exactly as it is; this
+# job needs Node, a Chromium download and a live Flask process, none of
+# which belong in that lane's critical path. A red run here never
+# blocks the Python suite and vice versa.
+#
+# HERMETIC ANYWAY: ``tests/e2e/server.py`` boots Flask against a temp
+# deck dir + temp knowledge DB, stubs every Scryfall / EDHREC lookup,
+# and blocks outbound sockets outright. Forge is never invoked — the
+# two sim endpoints are intercepted in the browser and replayed from a
+# fixture whose ``suggested_verdict`` block is computed by the real
+# server helper at boot. No network, no jar, no API keys.
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+    paths:
+      # The UI under test...
+      - "src/commander_builder/web/**"
+      # ...and the tooling that tests it (so a change to the harness is
+      # validated by the harness before it lands).
+      - "tests/e2e/**"
+      - "playwright.config.js"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/web-smokes.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smokes:
+    runs-on: ubuntu-latest
+    # Generous vs. the ~30s the suite actually takes: the only slow
+    # steps are dependency install and the Chromium download, and a
+    # hung browser should die on a timer rather than on the 6h default.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Single version on purpose. These smokes exercise BROWSER
+          # behaviour; the Python side is just a server host, and it is
+          # already covered across 3.10/3.11/3.12 by test.yml.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install the app (web extra -> flask)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[web]"
+
+      - name: Install Playwright + Chromium
+        # ``npm ci`` (not install) so the pinned @playwright/test in
+        # package-lock.json is what runs — the browser build and the
+        # client are version-locked to each other, and a floating
+        # client would eventually mismatch the installed browser.
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run web smokes
+        run: npx playwright test
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
