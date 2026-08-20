@@ -1,0 +1,102 @@
+# Weekly real-Forge canary (decision B4, 2026-08-20).
+#
+# Every other workflow in this repo is offline by design — the test
+# suite never launches a JVM, so a Forge-side regression (a new Forge
+# release changing log format, deck parsing, or AI behavior) surfaces
+# only when the owner is mid-experiment. This canary runs ONE real pod
+# a week against the LATEST Forge release so that breakage arrives as a
+# Monday-morning red X instead.
+#
+# What it actually proves comes from scripts/calibration_check.py's
+# contract: a known-good deck (the committed golden build) must crush a
+# pod of deliberately do-nothing 99-Wastes control decks. A PASS means
+# the whole chain — Forge download, JVM launch, deck parsing, sim run,
+# log parsing, win attribution — can still resolve an obvious
+# difference. A FAIL means the measurement is broken, independent of
+# any deck-quality question. It deliberately downloads the LATEST
+# Forge (not a pin): early warning about the next release is the whole
+# point; the offline suite already guards our own code.
+#
+# Cost: one 4-game pod, ~10-15 min of runner time per week.
+name: forge-canary
+
+on:
+  schedule:
+    # Mondays 06:12 UTC — off the :00 spike, before the owner's day.
+    - cron: "12 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # forge_runner falls back to `shutil.which("java")` when
+      # vendor/jre is absent, so PATH java from setup-java is enough —
+      # no Temurin download via bootstrap.ensure_jre needed here.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install package
+        run: pip install -e .
+
+      # Cache the Forge fat-jar per calendar week. A stale-week cache
+      # miss re-downloads the latest release — which is exactly the
+      # freshness this canary exists to test.
+      - name: Compute cache week
+        id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: vendor/forge
+          key: forge-jar-${{ steps.week.outputs.week }}
+
+      - name: Ensure latest Forge
+        run: |
+          python - <<'PY'
+          from commander_builder.bootstrap import check_dependencies, download_forge
+          status = check_dependencies()
+          if status.forge_jar:
+              print(f"cached jar: {status.forge_jar}")
+          else:
+              jar = download_forge()
+              print(f"downloaded: {jar}")
+          PY
+
+      - name: Seed the golden deck
+        run: |
+          mkdir -p vendor/forge/userdata/decks/commander
+          cp tests/fixtures/golden_single_commander_build.dck \
+             "vendor/forge/userdata/decks/commander/[USER] Canary Golden [B3].dck"
+
+      - name: Calibration canary (good deck vs do-nothing controls)
+        run: |
+          python scripts/calibration_check.py \
+            --good "vendor/forge/userdata/decks/commander/[USER] Canary Golden [B3].dck" \
+            --games 4 --timeout 360
+
+      # Keep the raw sim evidence around for a week of debugging when
+      # the canary goes red — the log is the artifact that says whether
+      # Forge changed its output or our parser lost the plot.
+      - name: Upload Forge logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-canary-logs
+          path: |
+            vendor/forge/userdata/**/*.log
+            vendor/forge/forge.log
+          if-no-files-found: ignore
+          retention-days: 14
