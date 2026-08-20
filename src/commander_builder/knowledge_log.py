@@ -360,7 +360,7 @@ def measurement_era_for(
     return 1
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -385,6 +385,8 @@ CREATE TABLE IF NOT EXISTS iterations (
     deck_snapshot   TEXT,            -- .dck file contents
     milestone       TEXT,            -- v2 (#012): user-chosen tag (e.g. "baseline", "PR-ready")
     measurement_era INTEGER,         -- v3: MEASUREMENT_ERAS key, NULL = unknown/mixed
+    judge_verdict   TEXT,            -- v4 (FP-016): LLM panel opinion, NULL = judge did not run
+    judge_report    TEXT,            -- v4: JSON JudgeReport
     FOREIGN KEY (parent_id) REFERENCES iterations(id)
 );
 
@@ -466,6 +468,45 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v3 → v4 migration: add the FP-016 ``judge_verdict`` /
+    ``judge_report`` columns.
+
+    Same check-then-add shape as ``_migrate_to_v2`` / ``_migrate_to_v3``
+    (pragma_table_info guard, ``IF NOT EXISTS`` index) so re-running
+    init_db is a no-op on a database that already has them.
+
+    NO BACKFILL, and that is the point. ``measurement_era`` could be
+    derived from a row's own timestamp; a judge verdict cannot be derived
+    from anything — it exists only if a panel actually ran. Every
+    historical row therefore keeps NULL in both columns, which reads as
+    "the judge did not run here" and never as a fourth opinion. The
+    Phase 2 agreement script (``scripts/judge_agreement.py``) joins on
+    rows that carry BOTH verdicts, so a fabricated backfill would poison
+    the exact table this column exists to produce.
+
+    The columns sit BESIDE ``verdict`` / ``sim_report``, never instead of
+    them (FP-016 §6): Phase 1 is observe-only, so nothing that reads the
+    sim verdict changes behavior because these columns appeared.
+
+    The index is PARTIAL (``WHERE judge_verdict IS NOT NULL``), following
+    the ``milestone`` precedent rather than ``measurement_era``'s plain
+    index: judged rows are the rare case here — the flag is off by
+    default — and the only query that wants them is "the rows carrying
+    both verdicts".
+    """
+    cur = conn.execute("PRAGMA table_info(iterations)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "judge_verdict" not in cols:
+        conn.execute("ALTER TABLE iterations ADD COLUMN judge_verdict TEXT")
+    if "judge_report" not in cols:
+        conn.execute("ALTER TABLE iterations ADD COLUMN judge_report TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_iterations_judge_verdict "
+        "ON iterations(judge_verdict) WHERE judge_verdict IS NOT NULL"
+    )
+
+
 @dataclass
 class Iteration:
     """One row of the iteration history. Fields default to None so callers can
@@ -489,12 +530,20 @@ class Iteration:
     # Left None by callers; ``to_row`` derives it from created_at so
     # every writer stamps it without having to know it exists.
     measurement_era: Optional[int] = None
+    # v4 (FP-016): the LLM panel's OPINION, stored beside the sim verdict
+    # and never in place of it. Both stay None unless the judge actually
+    # ran on this pairing — there is no default and no backfill, because
+    # "the judge did not run" and "the judge had no opinion" are different
+    # facts and only NULL says the first one.
+    judge_verdict: Optional[str] = None
+    judge_report: Optional[dict] = None
     id: Optional[int] = None  # Set after insert.
 
     def to_row(self) -> dict:
         d = asdict(self)
         d["audit_manifest"] = json.dumps(self.audit_manifest) if self.audit_manifest is not None else None
         d["sim_report"] = json.dumps(self.sim_report) if self.sim_report is not None else None
+        d["judge_report"] = json.dumps(self.judge_report) if self.judge_report is not None else None
         d["created_at"] = self.created_at or datetime.now(timezone.utc).isoformat()
         # Derive the era from the row's OWN timestamp rather than
         # hardcoding CURRENT_MEASUREMENT_ERA: a live write stamps now ->
@@ -542,6 +591,15 @@ class Iteration:
                 row["measurement_era"]
                 if "measurement_era" in row.keys() else None
             ),
+            # Same legacy guard again for the schema v4 pair (FP-016).
+            judge_verdict=(
+                row["judge_verdict"] if "judge_verdict" in row.keys() else None
+            ),
+            judge_report=(
+                json.loads(row["judge_report"])
+                if "judge_report" in row.keys() and row["judge_report"]
+                else None
+            ),
         )
 
 
@@ -584,6 +642,9 @@ def init_db(db_path: Optional[Path] = None) -> None:
       v2 → v3: add ``measurement_era`` column + index, and backfill
                historical rows from their id/created_at where the era
                is known (``_migrate_to_v3``, 2026-08-17).
+      v3 → v4: add ``judge_verdict`` / ``judge_report`` + partial index
+               for the FP-016 LLM deck judge. No backfill — see
+               ``_migrate_to_v4`` (2026-08-20).
     """
     with _connect(_resolve_db_path(db_path)) as conn:
         # Per-statement execute, NOT executescript(): executescript()
@@ -599,6 +660,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
         # index that aren't in the base _SCHEMA_SQL.
         _migrate_to_v2(conn)
         _migrate_to_v3(conn)
+        _migrate_to_v4(conn)
         cur = conn.execute("SELECT version FROM schema_version")
         row = cur.fetchone()
         if row is None:
@@ -671,6 +733,52 @@ def update_verdict(
         conn.execute(
             "UPDATE iterations SET verdict = ?, verdict_notes = ? WHERE id = ?",
             (verdict, notes, iteration_id),
+        )
+
+
+def update_iteration_judge(
+    iteration_id: int,
+    judge_verdict: str,
+    judge_report: Optional[dict] = None,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Record the FP-016 LLM panel's opinion BESIDE the sim verdict.
+
+    Deliberately a separate writer from ``update_verdict`` /
+    ``update_iteration_sim``, and deliberately incapable of touching
+    ``verdict``: Phase 1 is observe-only, so the structural guarantee that
+    the judge cannot overwrite the empirical column is worth more than the
+    convenience of one shared function. The SET clause names only the two
+    v4 columns; there is no code path here that could widen it by
+    accident.
+
+    ``judge_verdict`` reuses the existing vocabulary verbatim
+    (kept / reverted / neutral / inconclusive — no ``pending``, because a
+    panel that did not run leaves NULL rather than claiming a state).
+    Orientation is the pairing's: ``kept`` means deck B, the candidate,
+    is the better-BUILT one — which is emphatically not a claim that it
+    wins more games. See ``deck_judge.OPINION_CAVEAT``.
+
+    Fail-quiet on an unknown ``iteration_id``, matching
+    ``update_verdict`` / ``set_milestone``: the caller is the improve
+    loop's round path, and a judge write must never sink a round.
+    """
+    if judge_verdict not in {"kept", "reverted", "neutral", "inconclusive"}:
+        raise ValueError(
+            f"judge_verdict must be one of kept/reverted/neutral/"
+            f"inconclusive, got {judge_verdict!r}"
+        )
+    db_path = _resolve_db_path(db_path)
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE iterations SET judge_verdict = ?, judge_report = ? "
+            "WHERE id = ?",
+            (
+                judge_verdict,
+                json.dumps(judge_report) if judge_report is not None else None,
+                iteration_id,
+            ),
         )
 
 

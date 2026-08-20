@@ -1865,3 +1865,190 @@ def test_print_summary_survives_cp1252_console():
     assert "old=40% new=47%" in out
     assert "+3" in out  # margin still readable where the Δ was
     assert "Best deck: /decks/v1.dck" in out
+
+
+# --- FP-016 deck judge wiring (observe-only) ------------------------------- #
+#
+# The claim these tests defend is a NEGATIVE one, and it is the whole
+# reason Phase 1 is allowed to run against the real loop: turning the
+# judge on, off, or making it throw must produce byte-identical
+# advancement. The judge is an observer with no vote.
+
+def _judge_args(**over):
+    import argparse
+    base = dict(replicate=False, json=False, bracket=3, sim_games=40,
+                sim_margin=1, sim_fillers=None, db_path=None,
+                strategy="greedy", intent=None)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _scripted_judge(verdicts):
+    """judge_round_fn double: one scripted opinion per call, recording the
+    pairing and iteration id it was handed."""
+    calls: list[tuple] = []
+
+    def fn(base_path, candidate_path, args, iteration_id=None):
+        calls.append((Path(base_path), Path(candidate_path), iteration_id))
+        return verdicts[len(calls) - 1]
+
+    fn.calls = calls  # type: ignore[attr-defined]
+    return fn
+
+
+def _advance_shape(result):
+    """The only thing the judge is forbidden to change."""
+    return (
+        [r.advanced for r in result.history],
+        [r.verdict for r in result.history],
+        result.rounds_kept,
+        result.final_deck,
+    )
+
+
+def test_judge_sees_the_same_pairing_and_row_the_sim_judged():
+    """Decision D1: the agreement table only means anything if both
+    instruments answer about the SAME object."""
+    fn = _make_script(["kept", "neutral"])
+    judge = _scripted_judge(["kept", "reverted"])
+    res = run_improve_loop(Path("/decks/start.dck"), "start", 2,
+                           _judge_args(), round_fn=fn, judge_round_fn=judge)
+
+    assert judge.calls[0] == (Path("/decks/start.dck"), Path("/decks/v1.dck"), 101)
+    assert judge.calls[1] == (Path("/decks/v1.dck"), Path("/decks/v2.dck"), 102)
+    assert [r.judge_verdict for r in res.history] == ["kept", "reverted"]
+
+
+def test_advancement_is_identical_with_the_judge_on_off_and_failing():
+    """The observe-only guarantee, stated as three runs of the same
+    script. A judge that disagrees with the sim, and a judge that
+    explodes, must both leave the loop's decisions untouched."""
+    def run(judge_round_fn):
+        return run_improve_loop(
+            Path("/decks/start.dck"), "start", 3, _judge_args(),
+            round_fn=_make_script(["kept", "neutral", "kept"]),
+            **({"judge_round_fn": judge_round_fn} if judge_round_fn else {}),
+        )
+
+    def off(base, cand, args, iteration_id=None):
+        return None
+
+    def disagrees(base, cand, args, iteration_id=None):
+        # Opposite opinion on every round — must still change nothing.
+        return "reverted"
+
+    def explodes(base, cand, args, iteration_id=None):
+        raise RuntimeError("panel unavailable")
+
+    baseline = _advance_shape(run(off))
+    assert _advance_shape(run(disagrees)) == baseline
+    assert _advance_shape(run(explodes)) == baseline
+    assert baseline[0] == [True, False, True]
+
+
+def test_a_judge_failure_warns_and_leaves_the_opinion_null(capsys):
+    fn = _make_script(["kept"])
+
+    def explodes(base, cand, args, iteration_id=None):
+        raise RuntimeError("panel unavailable")
+
+    res = run_improve_loop(Path("/decks/start.dck"), "start", 1, _judge_args(),
+                           round_fn=fn, judge_round_fn=explodes)
+    out = capsys.readouterr().out
+    assert "deck judge failed" in out
+    assert "the sim verdict is unaffected" in out
+    assert res.history[0].judge_verdict is None      # NULL, not a guess
+    assert res.history[0].advanced is True
+
+
+def test_judge_runs_on_non_kept_rounds_too():
+    """Unlike replication (which gates the advance and so only runs on a
+    'kept'), the judge's sample must be UNBIASED — decision D3. Sampling
+    only the rounds the sim liked would poison the agreement table."""
+    fn = _make_script(["neutral", "reverted"])
+    judge = _scripted_judge(["kept", "kept"])
+    run_improve_loop(Path("/decks/start.dck"), "start", 2, _judge_args(),
+                     round_fn=fn, judge_round_fn=judge)
+    assert len(judge.calls) == 2
+
+
+def test_judge_does_not_run_on_an_errored_or_no_op_round():
+    """Nothing to judge: an errored round has no candidate deck, and a
+    no-op round's 'candidate' is the same list."""
+    judge = _scripted_judge(["kept"])
+    fn = _make_script(["error"])
+    run_improve_loop(Path("/decks/start.dck"), "start", 1, _judge_args(),
+                     round_fn=fn, judge_round_fn=judge)
+    assert judge.calls == []
+
+    judge2 = _scripted_judge(["kept"])
+    fn2 = _make_script(["kept"], applied=(0, 0))
+    run_improve_loop(Path("/decks/start.dck"), "start", 1, _judge_args(),
+                     round_fn=fn2, judge_round_fn=judge2)
+    assert judge2.calls == []
+
+
+def test_judge_opinion_is_shown_beside_the_sim_verdict_not_merged(capsys):
+    result = ImproveResult(
+        deck_id="deck", start_deck="/decks/a.dck", final_deck="/decks/v1.dck",
+        rounds_requested=1, rounds_run=1, rounds_kept=1, converged=False,
+        history=[RoundResult(
+            round=1, input_deck="/decks/a.dck", output_deck="/decks/v1.dck",
+            verdict="kept", advanced=True, iteration_id=7,
+            applied_adds=2, applied_cuts=2, judge_verdict="reverted",
+        )],
+    )
+    improve._print_summary(result)
+    out = capsys.readouterr().out
+    assert "round 1: kept" in out                 # the sim's word, unchanged
+    assert "[judge opinion: reverted]" in out     # the opinion, beside it
+
+
+def test_default_judge_round_writes_beside_the_sim_verdict(tmp_path, monkeypatch):
+    """The integration seam, still offline: a real judge_pairing over real
+    files with an injected judge_fn, persisted to a real sqlite row."""
+    import argparse
+    import json as _json
+
+    from commander_builder import deck_judge
+    from commander_builder.knowledge_log import (
+        Iteration, get_iteration, record_iteration,
+    )
+
+    monkeypatch.setenv(deck_judge.DECK_JUDGE_ENV_VAR, "1")
+    db = tmp_path / "kl.sqlite"
+    row_id = record_iteration(
+        Iteration(deck_id="d", deck_name="D", bracket=3, verdict="neutral"),
+        db_path=db,
+    )
+
+    def _deck(cards):
+        return ("[metadata]\nName=X\n[Commander]\n1 Cmdr\n[Main]\n"
+                + "".join(f"1 {c}\n" for c in cards))
+
+    old = tmp_path / "old.dck"
+    new = tmp_path / "new.dck"
+    old.write_text(_deck(["A", "B", "Old"]), encoding="utf-8")
+    new.write_text(_deck(["A", "B", "New"]), encoding="utf-8")
+
+    from commander_builder._deck_judge_prompt import DIMENSIONS
+    answers = [
+        _json.dumps({"preferred": p, "dimensions": {d: 0 for d in DIMENSIONS},
+                     "reasoning": "r"})
+        for p in ["B", "B", "B", "A", "A", "A"]
+    ]
+    calls = {"n": 0}
+
+    def judge_fn(system, user, *, model=None):
+        calls["n"] += 1
+        return answers[calls["n"] - 1]
+
+    args = argparse.Namespace(db_path=str(db), intent=None, judge_fn=judge_fn)
+    verdict = improve._default_judge_round(old, new, args, row_id)
+
+    assert calls["n"] == 6
+    assert verdict == "kept"
+    stored = get_iteration(row_id, db_path=db)
+    assert stored.judge_verdict == "kept"
+    assert stored.verdict == "neutral"      # the sim's column, untouched
+    assert stored.judge_report["votes"]["b"] == 6

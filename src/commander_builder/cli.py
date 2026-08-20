@@ -127,6 +127,9 @@ COMMANDS: tuple[Command, ...] = (
             "Import cEDH tournament results from edhtop16.com (bracket-5, exploratory)."),
     Command("history", "commander-history", "report:main", "analyze",
             "Render a deck's iteration lineage as a Markdown report."),
+    Command("judge", "commander-judge", "deck_judge:main", "analyze",
+            "Blinded LLM panel on two decks' construction (an OPINION; "
+            "Forge decides which deck is better)."),
     # -- web --------------------------------------------------------------
     Command("builder-desktop", "commander-builder-desktop", "desktop:main", "web",
             "Run Commander Builder as a native desktop window."),

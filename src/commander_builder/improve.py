@@ -131,6 +131,13 @@ class RoundResult:
     # the 'kept' that triggered the re-run.
     replicated: Optional[bool] = None
     replication_verdict: Optional[str] = None
+    # FP-016 Phase 1 (2026-08-20). The LLM panel's OPINION of this round's
+    # pairing, in the same vocabulary but from a different instrument.
+    # None means the judge did not run (flag off, by default) or could not
+    # — deliberately NOT folded into ``verdict``, which stays the sim's
+    # word alone. Nothing in the loop reads this field to make a decision;
+    # it exists to be displayed and to be written to the row.
+    judge_verdict: Optional[str] = None
 
 
 @dataclass
@@ -497,6 +504,59 @@ def _default_replicate_fn(
     return rep
 
 
+def _default_judge_round(
+    base_path: Path,
+    candidate_path: Path,
+    args,
+    iteration_id: Optional[int] = None,
+) -> Optional[str]:
+    """FP-016 Phase 1: run the blinded panel on this round's pairing.
+
+    OBSERVE-ONLY, and structurally so. This function returns a string for
+    display and writes two columns; it has no access to the loop's advance
+    decision and nothing it returns is consulted by one. The judge does
+    not advance decks and does not gate anything (FP-016 §6).
+
+    The pairing is the SAME old-vs-new the sim judged (``base_path`` is
+    the round's input deck, ``candidate_path`` its output), and the result
+    lands on the SAME row via ``update_iteration_judge`` — which is the
+    only reason the Phase 2 agreement table can join the two instruments
+    at all (decision D1: both must answer about the same object).
+
+    Runs automatically whenever the flag is on (decision D3): an on-demand
+    judge would sample exactly the pairings someone was already curious
+    about, which is the one sampling rule guaranteed to poison the
+    agreement table.
+
+    Returns the judge verdict, or None when the judge did not run. Raises
+    nothing it can help — but the loop wraps the call anyway, so even an
+    injected judge that throws cannot sink a round.
+    """
+    from . import deck_judge
+
+    if not deck_judge.is_enabled():
+        return None
+    report = deck_judge.judge_pairing(
+        base_path, candidate_path,
+        intent=getattr(args, "intent", None),
+        # Test seam: the improve CLI never sets this, so production always
+        # gets the real transport ladder. Threading it through args (rather
+        # than a new run_improve_loop parameter) keeps the offline test
+        # path identical to the production call path.
+        judge_fn=getattr(args, "judge_fn", None),
+    )
+    if iteration_id is not None:
+        from .knowledge_log import update_iteration_judge
+        update_iteration_judge(
+            iteration_id=iteration_id,
+            judge_verdict=report.verdict,
+            judge_report=report.to_dict(),
+            db_path=Path(args.db_path) if getattr(args, "db_path", None)
+            else None,
+        )
+    return report.verdict
+
+
 def run_improve_loop(
     deck_path: Path,
     deck_id: str,
@@ -505,6 +565,7 @@ def run_improve_loop(
     *,
     round_fn: Callable[[Path, int, object], RoundResult] = _default_round_fn,
     replicate_fn: Callable[..., Replication] = _default_replicate_fn,
+    judge_round_fn: Callable[..., Optional[str]] = _default_judge_round,
 ) -> ImproveResult:
     """Greedy keep-if-better loop over ``rounds`` auto-curate rounds.
 
@@ -553,6 +614,33 @@ def run_improve_loop(
             history.append(rr)
             converged = True
             break
+
+        # FP-016 Phase 1, observe-only. Deliberately placed BEFORE the
+        # advance block and deliberately unable to reach it: the judge sees
+        # the same pairing the sim saw, writes its opinion beside the sim
+        # verdict, and the loop then makes exactly the decision it would
+        # have made with the judge switched off (pinned by a test that runs
+        # the same script with the judge on, off, and failing, and compares
+        # the advance flags).
+        #
+        # The try/except is the "a judge failure must never sink the round"
+        # guarantee, and it lives HERE rather than inside the judge so it
+        # holds for ANY injected judge_round_fn, not just the default one.
+        # A failed judge leaves the row's judge columns NULL, which is the
+        # honest record: no opinion was formed.
+        if rr.output_deck:
+            try:
+                rr.judge_verdict = judge_round_fn(
+                    current, Path(rr.output_deck), args, rr.iteration_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — opinion loss, not a crash
+                if not getattr(args, "json", False):
+                    _safe_print(
+                        f"[improve] WARN: deck judge failed on round {r} "
+                        f"({type(exc).__name__}: {exc}); continuing without "
+                        f"an opinion (the sim verdict is unaffected).",
+                        flush=True,
+                    )
 
         # Greedy advance: only build on the new deck when it won -- and,
         # under replication, only when a second independent A/B agrees.
@@ -677,6 +765,12 @@ def _print_summary(result: ImproveResult) -> None:
         elif rr.replicated is False:
             line += (f"  [replication FAILED: run 1 kept, run 2 "
                      f"{rr.replication_verdict} -- not advanced]")
+        # The judge's opinion is shown NEXT TO the sim verdict, never
+        # merged into it: two instruments, two columns, and the operator
+        # gets to see when they disagree. Labeled 'opinion' on purpose —
+        # see deck_judge.OPINION_CAVEAT.
+        if rr.judge_verdict is not None:
+            line += f"  [judge opinion: {rr.judge_verdict}]"
         if rr.iteration_id is not None:
             line += f"  iter#{rr.iteration_id}"
         if rr.error:
