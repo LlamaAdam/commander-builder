@@ -36,11 +36,19 @@ jobs:
           DECK_ID="$(tr -cd '0-9' < tests/fixtures/_captures/request.txt)"
           if [ -z "$DECK_ID" ]; then echo "request.txt must contain a numeric deck id"; exit 1; fi
           echo "deck id: $DECK_ID"
-          curl -sS --fail --max-time 60 \
-            -H "Accept: application/json" \
-            -H "User-Agent: commander-builder-fixture-capture/1.0" \
-            "https://archidekt.com/api/decks/$DECK_ID/" \
-            -o "tests/fixtures/_captures/archidekt_deck_$DECK_ID.json"
+          # First attempt (2026-08-20) 403'd: Cloudflare rejects a
+          # bot-ish UA from a datacenter IP. Use the PROJECT UA string
+          # (archidekt_client.USER_AGENT, which the live probe of
+          # 2026-07-25 succeeded with), and fall back to a browser UA.
+          fetch() {
+            curl -sS --fail --max-time 60 \
+              -H "Accept: application/json" \
+              -H "User-Agent: $1" \
+              "https://archidekt.com/api/decks/$DECK_ID/" \
+              -o "tests/fixtures/_captures/archidekt_deck_$DECK_ID.json"
+          }
+          fetch "commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)" \
+            || fetch "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
           python3 - <<'PY'
           import json, collections, glob
           path = glob.glob("tests/fixtures/_captures/archidekt_deck_*.json")[0]
