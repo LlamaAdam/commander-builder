@@ -9,15 +9,21 @@
 # provenance noted, and the capture file is deleted once consumed.
 name: fetch-archidekt-capture
 
+# Trigger: push-based rather than workflow_dispatch, because GitHub only
+# registers dispatchable workflows from the DEFAULT branch, and this
+# helper lives on a feature branch. Committing a request file both
+# triggers the run and carries the deck id.
 on:
-  workflow_dispatch:
-    inputs:
-      deck_id:
-        description: "Archidekt deck id (numeric)"
-        required: true
+  push:
+    branches: ["claude/ollama-code-analysis-ak77i1"]
+    paths: ["tests/fixtures/_captures/request.txt"]
 
 permissions:
   contents: write
+
+concurrency:
+  group: archidekt-capture
+  cancel-in-progress: false
 
 jobs:
   capture:
@@ -27,15 +33,14 @@ jobs:
       - uses: actions/checkout@v5
       - name: Fetch deck JSON
         run: |
-          case "${{ inputs.deck_id }}" in
-            ''|*[!0-9]*) echo "deck_id must be numeric"; exit 1;;
-          esac
-          mkdir -p tests/fixtures/_captures
+          DECK_ID="$(tr -cd '0-9' < tests/fixtures/_captures/request.txt)"
+          if [ -z "$DECK_ID" ]; then echo "request.txt must contain a numeric deck id"; exit 1; fi
+          echo "deck id: $DECK_ID"
           curl -sS --fail --max-time 60 \
             -H "Accept: application/json" \
             -H "User-Agent: commander-builder-fixture-capture/1.0" \
-            "https://archidekt.com/api/decks/${{ inputs.deck_id }}/" \
-            -o "tests/fixtures/_captures/archidekt_deck_${{ inputs.deck_id }}.json"
+            "https://archidekt.com/api/decks/$DECK_ID/" \
+            -o "tests/fixtures/_captures/archidekt_deck_$DECK_ID.json"
           python3 - <<'PY'
           import json, collections, glob
           path = glob.glob("tests/fixtures/_captures/archidekt_deck_*.json")[0]
@@ -53,5 +58,5 @@ jobs:
           git config user.name "archidekt-capture[bot]"
           git config user.email "noreply@users.noreply.github.com"
           git add tests/fixtures/_captures/
-          git commit -m "chore: capture Archidekt deck ${{ inputs.deck_id }} API response (raw material for the R2-P18 fixture; delete after trimming)"
+          git commit -m "chore: capture Archidekt deck API response (raw material for the R2-P18 fixture; delete after trimming) [skip ci]"
           git push
