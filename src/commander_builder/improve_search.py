@@ -152,6 +152,21 @@ class SearchArm(Arm):
     is the conservative choice: we only apply swaps whose evidence is
     consistently interpretable, and a dead arm frees its share of the
     budget for arms that ARE producing signal.
+
+    DELIBERATE DIVERGENCE from ``bandit.run_bandit`` (2026-08-20,
+    decision R2-D6): that loop now retires an arm only on a STRUCTURAL
+    skip and keeps transient ones (crashed sim, zero decisive games) in
+    play. This search still kills on ANY no-signal pull, and the
+    difference is the budget the two spend. ``run_bandit`` IS the run —
+    an arm it retires is gone for the whole session, potentially hours,
+    over one crashed JVM. A ``SearchArm`` lives inside ONE round's
+    fixed ``--search-budget``, and every ``evaluate`` call consumes a
+    budget unit whether or not Forge ran, so retrying a failing probe
+    spends the same round's budget the survivors need and the round
+    ends either way. Killing here forfeits nothing beyond the current
+    round; killing there forfeits the run. Same failure, different
+    cost, so the two answers differ on purpose — do not "align" them
+    without re-deriving that.
     """
 
     dead: bool = False

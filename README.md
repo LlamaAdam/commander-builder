@@ -183,6 +183,16 @@ commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --run-sim
 commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --mode overhaul
 commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --mode auto
 
+# The unattended improve loop: N auto-curate rounds, advancing the base
+# deck only on a REPLICATED 'kept' A/B verdict. Read "The improve loop is
+# a screen, not a background improver" below before running it overnight.
+commander-improve --deck <publicId> --rounds 10
+commander-improve "[USER] My Deck [B3].dck" --rounds 5 --no-replicate
+# --strategy bandit explores individual swaps as bandit arms instead.
+commander-improve --deck <publicId> --rounds 20 --strategy bandit
+# FP-013 gate progress (no deck, no rounds needed)
+commander-improve --health
+
 # Old-vs-new head-to-head A/B sim
 commander-compare \
     --old "[USER] My Deck v1 [B3].dck" \
@@ -237,6 +247,51 @@ commander-status
 # Full menu of everything installed, grouped by task area
 commander
 ```
+
+## The improve loop is a screen, not a background improver
+
+`commander-improve` runs unattended, and on the unattended path a first
+`kept` verdict does not advance the deck on its own: a second
+independent A/B over the same old-vs-new pairing has to say `kept` too
+(`--replicate`, default ON for the round loop, OFF for `--strategy
+bandit`). That gate works, and it costs. Both halves of the trade, in
+the same place, because quoting only the first one sells this as
+something it isn't:
+
+- **False positives.** A truly neutral swap clears one significance test
+  about 1 run in 40 at α = 0.05; two independent runs in the same
+  direction cut the per-advance false-positive rate to **~1 in 1,600**.
+  That matters because the loop *chains* — an unconfirmed lucky split
+  becomes the base every later round is measured against, so the error
+  compounds rather than merely being recorded.
+- **True positives.** At the shipped settings (45 pod games, a
+  20-decisive gate, an exact two-sided binomial at α = 0.05) a genuinely
+  good **+5pp** swap advances with probability **0.13% per round** —
+  about **1.3% over a 10-round overnight run**. The likelihood ratio of
+  an advance rises from 3.0 single-shot to **9.2** replicated.
+
+So **"nothing advanced" is the EXPECTED outcome of an overnight run**,
+including when the curator is proposing genuinely good swaps. That is
+the screen behaving correctly, not a failure and not a stall. When
+something *does* advance, treat it as a rare lead worth investigating
+rather than a proven improvement: at LR ≈ 9.2, advances only become
+majority-true once the curator's true-hit rate clears ~10%, and FP-002
+measured curation net-neutral over 37,120 games.
+
+Buying more power by raising `--sim-games` was considered and declined —
+honest power costs real hours per round, and the Forge sim is positioned
+as a deep-dive instrument for questions worth real game counts, not a
+per-swap arbiter. If you want a swap decided, spend the games on that
+one question deliberately.
+
+**Every cycle that changes a deck is one row in
+`knowledge_log.sqlite`.** Round loops (`--strategy greedy`) write a row
+per round whatever the verdict, via the auto-curate pipeline.
+`--strategy bandit` writes a row per **accepted** pull — a pull is an
+"iteration" exactly when it advances the deck, so measured-but-rejected
+pulls stay in the run's CLI/JSON output and out of the log. Every row
+carries its audit manifest, deck snapshot, sim report and parent link,
+which is what makes `commander-history` / `commander-revert` work.
 
 ## The audit cycle (manual workflow)
 

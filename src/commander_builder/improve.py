@@ -10,9 +10,9 @@ the old deck with statistical significance (exact two-sided binomial
 test at ``_proposer_sim.VERDICT_ALPHA`` over at least
 ``MIN_DECISIVE_GAMES_FOR_VERDICT`` decisive games; ``--sim-margin``
 survives as a back-compat minimum-margin pre-filter on top).
-``reverted`` / ``neutral`` / ``pending`` rounds keep the current base —
-the candidate ``.dck`` is left on disk but not built upon. That's the
-greedy keep-if-better contract.
+``reverted`` / ``neutral`` / ``inconclusive`` / ``pending`` rounds keep
+the current base — the candidate ``.dck`` is left on disk but not built
+upon. That's the greedy keep-if-better contract.
 
 Replication (2026-08-17, owner decision)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -29,6 +29,36 @@ sim time. ``--replicate`` / ``--no-replicate`` control it; the default is
 ON for the unattended round loop (greedy / ``--search-budget``) and OFF
 for the interactive ``--strategy bandit`` explorer (see
 ``resolve_replicate_default``).
+
+What that gate actually buys, both directions (2026-08-20, R2-D2)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The 1-in-1,600 figure above is real, and it was the only number this
+docstring used to state. Here is the other half, computed exactly over
+the decisive-count distribution at 45 games with the 20-decisive gate
+and the exact two-sided binomial at alpha 0.05, for a GENUINELY good
+swap worth +5pp (a 55% decisive win rate):
+
+    P(kept | one 45-game run)      = 3.65%
+    P(advance | replication gate)  = 0.13%   per round
+    P(>= 1 advance | 10 rounds)    = 1.3%    per overnight run
+    likelihood ratio of an advance = 3.0 single-shot -> 9.2 replicated
+
+So the honest positioning, and the one the owner chose (R2-D2, decided
+2026-08-20 — reposition and document, no behavior change): this loop is
+a FALSE-POSITIVE-PROOF SCREEN, not a background improver. "Nothing
+advanced" is the EXPECTED outcome of an overnight run — at ~1.3%
+true-positive throughput per 10-round run, it is what you should expect
+to see even when the curator is proposing genuinely good swaps. An
+advance is therefore rare and worth reading, not a progress bar. And
+because LR ≈ 9.2, advances only become majority-TRUE once the curator's
+true-hit rate clears ~10%; FP-002 measured curation net-neutral over
+37,120 games, so treat a single advance as a lead to investigate rather
+than a proven improvement.
+
+Raising ``--sim-games`` to buy power was considered and declined: honest
+power costs real hours per round, and decision A1 already repositioned
+the Forge sim overall as a deep-dive instrument for questions worth real
+game counts. This is A1's argument applied to A2's default.
 
 What this slice deliberately is NOT (still parked under the full FP-012):
 no multi-arm-bandit / Bayesian swap selection, no intent learning, no
@@ -80,7 +110,8 @@ class RoundResult:
     round: int
     input_deck: str
     output_deck: Optional[str]
-    verdict: str  # kept / reverted / neutral / pending / no-op / error
+    # kept / reverted / neutral / inconclusive / pending / no-op / error
+    verdict: str
     advanced: bool  # did the greedy base move forward this round?
     iteration_id: Optional[int] = None
     win_rate_old: Optional[float] = None
@@ -246,6 +277,18 @@ class Replication:
     run's honest verdict PLUS a ``replication_failed`` annotation in the
     notes (``notes`` below), which is the field the schema does leave
     free-text.
+
+    When the confirming sim could not RUN AT ALL (no fillers, crashed
+    JVM) the verdict is ``inconclusive``, not ``pending`` (2026-08-20,
+    decision R2-D3). ``pending`` means "this row's sim didn't complete",
+    and run 1 DID complete -- it is the row's ``sim_report``, with win
+    rates. Stamping ``pending`` over it produced a row that contradicted
+    its own evidence, and any consumer re-deriving state from the
+    verdict alone read it as unmeasured. ``inconclusive`` already means
+    exactly what happened: measured, not decided. The
+    ``replication_failed`` note carries the detail, and the structured
+    ``sim_report[SIM_REPORT_REPLICATION_KEY]`` carries ``ran: False``
+    plus the error.
     """
 
     verdict: str
@@ -346,7 +389,10 @@ def _default_replicate_fn(
 
     Anything that stops the confirm sim from producing a verdict (no
     fillers, crashed JVM) counts as NOT confirmed: unattended replication
-    is a gate, and an unrunnable gate stays shut.
+    is a gate, and an unrunnable gate stays shut. The row is labeled
+    ``inconclusive`` in that case, NOT ``pending`` -- run 1 completed, so
+    'the sim didn't complete' would be a lie about the row's own
+    sim_report (2026-08-20, R2-D3; see ``Replication``).
 
     Knowledge_log failures are non-fatal, matching every other writer in
     this pipeline -- the .dck is on disk and the loop's decision is
@@ -371,10 +417,15 @@ def _default_replicate_fn(
 
     ab, _fillers, error = _run_confirm_sim(base_path, candidate_path, args)
     if ab is None:
+        # R2-D3 (2026-08-20): 'inconclusive', not 'pending'. Run 1 is a
+        # COMPLETED sim sitting in this row's sim_report; 'pending' means
+        # "the sim didn't complete" and would contradict it.
         rep = Replication(
-            verdict="pending", confirmed=False,
+            verdict="inconclusive", confirmed=False,
             notes=(f"replication_failed: confirming A/B could not run "
-                   f"({error}); base NOT advanced"),
+                   f"({error}); run 1's measurement stands but the "
+                   f"discipline's second half never executed, so no "
+                   f"verdict; base NOT advanced"),
         )
         run2: dict = {"ran": False, "error": error, "verdict": rep.verdict,
                       "confirmed": False}
@@ -692,6 +743,179 @@ def _signed_margin_reward(wins_a: int, wins_b: int) -> Optional[float]:
     return (wins_b - wins_a) / decisive
 
 
+def _log_bandit_pull(
+    state: dict,
+    base: Path,
+    candidate: Path,
+    proposal,
+    ab,
+    verdict: str,
+    args,
+    replication: Optional[dict] = None,
+) -> Optional[int]:
+    """Write ONE knowledge_log row for an ACCEPTED bandit pull.
+
+    2026-08-20, decision R2-D1. ``--strategy bandit`` used to write zero
+    knowledge_log rows while running full ``--sim-games`` A/B sims and
+    permanently advancing the deck on disk (``state["deck"] =
+    candidate``, the file already written by ``apply_proposal_to_deck``).
+    That meant: no lineage, no snapshot, no revert path, and total
+    invisibility to the FP-013 gate counter -- for one of three shipped
+    strategies, while the CLI told the operator "every improve run grows
+    this number". Greedy rounds get their rows for free because they
+    subprocess ``auto_curate_main``, which writes; this path calls
+    ``advise`` / ``apply_proposal_to_deck`` / ``run_ab_simulation``
+    directly, so it has to write its own.
+
+    WHERE THE BOUNDARY IS -- only ACCEPTING pulls are logged. A pull is
+    an "iteration" exactly when it CHANGES THE DECK. A pull that sims to
+    'neutral' / 'reverted' / 'inconclusive', or whose replication run
+    refused it, leaves the deck untouched and writes nothing: it is a
+    measurement of a swap that was not adopted, and the log's unit is
+    the deck STATE, with ``parent_id`` chaining one state to the next.
+    Logging non-advancing pulls would put rows in the chain that no
+    later row descends from and hand FP-013 a training set dominated by
+    rejected single swaps. The cost of the boundary, stated plainly:
+    the Forge games spent on rejected pulls are NOT recorded anywhere
+    persistent -- they live in the run's CLI/JSON output only. Revisit
+    this if the arm statistics ever need to survive a run.
+
+    The row shape deliberately matches the auto-curate writer
+    (``_proposer_sim._log_auto_curate_iteration``) so a bandit pull and
+    a curate cycle are the same kind of object to every reader:
+
+      audit_manifest  the SINGLE swap in the standard manifest shape
+                      (added / removed / rationale + the drop buckets)
+      deck_snapshot   the candidate deck text -- what revert restores
+      sim_report      the pull's own A/B report, stamped with the
+                      verdict provenance (margin / alpha / decisive
+                      floor) the other writers now carry, plus the
+                      confirming run under SIM_REPORT_REPLICATION_KEY
+                      when ``--replicate`` ran one
+      verdict         the pull's verdict (an accepted pull is 'kept')
+      parent_id       the previous row for this deck, so successive
+                      pulls in one run form a chain
+
+    ``measurement_era`` is NOT set here on purpose: ``Iteration.to_row``
+    derives it from the row's own ``created_at`` through the single
+    ``measurement_era_for`` definition, so this writer stamps the era
+    correctly without knowing the boundaries exist.
+
+    Failures are non-fatal and warn on stderr, matching every other
+    knowledge_log writer in this pipeline: the .dck is already on disk
+    and the pull's decision is already made, so losing the row must not
+    sink a multi-hour run. Returns the new row id, or None.
+    """
+    from ._proposer_sim import (
+        MIN_DECISIVE_GAMES_FOR_VERDICT,
+        VERDICT_ALPHA,
+        _ab_to_iteration_fields,
+    )
+    from .iteration_loop import resolve_deck_id
+    from .knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY,
+        SIM_REPORT_VERDICT_PARAMS_KEY,
+        Iteration,
+        iterations_for_deck,
+        record_iteration,
+        verdict_provenance,
+    )
+
+    # None, NOT DEFAULT_DB_PATH: knowledge_log resolves a None db_path
+    # against the module attribute at CALL time, which is what lets the
+    # test suite's autouse isolation fixture redirect it. Freezing the
+    # constant here would silently write to the production log.
+    db_path = Path(args.db_path) if getattr(args, "db_path", None) else None
+    deck_id = resolve_deck_id(candidate, fallback=candidate.stem)
+
+    # Chain within the run FIRST, then fall back to the deck's history.
+    # ``iterations_for_deck`` alone is enough when resolve_deck_id finds
+    # a stable publicId, but the fallback is the candidate's STEM, which
+    # gains a version suffix on every accepted pull -- so a
+    # publicId-less deck would start a fresh chain per pull. Carrying
+    # the id in ``state`` (the same dict that carries the advancing
+    # deck) makes the chain hold either way.
+    parent_id = state.get("last_iteration_id")
+    if parent_id is None:
+        prior = iterations_for_deck(deck_id, db_path=db_path)
+        parent_id = prior[-1].id if prior else None
+
+    sim_fields = _ab_to_iteration_fields(ab)
+    report = dict(sim_fields.get("sim_report") or {})
+    report[SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
+        margin=args.sim_margin,
+        alpha=VERDICT_ALPHA,
+        min_decisive=MIN_DECISIVE_GAMES_FOR_VERDICT,
+    )
+    if replication is not None:
+        report[SIM_REPORT_REPLICATION_KEY] = replication
+
+    adds = list(proposal.applied_adds)
+    cuts = list(proposal.applied_cuts)
+    manifest = {
+        "added": adds,
+        "removed": cuts,
+        "rationale": (
+            f"bandit pull ({getattr(args, 'bandit_policy', 'ucb1')}): "
+            f"{'+' + adds[0] if adds else ''}"
+            f"{' / ' if adds and cuts else ''}"
+            f"{'-' + cuts[0] if cuts else ''}"
+            f" — accepted on a '{verdict}' A/B verdict over "
+            f"{getattr(ab, 'games', 0)} pod games"
+            + ("; confirmed by a second independent A/B"
+               if replication is not None and replication.get("confirmed")
+               else "")
+        ),
+        "source": "bandit-pull",
+        # Same refusal buckets the auto-curate manifest carries, so a
+        # reader can tell "the pull proposed nothing" from "the guards
+        # refused what it proposed" on either writer's rows.
+        "dropped_for_bracket": list(proposal.dropped_for_bracket),
+        "dropped_for_protection": list(proposal.dropped_for_protection),
+        "dropped_for_politics": list(proposal.dropped_for_politics),
+        "dropped_for_color_identity": list(proposal.dropped_for_color_identity),
+        "dropped_for_balance": list(proposal.dropped_for_balance),
+        "dropped_unmatched_cut": list(proposal.dropped_unmatched_cut),
+        "dropped_duplicate_add": list(proposal.dropped_duplicate_add),
+        "dropped_commander_add": list(proposal.dropped_commander_add),
+        "padded_count": proposal.padded_count,
+        "padded_breakdown": dict(proposal.padded_breakdown),
+        "requested_adds": list(proposal.adds),
+        "requested_cuts": list(proposal.cuts),
+        "src_deck": base.name,
+    }
+
+    it = Iteration(
+        deck_id=deck_id,
+        deck_name=candidate.stem,
+        bracket=args.bracket,
+        parent_id=parent_id,
+        audit_version="bandit-pull",
+        audit_manifest=manifest,
+        sim_report=report,
+        verdict=verdict,
+        verdict_notes=(
+            f"bandit pull: A/B sim old won {getattr(ab, 'wins_a', None)}, "
+            f"new won {getattr(ab, 'wins_b', None)} over "
+            f"{getattr(ab, 'games', 0)} games "
+            f"(margin={args.sim_margin})"
+            + ("; replication_confirmed"
+               if replication is not None and replication.get("confirmed")
+               else "")
+        ),
+        win_rate_old=sim_fields.get("win_rate_old"),
+        win_rate_new=sim_fields.get("win_rate_new"),
+        margin=sim_fields.get("margin"),
+        deck_snapshot=candidate.read_text(encoding="utf-8"),
+    )
+    iteration_id = record_iteration(it, db_path=db_path)
+    state["last_iteration_id"] = iteration_id
+    # Also kept as a list so the run summary / JSON can hand the operator
+    # the row ids. A revert path nobody can find is not a revert path.
+    state.setdefault("logged_iteration_ids", []).append(iteration_id)
+    return iteration_id
+
+
 def _make_swap_evaluator(state: dict, args):
     """Build the real per-arm evaluator: apply one swap to the current
     best deck, A/B-sim it, and return a ``bandit.PullOutcome`` whose
@@ -706,14 +930,30 @@ def _make_swap_evaluator(state: dict, args):
     sim_margin`` with the default margin of 1 accepted any 23-22
     coin-flip split).
 
-    ``state`` is a mutable ``{"deck": Path}`` the closure advances.
-    Never raises — but failures are NOT rewards: apply errors, missing
-    fillers, incomplete sims, and zero-decisive runs return
-    ``PullOutcome.skip(reason)`` (logged to stderr), which
+    ``state`` is a mutable ``{"deck": Path}`` the closure advances (it
+    also carries ``"last_iteration_id"`` once a pull has been logged —
+    see below). Never raises — but failures are NOT rewards: apply
+    errors, missing fillers, incomplete sims, and zero-decisive runs
+    return ``PullOutcome.skip(reason)`` (logged to stderr), which
     ``run_bandit`` records via the skip API without touching the arm's
     pull count or mean. The old behavior mapped every failure to a 0.0
     reward, entering crashed sims into the bandit's statistics as
     measured ties.
+
+    Skip reasons produced here are the vocabulary
+    ``bandit.SKIP_REASON_CLASSES`` classifies (2026-08-20, R2-D6). Only
+    ``swap_dropped_by_legality`` is STRUCTURAL and retires the arm; the
+    rest (``apply_failed``, ``fillers_unavailable``, ``sim_*``,
+    ``zero_decisive_games``) are TRANSIENT and leave the arm in play.
+    Adding a NEW skip reason here means adding it to that table — an
+    unclassified reason warns loudly and defaults to transient.
+
+    Knowledge log (2026-08-20, decision R2-D1): an ACCEPTED pull writes
+    one knowledge_log row via ``_log_bandit_pull`` — manifest, deck
+    snapshot, sim report, verdict, parent chain — because an accepted
+    pull permanently advances the deck on disk and used to do so with no
+    record at all. Non-advancing pulls write nothing; the boundary and
+    its cost are argued in ``_log_bandit_pull``'s docstring.
 
     Replication (2026-08-17): OFF by default on this path (see
     ``resolve_replicate_default``) but honored when the operator asks for
@@ -721,11 +961,26 @@ def _make_swap_evaluator(state: dict, args):
     confirming A/B of the same base-vs-candidate pairing and the base
     advances only if that run is ``kept`` too; a disagreeing run leaves
     ``accepted=False`` and reports the SECOND run's verdict, so the arm's
-    outcome reflects the non-advance. The pull's REWARD stays run 1's
-    measurement: one pull is one budget unit, and folding a second sim
-    into the mean would silently double-weight exactly the arms that
-    reached the gate. The confirm run is a bare sim (``_run_confirm_sim``)
-    and can never recurse into another pull.
+    outcome reflects the non-advance. The confirm run is a bare sim
+    (``_run_confirm_sim``) and can never recurse into another pull.
+
+    The pull's REWARD stays run 1's measurement on BOTH branches: one
+    pull is one budget unit, and folding a second sim into the mean
+    would silently double-weight exactly the arms that reached the gate.
+    Reviewed and RE-CONFIRMED 2026-08-20 as decision R2-D4 (recorded in
+    the ANALYSIS repo: mtga-advisor's
+    ``docs/ollama-analysis/DECISIONS_FOR_REVIEW.md`` — not this repo's
+    docs/) against the
+    counter-argument that this preserves the winner's curse rather than
+    correcting it — run 1 triggered the gate by being extreme, so run 2
+    is the unbiased draw and discarding it keeps the arm mean inflated.
+    That reading is accepted as a real asymmetry and is documented
+    rather than fixed: the owner's budget-unit rationale stands, the
+    path is non-default (``--replicate`` is OFF for ``--strategy
+    bandit``), and the confirming run is preserved as DATA under
+    ``sim_report[SIM_REPORT_REPLICATION_KEY]`` on the logged row, so a
+    later re-analysis can pool both runs even though the live arm mean
+    does not.
     """
     from .proposer import Proposal, apply_proposal_to_deck
     from .forge_runner import run_ab_simulation
@@ -789,17 +1044,28 @@ def _make_swap_evaluator(state: dict, args):
         # verdict path uses (--sim-margin stays a pre-filter inside it).
         verdict = _verdict_from_ab(ab, margin=args.sim_margin)
         accepted = verdict == "kept"
+        # Structured record of the confirming run, for the logged row's
+        # sim_report. None when no confirm was attempted (replication off
+        # or the pull wasn't 'kept') -- distinct from "attempted and
+        # failed", which is ``{"ran": False, ...}``.
+        replication: Optional[dict] = None
         if accepted and bool(getattr(args, "replicate", False)):
             confirm_ab, _f, err = _run_confirm_sim(base, candidate, args)
+            # 'inconclusive' when the confirm couldn't RUN, matching
+            # _default_replicate_fn (R2-D3, 2026-08-20): run 1 completed,
+            # so 'pending' ("the sim didn't complete") would misdescribe
+            # the pull. Either way it isn't 'kept', so the base stays put.
             confirm_verdict = (
                 _verdict_from_ab(confirm_ab, margin=args.sim_margin)
-                if confirm_ab is not None else "pending"
+                if confirm_ab is not None else "inconclusive"
             )
             if confirm_verdict != "kept":
                 # Non-advance, recorded as such: the arm keeps run 1's
                 # reward (a real measurement) but reports the second
                 # run's verdict, so nothing downstream reads this pull
-                # as an adopted swap.
+                # as an adopted swap. NOT logged to knowledge_log -- the
+                # deck did not change, so there is no new iteration
+                # (R2-D1 boundary, argued in _log_bandit_pull).
                 print(f"[bandit] replication failed on {arm.key}: run 1 "
                       f"kept, run 2 {confirm_verdict}"
                       + (f" ({err})" if err else "")
@@ -807,17 +1073,39 @@ def _make_swap_evaluator(state: dict, args):
                       file=sys.stderr, flush=True)
                 return PullOutcome(reward=reward, accepted=False,
                                    verdict=confirm_verdict)
+            replication = {
+                "ran": confirm_ab is not None,
+                "verdict": confirm_verdict,
+                "confirmed": True,
+                "wins_old": getattr(confirm_ab, "wins_a", None),
+                "wins_new": getattr(confirm_ab, "wins_b", None),
+                "games": getattr(confirm_ab, "games", None),
+                "status": getattr(confirm_ab, "status", None),
+            }
             print(f"[bandit] replication confirmed on {arm.key}: two "
                   f"independent A/Bs both 'kept'; base advanced.",
                   file=sys.stderr, flush=True)
         if accepted:
             state["deck"] = candidate  # advance the base deck
+            # R2-D1: the deck just moved on disk, so this pull IS an
+            # iteration -- record it. Non-fatal: a knowledge_log failure
+            # must not sink a multi-hour run whose .dck is already
+            # written and whose decision is already made.
+            try:
+                _log_bandit_pull(state, base, candidate, proposal, ab,
+                                 verdict, args, replication)
+            except Exception as exc:  # noqa: BLE001 — history loss, not a crash
+                print(f"[bandit] WARN: could not log the accepted pull on "
+                      f"{arm.key} to the knowledge log: "
+                      f"{type(exc).__name__}: {exc}",
+                      file=sys.stderr, flush=True)
         return PullOutcome(reward=reward, accepted=accepted, verdict=verdict)
 
     return evaluate
 
 
-def _print_bandit_summary(deck_id: str, result, final_deck: Path) -> None:
+def _print_bandit_summary(deck_id: str, result, final_deck: Path,
+                          logged_ids: Optional[list] = None) -> None:
     # _safe_print throughout: arm keys embed card names, which can carry
     # characters a cp1252/cp437 console can't encode (same failure mode
     # as the Δ in _print_summary).
@@ -829,14 +1117,35 @@ def _print_bandit_summary(deck_id: str, result, final_deck: Path) -> None:
     _safe_print(f"  best swap:  {result.best_arm_key} (mean reward "
                 f"{result.best_arm_mean:+.2f})")
     _safe_print(f"  final deck: {final_deck.name}")
+    # R2-D1: accepted pulls advance the deck on disk, so each one is now
+    # a knowledge_log row. Print the ids -- a revert path the operator
+    # can't find is not a revert path.
+    if logged_ids:
+        _safe_print(f"  logged:     iteration rows "
+                    f"{', '.join('#' + str(i) for i in logged_ids)} "
+                    f"(commander-history / commander-revert)")
+    elif result.accepted:
+        _safe_print("  logged:     none -- the accepted pull(s) could not "
+                    "be written to the knowledge log (see the warnings "
+                    "above)")
     _safe_print()
     _safe_print("  Arm stats (by mean reward; normalized margin in [-1, 1]):")
     for a in result.arm_stats:
+        # R2-D6: "retired" and "skipped" are different facts now. An arm
+        # can carry skips and still be live (transient failures only), so
+        # printing every skipped arm as dead would misreport the run.
+        note = ""
+        if a.get("skips"):
+            note = (f"  [{a['skips']} skip(s): "
+                    f"{a.get('skip_reason') or 'no signal'}"
+                    + ("; RETIRED (structural)" if a.get("retired")
+                       else "; still live (transient)")
+                    + "]")
         if a["pulls"]:
-            _safe_print(f"    {a['mean']:+.2f}  ({a['pulls']}x)  {a['key']}")
-        elif a.get("skips"):
-            _safe_print(f"    skipped ({a['skips']}x: "
-                        f"{a.get('skip_reason') or 'no signal'})  {a['key']}")
+            _safe_print(f"    {a['mean']:+.2f}  ({a['pulls']}x)  "
+                        f"{a['key']}{note}")
+        elif note:
+            _safe_print(f"    no measurement  {a['key']}{note}")
 
 
 def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
@@ -875,13 +1184,18 @@ def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
         arms, args.rounds, evaluate, policy, rng=random.Random(),
     )
 
+    logged_ids = state.get("logged_iteration_ids") or []
     if args.json:
         out = result.to_dict()
         out["deck_id"] = deck_id
         out["final_deck"] = str(state["deck"])
+        # R2-D1: the knowledge_log rows this run created, in pull order.
+        # Empty when no pull advanced the deck -- which is the common
+        # outcome and NOT an error (see _log_bandit_pull's boundary).
+        out["iteration_ids"] = logged_ids
         print(json.dumps(out, indent=2))
     else:
-        _print_bandit_summary(deck_id, result, state["deck"])
+        _print_bandit_summary(deck_id, result, state["deck"], logged_ids)
     return 0
 
 
@@ -1024,8 +1338,14 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                         "--strategy bandit. COST: a confirmed swap runs two "
                         "sims, i.e. ~2x the Forge time of an advancing "
                         "round. Buys a ~40x lower per-advance "
-                        "false-positive rate on a loop that compounds its "
-                        "own mistakes.")
+                        "false-positive rate (~1 in 1,600) on a loop that "
+                        "compounds its own mistakes. THE OTHER HALF OF THE "
+                        "TRADE: it is a screen, not an improver. A "
+                        "genuinely good +5pp swap advances with p=0.13%% "
+                        "per round, ~1.3%% over a 10-round run, so "
+                        "'nothing advanced' is the EXPECTED overnight "
+                        "outcome; an advance is a rare lead worth reading, "
+                        "not a progress bar.")
     p.add_argument("--no-replicate", dest="replicate", action="store_false",
                    help="Single-shot: one significance-passing 'kept' "
                         "advances the base, no confirming run (the "
@@ -1044,7 +1364,13 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     # candidate swaps as arms and learns which ones move the win rate.
     p.add_argument("--strategy", choices=["greedy", "bandit"], default="greedy",
                    help="Search strategy (default greedy). 'bandit' selects "
-                        "individual swaps via a multi-armed-bandit policy.")
+                        "individual swaps via a multi-armed-bandit policy. "
+                        "KNOWLEDGE LOG: greedy writes one row per round "
+                        "(via the auto-curate subprocess) whatever the "
+                        "verdict; bandit writes one row per ACCEPTED pull "
+                        "only -- a pull that does not advance the deck is "
+                        "not an iteration and is left in the run's "
+                        "CLI/JSON output, not the log.")
     p.add_argument("--bandit-policy", choices=["epsilon_greedy", "ucb1", "thompson"],
                    default="ucb1",
                    help="Bandit arm-selection policy (default ucb1). Only "
@@ -1119,8 +1445,25 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     args = p.parse_args(argv)
 
     # --health short-circuits: report the FP-013 gate counter and exit.
-    # Every improve run grows this number, so surfacing it here keeps the
-    # gate visible exactly where the data gets generated.
+    # Surfaced here because this is where the qualifying data gets
+    # generated. What actually grows the number (corrected 2026-08-20,
+    # R2-P02 / decision R2-D1 -- this comment used to claim "every
+    # improve run grows this number", which was flatly false for
+    # --strategy bandit, then writing zero rows at all):
+    #
+    #   --strategy greedy   one row per round, written by the auto-curate
+    #                       subprocess. It counts toward the gate once it
+    #                       has a decided verdict, a manifest and a
+    #                       >= FP013_MIN_GAMES sim report.
+    #   --strategy bandit   one row per ACCEPTED pull (_log_bandit_pull).
+    #                       Pulls that don't advance the deck write
+    #                       nothing, so a run that accepts nothing --
+    #                       the common outcome -- grows this by zero.
+    #
+    # So: runs that CHANGE a deck grow this number. Runs that conclude
+    # "no change was justified" mostly don't, and that is the honest
+    # reading of both the gate and the loop (see R2-D2 in the module
+    # docstring).
     if args.health:
         from .knowledge_log import (
             DEFAULT_DB_PATH,
@@ -1315,6 +1658,24 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
                   f"so a CONFIRMED swap costs 2x sim time "
                   f"(~2 x {args.sim_games} pod games for that round). Pass "
                   f"--no-replicate for single-shot advancing.", flush=True)
+            # BOTH numbers, up front (2026-08-20, decision R2-D2). The
+            # 1-in-1,600 false-advance rate was the only figure this
+            # banner used to state, which sells the gate as an improver.
+            # It is a false-positive-proof SCREEN: at the shipped power
+            # the true-positive throughput is the other half of the same
+            # trade and the operator is entitled to see it before
+            # committing a night of Forge time.
+            print(
+                "[improve] what that buys, both directions: a truly "
+                "neutral swap advances ~1 in 1,600 times (the "
+                "false-positive floor), and a GENUINELY good +5pp swap "
+                "advances with p=0.13% per round -- about 1.3% over a "
+                "10-round run. 'Nothing advanced' is the EXPECTED "
+                "outcome of an overnight run; an advance is a rare lead "
+                "worth investigating (likelihood ratio ~9.2), not proof "
+                "and not a progress bar.",
+                flush=True,
+            )
         else:
             print("[improve] replication: OFF -- a single 'kept' advances "
                   "the base (single-shot). Pass --replicate to require a "

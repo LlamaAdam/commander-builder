@@ -867,6 +867,56 @@ def test_measurement_era_for_boundaries(created_at, row_id, expected):
     assert measurement_era_for(created_at, row_id) == expected
 
 
+# --- R2-D5: the era-3/4 boundary is inspectable without being moved ------
+#
+# The 2026-08-14 significance change was a COMMIT, not a midnight
+# cutover, so rows written that morning are stamped era 4 on a bare date
+# rule. The override below exists ONLY so the backfill script's
+# report-only mode can show the owner what a shifted boundary would
+# reclassify, using this one function rather than a second copy of its
+# rules.
+
+def test_significance_start_override_reclassifies_only_the_boundary_day():
+    from commander_builder.knowledge_log import measurement_era_for
+    shifted = "2026-08-15"
+    # The ambiguous day drops back to era 3 under the shifted boundary...
+    assert measurement_era_for("2026-08-14T08:15:00+00:00", 900) == 4
+    assert measurement_era_for("2026-08-14T08:15:00+00:00", 900,
+                               significance_start=shifted) == 3
+    # ...the day AFTER is era 4 either way...
+    assert measurement_era_for("2026-08-15T09:00:00+00:00", 901,
+                               significance_start=shifted) == 4
+    # ...and the earlier boundaries are untouched by the override.
+    assert measurement_era_for("2026-07-19T12:00:00+00:00", 450,
+                               significance_start=shifted) is None
+    assert measurement_era_for("2026-06-01T00:00:00+00:00", 400,
+                               significance_start=shifted) == 2
+
+
+def test_significance_start_defaults_to_the_shipped_constant():
+    """The override is opt-in per call: nothing that WRITES a row may
+    reach it, so a stored stamp can never come from a report."""
+    from commander_builder.knowledge_log import (
+        _SIGNIFICANCE_START, measurement_era_for,
+    )
+    assert _SIGNIFICANCE_START == "2026-08-14"
+    assert measurement_era_for("2026-08-14T00:00:01+00:00", 900) == 4
+    assert measurement_era_for(
+        "2026-08-14T00:00:01+00:00", 900,
+        significance_start=_SIGNIFICANCE_START) == 4
+
+
+def test_recording_a_boundary_day_row_uses_the_shipped_boundary(db):
+    """A live write stamps through the module constant, not an override."""
+    from commander_builder.knowledge_log import (
+        Iteration, get_iteration, record_iteration,
+    )
+    iid = record_iteration(Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        created_at="2026-08-14T08:15:00+00:00"), db_path=db)
+    assert get_iteration(iid, db_path=db).measurement_era == 4
+
+
 def test_measurement_eras_mapping_documents_every_stamped_value():
     from commander_builder.knowledge_log import (
         CURRENT_MEASUREMENT_ERA,

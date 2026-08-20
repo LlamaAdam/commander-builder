@@ -407,9 +407,22 @@ class _AB:
         self.error = error
         self.games = games if games is not None else (wins_a + wins_b) * 2
 
+    def to_dict(self) -> dict:
+        # The real ABResult is a dataclass with to_dict(); the accepted-
+        # pull knowledge_log writer (R2-D1) persists its output as the
+        # row's sim_report, so the stand-in has to carry it too.
+        return {"wins_a": self.wins_a, "wins_b": self.wins_b,
+                "games": self.games, "status": self.status,
+                "error": self.error}
+
 
 def _eval_args(**over):
     import argparse
+    # db_path stays absent by default so the R2-D1 pull writer resolves
+    # db_path=None, which knowledge_log looks up against the module
+    # attribute at call time — the conftest autouse fixture points that
+    # at a per-test temp file. Tests that want to READ the row back pass
+    # db_path=str(tmp) explicitly.
     base = dict(sim_fillers=None, bracket=4, sim_games=90, sim_margin=1)
     base.update(over)
     return argparse.Namespace(**base)
@@ -554,7 +567,13 @@ def test_failed_pull_leaves_arm_statistics_untouched(monkeypatch, tmp_path):
     """(c) End-to-end through ``run_bandit``: a crashed pull must leave
     the arm's pull count and reward statistics unchanged and be logged
     as skipped. Previously it landed as a 0.0-reward pull, so a broken
-    swap looked exactly like a perfectly neutral one."""
+    swap looked exactly like a perfectly neutral one.
+
+    R2-D6: ``apply_failed`` is a TRANSIENT skip (apply INFRASTRUCTURE,
+    not swap legality -- the legality answer comes back as a normal
+    return, not an exception), so the arm is not retired and every round
+    in the budget re-attempts it. All three attempts still enter zero
+    statistics."""
     import random
     from commander_builder.bandit import run_bandit, make_policy
 
@@ -566,12 +585,47 @@ def test_failed_pull_leaves_arm_statistics_untouched(monkeypatch, tmp_path):
     assert arms[0].pulls == 0
     assert arms[0].total_reward == 0.0
     assert arms[0].mean == 0.0
-    assert arms[0].skips == 1
+    assert arms[0].skips == 3
+    assert arms[0].retired is False
     assert "illegal cut" in arms[0].skip_reason
-    assert res.skipped == 1
+    assert res.skipped == 3
     assert res.accepted == 0
     assert res.total_reward == 0.0
     assert res.best_arm_key is None  # nothing was ever measured
+
+
+def test_dropped_swap_retires_the_arm_but_a_crashed_sim_does_not(
+    monkeypatch, tmp_path,
+):
+    """R2-D6 end-to-end through the REAL evaluator: the two skip classes
+    this path actually produces get opposite retirement treatment.
+
+    A swap the applier dropped can never apply to this deck, so one
+    occurrence retires the arm and the run stops early. A crashed JVM
+    says nothing about the swap, so the arm stays in the pool and the
+    run spends its whole budget re-measuring."""
+    import random
+    from commander_builder.bandit import run_bandit, make_policy
+
+    _s, _b, _c, structural = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45),
+        apply_drops_all=True)
+    arms = [_arm("+Good / -Bad")]
+    res = run_bandit(arms, 4, structural, make_policy("ucb1"),
+                     rng=random.Random(0))
+    assert arms[0].skip_reason == "swap_dropped_by_legality"
+    assert arms[0].retired is True
+    assert arms[0].retire_reason == "swap_dropped_by_legality"
+    assert res.rounds_run == 1          # every arm retired -> early stop
+
+    _s2, _b2, _c2, transient = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(0, 0, status="failed", error="jvm died"))
+    arms2 = [_arm("+Good / -Bad")]
+    res2 = run_bandit(arms2, 4, transient, make_policy("ucb1"),
+                      rng=random.Random(0))
+    assert arms2[0].skip_reason.startswith("sim_failed")
+    assert arms2[0].retired is False
+    assert res2.rounds_run == 4         # still measurable -> full budget
 
 
 # --- R2-P01: the no-op guard the bandit evaluator was missing --------------
@@ -1062,8 +1116,75 @@ def test_default_replicate_fn_unrunnable_gate_stays_shut(tmp_path,
     rep = improve._default_replicate_fn(
         tmp_path / "base.dck", tmp_path / "cand.dck", args, None)
     assert rep.confirmed is False
-    assert rep.verdict == "pending"
+    assert rep.verdict == "inconclusive"
     assert "replication_failed" in rep.notes
+
+
+def test_unrunnable_confirmation_labels_the_row_inconclusive(
+    tmp_path, monkeypatch,
+):
+    """R2-D3: a confirming A/B that could not RUN must not stamp
+    'pending' over a COMPLETED run 1.
+
+    'pending' is defined as "the sim didn't complete" -- and this row's
+    own sim_report says 'done', with win rates. Writing it produced a row
+    that contradicted its own evidence, which any consumer re-deriving
+    state from the verdict alone reads as unmeasured. 'inconclusive'
+    already means "measured, not decided", which is exactly what
+    happened."""
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY, get_iteration,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    _patch_confirm_sim(monkeypatch, _RepAB(0, 0, status="skipped"),
+                       fillers=("only-one.dck",))
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    rep = improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+    assert rep.verdict == "inconclusive"
+
+    row = get_iteration(iid, db_path=db)
+    assert row.verdict == "inconclusive"
+    assert row.verdict != "pending"
+    # The row is now self-consistent: a completed sim_report beside a
+    # verdict that does not claim the sim never ran.
+    assert row.sim_report["status"] == "done"
+    assert row.sim_report[SIM_REPORT_REPLICATION_KEY]["ran"] is False
+    # ...and the existing replication_failed note machinery carries why.
+    assert "replication_failed" in row.verdict_notes
+    assert _RUN1_NOTE in row.verdict_notes
+
+
+def test_bandit_unrunnable_confirmation_is_also_inconclusive(
+    monkeypatch, tmp_path, capsys,
+):
+    """R2-D3 on the bandit path: same label, same reason. Run 1
+    completed; only the confirm could not run."""
+    args = _eval_args(replicate=True)
+    state, base, _cand, _ = _make_eval(
+        monkeypatch, tmp_path, ab=None, args=args)
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: _AB(15, 30, games=45),
+    )
+    # Run 1's pod fills fine; the CONFIRM run's filler pick comes up
+    # short, so the confirming A/B never runs at all.
+    picks = iter([["f1.dck", "f2.dck"], ["only-one.dck"]])
+    monkeypatch.setattr(
+        "commander_builder._proposer_sim._pick_filler_decks",
+        lambda deck_dir, exclude_paths, count, target_bracket: next(picks),
+    )
+    evaluate = improve._make_swap_evaluator(state, args)
+
+    out = evaluate(_arm())
+    assert out.accepted is False
+    assert out.verdict == "inconclusive"
+    assert state["deck"] == base     # the gate stayed shut
+    assert "replication failed" in capsys.readouterr().err
 
 
 # --- R2-P04 / R2-P06: the replicate writer is a SECOND writer --------------
@@ -1247,7 +1368,13 @@ def test_bandit_evaluator_replication_blocks_an_unconfirmed_advance(
 
 
 def test_bandit_evaluator_replication_confirms(monkeypatch, tmp_path):
-    """Two independent 'kept' runs on the same pull advance the base."""
+    """Two independent 'kept' runs on the same pull advance the base.
+
+    R2-D4 (re-confirmed 2026-08-20, no code change): the arm's reward is
+    run 1's measurement on the CONFIRMING branch too, not run 2's and not
+    a pooled estimate. One pull is one budget unit; folding the confirm
+    sim in would double-weight exactly the arms that reached the gate.
+    Run 2 is preserved as data on the logged row instead."""
     args = _eval_args(replicate=True)
     sims = [_AB(15, 30, games=45), _AB(14, 31, games=45)]
 
@@ -1261,6 +1388,9 @@ def test_bandit_evaluator_replication_confirms(monkeypatch, tmp_path):
     out = evaluate(_arm())
     assert out.accepted is True and out.verdict == "kept"
     assert state["deck"] == candidate
+    # Run 1's normalized margin (30-15)/45, NOT run 2's (31-14)/45 and
+    # not the pooled (61-29)/90.
+    assert out.reward == pytest.approx(15 / 45)
 
 
 def test_bandit_evaluator_is_single_shot_by_default(monkeypatch, tmp_path):
@@ -1271,6 +1401,362 @@ def test_bandit_evaluator_is_single_shot_by_default(monkeypatch, tmp_path):
     out = evaluate(_arm())
     assert out.accepted is True
     assert state["deck"] == candidate
+
+
+# --- R2-D1: bandit pulls are knowledge-logged ------------------------------
+#
+# ``--strategy bandit`` used to write ZERO knowledge_log rows while
+# running full A/B sims and permanently advancing the deck on disk: no
+# lineage, no snapshot, no revert path, invisible to the FP-013 gate --
+# and the CLI told the operator "every improve run grows this number".
+# Decision R2-D1 (2026-08-20): one row per ACCEPTED pull. A pull is an
+# "iteration" exactly when it CHANGES THE DECK, so non-advancing pulls
+# stay off the log; that boundary is pinned below too.
+
+
+def _pull_args(db, **over):
+    """Evaluator args wired to a real (temp) knowledge log."""
+    base = dict(db_path=str(db), bandit_policy="ucb1")
+    base.update(over)
+    return _eval_args(**base)
+
+
+def _accept_one_pull(monkeypatch, tmp_path, db, *, ab=None, **over):
+    """Run one ACCEPTING pull through the real evaluator + real writer."""
+    args = _pull_args(db, **over)
+    state, base, candidate, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=ab or _AB(15, 30, games=45), args=args)
+    out = evaluate(_arm())
+    return state, base, candidate, out
+
+
+def test_accepted_pull_writes_a_knowledge_log_row(monkeypatch, tmp_path):
+    """The core of R2-D1: the deck moved on disk, so a row exists."""
+    from commander_builder.knowledge_log import all_iterations
+
+    db = tmp_path / "kl.sqlite"
+    _state, _base, candidate, out = _accept_one_pull(
+        monkeypatch, tmp_path, db)
+
+    assert out.accepted is True
+    rows = all_iterations(db_path=db)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.verdict == "kept"              # the pull's own verdict
+    assert row.audit_version == "bandit-pull"
+    assert row.bracket == 4
+    # The manifest is the SINGLE swap, in the standard manifest shape.
+    assert row.audit_manifest["added"] == ["Good"]
+    assert row.audit_manifest["removed"] == ["Bad"]
+    assert row.audit_manifest["source"] == "bandit-pull"
+    assert "rationale" in row.audit_manifest
+    # ...with the same refusal buckets the auto-curate writer carries,
+    # so a reader can't tell the two writers' rows apart by shape.
+    for bucket in ("dropped_for_bracket", "dropped_for_protection",
+                   "dropped_for_politics", "dropped_for_color_identity",
+                   "dropped_unmatched_cut", "requested_adds",
+                   "requested_cuts", "src_deck"):
+        assert bucket in row.audit_manifest
+    # The snapshot is the CANDIDATE deck text — what a revert restores.
+    assert row.deck_snapshot == candidate.read_text(encoding="utf-8")
+    # The sim report is the pull's own A/B report.
+    assert row.sim_report["wins_a"] == 15 and row.sim_report["wins_b"] == 30
+    assert row.sim_report["games"] == 45
+
+
+def test_accepted_pull_row_carries_the_verdict_provenance_stamp(
+    monkeypatch, tmp_path,
+):
+    """The stamp the other writers now carry: margin / alpha / decisive
+    floor, so the row says what bar its verdict cleared."""
+    from commander_builder._proposer_sim import (
+        MIN_DECISIVE_GAMES_FOR_VERDICT, VERDICT_ALPHA,
+    )
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_VERDICT_PARAMS_KEY, all_iterations,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    _accept_one_pull(monkeypatch, tmp_path, db, sim_margin=3)
+
+    params = all_iterations(db_path=db)[0].sim_report[
+        SIM_REPORT_VERDICT_PARAMS_KEY]
+    assert params["margin"] == 3          # the flag actually used
+    assert params["alpha"] == VERDICT_ALPHA
+    assert params["min_decisive"] == MIN_DECISIVE_GAMES_FOR_VERDICT
+
+
+def test_accepted_pull_row_is_measurement_era_stamped(monkeypatch, tmp_path):
+    """record_iteration stamps the era from the row's own created_at —
+    this writer must not have to know eras exist, and must not skip one."""
+    from commander_builder.knowledge_log import (
+        CURRENT_MEASUREMENT_ERA, all_iterations,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    _accept_one_pull(monkeypatch, tmp_path, db)
+    assert all_iterations(db_path=db)[0].measurement_era == \
+        CURRENT_MEASUREMENT_ERA
+
+
+def test_successive_accepted_pulls_chain_parent_id(monkeypatch, tmp_path):
+    """Lineage: pull 2's row descends from pull 1's, so the iteration
+    graph threads the run instead of producing orphan rows."""
+    from commander_builder.knowledge_log import all_iterations
+
+    db = tmp_path / "kl.sqlite"
+    args = _pull_args(db)
+    state, _base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45), args=args)
+
+    assert evaluate(_arm("+A / -B")).accepted is True
+    assert evaluate(_arm("+C / -D")).accepted is True
+
+    rows = all_iterations(db_path=db)
+    assert len(rows) == 2
+    assert rows[0].parent_id is None          # first pull starts the chain
+    assert rows[1].parent_id == rows[0].id    # second descends from it
+    assert state["last_iteration_id"] == rows[1].id
+
+
+def test_a_pull_chains_onto_the_decks_existing_history(monkeypatch, tmp_path):
+    """A bandit run on a deck that already has iterations continues that
+    deck's chain rather than starting a second root."""
+    from commander_builder.knowledge_log import (
+        Iteration, all_iterations, init_db, record_iteration,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    init_db(db)
+    prior = record_iteration(Iteration(
+        deck_id="candidate", deck_name="candidate", bracket=4,
+        verdict="kept"), db_path=db)
+
+    _accept_one_pull(monkeypatch, tmp_path, db)
+
+    rows = all_iterations(db_path=db)
+    assert len(rows) == 2
+    assert rows[1].parent_id == prior
+
+
+@pytest.mark.parametrize("ab,why", [
+    (_AB(22, 23, games=45), "neutral — a 23-22 coin flip"),
+    (_AB(30, 15, games=45), "reverted — significant the wrong way"),
+    (_AB(3, 12, games=30), "inconclusive — under the decisive gate"),
+])
+def test_non_advancing_pulls_write_nothing(monkeypatch, tmp_path, ab, why):
+    """The R2-D1 boundary: a pull is an "iteration" only when it CHANGES
+    THE DECK. A measured-but-rejected swap leaves the deck untouched, so
+    it produces no row — rows in the chain that nothing descends from
+    would break lineage and flood FP-013 with rejected single swaps."""
+    from commander_builder.knowledge_log import all_iterations
+
+    db = tmp_path / "kl.sqlite"
+    args = _pull_args(db)
+    state, base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=ab, args=args)
+
+    out = evaluate(_arm())
+    assert out.accepted is False, why
+    assert state["deck"] == base
+    assert all_iterations(db_path=db) == []
+
+
+def test_a_skipped_pull_writes_nothing(monkeypatch, tmp_path):
+    """A pull that never produced a measurement obviously has no row."""
+    from commander_builder.knowledge_log import all_iterations
+
+    db = tmp_path / "kl.sqlite"
+    args = _pull_args(db)
+    _state, _base, _cand, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45), args=args,
+        apply_drops_all=True)
+    assert evaluate(_arm()).skipped is True
+    assert all_iterations(db_path=db) == []
+
+
+def test_a_refused_replication_writes_nothing(monkeypatch, tmp_path):
+    """The gate's whole point is that the deck did NOT advance, so the
+    unconfirmed 'kept' must not appear in the log as an adopted swap."""
+    from commander_builder.knowledge_log import all_iterations
+
+    db = tmp_path / "kl.sqlite"
+    args = _pull_args(db, replicate=True)
+    sims = [_AB(15, 30, games=45), _AB(23, 22, games=45)]
+    state, base, _cand, _ = _make_eval(
+        monkeypatch, tmp_path, ab=None, args=args)
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: sims.pop(0),
+    )
+    evaluate = improve._make_swap_evaluator(state, args)
+
+    out = evaluate(_arm())
+    assert out.accepted is False
+    assert state["deck"] == base
+    assert all_iterations(db_path=db) == []
+
+
+def test_a_confirmed_replication_logs_run_2_structurally(monkeypatch,
+                                                         tmp_path):
+    """When --replicate is on and the confirm agrees, the pull advances
+    AND the row carries the second run as data — so a later analysis can
+    pool both runs even though the live arm mean keeps only run 1
+    (R2-D4, deliberately unchanged)."""
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY, all_iterations,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    args = _pull_args(db, replicate=True)
+    sims = [_AB(15, 30, games=45), _AB(14, 31, games=45)]
+    state, _base, candidate, _ = _make_eval(
+        monkeypatch, tmp_path, ab=None, args=args)
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: sims.pop(0),
+    )
+    evaluate = improve._make_swap_evaluator(state, args)
+
+    assert evaluate(_arm()).accepted is True
+    assert state["deck"] == candidate
+
+    row = all_iterations(db_path=db)[0]
+    # Run 1 stays the row's measured record...
+    assert row.sim_report["wins_a"] == 15 and row.sim_report["wins_b"] == 30
+    # ...and run 2 is beside it, as data.
+    run2 = row.sim_report[SIM_REPORT_REPLICATION_KEY]
+    assert run2["confirmed"] is True and run2["ran"] is True
+    assert run2["wins_old"] == 14 and run2["wins_new"] == 31
+
+
+def test_an_accepted_pull_row_counts_toward_the_fp013_gate(monkeypatch,
+                                                           tmp_path):
+    """The point of logging at all: bandit pulls stop being invisible to
+    the gate they were spending Forge games to feed. The row has to carry
+    the full triple (manifest + decided verdict + >= FP013_MIN_GAMES sim
+    report) at era >= FP013_MIN_TRAINING_ERA."""
+    from commander_builder.knowledge_log import (
+        FP013_MIN_GAMES, fp013_gate_progress,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    assert fp013_gate_progress(db_path=db)["count"] == 0
+
+    _accept_one_pull(monkeypatch, tmp_path, db,
+                     ab=_AB(15, 30, games=FP013_MIN_GAMES + 5))
+
+    progress = fp013_gate_progress(db_path=db)
+    assert progress["count"] == 1
+    assert progress["excluded_by_era"] == 0
+    assert progress["relabelable"] == 0
+
+
+def test_a_short_pull_does_not_inflate_the_fp013_gate(monkeypatch, tmp_path):
+    """...and the gate's own game-count floor still applies to these
+    rows. Logging the pull must not smuggle an under-powered run past a
+    bar every other writer's rows have to clear."""
+    from commander_builder.knowledge_log import (
+        FP013_MIN_GAMES, fp013_gate_progress,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    _accept_one_pull(monkeypatch, tmp_path, db,
+                     ab=_AB(11, 21, games=FP013_MIN_GAMES - 8))
+    assert fp013_gate_progress(db_path=db)["count"] == 0
+
+
+def test_a_knowledge_log_failure_does_not_sink_the_pull(monkeypatch,
+                                                        tmp_path, capsys):
+    """History loss is not a crash: the .dck is already written and the
+    pull's decision already made, so a logging failure warns and the run
+    continues — matching every other knowledge_log writer here."""
+    args = _pull_args(tmp_path / "kl.sqlite")
+    state, _base, candidate, evaluate = _make_eval(
+        monkeypatch, tmp_path, ab=_AB(15, 30, games=45), args=args)
+
+    def boom(*a, **kw):
+        raise OSError("disk on fire")
+    monkeypatch.setattr(improve, "_log_bandit_pull", boom)
+
+    out = evaluate(_arm())
+    assert out.accepted is True              # the pull still stands
+    assert state["deck"] == candidate        # and the base still advanced
+    assert "could not log the accepted pull" in capsys.readouterr().err
+
+
+def test_bandit_summary_and_json_surface_the_logged_row_ids(monkeypatch,
+                                                            tmp_path, capsys):
+    """The row ids are the operator's handle for commander-history /
+    commander-revert. A revert path nobody can find is not a revert
+    path — and an empty list on a run that accepted nothing is the
+    expected outcome, not an error."""
+    import json as _json
+
+    accepted = improve._print_bandit_summary
+    from commander_builder.bandit import BanditResult
+
+    result = BanditResult(rounds_run=2, accepted=1, best_arm_key="+A / -B",
+                          best_arm_mean=0.3, total_reward=0.3)
+    accepted("deck", result, tmp_path / "v2.dck", [11, 12])
+    out = capsys.readouterr().out
+    assert "#11, #12" in out
+    assert "commander-revert" in out
+
+    # A run that logged nothing but accepted a pull says so rather than
+    # printing a silent blank.
+    accepted("deck", result, tmp_path / "v2.dck", [])
+    assert "could not be written to the knowledge log" in \
+        capsys.readouterr().out
+
+    # ...and the --json payload carries the same list, keyed so a script
+    # can pick the rows up without parsing the human summary.
+    from commander_builder.bandit import Arm
+
+    captured: dict = {}
+
+    def capture_state(state, args):
+        captured["state"] = state       # the dict _log_bandit_pull writes to
+        return lambda arm: None
+
+    def fake_run_bandit(arms, rounds, evaluate, policy, **kwargs):
+        # Stand in for the pulls: record what accepting pulls would have.
+        captured["state"]["logged_iteration_ids"] = [41, 42]
+        return result
+
+    monkeypatch.setattr(improve, "_make_swap_evaluator", capture_state)
+    monkeypatch.setattr("commander_builder.bandit.run_bandit", fake_run_bandit)
+    monkeypatch.setattr(
+        improve, "_build_arms_from_advice",
+        lambda deck_path, bracket, source: [Arm(key="+A / -B", add="A",
+                                               cut="B")],
+    )
+    deck = tmp_path / "[USER] Goblins [B4].dck"
+    deck.write_text("[metadata]\nName=Goblins\n", encoding="utf-8")
+
+    rc = improve_main([str(deck), "--rounds", "1", "--strategy", "bandit",
+                       "--json", "--db-path", str(tmp_path / "kl.sqlite")])
+    assert rc == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["iteration_ids"] == [41, 42]
+
+
+def test_strategy_help_states_the_logging_boundary(capsys):
+    """R2-P02: the CLI used to claim 'every improve run grows this
+    number' while bandit wrote nothing at all. The help now says which
+    pulls are logged."""
+    with pytest.raises(SystemExit):
+        improve_main(["--help"])
+    out = capsys.readouterr().out
+    assert "KNOWLEDGE LOG" in out
+    assert "ACCEPTED pull" in out
+
+
+def test_health_copy_no_longer_claims_every_run_grows_the_number():
+    """The false comment is gone from the source it was written in."""
+    import inspect
+    src = inspect.getsource(improve)
+    assert "Every improve run grows this number" not in src
 
 
 # --- --health: FP-013 gate progress ----------------------------------------

@@ -16,7 +16,7 @@ Schema rationale:
     audit_version   prompt version that generated this iteration (e.g. "v3")
     audit_manifest  JSON blob: {added: [...], removed: [...], rationale: "..."}
     sim_report      JSON blob: ComparisonReport (or MatchupReport) full body
-    verdict         "kept" | "reverted" | "neutral" | "pending"
+    verdict         "kept" | "reverted" | "neutral" | "inconclusive" | "pending"
     verdict_notes   free-text reasoning from the analyst (Phase 2)
     win_rate_old    float, 0-1, NULL if not measured
     win_rate_new    float, 0-1, NULL if not measured
@@ -51,6 +51,26 @@ mechanizes):
     as one convention.
   * From 2026-07-20 all writers use head-to-head decisive
     (wins_old + wins_new), the denominator every verdict gate counts.
+
+Verdict vocabulary — what each label CLAIMS (see
+``_proposer_sim._verdict_from_ab`` for the arithmetic):
+
+  * ``kept`` / ``reverted`` — the split is statistically significant in
+    that direction (era 4; era 3's came from ``|margin| >= 4``).
+  * ``neutral`` — measured at a trustworthy sample size, no significant
+    difference.
+  * ``inconclusive`` — measured, but the evidence does not support a
+    decision: fewer than ``MIN_DECISIVE_GAMES_FOR_VERDICT`` decisive
+    games, OR (2026-08-20, decision R2-D3) a completed run whose
+    REQUIRED confirming run could not RUN at all. A row can only carry
+    ``pending`` when no sim of its own completed, so a finished
+    ``sim_report`` beside a ``pending`` verdict is a contradiction; the
+    replication writer used to produce exactly that. The distinction the
+    label preserves: ``inconclusive`` means "we measured and still can't
+    say", ``pending`` means "nothing has been measured yet".
+  * ``pending`` — this row's sim did not complete (status 'skipped' /
+    'failed'), or has not been run yet. The initial state of a row the
+    curator writes before the sim.
 
 `deck_snapshot` keeps a copy of the .dck text so we can rebuild any historical
 state without depending on Moxfield not deleting the deck. The blobs are small
@@ -270,7 +290,10 @@ _SIGNIFICANCE_START = "2026-08-14"  # significance-based verdicts land
 
 
 def measurement_era_for(
-    created_at: Optional[str], iteration_id: Optional[int] = None,
+    created_at: Optional[str],
+    iteration_id: Optional[int] = None,
+    *,
+    significance_start: str = _SIGNIFICANCE_START,
 ) -> Optional[int]:
     """Which ``MEASUREMENT_ERAS`` key a row belongs to, or None if unknown.
 
@@ -297,6 +320,17 @@ def measurement_era_for(
     window, which is a MIXED population by writer (compare-shaped
     writers counted filler-won games, AB-shaped writers didn't) and
     therefore has no single era.
+
+    ``significance_start`` (2026-08-20, decision R2-D5) overrides the
+    era-3/4 boundary date FOR ONE CALL. It exists so
+    ``scripts/backfill_web_margins.py --era-boundary-report`` can show
+    the owner what a shifted boundary WOULD reclassify without a second
+    copy of this function's rules — the era-3/4 cut is the one boundary
+    that is a bare date while 05-21/22 and 07-19 get the NULL-not-guess
+    treatment, because the 08-14 fixes were commits, not midnight
+    cutovers (R2-P13). Callers that write rows must never pass it: the
+    stored stamp always comes from the module constant, so a report can
+    never leak into the data.
     """
     stamp = created_at.strip() if isinstance(created_at, str) else ""
     if not stamp:
@@ -309,7 +343,7 @@ def measurement_era_for(
         ):
             return 1
         return None
-    if stamp >= _SIGNIFICANCE_START:
+    if stamp >= significance_start:
         return 4
     if stamp >= _DECISIVE_SETTLED:
         return 3
