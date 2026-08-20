@@ -14,9 +14,46 @@ API shapes (probed live 2026-07-25 with the project User-Agent):
   "unknown", never as a mismatch).
 - **Detail**: ``GET archidekt.com/api/decks/<id>/`` →
   ``{cards: [{quantity, categories: [<name>, ...],
-  card: {oracleCard: {name}}}], categories: [{name, includedInDeck,
-  ...}]}``. Category membership is the deck's own board semantics:
-  Maybeboard/Sideboard categories carry ``includedInDeck: false``.
+  card: {collectorNumber, edition: {editioncode},
+  oracleCard: {name, layout, faces}}}],
+  categories: [{name, isPremier, includedInDeck, ...}]}``. Category
+  membership is the deck's own board semantics — the ``includedInDeck``
+  FLAG decides, never the category's name.
+
+WHAT A REAL DETAIL RESPONSE ACTUALLY LOOKS LIKE (R2-P18, 2026-08-20).
+Everything above was probed by hand; the adapter below was then tested
+only against synthesized shapes, which is exactly the setup where a wrong
+assumption survives a green suite. Deck 24864897 ("Hazel demands
+Sacrifice", 98 entries) was captured live and trimmed into
+``tests/fixtures/archidekt_deck_shape.json``. What it corrected:
+
+- **``includedInDeck`` is per-deck user state, NOT a property of the
+  category's name.** This deck's ``Sideboard`` category carries
+  ``includedInDeck: true`` — the old claim here ("Maybeboard/Sideboard
+  carry ``includedInDeck: false``") is simply false, and any future
+  name-based shortcut would import that deck's sideboard as maindeck.
+  ``Maybeboard`` was the only excluded category in the capture.
+- **Commanders are marked by the card-level category string
+  ``"Commander"``**, matching a deck-level category that is the only one
+  with ``isPremier: true``. There is no top-level ``commander`` field.
+- **Entry categories stack**: a maybeboarded card carries BOTH, e.g.
+  ``["Maybeboard", "Tokens"]`` — so exclusion has to test EVERY category
+  on the entry (it does), not just the first.
+- **``quantity`` is a real multiplier** (11x Forest, 9x Swamp in the
+  capture) and must survive into the ``.dck``.
+- **``collectorNumber`` is a string and is not always numeric**: The List
+  printings come back as ``"M20-193"`` / ``"HOU-77"`` with
+  ``editioncode: "plst"``.
+- **Non-``normal`` layouts need no special handling here**: the capture's
+  one ``layout: "class"`` card (Ninja Teen) carries a single
+  ``oracleCard.name`` and ``faces: []`` like every other entry.
+  UNPINNED: no modal-DFC/transform card was in this deck, so whether an
+  MDFC's ``name`` is ``"A // B"`` (with ``faces`` populated) is still
+  unverified — capture a real MDFC deck rather than guessing.
+- **``description`` is a Quill Delta JSON string**, not prose — see
+  ``tests/fixtures/hazel_primer.md``. Nothing here reads it yet.
+- **``intentionallySkippedCardData``** (false in the capture) is the API
+  telling you the response omitted card data — see :func:`fetch_deck`.
 
 Same degrade-don't-die contract as the other clients: every CORPUS
 function returns an empty result on network/shape failure rather than
@@ -135,8 +172,12 @@ def _get_json_with_retry(
 def _excluded_categories(deck_json: dict) -> set[str]:
     """Lowercased category names whose cards are NOT in the playable deck.
 
-    Archidekt's board semantics live in the deck's own category list:
-    Maybeboard / Sideboard / Considering carry ``includedInDeck: false``.
+    Archidekt's board semantics live in the deck's own category list, and
+    the ``includedInDeck`` FLAG is the whole rule. Do not shortcut it by
+    name: in the real capture (R2-P18, deck 24864897, 2026-08-20) the
+    ``Sideboard`` category carries ``includedInDeck: true`` while
+    ``Maybeboard`` carries false — the flag is per-deck user state, so a
+    name-based rule would silently import that deck's sideboard.
     """
     excluded: set[str] = set()
     for cat in deck_json.get("categories") or []:
@@ -192,6 +233,13 @@ def extract_mainboard(deck_json: dict) -> list[str]:
     Commanders are excluded — the corpus wants the 99; the commander is
     the query key, not a data point. See :func:`_split_boards` for the
     membership rules.
+
+    ONE NAME PER ENTRY, not per copy: the real capture's 81 in-deck
+    entries sum to 99 cards (11x Forest, 9x Swamp), and this returns 81
+    names. Deliberate — ``bubble_analysis`` folds each list into a
+    ``frozenset`` of card keys, so duplicates would be discarded anyway.
+    A caller that needs deck SIZE must not count this list (R2-P18,
+    2026-08-20).
     """
     _, mainboard = _split_boards(deck_json)
     return [n for n in (_entry_name(e) for e in mainboard) if n]
@@ -253,9 +301,35 @@ def fetch_deck(
     redundancy: swallowing the error here would write an empty ``.dck``
     and call it success, which is exactly the silent failure the project's
     working principles forbid. Retries still apply (429/5xx).
+
+    Raises :class:`ValueError` when the payload sets
+    ``intentionallySkippedCardData``: a 200 with the card data omitted.
+
+    WHY (R2-P18, 2026-08-20): the real capture
+    (``tests/fixtures/archidekt_deck_shape.json``) carries this key —
+    false there, so the deck was complete — which is the API stating out
+    loud that it CAN return a deck whose card data it deliberately left
+    out. Down that path every entry loses its ``oracleCard.name``,
+    :func:`to_deck_json` drops every nameless entry, and the importer
+    writes a 0-card ``.dck`` and prints "Wrote ... (0 commander + 0
+    main)" as if it had worked. The exact silent success this function's
+    raise-don't-degrade contract exists to prevent, so it is checked here
+    rather than left to the caller. The corpus lane is untouched: it
+    calls ``_get_json_with_retry`` directly and a skipped-data deck just
+    yields no names, which is a degrade, not a lie.
     """
     get = fetch_json or _http_get_json
-    return _get_json_with_retry(get, f"{BASE}/decks/{parse_deck_id(deck_id)}/")
+    payload = _get_json_with_retry(
+        get, f"{BASE}/decks/{parse_deck_id(deck_id)}/")
+    if isinstance(payload, dict) and payload.get(
+            "intentionallySkippedCardData"):
+        raise ValueError(
+            f"Archidekt returned deck {parse_deck_id(deck_id)} with "
+            f"intentionallySkippedCardData=true — the response omits the "
+            f"card data, so importing it would write an empty deck. "
+            f"Retry, or export the deck from Archidekt by hand."
+        )
+    return payload
 
 
 def deck_bracket(deck_json: dict) -> int:
@@ -311,6 +385,27 @@ def to_deck_json(deck_json: dict) -> dict:
             f"{i}": _mox_entry(e) for i, e in enumerate(entries)
             if _entry_name(e)
         }}
+
+    # An entry with no ``oracleCard.name`` is unrenderable and gets
+    # dropped above. Say so — WHY (R2-P18, 2026-08-20): the real capture
+    # has a ``customCards`` list (empty for this deck) and an
+    # ``intentionallySkippedCardData`` flag, i.e. two documented ways for
+    # the API to hand back entries this adapter cannot name. Dropping
+    # them quietly turns "we lost 12 cards" into a deck that merely looks
+    # short, which no downstream consumer can tell from a 76-card
+    # brew. One stderr line, never an exception: the import still
+    # produces the cards it CAN name, and the user gets told what is
+    # missing. ``fetch_deck`` owns the all-or-nothing case.
+    counted = commanders + mainboard
+    nameless = sum(1 for e in counted if not _entry_name(e))
+    if nameless:
+        print(
+            f"[archidekt] WARN: {nameless} of {len(counted)} in-deck "
+            f"entries have no oracleCard name and were dropped — the "
+            f"imported deck is incomplete (custom cards, or a response "
+            f"with card data omitted).",
+            file=sys.stderr, flush=True,
+        )
 
     return {
         "name": (deck_json.get("name") or "").strip() or "Untitled",
