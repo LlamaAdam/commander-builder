@@ -1,0 +1,57 @@
+# One-shot capture helper (2026-08-20, R2-P18). The dev sandbox's egress
+# proxy blocks archidekt.com on every lane, and the round-2 fix for the
+# Archidekt adapter needs the REAL API response shape for a deck --
+# synthesizing it is the exact failure mode the fixture would exist to
+# catch. CI runners have open egress, so this workflow_dispatch job
+# fetches one deck's JSON and commits it to the calling branch under
+# tests/fixtures/_captures/ as raw material. It is NOT the fixture:
+# the checked-in fixture is hand-trimmed from this capture with
+# provenance noted, and the capture file is deleted once consumed.
+name: fetch-archidekt-capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      deck_id:
+        description: "Archidekt deck id (numeric)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch deck JSON
+        run: |
+          case "${{ inputs.deck_id }}" in
+            ''|*[!0-9]*) echo "deck_id must be numeric"; exit 1;;
+          esac
+          mkdir -p tests/fixtures/_captures
+          curl -sS --fail --max-time 60 \
+            -H "Accept: application/json" \
+            -H "User-Agent: commander-builder-fixture-capture/1.0" \
+            "https://archidekt.com/api/decks/${{ inputs.deck_id }}/" \
+            -o "tests/fixtures/_captures/archidekt_deck_${{ inputs.deck_id }}.json"
+          python3 - <<'PY'
+          import json, collections, glob
+          path = glob.glob("tests/fixtures/_captures/archidekt_deck_*.json")[0]
+          data = json.load(open(path))
+          print("top-level keys:", sorted(data.keys()))
+          cards = data.get("cards", [])
+          layouts = collections.Counter(
+              (c.get("card", {}).get("oracleCard", {}) or {}).get("layout")
+              for c in cards
+          )
+          print("card count:", len(cards), "layouts:", dict(layouts))
+          PY
+      - name: Commit capture to the calling branch
+        run: |
+          git config user.name "archidekt-capture[bot]"
+          git config user.email "noreply@users.noreply.github.com"
+          git add tests/fixtures/_captures/
+          git commit -m "chore: capture Archidekt deck ${{ inputs.deck_id }} API response (raw material for the R2-P18 fixture; delete after trimming)"
+          git push
