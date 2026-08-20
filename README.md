@@ -43,15 +43,46 @@ of a real thing; it just isn't your pod.
 git clone <this repo>
 cd commander_builder
 python -m pip install -e ".[dev]"
+commander-init            # guided first-run setup (see below)
 ```
 
-After this, every CLI entry point works without `PYTHONPATH=src`.
+After the install, every CLI entry point works without `PYTHONPATH=src`.
+
+### `commander-init` — guided first run
+
+`commander-init` sequences the first-run pipeline in the order the steps
+actually depend on each other, checking state before each one and
+skipping whatever is already done:
+
+1. **Dependencies** — Forge jar (~120 MB) + a Temurin JRE, via
+   `bootstrap.check_dependencies` / `download_forge` / `ensure_jre`.
+2. **Oracle card store** — one ~150 MB rate-limit-exempt bulk GET
+   (`commander-oracle-refresh --from-bulk --everything`) instead of one
+   Scryfall request per card.
+3. **Decks** — harvest ~60 community decks at your bracket, pull
+   `[PREMADE]` popularity decks, or skip and import your own later.
+4. **Opponent pool** — `commander-curate`, after an explicit cost
+   warning: measured ~35 min (B3) / ~55 min (B5) of JVM time.
+
+```bash
+commander-init --dry-run              # print the plan + current state, run nothing
+commander-init --bracket 3            # interactive; asks before anything expensive
+commander-init --yes --decks harvest  # unattended (authorizes the downloads AND the curation)
+```
+
+It is **resumable and stateless**: each step probes the artifact it
+produces (jar on disk, snapshot count, candidate `.dck` files,
+`_pools/B<n>.json`), so re-running picks up where you stopped. No new
+state file to go stale.
+
+Prefer to do it by hand? Every step is just the standalone command it
+prints — `commander-init` adds ordering, not logic.
 
 For live Forge sims, drop a portable Forge release + JRE into
-`vendor/forge/` and `vendor/jre/` (see `setup/forge/README.md`). The
-system runs without Forge — only modules that hit the JVM
-(`forge_runner`, `pool_curator`, `run_match`, `compare_versions`,
-`iteration_loop`) need it.
+`vendor/forge/` and `vendor/jre/` (see `setup/forge/README.md`), or let
+step 1 above fetch them. The system runs without Forge — only modules
+that hit the JVM (`forge_runner`, `pool_curator`, `run_match`,
+`compare_versions`, `iteration_loop`) need it.
 
 For live LLM analyst, configure `ANTHROPIC_API_KEY` via one of:
 
@@ -96,6 +127,26 @@ The dashboard and audit also surface (ManaFoundry-parity additions):
   replays — life totals, eliminations, winner — under the Replays rail section.
 
 ## CLI commands
+
+### `commander` — one front door
+
+Every command below is also reachable as a subcommand of `commander`,
+grouped by task area. It is an alias layer, not a migration: the
+hyphenated scripts all still work, and `commander improve ...` runs the
+identical code with identical flags and exit codes as
+`commander-improve ...`.
+
+```bash
+commander                 # the grouped menu: build / import / sim / analyze / web / maintenance
+commander improve --help  # the target command's own --help
+commander init            # guided first-run setup
+```
+
+Use it when you can't remember which of ~30 hyphenated names does the
+thing you want; use the hyphenated scripts when you can (they're shorter,
+and shell completion already knows them).
+
+### The commands themselves
 
 ```bash
 # Build a first-cut deck from scratch: commander + target bracket → a legal
@@ -182,6 +233,9 @@ commander-doctor
 
 # Status snapshot for cold pickup
 commander-status
+
+# Full menu of everything installed, grouped by task area
+commander
 ```
 
 ## The audit cycle (manual workflow)

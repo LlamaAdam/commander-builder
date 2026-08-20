@@ -38,6 +38,16 @@ dev = [
 # CLI entry points so users can `commander-import ...` instead of
 # `python -m commander_builder.moxfield_import ...`. Kept the long forms too
 # since they're already documented in docs/architecture.md and README.md.
+#
+# `commander` (B1) is the umbrella multiplexer over every script below:
+# `commander improve ...` == `commander-improve ...`, same code and same
+# exit codes. It is an ALIAS layer, not a migration — every hyphenated
+# script stays registered. `cli.COMMANDS` must stay 1:1 with this table;
+# tests/test_cli.py fails if a script is added without a subcommand.
+commander            = "commander_builder.cli:main"
+# `commander-init` (B2) sequences the first-run pipeline (deps -> oracle
+# store -> decks -> pool) that was previously spread across four docs.
+commander-init       = "commander_builder.init_cli:main"
 commander-import     = "commander_builder.moxfield_import:main"
 commander-push       = "commander_builder.moxfield_push:main"
 commander-snapshot   = "commander_builder.snapshot_deck:main"
