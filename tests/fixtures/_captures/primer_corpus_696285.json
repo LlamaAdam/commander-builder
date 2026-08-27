@@ -1,0 +1,894 @@
+{
+ "_provenance": {
+  "source": "https://archidekt.com/api/decks/696285/",
+  "requested_commander": "Kaalia of the Vast",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 696285,
+ "name": "Upping the Average - Kaalia of the Vast",
+ "viewCount": 80340,
+ "format": null,
+ "description": "{\"ops\":[{\"attributes\":{\"link\":\"https://youtu.be/siZD5aOeZRo\"},\"insert\":\"https://youtu.be/siZD5aOeZRo\"},{\"insert\":\"\\n\\n\"},{\"attributes\":{\"underline\":true,\"bold\":true},\"insert\":\"Cards Added: \"},{\"insert\":\"\\n\\nDoom Whisperer\\nDrakuseth, Maw of Flames\\nSower of Discord\\nTerror of Mount Velus\\nYosei, the Morning Star\\nUtvara Hellkite\\nTwilight Shepherd\\nDemonlord Belzenlok\\n\\nOpen the Armory\\nGiver of Runes\\n\\nWayfarer's Bauble\\nFervor\\n\\nNight's Whisper\\nPainful Truths\\n\\nGenerous GIft\\nChaos Warp\\nCrackling Doom\\n\\nBlasphemous Act\\nCrux of Fate\\n\\nAsh Barrens\\nShadowblood Ridge\\nMountain\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Clifftop Retreat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Demonlord Belzenlok",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Isolated Chapel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Gisela, Blade of Goldnight",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Yosei, the Morning Star",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Dragon Tempest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Dragonskull Summit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Crux of Fate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Archfiend of Depravity",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Diabolic Tutor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Hellkite Tyrant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Phyrexian Arena",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Bruna, the Fading Light",
+   "layout": "meld"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Open the Armory",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Anguished Unmaking",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Twilight Shepherd",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Bloodgift Demon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ob Nixilis, Unshackled",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Lord of the Void",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Aurelia, the Warleader",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Fervor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Wayfarer's Bauble",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Merciless Eviction",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Angel of Serenity",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Steel Hellkite",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sower of Discord",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Sacred Foundry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Doom Whisperer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Boros Charm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Godless Shrine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Blood Crypt",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Smothering Tithe",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Master of Cruelties",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Utvara Hellkite",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Angel of Despair",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Giver of Runes",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Generous Gift",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Talisman of Hierarchy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Talisman of Conviction",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Kaalia, Zenith Seeker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Vilis, Broker of Blood",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sephara, Sky's Blade",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Drakuseth, Maw of Flames",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Chromatic Lantern",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Rune-Scarred Demon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Read the Bones",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Night's Whisper",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Swords to Plowshares",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Mother of Runes",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Terror of Mount Velus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Arcane Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Command Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Akroma, Angel of Wrath",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Rakdos Carnarium",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Orzhov Basilica",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Nomad Outpost",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Exotic Orchard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Caves of Koilos",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Bojuka Bog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Boros Garrison",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Battlefield Forge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Swiftfoot Boots",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Orzhov Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Rakdos Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Boros Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Terminate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Crackling Doom",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Chaos Warp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Painful Truths",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Ruinous Ultimatum",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Savai Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 5,
+   "categories": [
+    "Land"
+   ],
+   "name": "Swamp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Evolving Wilds",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Temple of Silence",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Temple of Triumph",
+   "layout": "normal"
+  },
+  {
+   "quantity": 6,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 3,
+   "categories": [
+    "Land"
+   ],
+   "name": "Mountain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Terramorphic Expanse",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Angelic Arbiter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Path to Exile",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Wrath of God",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Blasphemous Act",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Graven Cairns",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Lightning Greaves",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Avacyn, Angel of Hope",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Ash Barrens",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Razaketh, the Foulblooded",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Balefire Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Archfiend of Despair",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Gisela, the Broken Blade",
+   "layout": "meld"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Lyra Dawnbringer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Terror of the Peaks",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Demonic Tutor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Arid Mesa",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Marsh Flats",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Bloodstained Mire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Reya Dawnbringer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Tariel, Reckoner of Souls",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Akroma, Angel of Fury",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Darksteel Ingot",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Serra the Benevolent",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Phyrexian Reclamation",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Whispersilk Cloak",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Vindicate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Utter End",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Return to Dust",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Armageddon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Kaalia of the Vast",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Animate Dead",
+   "layout": "normal"
+  }
+ ]
+}

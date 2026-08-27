@@ -1,0 +1,895 @@
+{
+ "_provenance": {
+  "source": "https://archidekt.com/api/decks/5984805/",
+  "requested_commander": "Pantlaza, Sun-Favored",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 5984805,
+ "name": "Upping the Average - Pantlaza, Sun-Favored",
+ "viewCount": 39962,
+ "format": null,
+ "description": "{\"ops\":[{\"attributes\":{\"bold\":true,\"link\":\"https://youtu.be/b_bxjvWyJ8I?si=vN3Cbr_5Xq1sM7U6\"},\"insert\":\"https://youtu.be/b_bxjvWyJ8I?si=vN3Cbr_5Xq1sM7U6\"},{\"attributes\":{\"bold\":true},\"insert\":\" \"},{\"insert\":\"\\n\\n\"},{\"attributes\":{\"underline\":true,\"bold\":true},\"insert\":\"Cards Added:\"},{\"insert\":\"\\nKaheera (Companion)\\nFellwar Stone\\nNature\u2019s Lore\\nKodama\u2019s Reach\\nLurking Predators\\nSneak Attack\\nTouch the Spirit Realm\\nLegion\u2019s initiative\\nLaezel\u2019s Acrobatics\\nBlasphemous Act\\nHulking Raptor\\n\\n\"},{\"attributes\":{\"color\":\"var(--color)\",\"background\":\"var(--light-background)\"},\"insert\":\"Rockfall Vale\"},{\"insert\":\"\\nSundown Pass\\nOvergrown Farmland\\nKrosan Verge\\nScavenger Grounds\\nPit of Offerings\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Apex Altisaur",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Arcane Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Bronzebeak Foragers",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Chandra's Ignition",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Cinder Glade",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Clifftop Retreat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Command Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Curious Altisaur",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Earthshaker Dreadmaw",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Ephemerate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Etali, Primal Storm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Exotic Orchard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Farseek",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "From the Rubble",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Pantlaza, Sun-Favored",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Fortified Village",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Etali, Primal Conqueror // Etali, Primal Sickness",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Descendants' Path",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Cultivate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Elemental Bond",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Evolving Wilds",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Dinosaur Egg",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Furycalm Snarl",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Atzocan Seer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Canopy Vista",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Akroma's Will",
+   "layout": "normal"
+  },
+  {
+   "quantity": 5,
+   "categories": [
+    "Land"
+   ],
+   "name": "Forest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Rhythm of the Wild",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ripjaw Raptor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Rishkar's Expertise",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Runic Armasaur",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Scion of Calamity",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Secluded Courtyard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sunfrill Imitator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Swords to Plowshares",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Temple Altisaur",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Thrashing Brontodon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Thunderherd Migration",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Rogue's Passage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "The Skullspore Nexus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Temple Garden",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Terramorphic Expanse",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Stomping Ground",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Sacred Foundry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Temple of the False God",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Savage Stomp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Garruk's Uprising",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Generous Gift",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ghalta, Stampede Tyrant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Gishath, Sun's Avatar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Jungle Shrine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Kessig Wolf Run",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Kinjalli's Sunwing",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Marauding Raptor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Mosswort Bridge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Path of Ancestry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Path to Exile",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Progenitor's Icon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Quartzwood Crasher",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Rampant Growth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Regal Behemoth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Regisaur Alpha",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Return of the Wildspeaker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Topiary Stomper",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Trumpeting Carnosaur",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Myriad Landscape",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ranging Raptors",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Jetmir's Garden",
+   "layout": "normal"
+  },
+  {
+   "quantity": 2,
+   "categories": [
+    "Land"
+   ],
+   "name": "Mountain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Wakening Sun's Avatar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Wayward Swordtooth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Unclaimed Territory",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Wrathful Raptors",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Welcome to . . . // Jurassic Park",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Zacama, Primal Calamity",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Otepec Huntmaster",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Zetalpa, Primal Dawn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Xenagos, God of Revels",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Ixalli's Lorekeeper",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Monster Manual // Zoological Study",
+   "layout": "adventure"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Game Trail",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ghalta and Mavren",
+   "layout": "normal"
+  },
+  {
+   "quantity": 3,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ghalta, Primal Hunger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Heroic Intervention",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Rampaging Brontodon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Arch of Orazca",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "The Great Henge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Urza's Incubator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Herald's Horn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Sundown Pass",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Cavern of Souls",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Nature's Lore",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Kodama's Reach",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Krosan Verge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Fellwar Stone",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sideboard",
+    "Creature"
+   ],
+   "name": "Kaheera, the Orphanguard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Sneak Attack",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Lurking Predators",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Scavenger Grounds",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Lae'zel's Acrobatics",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Pit of Offerings",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Rockfall Vale",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Overgrown Farmland",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Rootbound Crag",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Blasphemous Act",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Hulking Raptor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Touch the Spirit Realm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Legion's Initiative",
+   "layout": "normal"
+  }
+ ]
+}

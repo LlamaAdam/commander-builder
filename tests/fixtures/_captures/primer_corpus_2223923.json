@@ -1,0 +1,838 @@
+{
+ "_provenance": {
+  "source": "https://archidekt.com/api/decks/2223923/",
+  "requested_commander": "Muldrotha, the Gravetide",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 2223923,
+ "name": "Upping the Average - Muldrotha, the Gravetide Redux",
+ "viewCount": 43679,
+ "format": null,
+ "description": "{\"ops\":[{\"attributes\":{\"bold\":true,\"link\":\"https://youtu.be/thKaKV-2ZbY\"},\"insert\":\"https://youtu.be/thKaKV-2ZbY\"},{\"attributes\":{\"bold\":true},\"insert\":\" \"},{\"insert\":\"\\n\\n\"},{\"attributes\":{\"underline\":true,\"bold\":true},\"insert\":\"Cards Added\"},{\"insert\":\"\\n\\nSwiftfoot Boots\\nWayfarer's Bauble\\nHigh Market\\nGhost Quarter\\nSanctum Weaver\\n\\nAether Spellbomb\\nSeal of Removal\\nNihil Spellbomb\\nSinister Concoction\\nGlacial Chasm\\nDemon's Disciple\\n\\nMazirek, Kraul Death Priest\\nSyr Konrad, the Grim\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Muldrotha, the Gravetide",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Swiftfoot Boots",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Wayfarer's Bauble",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "High Market",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Seal of Removal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sanctum Weaver",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Syr Konrad, the Grim",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Demon's Disciple",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Mazirek, Kraul Death Priest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Aether Spellbomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Glacial Chasm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Ghost Quarter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Sinister Concoction",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Nihil Spellbomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Shriekmaw",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Dryad of the Ilysian Grove",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sidisi, Undead Vizier",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Cultivate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Counterspell",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Windfall",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Command Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Birds of Paradise",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Sultai Ascendancy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Arcane Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Commander's Sphere",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Exotic Orchard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Dreamroot Cascade",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Deathcap Glade",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Stitcher's Supplier",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Bojuka Bog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Eternal Witness",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Fleshbag Marauder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Lord of the Forsaken",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Wrenn and Seven",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Demonic Tutor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Mulldrifter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Plaguecrafter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Acidic Slime",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Baleful Strix",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Solemn Simulacrum",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Lightning Greaves",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Terramorphic Expanse",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Animate Dead",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Dauthi Voidwalker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Nevinyrral's Disk",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Verdant Catacombs",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Misty Rainforest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Simic Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Seal of Primordium",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Reclamation Sage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Springbloom Druid",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Binding the Old Gods",
+   "layout": "saga"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Evolving Wilds",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Ramunap Excavator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Fact or Fiction",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Command Beacon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Siren Stormtamer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Satyr Wayfinder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Rejuvenating Springs",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Undergrowth Stadium",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Cyclonic Rift",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ravenous Chupacabra",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Rhystic Study",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Zagoth Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sakura-Tribe Elder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Opulent Palace",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Villainous Wealth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Gravebreaker Lamia",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "The Eldest Reborn",
+   "layout": "saga"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Caustic Caterpillar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "The Gitrog Monster",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Tatyova, Benthic Druid",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Ashnod's Altar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Secrets of the Dead",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "River Kelpie",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Altar of Dementia",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Spore Frog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Planeswalker"
+   ],
+   "name": "Ashiok, Dream Render",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Planeswalker"
+   ],
+   "name": "Tamiyo, Collector of Tales",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Kaya's Ghostform",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Breeding Pool",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Glen Elendra Archmage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Buried Alive",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Entomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Life from the Loam",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Assassin's Trophy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Underrealm Lich",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Overgrown Tomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Watery Grave",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Golgari Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 3,
+   "categories": [
+    "Land"
+   ],
+   "name": "Island",
+   "layout": "normal"
+  },
+  {
+   "quantity": 5,
+   "categories": [
+    "Land"
+   ],
+   "name": "Swamp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 5,
+   "categories": [
+    "Land"
+   ],
+   "name": "Forest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Mystic Remora",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Polluted Delta",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Sidisi, Brood Tyrant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Perpetual Timepiece",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Drowned Catacomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "World Shaper",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Pernicious Deed",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Woodland Cemetery",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Hinterland Harbor",
+   "layout": "normal"
+  }
+ ]
+}

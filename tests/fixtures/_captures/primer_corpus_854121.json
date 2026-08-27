@@ -1,0 +1,886 @@
+{
+ "_provenance": {
+  "source": "https://archidekt.com/api/decks/854121/",
+  "requested_commander": "The Ur-Dragon",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 854121,
+ "name": "Upping the Average - The Ur-Dragon",
+ "viewCount": 29599,
+ "format": null,
+ "description": "{\"ops\":[{\"attributes\":{\"bold\":true,\"link\":\"https://youtu.be/dPDLYZYPsz0\"},\"insert\":\"https://youtu.be/dPDLYZYPsz0\"},{\"insert\":\"\\n\\n\"},{\"attributes\":{\"underline\":true,\"bold\":true},\"insert\":\"Cards Added:\"},{\"insert\":\"\\n\\nVaevictus Asmadi the Dire\\nTerror of Mount Velus\\nSylvia Brightspear\\n\\nLurking Predators\\nReturn of the Wildspeaker\\n\\nChaos Warp\\nMerciless Eviction\\n\\nHeroic Intervention\\nBoros Charm\\n\\nEvolving Wilds\\nTerramorphic Expanse\\nAsh Barrens\\n\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Kindred Discovery",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "The Ur-Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Crucible of Fire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Dragon Tempest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Scourge of Valkas",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Scalelord Reckoner",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Wasitora, Nekoru Queen",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ramos, Dragon Engine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sunscorch Regent",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Crux of Fate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Hellkite Charger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Atarka, World Render",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Broodmate Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Dromoka, the Eternal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Intet, the Dreamer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Kolaghan, the Storm's Fury",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Ojutai, Soul of Winter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Scion of the Ur-Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Silumgar, the Drifting Death",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Teneb, the Harvester",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Crucible of the Spirit Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Haven of the Spirit Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Sarkhan's Triumph",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Dragonlord Dromoka",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Planeswalker"
+   ],
+   "name": "Sarkhan Unbroken",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Temur Ascendancy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Boros Charm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Rampant Growth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Dragon's Hoard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Vaevictis Asmadi, the Dire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Earthquake",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Savage Ventmaw",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Skyshroud Claim",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sylvia Brightspear",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Seaside Citadel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Savage Lands",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Steel Hellkite",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Steam Vents",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Sacred Foundry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Overgrown Tomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Balefire Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Stomping Ground",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Blood Crypt",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Rhythm of the Wild",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Utvara Hellkite",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Morophon, the Boundless",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Drakuseth, Maw of Flames",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Farseek",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Elemental Bond",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Crumbling Necropolis",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Arcane Sanctum",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Chromatic Lantern",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Swords to Plowshares",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Terror of Mount Velus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Path of Ancestry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Command Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Unclaimed Territory",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Sandsteppe Citadel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Opulent Palace",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Mystic Monastery",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Nomad Outpost",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Exotic Orchard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Frontier Bivouac",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Chaos Warp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Eerie Ultimatum",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Ketria Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Raugrin Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Savai Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Zagoth Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Indatha Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 3,
+   "categories": [
+    "Land"
+   ],
+   "name": "Mountain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Cultivate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Heroic Intervention",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Garruk's Uprising",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Terror of the Peaks",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Lurking Predators",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Herald's Horn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Dragonlord's Servant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Dragonspeaker Shaman",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Lathliss, Dragon Queen",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Cyclonic Rift",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Merciless Eviction",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Ash Barrens",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Commander's Sphere",
+   "layout": "normal"
+  },
+  {
+   "quantity": 2,
+   "categories": [
+    "Land"
+   ],
+   "name": "Forest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 2,
+   "categories": [
+    "Land"
+   ],
+   "name": "Swamp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Island",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Arcane Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Evolving Wilds",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Jungle Shrine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Terramorphic Expanse",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Kodama's Reach",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Return of the Wildspeaker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Ryusei, the Falling Star",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Deathbringer Regent",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "O-Kagachi, Vengeful Kami",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Sarkhan, Fireblood",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Anguished Unmaking",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Utter End",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Frontier Siege",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Lightning Greaves",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Primevals' Glorious Rebirth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Urza's Incubator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Darksteel Ingot",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Fist of Suns",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Thriving Isle",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Bladewing the Risen",
+   "layout": "normal"
+  }
+ ]
+}

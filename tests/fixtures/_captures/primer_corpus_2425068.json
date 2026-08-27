@@ -1,0 +1,902 @@
+{
+ "_provenance": {
+  "source": "https://archidekt.com/api/decks/2425068/",
+  "requested_commander": "Isshin, Two Heavens as One",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 2425068,
+ "name": "Upping the Average - Isshin, Two Heavens as One (Budget)",
+ "viewCount": 34424,
+ "format": null,
+ "description": "{\"ops\":[{\"attributes\":{\"link\":\"https://youtu.be/RDOWPZODeDo\"},\"insert\":\"https://youtu.be/RDOWPZODeDo\"},{\"insert\":\"\\n\\n\"},{\"attributes\":{\"underline\":true,\"bold\":true},\"insert\":\"Cards Added:\"},{\"insert\":\"\\n\\nCathars' Crusade\\nSophina, Spearsage Deserter\\nMarton Stromgald\\nCalculating Lich\\nSilverwing Squadron\\n\\nGeneral\u2019s Enforcer\\nLoyal Unicorn\\nCircle of Flame\\nDire Tactics\\n\\nInferno Titan\\nGoblin Traprunner\\nVengeful Ancestor\\nCampaign of Vengeance\\nTriumphant Adventurer\\nFireflux Squad\\nRhox Veteran\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Marsh Flats",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Spectator Seating",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Cunning Rhetoric",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Caves of Koilos",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Battlefield Forge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Arid Mesa",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Shiny Impetus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Haunted Ridge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Shattered Sanctum",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Sundown Pass",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Command Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Exotic Orchard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Raiyuu, Storm's Edge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Godless Shrine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Blood Crypt",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Circle of Flame",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Inferno Titan",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Rhox Veteran",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Silverwing Squadron",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Calculating Lich",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Campaign of Vengeance",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "General's Enforcer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Dire Tactics",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Fireflux Squad",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Windbrisk Heights",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Cathars' Crusade",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Loyal Unicorn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Boros Garrison",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Goblin Traprunner",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Triumphant Adventurer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Vengeful Ancestor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Orzhov Basilica",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Rakdos Carnarium",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Path of Ancestry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Spinerock Knoll",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sophina, Spearsage Deserter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "M\u00e1rton Stromgald",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Isshin, Two Heavens as One",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Clifftop Retreat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Isolated Chapel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Captain Lannery Storm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Dragonskull Summit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Bruse Tarl, Boorish Herder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Brutal Hordechief",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Kazuul, Tyrant of the Cliffs",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Iroas, God of Victory",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Marchesa's Decree",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Hanweir Garrison",
+   "layout": "meld"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Hanweir Battlements",
+   "layout": "meld"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Anguished Unmaking",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Mardu Ascendancy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Aurelia, the Warleader",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Hero of Bladehold",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Fervent Charge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 3,
+   "categories": [
+    "Land"
+   ],
+   "name": "Swamp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 6,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Leonin Warleader",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Adeline, Resplendent Cathar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Rakdos Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Night's Whisper",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Blasphemous Act",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Raiyuu, Storm's Edge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Swiftfoot Boots",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Fellwar Stone",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Krenko, Tin Street Kingpin",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Swords to Plowshares",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Generous Gift",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Vandalblast",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Chaos Warp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Arcane Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Despark",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Sun Titan",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Sacred Foundry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Smothering Tithe",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Talisman of Hierarchy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Talisman of Conviction",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Audacious Thief",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Skyknight Vanguard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Drakuseth, Maw of Flames",
+   "layout": "normal"
+  },
+  {
+   "quantity": 6,
+   "categories": [
+    "Land"
+   ],
+   "name": "Mountain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Revenge of Ravens",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Curse of Opulence",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Grave Titan",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Teferi's Protection",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Nomad Outpost",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Adriana, Captain of the Guard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Painful Truths",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Ruinous Ultimatum",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Savai Triome",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Mangara, the Diplomat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Hellrider",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Path to Exile",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Vault of Champions",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Emberwilde Captain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Boros Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Goldspan Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Breena, the Demagogue",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Laelia, the Blade Reforged",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Instant"
+   ],
+   "name": "Boros Charm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantment"
+   ],
+   "name": "Duelist's Heritage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Orzhov Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Esper Sentinel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Sorcery"
+   ],
+   "name": "Damn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Delina, Wild Mage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Karazikar, the Eye Tyrant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Lightning Greaves",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Talisman of Indulgence",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifact"
+   ],
+   "name": "Sword of the Animist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Tectonic Giant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Etali, Primal Storm",
+   "layout": "normal"
+  }
+ ]
+}
