@@ -78,7 +78,9 @@ formality; it found a real bug:
   so whether Archidekt's ``name`` for those is the card's own full name
   stays unverified. They are left untouched rather than guessed.
 - **``description`` is a Quill Delta JSON string**, not prose — see
-  ``tests/fixtures/hazel_primer.md``. Nothing here reads it yet.
+  ``tests/fixtures/hazel_primer.md``. Since FP-018.1 (2026-08-27)
+  :func:`to_deck_json` passes it through RAW; rendering lives in
+  ``primer``.
 - **``intentionallySkippedCardData``** (false in the capture) is the API
   telling you the response omitted card data — see :func:`fetch_deck`.
 
@@ -460,6 +462,12 @@ def to_deck_json(deck_json: dict) -> dict:
     Moxfield publicId and stamping one into the ``Moxfield=`` line would
     poison the re-import dedupe index. The importer records provenance as
     ``Archidekt=<id>`` / ``Source=archidekt`` instead.
+
+    ``description`` passes through RAW (FP-018.1, 2026-08-27) — the Quill
+    Delta JSON string exactly as the API returned it. This client stays a
+    client: rendering the Delta to text is ``primer``'s job, and handing
+    the importer the raw field means the render happens once, at the one
+    place that decides whether a sidecar gets written.
     """
     commanders, mainboard = _split_boards(deck_json)
 
@@ -505,6 +513,11 @@ def to_deck_json(deck_json: dict) -> dict:
     return {
         "name": (deck_json.get("name") or "").strip() or "Untitled",
         "format": "commander",
+        # Raw Quill Delta string (or whatever the API sent) — see the
+        # docstring. Only set when non-empty so consumers can key on
+        # plain truthiness.
+        **({"description": deck_json["description"]}
+           if deck_json.get("description") else {}),
         # ``resolve_bracket`` reads this key first; 0 stays unset so it
         # falls through to its own "unknown" default rather than being
         # handed an out-of-range int.

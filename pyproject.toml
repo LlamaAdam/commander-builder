@@ -86,6 +86,9 @@ commander-local-model = "commander_builder.local_model:main"
 # stay 1:1 with this table and tests/test_cli.py enforces it, so the
 # subcommand and the script land together or not at all.
 commander-judge       = "commander_builder.deck_judge:main"
+# FP-018.3 (2026-08-27): adopt a deck — primer-grounded explanation plus
+# polish-capped, preference-steered swap suggestions. Read-only, offline.
+commander-adopt       = "commander_builder.adopt:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -87,7 +87,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .forge_runner import VENDOR_FORGE
-from .intent import Intent, intent_protect_cards, learn_intent
+from .intent import (
+    Intent,
+    intent_protect_cards,
+    learn_intent,
+    soft_bias_theme_slugs,
+)
 # Imported (not duplicated) so the sub-threshold warning and the
 # --sim-games default can never drift from the verdict gate in
 # _proposer_sim._verdict_from_ab.
@@ -207,10 +212,16 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
         argv += ["--protect-from", args.protect_from]
     # Soft-bias: pass the intent's themes as --intent-themes so the
     # advisor candidate pool is ranked toward those EDHREC tag pages.
-    # Only appended when themes are non-empty — the no-themes path
-    # must be identical to pre-Slice-A behavior.
-    if intent is not None and intent.themes:
-        argv += ["--intent-themes", ",".join(intent.themes)]
+    # Only appended when the slug list is non-empty — the no-themes path
+    # must be identical to pre-Slice-A behavior. Since FP-018.2
+    # (2026-08-27) the list also carries slugs the intent's FREE TEXT
+    # (`stated` primer / `pilot_preferences`) mentions, appended AFTER
+    # the derived themes so the list's own evidence keeps the louder
+    # voice. Still soft by construction: the advisor only ADDS tag pages
+    # for these; it never filters a recommendation for missing them.
+    bias_slugs = soft_bias_theme_slugs(intent)
+    if bias_slugs:
+        argv += ["--intent-themes", ",".join(bias_slugs)]
 
     buf = io.StringIO()
     try:

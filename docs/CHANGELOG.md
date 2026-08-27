@@ -6,6 +6,49 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
+
+#### Added
+
+- **`primer` module (018.1).** Deck primers become first-class:
+  `parse_primer` branches on provenance — Archidekt descriptions are
+  Quill Delta JSON (string ops render verbatim, `card-link` embeds
+  render as the card name, image embeds as nothing), Moxfield/plain
+  text passes through untouched — pinned by two real captures (the
+  single-op hazel primer and deck 86888's 59-op formatted Delta, new
+  fixture `archidekt_primer_delta_86888.json`). Imports write a
+  `<deckstem>.primer.md` sidecar (never empty, refuse-clobber
+  semantics) with the card-links block preserved; `.dck` format
+  untouched. Prompt use goes through `clip_for_prompt` — explicit
+  truncation marker, never silent.
+- **Free-text intent (018.2).** `Intent` gains `stated` (the deck's
+  own primer) and `pilot_preferences` (the adopter's words). Both flow
+  into the judge's intent block, clearly labeled, and soft-bias the
+  advisor via `free_text_theme_slugs` — a keyword→slug map bounded to
+  `staples`' existing theme vocabulary, so free text can steer
+  attention but cannot invent themes the app doesn't recognize.
+  **Free text never drives G3 swap labeling**: an intent carrying only
+  free text labels `unknown` exactly like `intent=None`
+  (`classify_swap_direction` now guards on structured signals — the
+  adopt flow routinely builds free-text-only intents, and without the
+  guard those pairings would enter G3's population with a fabricated
+  `staple_ward` direction). The two judge boundary tests moved with
+  the boundary, deliberately.
+- **`commander adopt` (018.3).** Deterministic, offline, read-only:
+  (1) a grounded explanation — the primer's plan cross-checked against
+  the actual list (cards it names that are/aren't present, packages by
+  role/theme, the author's win-line paragraphs quoted verbatim, never
+  paraphrased); (2) small preference-steered suggestions reusing
+  `deck_builder_personalize`'s like-for-like passes, clamped to the
+  polish tier's budget by constant — no mode parameter, no
+  `resolve_tier`, no rebuild env var read: **the rebuild tier is
+  structurally unreachable**, not defaulted off. Primer card-link
+  names are auto-Protected; prose-only primers get an explanation
+  without auto-protection and the output says so (harvest evidence:
+  exact names exist only as Archidekt embeds). "No primer" — the
+  common case, ~75% of even top-ranked decks — degrades to a
+  list-grounded explanation, stated as absent, never an error.
+
 ### 2026-08-27 — DFC import fix, dead-backend retirement, G3 computable
 
 #### Fixed

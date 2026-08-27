@@ -698,3 +698,90 @@ def test_advise_passes_intent_themes_to_tag_pages(tmp_path, monkeypatch):
     tok_idx = fetched_slugs.index("tokens")
     arist_idx = fetched_slugs.index("aristocrats")
     assert tok_idx < arist_idx
+
+
+# ---------------------------------------------------------------------------
+# FP-018.2 — free-text intent (stated primer / pilot preferences)
+# ---------------------------------------------------------------------------
+
+def test_intent_free_text_fields_default_to_none_and_serialize():
+    intent = Intent(archetype="combo")
+    assert intent.stated is None and intent.pilot_preferences is None
+    blob = intent.to_dict()
+    assert blob["stated"] is None and blob["pilot_preferences"] is None
+    intent2 = Intent(stated="the primer", pilot_preferences="my words")
+    assert intent2.to_dict()["stated"] == "the primer"
+
+
+def test_free_text_theme_slugs_reads_prose_not_oracle_wording():
+    """The keyword table exists because staples' theme regexes are tuned
+    to ORACLE wording and mostly miss prose — 'I like sacrificing
+    creatures' must still land on the sacrifice slug."""
+    from commander_builder.intent import free_text_theme_slugs
+
+    slugs = free_text_theme_slugs(
+        "I like sacrificing creatures and making a million tokens")
+    assert slugs == ["tokens", "sacrifice"]
+    assert free_text_theme_slugs(None) == []
+    assert free_text_theme_slugs("just value and vibes") == []
+
+
+def test_free_text_slugs_stay_inside_the_theme_vocabulary():
+    """Every emitted slug must exist in staples._THEME_PATTERNS — the
+    advisor fetches /tags/<slug> pages for these, and an invented slug
+    would be a dead fetch outside the vocabulary the rest of the app
+    recognizes."""
+    from commander_builder.intent import _FREE_TEXT_THEME_KEYWORDS
+    from commander_builder.staples import _THEME_PATTERNS
+
+    known = {slug for _n, slug, _p, _t in _THEME_PATTERNS}
+    assert {slug for _kw, slug in _FREE_TEXT_THEME_KEYWORDS} <= known
+
+
+def test_soft_bias_slugs_put_derived_themes_before_free_text():
+    """The advisor caps tag pages at 4 and earlier slugs get the louder
+    voice — the list's own evidence (themes) must outrank what the free
+    text merely says."""
+    from commander_builder.intent import soft_bias_theme_slugs
+
+    intent = Intent(
+        themes=["landfall"],
+        stated="we sacrifice stuff",
+        pilot_preferences="I want tokens",
+    )
+    assert soft_bias_theme_slugs(intent) == ["landfall", "sacrifice", "tokens"]
+    assert soft_bias_theme_slugs(None) == []
+    # No double-listing when free text repeats a derived theme.
+    dup = Intent(themes=["tokens"], stated="tokens tokens tokens")
+    assert soft_bias_theme_slugs(dup) == ["tokens"]
+
+
+def test_default_round_fn_free_text_reaches_the_advisor_bias(tmp_path,
+                                                             monkeypatch):
+    """FP-018.2's advisor half: free-text-only intent flows into the
+    SAME --intent-themes soft-bias channel themes already use (never a
+    hard filter — the flag only adds tag pages to the pool ranking)."""
+    from commander_builder import improve
+
+    received_argv: list[list[str]] = []
+
+    def fake_acm(argv):
+        received_argv.append(list(argv))
+        return 0
+
+    _patch_acm_in_proposer_cli(monkeypatch, fake_acm)
+
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text(
+        "[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+        encoding="utf-8",
+    )
+    args = _make_minimal_args(
+        intent=Intent(archetype="midrange", themes=[],
+                      pilot_preferences="I love tokens")
+    )
+    improve._default_round_fn(deck, 1, args)
+
+    argv = received_argv[0]
+    assert "--intent-themes" in argv
+    assert argv[argv.index("--intent-themes") + 1] == "tokens"

@@ -419,6 +419,17 @@ def classify_swap_direction(
     ``neither`` — a fabricated result pointing at exactly the bias G3
     tests for. Those pairings are ``unknown`` and G3 skips them.
 
+    FREE TEXT IS NOT INTENT — for labeling (FP-018.2, 2026-08-27). An
+    ``Intent`` whose only content is ``stated`` / ``pilot_preferences``
+    (no themes, no tribe, no key wincons) is the same situation as
+    ``intent=None`` here: ``_matches_intent`` reads exactly those three
+    structured signals, so with all of them empty the intent-fit test
+    can never fire and every swap would again come back ``staple_ward``
+    or ``neither``. Without this guard, the adopt flow (which routinely
+    builds free-text-only intents) would silently move those pairings
+    from "unlabelable" into G3's population with a fabricated direction.
+    Structured signals drive labeling; free text never does.
+
     Returns a plain dict (JSON-serializable, stored verbatim in
     ``JudgeReport.swap_label`` and thus in the ``judge_report`` column)::
 
@@ -448,6 +459,20 @@ def classify_swap_direction(
     if intent is None:
         return {**label, "direction": "unknown",
                 "reason": "no intent supplied; intent-fit cannot be tested"}
+    has_structured_signal = bool(
+        (getattr(intent, "themes", None) or [])
+        or (getattr(intent, "tribal_type", None) or "").strip()
+        or (getattr(intent, "key_wincons", None) or [])
+    )
+    if not has_structured_signal:
+        # Free-text-only (or empty) intent — see the docstring: the
+        # intent-fit test cannot fire, so a computed label would be
+        # fabricated exactly like the intent=None case.
+        return {**label, "direction": "unknown",
+                "reason": (
+                    "intent carries no structured signals (themes / tribe "
+                    "/ key wincons); free text does not drive labeling"
+                )}
     if classifiable < SWAP_LABEL_MIN_CARDS:
         return {**label, "direction": "unknown",
                 "reason": (
@@ -564,17 +589,19 @@ def _intent_block(intent) -> str:
     deck toward the EDHREC average, which is the single most likely way
     this feature makes the app worse.
 
-    NOT WIRED IN PHASE 1: the owner's *written* primer. FP-016 §4 pins
-    the standard to ``intent.learn_intent`` — derived from the decklist
-    itself — and this block deliberately carries only that, so the judge
-    is anchored to the SAME intent the improve loop already protects
-    cards with rather than to a second, differently-derived one.
-    ``tests/fixtures/hazel_primer.md`` is the real stated-intent capture
-    waiting for whoever wires the richer anchor, and it also carries the
-    trap: an Archidekt ``description`` is a Quill Delta JSON *string*
-    (``{"ops": [{"insert": ...}]}``), not prose. Anything that reads a
-    primer must parse the Delta; the fixture's section 2 is labeled
-    DERIVED precisely so nobody mistakes the rendered text for the field.
+    FREE TEXT (FP-018.2, 2026-08-27 — the Phase-1 boundary this block
+    used to pin has moved, and the two boundary tests moved with it).
+    ``intent.stated`` (the deck's own primer, rendered from the source's
+    Quill Delta by ``primer.render_quill_delta`` — never the raw field,
+    see ``tests/fixtures/hazel_primer.md`` for the trap) and
+    ``intent.pilot_preferences`` (the adopting player's words) are
+    rendered as clearly labeled quoted sections. Both are clipped by
+    ``primer.clip_for_prompt`` — primers run long, and an unbounded one
+    would drown the changed-card diff the panel is there to judge; the
+    clip marks any truncation explicitly rather than silently shortening
+    the author's words. The grounding rule is stated to the judge in the
+    block itself: free text steers attention, it never establishes card
+    facts — those come only from the oracle text in this prompt.
     """
     if intent is None:
         return (
@@ -595,6 +622,21 @@ def _intent_block(intent) -> str:
     colors = list(getattr(intent, "color_identity", None) or [])
     if colors:
         parts.append(f"  color identity: {''.join(colors)}")
+    stated = (getattr(intent, "stated", None) or "").strip()
+    prefs = (getattr(intent, "pilot_preferences", None) or "").strip()
+    if stated or prefs:
+        from .primer import clip_for_prompt
+        parts.append(
+            "  (The free text below steers what to pay attention to. It "
+            "does not establish card facts — cards do only what the "
+            "oracle text in this prompt says they do.)"
+        )
+        if stated:
+            parts.append("  deck's own primer (the builder's words):")
+            parts.append(f'    """{clip_for_prompt(stated)}"""')
+        if prefs:
+            parts.append("  pilot preferences (the player's words):")
+            parts.append(f'    """{clip_for_prompt(prefs)}"""')
     return "\n".join(parts)
 
 

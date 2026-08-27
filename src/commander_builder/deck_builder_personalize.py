@@ -140,6 +140,8 @@ def lift_swaps(
     ci_ok: Callable[[str], bool],
     max_swaps: int = DEFAULT_MAX_LIFT_SWAPS,
     partner: Optional[str] = None,
+    prefer: Optional[Callable[[str], float]] = None,
+    protect: Optional[Callable[[str], bool]] = None,
 ) -> tuple[list[str], list[str], Optional[str]]:
     """Trade marginal seed cards for higher-synergy in-corpus candidates.
 
@@ -149,6 +151,24 @@ def lift_swaps(
     pairs with the primary, and leaving the partner out would silently
     under-rank half the pair's synergy package. Defaults to None so every
     single-commander caller is untouched.
+
+    ``prefer`` / ``protect`` (FP-018.3, 2026-08-27) exist so the adopt
+    flow can REUSE this pass instead of restating it:
+
+    * ``prefer(name) -> float`` reorders the candidate walk — higher
+      scores compete first for the bounded ``max_swaps`` budget; ties
+      keep the lift ranking (stable sort). A SOFT bias by construction:
+      order is ALL it changes — every gate below (color identity,
+      singleton, like-for-like role, "must out-synergize the card it
+      ousts") still applies, so a preferred candidate that doesn't fit
+      is still skipped, and nothing is ever filtered out for being
+      un-preferred.
+    * ``protect(name) -> bool`` marks cards that must never be swapped
+      OUT (adopt's primer-named identity cards) — the same idiom as
+      ``apply_collection_bias``'s ``protect``. A protected card still
+      holds its role slot; it just can't be the one traded away.
+
+    Both default to None, leaving every existing caller byte-identical.
 
     Returns ``(new_nonlands, swap_notes, skipped_reason)``. When the corpus
     is unavailable or below ``lift_analysis``'s floor we return the input
@@ -195,6 +215,11 @@ def lift_swaps(
     )
     if not candidates:
         return nonlands, [], "no candidate cleared the lift bar"
+    if prefer is not None:
+        # Stable sort: equal preference keeps the lift ranking, so with a
+        # constant scorer this is a no-op and the bias stays soft.
+        candidates = sorted(
+            candidates, key=lambda c: -prefer(c["card"]))
 
     score = synergy_scorer(matrix, bracket, deck_keys)
     working = list(nonlands)
@@ -214,10 +239,12 @@ def lift_swaps(
         if not ci_ok(cand_name):
             continue
         cand_role = role_of(cand_name)
-        # Same-role, still-present, not-yet-swapped trade targets.
+        # Same-role, still-present, not-yet-swapped, unprotected trade
+        # targets.
         same_role = [
             n for n in working
             if name_key(n) not in swapped_out and role_of(n) == cand_role
+            and not (protect is not None and protect(n))
         ]
         if not same_role:
             # No like-for-like slot → skip rather than distort role counts.

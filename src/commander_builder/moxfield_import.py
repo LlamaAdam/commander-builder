@@ -1103,6 +1103,10 @@ def import_deck(
     """
     lane = resolve_source(url_or_id, source)
     provenance: list[str] = []
+    # The lane the deck ACTUALLY came from (the Moxfield branch falls back
+    # to Archidekt below) — the primer sidecar keys on this, not on the
+    # lane that was asked for.
+    lane_used = lane
 
     if lane == SOURCE_ARCHIDEKT:
         deck_json, source_id, provenance = _fetch_archidekt(url_or_id)
@@ -1136,6 +1140,7 @@ def import_deck(
                 file=sys.stderr, flush=True,
             )
             deck_json, source_id, provenance = _fetch_archidekt(archidekt)
+            lane_used = SOURCE_ARCHIDEKT
 
     fmt = (deck_json.get("format") or "").lower()
     if fmt and fmt != "commander":
@@ -1209,6 +1214,39 @@ def import_deck(
     # soon-discarded render.
     dck = stamp_name_preserving_display(dck, out_path.stem)
     out_path.write_text(dck, encoding="utf-8")
+
+    # FP-018.1 (2026-08-27): the deck's primer, stored as a sidecar
+    # (`<stem>.primer.md`) beside the FINAL deck path — after every
+    # uniquify/overwrite decision, so it can only ever accompany the file
+    # this import actually wrote. Archidekt lane only: its `description`
+    # shape is capture-pinned (Quill Delta, tests/fixtures/hazel_primer.md);
+    # Moxfield's has no capture in this repo, and unverified shapes stay
+    # untouched rather than guessed (the `_entry_name` discipline). The
+    # `.dck` itself is never touched — primers are paragraphs, not
+    # `[metadata]` directives, and the format belongs to Forge. A sidecar
+    # I/O failure is reported but never unwinds the import that already
+    # succeeded.
+    if lane_used == SOURCE_ARCHIDEKT and deck_json.get("description"):
+        from .primer import (
+            primer_word_count,
+            read_primer_sidecar,
+            write_primer_sidecar,
+        )
+        try:
+            sidecar = write_primer_sidecar(
+                out_path, deck_json.get("description"))
+        except OSError as exc:
+            sidecar = None
+            print(
+                f"  WARN: primer sidecar could not be written "
+                f"({type(exc).__name__}: {exc}); the deck imported fine.",
+                file=sys.stderr, flush=True,
+            )
+        if sidecar is not None:
+            # Word count over the TEXT read-back — the card-links block
+            # is machine data, not the author's words.
+            words = primer_word_count(read_primer_sidecar(out_path) or "")
+            print(f"  primer captured ({words} words) -> {sidecar.name}")
 
     boards = deck_json.get("boards", {})
     cmdr_count = sum(c.get("quantity", 0) for c in boards.get("commanders", {}).get("cards", {}).values())

@@ -1194,3 +1194,93 @@ def test_score_ordered_fallback_failure_returns_plain_pool(monkeypatch):
     from commander_builder.deck_builder import _score_ordered_fallback
     names = ["B", "A"]
     assert _score_ordered_fallback(names, "X", 3) == ["B", "A"]
+
+
+# ==========================================================================
+# FP-018.3 (2026-08-27) — lift_swaps' adopt seams: `prefer` + `protect`
+# ==========================================================================
+#
+# Two optional parameters added so `adopt` can REUSE the like-for-like
+# pass instead of restating it. Both default to None; the pinned
+# properties are (a) protect wins over the swap the pass would otherwise
+# make, and (b) prefer only reorders — it can never make an unfittable
+# candidate land, and a constant scorer is a no-op.
+
+
+def test_lift_swap_protect_never_cuts_the_protected_card():
+    """Unprotected, the marginal ramp card is exactly what the pass cuts
+    (test_lift_swap_replaces_marginal_same_role). Protected, it must
+    survive — the pass may trade a DIFFERENT same-role card the
+    candidate genuinely beats, but the protected name is never the
+    out."""
+    nonlands = ["Good Ramp", "Marginal Ramp", "A Draw"]
+    matrix = _lift_matrix(_LIFT_COUNTS, _LIFT_PAIRS, _LIFT_NAMES)
+    out, notes, skipped = personalize.lift_swaps(
+        nonlands, commander="Krenko, Mob Boss", bracket=3, matrix=matrix,
+        reserved_keys=set(), role_of=lambda nm: _LIFT_ROLES.get(nm, "other"),
+        ci_ok=lambda nm: True,
+        protect=lambda nm: nm == "Marginal Ramp",
+    )
+    assert "Marginal Ramp" in out          # the protected card survives
+    assert skipped is None
+    assert all("swapped Marginal Ramp" not in n for n in notes)
+    # And when EVERY same-role slot is protected there is no legal out,
+    # so no swap happens at all.
+    out2, notes2, _ = personalize.lift_swaps(
+        nonlands, commander="Krenko, Mob Boss", bracket=3, matrix=matrix,
+        reserved_keys=set(), role_of=lambda nm: _LIFT_ROLES.get(nm, "other"),
+        ci_ok=lambda nm: True,
+        protect=lambda nm: nm in ("Marginal Ramp", "Good Ramp"),
+    )
+    assert out2 == nonlands
+    assert notes2 == []
+
+
+def test_lift_swap_constant_prefer_is_a_noop():
+    """Soft by construction: a scorer that cannot separate candidates
+    must leave the pass byte-identical to no scorer at all (the sort is
+    stable over the lift ranking)."""
+    nonlands = ["Good Ramp", "Marginal Ramp", "A Draw"]
+    matrix = _lift_matrix(_LIFT_COUNTS, _LIFT_PAIRS, _LIFT_NAMES)
+    base = personalize.lift_swaps(
+        nonlands, commander="Krenko, Mob Boss", bracket=3, matrix=matrix,
+        reserved_keys=set(), role_of=lambda nm: _LIFT_ROLES.get(nm, "other"),
+        ci_ok=lambda nm: True,
+    )
+    flat = personalize.lift_swaps(
+        nonlands, commander="Krenko, Mob Boss", bracket=3, matrix=matrix,
+        reserved_keys=set(), role_of=lambda nm: _LIFT_ROLES.get(nm, "other"),
+        ci_ok=lambda nm: True,
+        prefer=lambda nm: 0.0,
+    )
+    assert flat == base
+
+
+def test_lift_swap_prefer_reorders_which_candidate_wins_the_budget():
+    """Two viable candidates, budget of one: prefer decides which one
+    competes first. Every fit gate still applies — this is ordering,
+    not filtering."""
+    names = dict(_LIFT_NAMES)
+    names["skirk prospector"] = "Skirk Prospector"
+    counts = dict(_LIFT_COUNTS)
+    counts["skirk prospector"] = 4
+    pairs = {k: dict(v) for k, v in _LIFT_PAIRS.items()}
+    # The second candidate mirrors Goblin Bombardment's support exactly,
+    # so on raw lift either could land; prefer breaks the tie.
+    pairs["krenko, mob boss"] = {"skirk prospector": 3}
+    pairs["good ramp"]["skirk prospector"] = 3
+
+    nonlands = ["Good Ramp", "Marginal Ramp", "A Draw"]
+    matrix = _lift_matrix(counts, pairs, names)
+    roles = dict(_LIFT_ROLES)
+    roles["Skirk Prospector"] = "ramp"
+
+    out, notes, _skipped = personalize.lift_swaps(
+        nonlands, commander="Krenko, Mob Boss", bracket=3, matrix=matrix,
+        reserved_keys=set(), role_of=lambda nm: roles.get(nm, "other"),
+        ci_ok=lambda nm: True, max_swaps=1,
+        prefer=lambda nm: 1.0 if nm == "Skirk Prospector" else 0.0,
+    )
+    assert "Skirk Prospector" in out
+    assert "Goblin Bombardment" not in out
+    assert len(notes) == 1

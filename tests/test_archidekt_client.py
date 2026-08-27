@@ -830,3 +830,28 @@ def test_unpinned_two_faced_layouts_pass_through_untouched():
                     [{"name": "Bonecrusher Giant"}, {"name": "Stomp"}])
     assert ac._entry_name(adventure) == "Bonecrusher Giant"
     assert ac._TWO_FACED_LAYOUTS == {"transform", "modal_dfc"}
+
+
+# ---------------------------------------------------------------------------
+# FP-018.1 (2026-08-27) — `description` passes through the adapter RAW
+# ---------------------------------------------------------------------------
+
+def test_to_deck_json_passes_the_description_through_raw(real_deck):
+    """The client stays a client: `to_deck_json` hands the Quill Delta
+    string through verbatim (rendering is `primer`'s job, at the one
+    place that decides whether a sidecar gets written)."""
+    out = ac.to_deck_json(real_deck)
+    assert out["description"] == real_deck["description"]
+    # It really is the raw field, not a render.
+    assert out["description"].startswith('{"ops"')
+
+
+def test_to_deck_json_omits_an_empty_description(real_deck):
+    """No description key when the deck has none, so consumers can key
+    on plain truthiness (mirrors the bracket key's convention)."""
+    for empty in (None, ""):
+        deck = dict(real_deck, description=empty)
+        assert "description" not in ac.to_deck_json(deck)
+    deck = dict(real_deck)
+    del deck["description"]
+    assert "description" not in ac.to_deck_json(deck)

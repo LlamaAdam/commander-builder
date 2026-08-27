@@ -130,6 +130,9 @@ COMMANDS: tuple[Command, ...] = (
     Command("judge", "commander-judge", "deck_judge:main", "analyze",
             "Blinded LLM panel on two decks' construction (an OPINION; "
             "Forge decides which deck is better)."),
+    Command("adopt", "commander-adopt", "adopt:main", "analyze",
+            "Understand an imported deck (primer vs. list) and get small "
+            "preference-steered swap suggestions (polish-capped)."),
     # -- web --------------------------------------------------------------
     Command("builder-desktop", "commander-builder-desktop", "desktop:main", "web",
             "Run Commander Builder as a native desktop window."),

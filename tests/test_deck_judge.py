@@ -886,12 +886,20 @@ def test_a_key_routes_to_the_sdk_with_no_sampling_params(monkeypatch):
 _PRIMER = Path(__file__).parent / "fixtures" / "hazel_primer.md"
 
 
-def test_the_real_primer_is_a_quill_delta_not_prose():
+def test_the_real_primer_is_a_quill_delta_and_the_renderer_reads_it():
     """``tests/fixtures/hazel_primer.md`` is the owner's real stated
-    intent, kept for this feature. It carries the trap that any future
+    intent, kept for this feature. It carries the trap that any
     primer-reading code has to survive: Archidekt's ``description`` is a
     Quill Delta JSON *string*, and the readable section of the fixture is
-    labeled DERIVED so nobody mistakes it for the field."""
+    labeled DERIVED so nobody mistakes it for the field.
+
+    WHY THIS TEST CHANGED (FP-018.1, 2026-08-27): it used to only pin
+    the fixture's shape, because nothing read the field yet. The trap
+    now has a designated survivor — ``primer.parse_primer`` — so the
+    same capture doubles as its test vector: the renderer must take the
+    boundary's own bytes and produce the player's words."""
+    from commander_builder.primer import parse_primer
+
     text = _PRIMER.read_text(encoding="utf-8")
     delta_line = next(
         line for line in text.splitlines() if line.startswith('{"ops"')
@@ -899,18 +907,61 @@ def test_the_real_primer_is_a_quill_delta_not_prose():
     delta = json.loads(delta_line)
     assert isinstance(delta["ops"][0]["insert"], str)
     assert "DERIVED" in text
-    # The player's own words name the plan the judge would be measured
+
+    parsed = parse_primer(delta_line)
+    assert parsed.was_delta is True
+    # This capture is one string op with no embeds: the render IS the
+    # insert, and there are no card-links to trust for auto-protection.
+    assert parsed.text == delta["ops"][0]["insert"]
+    assert parsed.card_links == []
+    # The player's own words name the plan the judge is measured
     # against — sacrifice + tokens + drain, not generic Golgari goodstuff.
-    rendered = delta["ops"][0]["insert"]
-    assert "sacrifice theme" in rendered and "Squirrel" in rendered
+    assert "sacrifice theme" in parsed.text and "Squirrel" in parsed.text
 
 
-def test_phase_1_anchors_on_learned_intent_not_the_written_primer(pairing):
-    """The Phase 1 boundary, pinned so it is a decision rather than an
-    oversight: FP-016 §4 makes ``intent.learn_intent`` the standard, so
-    the prompt carries the DERIVED intent and no free-text primer. When
-    someone wires the richer anchor, this test is the thing that should
-    change."""
+def test_free_text_intent_reaches_the_prompt_labeled_and_grounded(pairing):
+    """The Phase 1 boundary, moved deliberately (FP-018.2, 2026-08-27).
+
+    This test used to pin the OPPOSITE contract — "the prompt carries
+    the DERIVED intent and no free-text primer" — and named itself as
+    the thing to change when someone wired the richer anchor. FP-018.2
+    is that wiring: ``Intent.stated`` (the deck's own primer) and
+    ``Intent.pilot_preferences`` (the adopter's words) now flow into the
+    judge's intent block, clearly labeled, with the grounding rule
+    stated in the prompt itself (free text steers attention; card facts
+    still come only from supplied oracle text)."""
+    from commander_builder.intent import Intent
+
+    a, b = pairing
+    learned = Intent(
+        archetype="combo",
+        themes=["sacrifice", "tokens"],
+        key_wincons=["Chatterfang, Squirrel General"],
+        tribal_type="Squirrel",
+        stated="This started as the Precon and leans into sacrifice.",
+        pilot_preferences="I love making a million squirrels.",
+    )
+    fn = _scripted([_answer("B")] * 3 + [_answer("A")] * 3)
+    judge_pairing(a, b, intent=learned, judge_fn=fn, lookup=_no_lookup)
+    user = fn.calls[0][1]
+
+    # The derived anchor is still there — free text joins it, it does
+    # not replace it.
+    assert "archetype: combo" in user
+    assert "themes: sacrifice, tokens" in user
+    # Both free-text fields, labeled for what they are.
+    assert "deck's own primer (the builder's words):" in user
+    assert "This started as the Precon" in user
+    assert "pilot preferences (the player's words):" in user
+    assert "I love making a million squirrels." in user
+    # The grounding rule rides along in the block itself.
+    assert "does not establish card facts" in user
+
+
+def test_without_free_text_the_intent_block_is_unchanged(pairing):
+    """The other half of the moved boundary: an Intent with no free text
+    renders exactly the Phase-1 block — no labels, no quote sections —
+    so every pre-FP-018 caller's prompts are unchanged."""
     from commander_builder.intent import Intent
 
     a, b = pairing
@@ -925,9 +976,29 @@ def test_phase_1_anchors_on_learned_intent_not_the_written_primer(pairing):
     user = fn.calls[0][1]
 
     assert "archetype: combo" in user
-    assert "themes: sacrifice, tokens" in user
-    # No slice of the owner's written primer reaches the prompt today.
+    assert "deck's own primer" not in user
+    assert "pilot preferences" not in user
     assert "Precon" not in user and "cryptolith rite" not in user.lower()
+
+
+def test_long_free_text_is_truncated_with_an_explicit_marker(pairing):
+    """Primers can run pages; the cap must never be a silent cut — a
+    shortened 'stated intent' with no marker misrepresents the author."""
+    from commander_builder.intent import Intent
+    from commander_builder.primer import FREE_TEXT_PROMPT_CHAR_CAP
+
+    a, b = pairing
+    long_primer = "sacrifice everything " * 400  # ~8.4k chars > cap
+    learned = Intent(archetype="combo", themes=["sacrifice"],
+                     stated=long_primer)
+    fn = _scripted([_answer("B")] * 6)
+    judge_pairing(a, b, intent=learned, judge_fn=fn, lookup=_no_lookup)
+    user = fn.calls[0][1]
+
+    assert "…[TRUNCATED —" in user
+    assert f"{FREE_TEXT_PROMPT_CHAR_CAP} of" in user
+    # The whole raw primer must NOT be in the prompt.
+    assert long_primer.strip() not in user
 
 
 # --------------------------------------------------------------------------- #
@@ -1104,6 +1175,37 @@ def test_no_intent_means_no_label_not_staple_ward():
     assert label["direction"] == "unknown"
     assert "no intent" in label["reason"]
     assert label["staple_share"] is None
+
+
+def test_free_text_only_intent_is_still_unlabeled(tmp_path):
+    """FP-018.2 guard: a free-text-only Intent (adopt's common shape —
+    primer text and pilot preferences, no themes/tribe/wincons) is the
+    intent=None situation wearing an object: the structured intent-fit
+    test can never fire, so a computed label would be fabricated. It
+    must stay OUT of G3's population — free text does not drive
+    labeling."""
+    from commander_builder.intent import Intent
+
+    a_text, b_text, lookup = _swap(
+        ["Sol Ring", "Arcane Signet"],
+        oracles={"Sol Ring": {"type_line": "Artifact",
+                              "oracle_text": "{T}: Add {C}{C}."}},
+    )
+    label = classify_swap_direction(
+        a_text, b_text,
+        intent=Intent(stated="I am all about squirrel tokens",
+                      pilot_preferences="tokens please"),
+        lookup=lookup,
+    )
+    assert label["direction"] == "unknown"
+    assert "free text does not drive labeling" in label["reason"]
+    # ...while the SAME free text plus one structured signal labels fine.
+    labeled = classify_swap_direction(
+        a_text, b_text,
+        intent=Intent(themes=["tokens"], stated="I am all about tokens"),
+        lookup=lookup,
+    )
+    assert labeled["direction"] == "staple_ward"
 
 
 def test_a_single_card_swap_is_unknown_not_a_100_percent_share():
