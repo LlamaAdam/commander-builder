@@ -10,6 +10,70 @@
 
 # ── ACTIVE / WORK NEEDED ──────────────────────────────────────────────
 
+# FP-018 — Adopt a deck: primer-guided understanding + gentle personalization
+
+Owner, 2026-08-27: "the primer could let someone use a deck and
+understand it and do small modifications on that deck list to what they
+like doing rather than a crazy overhaul."
+
+The improve loop optimizes; this flow ADOPTS. A player finds a deck
+with a primer, and the app helps them (1) understand it and (2) make it
+theirs — small, identity-preserving changes steered by what THEY like,
+with the overhaul path structurally off the table.
+
+## Why the pieces already exist
+
+| Need | Existing seam |
+|---|---|
+| Primer arrives with the deck | `archidekt_client` captures `description` (Quill Delta JSON — parser needed, shape pinned by `tests/fixtures/hazel_primer.md`) |
+| "Small, not crazy" | `change_budget` polish tier; the rebuild tier is ALREADY opt-in (decision C4) |
+| "Don't touch the identity" | `Protect=` + `intent.key_wincons` auto-protection; politics guard |
+| "What the pilot likes" | `intent` themes soft-bias the advisor's candidate pool; `deck_builder_personalize` (FP-014.3) already does like-for-like preference passes under the 99/CI/singleton invariants |
+| "Is this change true to the deck" | `deck_judge` (observe-only) judges against intent — needs the free-text field its boundary tests were built to force a decision on |
+
+## Slices
+
+**018.1 — Primer ingestion.** A Quill-Delta→text parser (one op-walk;
+the Hazel fixture is the test vector); imports store the rendered
+primer beside the deck (sidecar `<deck>.primer.md`, not `[metadata]` —
+primers are paragraphs, not directives); `commander import` reports
+"primer captured (N words)".
+
+**018.2 — Free-text intent.** `Intent` gains `stated` (the deck's
+primer) and `pilot_preferences` (the adopter's own words). Both flow
+into the judge's intent block — updating the two tests that pin the
+Phase-1 boundary, which is the contract change they exist to force —
+and into the advisor as a soft bias, exactly as themes do today.
+Grounding rule unchanged: free text steers ATTENTION, never invents
+card facts; every card named still resolves through the oracle cache.
+
+**018.3 — `commander adopt <deck>`.** Two outputs, in order:
+1. UNDERSTAND: a grounded explanation — the primer's plan cross-checked
+   against the actual list (engine pieces, role distribution, what the
+   primer says to keep/mulligan, where the wincons live), flagging
+   where primer and list disagree.
+2. PERSONALIZE: swap suggestions hard-capped at the polish tier,
+   primer-named core cards auto-Protected, candidates biased by
+   pilot_preferences via the FP-014.3 passes generalized to imported
+   decks. Every suggestion says which preference it serves and what it
+   preserves. The rebuild tier is not reachable from this flow at all.
+
+**018.4 — Primer corpus (supporting study).** Batch-capture primer'd
+decks via the CI capture lane; distill how real primers explain decks
+(what a good explanation covers) and where real lists diverge from
+ROLE_TARGETS — evidence-backed patches only, per the corpus-norms
+discipline (C5 stays parked until its A/B).
+
+## Non-goals
+
+- No sim gating: adopt is a comprehension-and-taste flow; Forge
+  verdicts remain available but are never required.
+- No free-text card invention: the explainer and suggester cite only
+  cards present in the list or resolved via the oracle cache.
+- No overhaul: if a deck is genuinely misbuilt for its primer, adopt
+  SAYS so and points at the improve loop; it does not become it.
+
+
 # FP-017 — cEDH tournament results as a fourth corpus source (edhtop16)
 
 **Status (2026-08-05): importer SHIPPED. Exploratory data source, NOT a
