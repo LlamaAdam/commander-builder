@@ -1,0 +1,2815 @@
+{
+ "_provenance": {
+  "site": "archidekt",
+  "source": "https://archidekt.com/api/decks/1794593/",
+  "rank": 107,
+  "ordering": "-viewCount (the API exposes no like count)",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 1794593,
+ "name": "All Free EDH Sac Outlets",
+ "viewCount": 57322,
+ "description": "{\"ops\":[{\"insert\":\"All repeatable sac outlets in EDH that do not cost mana. I am deliberately excluding effects that can destroy your own stuff. Additionally, I know that lands like High Market aren't technically free sac outlets but I decided to include them anyway.\\n\\nUpdated 10/16/22 with Warhammer 40k Commander Decks/Unfinity\\n\\nI've become less invested in MtG since the last update. If anyone wants to maintain this list, send me a message and I will put a link to yours! \\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Daretti, Ingenious Iconoclast",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Daretti, Scrap Savant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Dark Heart of the Wood",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Dark Privilege",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Darkheart Sliver",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Dark Supplicant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Deathspore Thallid",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Defiler of Souls",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Defiant Salvager",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Demonic Taskmaster",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Demonmail Hauberk",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Desecration Elemental",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Desolation",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Destructive Flow",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Devouring Strossus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Devouring Swarm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Diamond Kaleidoscope",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Diamond Valley",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Dimir House Guard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Doom Foretold",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Doomgape",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Drinker of Sorrow",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Dross Hopper",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ebon Praetor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Dwarven Weaponsmith",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Elder Spawn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Eldrazi Monument",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Energy Flux",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantments"
+   ],
+   "name": "Endless Wurm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Elven Palisade",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Elvish Farmer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantments"
+   ],
+   "name": "Enchanter's Bane",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantments"
+   ],
+   "name": "Enigmatic Incarnation",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Exalted Dragon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Excavator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Extruder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Fain, the Broker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Falkenrath Torturer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantments"
+   ],
+   "name": "Faith Healer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Falkenrath Aristocrat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Fallen Angel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Fault Riders",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Fanatical Devotion",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Feed the Pack",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Feasting Troll King",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Flamewright",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Flesh-Eater Imp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Fortitude",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Fireblade Artist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Fiend of the Shadows",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Gargantuan Gorilla",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Garruk Relentless // Garruk, the Veil-Cursed",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantments"
+   ],
+   "name": "Gatherer of Graces",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Glacial Crevasses",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Glimmer Bairn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Gnathosaur",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Goblin Bombardment",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Goblin Chirurgeon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Goblin Clearcutter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Goblin Lookout",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Goblin Sledder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Goblin Trashmaster",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Goblin Turncoat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Goblin Welder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Grafted Wargear",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Greater Gargadon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Grimgrin, Corpse-Born",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Greven, Predator Captain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Greater Good",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Grinding Station",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Hazoret's Favor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Hearthcage Giant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Hell's Caretaker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Heroism",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Horror of Horrors",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "High Market",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Ib Halfheart, Goblin Tactician",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Atogatog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Professional Face-Breaker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Stimulus Package",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Cultist of the Absolute",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Swashbuckler Extraordinaire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ziatora, the Incinerator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Anhelo, the Painter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Baba Lysaga, Night Witch",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Bellowing Mauler",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Gut, True Soul Zealot",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Industrial Advancement",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Maestros Ascendancy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Shadowheart, Dark Justiciar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Sivriss, Nightmare Speaker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Minsc & Boo, Timeless Heroes",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Tamiyo's Journal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Strefan, Maurer Progenitor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Biolume Egg // Biolume Serpent",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Dreadfeast Demon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Wedding Security",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Bloodcrazed Socialite",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Vodalian Hexcatcher",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Braids, Arisen Nightmare",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Wilhelt, the Rotcleaver",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ravenous Rotbelly",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Gilded Goose",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Dire Fleet Warmonger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Gate to Phyrexia",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Immersturm Predator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Inevitable End",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Infernal Denizen",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Food Chain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Kataki, War's Wage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Jinxed Idol",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Junkyo Bell",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Jeweled Spirit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Jinxed Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Jungle Patrol",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Keldon Twilight",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Keskit, the Flesh Sculptor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Koma, Cosmos Serpent",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Knight of the Reliquary",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Krark-Clan Ironworks",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Krark-Clan Stoker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Krark-Clan Grunt",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Krark-Clan Shaman",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Korvold, Fae-Cursed King",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Kuldotha Forgemaster",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Leviathan",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Kuon, Ogre Ascendant // Kuon's Essence",
+   "layout": "flip"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Lich's Tomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Lava Runner",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Lake of the Dead",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Lich",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Kykar, Wind's Fury",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Lesser Gargadon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Liege of the Pit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Life Chisel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Lifespinner",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Lithatog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Liliana of the Veil",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Liliana, Dreadhorde General",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Lonis, Cryptozoologist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Lord of the Pit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Lowland Oaf",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Marrow-Gnawer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Mana Vortex",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Maraleaf Rider",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Marsh Flitter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Metalwork Colossus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Maw of the Obzedat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Megatog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Marsh Lurker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Martyr's Cause",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Molder Slug",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Mogg Raider",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Minion of Leshrac",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Morkrut Necropod",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Nantuko Husk",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Mycologist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Oxidda Daredevil",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Necrotic Plague",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Nettlevine Blight",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Orcish Bloodpainter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Nim Shambler",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Need for Speed",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Overgrown Estate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Nemata, Grove Guardian",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Nature's Wrath",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Oath of Lim-D\u00fbl",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Orc General",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Orcish Mechanics",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Orcish Vandal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Orcish Lumberjack",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Painwracker Oni",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantments"
+   ],
+   "name": "Phantatog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Pallid Mycoderm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Phyrexian Ghoul",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Prossh, Skyraider of Kher",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Razaketh, the Foulblooded",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Reaper of Flight Moonsilver",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ravenous Demon // Archdemon of Greed",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Plaguemaw Beast",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Piston Sledge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Puppet Conjurer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Rakdos the Defiler",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Possessed Portal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Phyrexian Negator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Psychic Vortex",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ravenous Vampire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Polar Kraken",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Reclamation",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Raiding Party",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Psychic Allergy",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Priest of Yawgmoth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Rite of Belzenlok",
+   "layout": "saga"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Retrofitter Foundry",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Phyrexian Altar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Prime Speaker Vannifar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Priest of Forgotten Gods",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Rankle, Master of Pranks",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Phyrexian Soulgorger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Phyrexian Plaguelord",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ravenous Baloth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Ravenous Intruder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Phyrexian Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Rootwater Alligator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Shadowborn Demon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Seething Pathblazer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Sekki, Seasons' Guide",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Shisato, Whispering Hunter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Serendib Djinn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Skirk Prospector",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Silvar, Devourer of the Free",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Sepulcher Ghoul",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Slobad, Goblin Tinkerer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Smothering Abomination",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Smokestack",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Soldevi Adnate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Sling-Gang Lieutenant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Springjack Pasture",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Spawning Pit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Spitting Spider",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Soldevi Sage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Sorin, Imperious Bloodlord",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Sylvan Safekeeper",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Stronghold Assassin",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Stoneshaker Shaman",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Tainted Aether",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Stormwatch Eagle",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Squandered Resources",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Surtland Flinger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Vampire Aristocrat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Tooth and Claw",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Tar Pitcher",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Vampire Warlord",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Varolz, the Scar-Striped",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Valleymaker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Thermopod",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Teysa, Orzhov Scion",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Torpid Moloch",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Thermal Navigator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Thaumatog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Trenching Steed",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Troubled Healer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Territorial Dispute",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Thing from the Deep",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Thallid Devourer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Thelonite Monk",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Vaevictis Asmadi, the Dire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Thalia's Geistcaller",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "The Gitrog Monster",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Towering Titan",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Throne of Geth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Tevesh Szat, Doom of Fools",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Tergrid, God of Fright // Tergrid's Lantern",
+   "layout": "modal_dfc"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Utopia Mycon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Thallid Germinator",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Vermin Gorger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Tiger-Tribe Hunter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Vitaspore Thallid",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Wand of the Elements",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Wayward Angel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Vile Consumption",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Viscerid Drone",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Vraska, Golgari Queen",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Vish Kal, Blood Arbiter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Viscera Seer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Whisper, Blood Liturgist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Yahenni, Undying Partisan",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Xathrid Demon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "World Queller",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Yawgmoth Demon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Wicked Wolf",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Woe Strider",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Yawgmoth, Thran Physician",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Zuran Orb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Skirk Alarmist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "The Golden Throne",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Illuminor Szeras",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Deathless Behemoth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Despotic Scepter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Abhorrent Overlord",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Aggressive Mining",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Akki Avalanchers",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Aether Barrier",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Altar of Dementia",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Animal Boneyard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Anowon, the Ruin Sage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Apocalypse Demon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Arcbound Ravager",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Archdemon of Unx",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Arcum Dagsson",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Arguel's Blood Fast // Temple of Aclazotz",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Atog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ashnod's Altar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Army Ants",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Audacious Reshapers",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Asmoranomardicadaistinaculdacar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Aura Fracture",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Enchantments"
+   ],
+   "name": "Auratog",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Ayara, First of Locthwain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Blood Bairn",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Bloodthrone Vampire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Basal Sliver",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Blood Funnel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Blasting Station",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Bloodshot Cyclops",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Bog Elemental",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Bog Glider",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Blighted Shaman",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Betrothed of Fire",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Black Carriage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Barrage Ogre",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Bloodflow Connoisseur",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Bogardan Dragonheart",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Bloodsoaked Altar",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Bolas's Citadel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Bound by Moonsilver",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Breya's Apprentice",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Brine Shaman",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Brutal Suppression",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Burning Sands",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Butcher of the Horde",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Cabal Therapist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Caribou Range",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Carrion Feeder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Cartel Aristocrat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Cateran Overlord",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tokens"
+   ],
+   "name": "Chitterspitter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Call to the Grave",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Clickslither",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Coastal Hornclaw",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Consecrated by Blood",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Coffin Puppets",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Contamination",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Corpse Blockade",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Coral Reef",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Cosmic Larva",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Crovax the Cursed",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Cruel Reality",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Lands"
+   ],
+   "name": "Custody Battle",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Culling Dais",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Damping Engine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Daemogoth Woe-Eater",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Volrath's Curse",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Jerren, Corrupted Bishop // Ormendahl, the Corrupter",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Scrap Welder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Multiple"
+   ],
+   "name": "Spirit-Sister's Call",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Artifacts"
+   ],
+   "name": "Oni-Cult Anvil",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Tribute to Horobi // Echo of Death's Wail",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Minsc, Beloved Ranger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creatures"
+   ],
+   "name": "Fallen Ideal",
+   "layout": "normal"
+  }
+ ]
+}

@@ -1,0 +1,615 @@
+{
+ "_provenance": {
+  "site": "archidekt",
+  "source": "https://archidekt.com/api/decks/3887/",
+  "rank": 73,
+  "ordering": "-viewCount (the API exposes no like count)",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 3887,
+ "name": "Reki, the History of Kamigawa: Legendfall",
+ "viewCount": 69264,
+ "description": "{\"ops\":[{\"insert\":\"Date of creation:\\n2015\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nTheme: \\nLegends matter\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nPower:\\nVery resilient and hard to stop once started. Could win on turn 8, often by 10\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nWin conditions\\nWins with creature beats, usually on a big storm-like turn or off a \"},{\"insert\":{\"card-link\":\"Genesis Wave\"}},{\"insert\":\" or \"},{\"insert\":{\"card-link\":\"Kamahl's Druidic Vow\"}},{\"insert\":\"-type spell \"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nRules and notes:\\nOnly legendary creatures\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nChangelog:\\n2020 01-11 add \"},{\"insert\":{\"card-link\":\"Shadowspear\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Umezawa's Jitte\"}},{\"insert\":\" (-1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 01-11 add \"},{\"insert\":{\"card-link\":\"Nylea, Keen-Eyed\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Omnath, Locus of Mana\"}},{\"insert\":\" (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 01-11 add \"},{\"insert\":{\"card-link\":\"Arasta of the Endless Web\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Polukranos, World Eater\"}},{\"insert\":\" (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 01-11 add \"},{\"insert\":{\"card-link\":\"Nyx Lotus\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Alhammarret's Archive\"}},{\"insert\":\" (-1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 01-11 add \"},{\"insert\":{\"card-link\":\"Renata, Called to the Hunt\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Rishkar, Peema Renegade\"}},{\"insert\":\" (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 02-23 add \"},{\"insert\":{\"card-link\":\"Mana Crypt\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Search for Tomorrow\"}},{\"insert\":\" Trying to diversify power of my decks. This will be my one Crypt deck (-1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 03-19 add \"},{\"insert\":{\"card-link\":\"Glimpse of Nature\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Nyx Lotus\"}},{\"insert\":\" Not happy with Lotus, Glimpse just generally seems more consistent (-3)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 04-14 add \"},{\"insert\":{\"card-link\":\"Kogla, the Titan Ape\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Yorvo, Lord of Garenbrig\"}},{\"insert\":\" Yorv is probably the most expendable body in the deck (+3)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 04-14 add \"},{\"insert\":{\"card-link\":\"Vivien, Monsters' Advocate\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Lightning Greaves\"}},{\"insert\":\" Vivien is a perfect fit, though I'll miss Greaves (+3)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 06-18 add \"},{\"insert\":{\"card-link\":\"Jolrael, Mwonvuli Recluse\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Syr Faren, the Hengehammer\"}},{\"insert\":\" Jolrael is just better (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 08-25 add \"},{\"insert\":{\"card-link\":\"Veil of Summer\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Vivien, Monsters' Advocate\"}},{\"insert\":\" Vivien was surprisingly mediocre (-4)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 10-01 add \"},{\"insert\":{\"card-link\":\"Ashaya, Soul of the Wild\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Surrak, the Hunt Caller\"}},{\"insert\":\" Haste isn't that good here (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 11-16 add \"},{\"insert\":{\"card-link\":\"War Room\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Homeward Path\"}},{\"insert\":\" Nothing I care too much if they steal but Reki (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 11-16 add \"},{\"insert\":{\"card-link\":\"Kodama of the East Tree\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Finale of Devastation\"}},{\"insert\":\" Tutors aren't much fun (+4)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2020 11-16 add \"},{\"insert\":{\"card-link\":\"Utopia Sprawl\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Rhonas's Monument\"}},{\"insert\":\" Monument just did too little (-2)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 01-16 add \"},{\"insert\":{\"card-link\":\"Castle Garenbrig\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Reliquary Tower\"}},{\"insert\":\"  Not sure I need Tower, Castle is fun w Mana Reflection and Garruk (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 01-25 add \"},{\"insert\":{\"card-link\":\"Kolvori, God of Kinship // The Ringhart Crest\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Ashaya, Soul of the Wild\"}},{\"insert\":\" Ashaya gets my creatures killed (-1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 01-25 add \"},{\"insert\":{\"card-link\":\"Toski, Bearer of Secrets\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Thrun, the Last Troll\"}},{\"insert\":\" Need space for Toski (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 02-20 add \"},{\"insert\":{\"card-link\":\"Esika's Chariot\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Mana Crypt\"}},{\"insert\":\" Honestly? Mana Crypt is a boring fucking card (+4)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 03-20 add \"},{\"insert\":{\"card-link\":\"Gauntlet of Power\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Caged Sun\"}},{\"insert\":\" Want to see if the lower casting cost is worth opponents using it (-1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 07-01 add \"},{\"insert\":{\"card-link\":\"Aeve, Progenitor Ooze\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Arasta of the Endless Web\"}},{\"insert\":\" Aeve has more upside (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 07-01 add \"},{\"insert\":{\"card-link\":\"Yavimaya, Cradle of Growth\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Dust Bowl\"}},{\"insert\":\" Just not a slow enough deck to care about land removal much (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 07-23 add \"},{\"insert\":{\"card-link\":\"Eye of Vecna\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Harmonize\"}},{\"insert\":\" Draw 2 for 2 better than a draw 3 for 4 plus it works off Gen Wave (-1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 07-23 add \"},{\"insert\":{\"card-link\":\"Old Gnawbone\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Esika's Chariot\"}},{\"insert\":\" Something had to go, and this felt the weakest (+3)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 08-30 add \"},{\"insert\":{\"card-link\":\"Autumn's Veil\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Shadowspear\"}},{\"insert\":\" Shadowspear was a glorified cantrip (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 09-10 add \"},{\"insert\":{\"card-link\":\"Ashaya, Soul of the Wild\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Aeve, Progenitor Ooze\"}},{\"insert\":\" Aeve didn't work off Gen Wave or KDV (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 09-16 add \"},{\"insert\":{\"card-link\":\"Saryth, the Viper's Fang\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Marwyn, the Nurturer\"}},{\"insert\":\" More upside on Saryth (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 09-16 add \"},{\"insert\":{\"card-link\":\"Unnatural Growth\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Return of the Wildspeaker\"}},{\"insert\":\" UG hits off Gen Wave and is just generally good(0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 09-28 add \"},{\"insert\":{\"card-link\":\"Homeward Path\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Untaidake, the Cloud Keeper\"}},{\"insert\":\" Untaidake is just frustrating, want Path back (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 11-21 add \"},{\"insert\":{\"card-link\":\"Wrap in Vigor\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Glimpse of Nature\"}},{\"insert\":\" Want more protection (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2021 12-24 add \"},{\"insert\":{\"card-link\":\"Carpet of Flowers\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Wrap in Vigor\"}},{\"insert\":\" Wrap has failed me both times I've had it in hand (-1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2022 02-15 add \"},{\"insert\":{\"card-link\":\"Boseiju, Who Endures\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Castle Garenbrig\"}},{\"insert\":\" Really only worked with Mana Reflection (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2022 02-15 add \"},{\"insert\":{\"card-link\":\"Kura, the Boundless Sky\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Ashaya, Soul of the Wild\"}},{\"insert\":\" Too much downside on Ashaya (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2022 09-13 add \"},{\"insert\":{\"card-link\":\"Gwenna, Eyes of Gaea\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Cream of the Crop\"}},{\"insert\":\" Cream was mostly just annoying (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 01-22 add \"},{\"insert\":{\"card-link\":\"Nissa, Ascended Animist\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Kogla, the Titan Ape\"}},{\"insert\":\" Nissa is a straight up win con (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 01-22 add \"},{\"insert\":{\"card-link\":\"Zopandrel, Hunger Dominus\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Kamahl, Fist of Krosa\"}},{\"insert\":\" Zopandrel is also a win con (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 04-04 add \"},{\"insert\":{\"card-link\":\"Doric, Nature's Warden // Doric, Owlbear Avenger\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Dragon Throne of Tarkir\"}},{\"insert\":\" Easier overrun (-1) \"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 05-28 add \"},{\"insert\":{\"card-link\":\"Bitterthorn, Nissa's Animus\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Jolrael, Mwonvuli Recluse\"}},{\"insert\":\" Cat tokens didn't add much (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 06-02 add \"},{\"insert\":{\"card-link\":\"Nissa, Resurgent Animist\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Multani, Yavimaya's Avatar\"}},{\"insert\":\" Multani just a beatstick (-3)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 06-30 add \"},{\"insert\":{\"card-link\":\"Mirror of Galadriel\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Oath of Nissa\"}},{\"insert\":\" Mirror just draws more consistently (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 10-06 add \"},{\"insert\":{\"card-link\":\"Jamie McCrimmon\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Old Gnawbone\"}},{\"insert\":\" Never hard cast him, and ability is pointless on an alpha strike (-4)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 11-24 add \"},{\"insert\":{\"card-link\":\"Pit of Offerings\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Dryad Arbor\"}},{\"insert\":\" Invasion of Ikoria was too cute (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 11-24 add \"},{\"insert\":{\"card-link\":\"Glimpse the Core\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Invasion of Ikoria // Zilortha, Apex of Ikoria\"}},{\"insert\":\" Invasion was too cute (0)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 11-24 add \"},{\"insert\":{\"card-link\":\"Ojer Kaslem, Deepest Growth // Temple of Cultivation\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Traxos, Scourge of Kroog\"}},{\"insert\":\" Ojer just better (+1)\"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"2023 12-20 add \"},{\"insert\":{\"card-link\":\"Surrak and Goreclaw\"}},{\"insert\":\" rmv \"},{\"insert\":{\"card-link\":\"Kolvori, God of Kinship // The Ringhart Crest\"}},{\"insert\":\" \"},{\"attributes\":{\"list\":\"ordered\"},\"insert\":\"\\n\"},{\"insert\":\"\\n\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Gwenna, Eyes of Gaea",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Reliquary Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Emerald Medallion",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Ghalta, Primal Hunger",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Big mana"
+   ],
+   "name": "Growing Rites of Itlimoc // Itlimoc, Cradle of the Sun",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Rhonas the Indomitable",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Big mana"
+   ],
+   "name": "Extraplanar Lens",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Selvala, Heart of the Wilds",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Azusa, Lost but Seeking",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Strip Mine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Buffs"
+   ],
+   "name": "Heroes' Podium",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Nykthos, Shrine to Nyx",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Ancient Tomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "Genesis Wave",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Unravel the Aether",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Beast Within",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Deglamer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Utopia Sprawl",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Dosan the Falling Leaf",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Wild Growth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Nature's Lore",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Mox Amber",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Veil of Summer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Questing Beast",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "War Room",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Toski, Bearer of Secrets",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Autumn's Veil",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Homeward Path",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Saryth, the Viper's Fang",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Buffs"
+   ],
+   "name": "Unnatural Growth",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Carpet of Flowers",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Boseiju, Who Endures",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Zopandrel, Hunger Dominus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Casal, Lurkwood Pathfinder // Casal, Pathbreaker Owlbear",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Nissa, Resurgent Animist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Jamie McCrimmon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "Kamahl's Druidic Vow",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "Guardian Project",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "God-Eternal Rhonas",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "The Great Henge",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Nylea, Keen-Eyed",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Renata, Called to the Hunt",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Nylea, God of the Hunt",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Heroic Intervention",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Mox Opal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Kodama of the East Tree",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Three Visits",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Surrak and Goreclaw",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Tyvar, the Pummeler",
+   "layout": "normal"
+  },
+  {
+   "quantity": 26,
+   "categories": [
+    "Land"
+   ],
+   "name": "Snow-Covered Forest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Urza's Cave",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Talon Gates of Madara",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Eladamri, Korvecdal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Loot, Exuberant Explorer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Buffs"
+   ],
+   "name": "Campsite Cuisine",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Bugenhagen, Wise Elder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Lizard, Connors's Curse",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Haste"
+   ],
+   "name": "Akroma's Memorial",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Haste"
+   ],
+   "name": "Concordant Crossroads",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "Mirror of Galadriel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Buffs"
+   ],
+   "name": "Beastmaster Ascension",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "The One Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Big mana"
+   ],
+   "name": "Vernal Bloom",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Big mana"
+   ],
+   "name": "Mana Reflection",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Mona Lisa, Science Geek",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "Sylvan Library",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Groundchuck & Dirtbag",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Radagast the Brown",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Collective Resistance",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Rhonas's Monument",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Reki, the History of Kamigawa",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Hit-Monkey",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Legendary Creature"
+   ],
+   "name": "Radagast of Rhosgobel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp & Reduction"
+   ],
+   "name": "Necklace of Girion",
+   "layout": "normal"
+  }
+ ]
+}

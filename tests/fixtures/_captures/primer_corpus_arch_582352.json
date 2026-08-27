@@ -1,0 +1,629 @@
+{
+ "_provenance": {
+  "site": "archidekt",
+  "source": "https://archidekt.com/api/decks/582352/",
+  "rank": 95,
+  "ordering": "-viewCount (the API exposes no like count)",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 582352,
+ "name": "Upping the Average - Niv-Mizzet Parun",
+ "viewCount": 60313,
+ "description": "{\"ops\":[{\"attributes\":{\"link\":\"https://youtu.be/227iG61kC-o\"},\"insert\":\"https://youtu.be/227iG61kC-o\"},{\"insert\":\"\\n\\n\"},{\"attributes\":{\"underline\":true,\"bold\":true},\"insert\":\"Cards Added: \"},{\"insert\":\"\\n\\nMolten Psyche\\nTime Reversal\\nKhorvath's Fury\\nCollective Defiance\\nMidnight Clock\\nCommit // Memory\\n\\nFirebrand Archer\\nElixir of Immortality\\nMizzix's Mastery\\n\\nWandering Fumarole\\nIsland x1\\n\\nPolymorphist's Jest\\nRapid Hybridization\\nReality Shift\\nStubborn Denial\\nBolt Bend\\n\\nTorbran, Thane of Red Fell\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Cascade Bluffs",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Polymorphist's Jest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Cyclonic Rift",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Rewind",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Serum Visions",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Swan Song",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Fateful Showdown",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Collective Defiance",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Wandering Fumarole",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Vandalblast",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Counterflux",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Stubborn Denial",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Izzet Cluestone",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Time Reversal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Gitaxian Probe",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Molten Psyche",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Ophidian Eye",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Gilded Lotus",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Khorvath's Fury",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Blasphemous Act",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Ponder",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Steam Vents",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Expansion // Explosion",
+   "layout": "split"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Electrostatic Field",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Izzet Charm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Rapid Hybridization",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Bolt Bend",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Narset's Reversal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Narset, Parter of Veils",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Talisman of Creativity",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Echo of Eons",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Temple of Epiphany",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Reality Shift",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Mystic Retrieval",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Izzet Guildgate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Highland Lake",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Izzet Locket",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Midnight Clock",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Torbran, Thane of Red Fell",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Mystic Sanctuary",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Elixir of Immortality",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Chromatic Lantern",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Commit // Memory",
+   "layout": "split"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Mizzix's Mastery",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Guttersnipe",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Firebrand Archer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Faithless Looting",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Treasure Cruise",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Tandem Lookout",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Preordain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Opt",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Negate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Laboratory Maniac",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Fact or Fiction",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Curiosity",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Counterspell",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Brainstorm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Arcane Denial",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Arcane Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Ominous Seas",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Command Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Commander's Sphere",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "The Locust God",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Shivan Reef",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Reliquary Tower",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Izzet Boilerworks",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Creature"
+   ],
+   "name": "Psychosis Crawler",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Izzet Signet",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Niv-Mizzet, the Firemind",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Chaos Warp",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Windfall",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Frantic Search",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Chemister's Insight",
+   "layout": "normal"
+  },
+  {
+   "quantity": 7,
+   "categories": null,
+   "name": "Mountain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 16,
+   "categories": null,
+   "name": "Island",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Swiftwater Cliffs",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Ral, Storm Conduit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Thousand-Year Storm",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Firemind's Research",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Goblin Electromancer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Baral, Chief of Compliance",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Primal Amulet // Primal Wellspring",
+   "layout": "transform"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Terramorphic Expanse",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Evolving Wilds",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Young Pyromancer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Talrand, Sky Summoner",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Murmuring Mystic",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Crackling Drake",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Mizzium Mortars",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Deflecting Swat",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Fierce Guardianship",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Mystical Tutor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Blue Sun's Zenith",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "name": "Sulfur Falls",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Niv-Mizzet, Parun",
+   "layout": "normal"
+  }
+ ]
+}

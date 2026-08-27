@@ -1,0 +1,728 @@
+{
+ "_provenance": {
+  "site": "archidekt",
+  "source": "https://archidekt.com/api/decks/18520785/",
+  "rank": 3,
+  "ordering": "-viewCount (the API exposes no like count)",
+  "note": "trimmed in-runner for the FP-018.4 primer corpus; description is the verbatim API string"
+ },
+ "id": 18520785,
+ "name": "Praise the Sun, Fire the Gun",
+ "viewCount": 207781,
+ "description": "{\"ops\":[{\"insert\":\"Praise the Sun, Fire the Gun\"},{\"attributes\":{\"header\":1},\"insert\":\"\\n\"},{\"insert\":\"This Heliod Commander deck is a highly optimized blend of control, stax pressure, and a consistent Ballista-based win condition  \"},{\"attributes\":{\"color\":\"#e8e8e8\",\"background\":\"#22242a\"},\"insert\":\"\u00a9 Marsitz\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"\\nAt first glance, Heliod looks like a lifegain commander. A friendly god handing out counters and blessings. \"},{\"attributes\":{\"bold\":true},\"insert\":\"That's a lie.\"},{\"insert\":\"\\nThis deck isn't interested in gaining life. It isn't interested in combat. It isn't interested in fair Magic.\\nThis is a mono-white control deck disguised as a devotion commander.\\n\\nThe goal is simple: slow the table to a crawl, force everyone to play by your rules, and quietly assemble one of the most compact kill conditions in the format. \\nWhile opponents argue with Rule of Law effects, search restrictions, graveyard hate, and a growing pile of \\\"you can't do that\\\" permanents, Heliod patiently waits for the moment when a Ballista or Triskelion enters the battlefield and ends the discussion entirely.\\n\\nGeneral Strategy\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"\\nThe deck operates on a simple principle:\\n\"},{\"attributes\":{\"bold\":true},\"insert\":\"If everyone is playing one spell per turn, I'd like to be the player whose one spell matters most.\"},{\"insert\":\"\\nMost tables are built around velocity. Multiple spells. Explosive turns. Giant stack battles. This deck attacks the foundation itself. Rule of Law. Deafening Silence. Archon of Emeria. Eidolon of Rhetoric.\\nWhile opponents are forced to navigate a maze of restrictions, Heliod develops incrementally. A mana rock here. A tutor there. A protection spell held patiently in hand.\\nThe deck rarely wins quickly.\\nInstead, it creates a game state where everyone else slowly realizes they're no longer playing the game they sat down for.\\n\\nYou Shouldn't Play This Deck If...\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"You enjoy explosive turns.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You like drawing half your deck.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You want every game to end quickly.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You enjoy making friends at the table.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You feel guilty when three opponents collectively sigh.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nYou SHOULD Play This Deck If...\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"You enjoy being the sheriff at a lawless table.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You love saying \\\"No\\\" without technically countering anything.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You appreciate winning through positioning rather than raw card advantage.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You enjoy making opponents solve impossible puzzles.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"You believe silence is a valid win condition.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nMVP Cards\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"\\nRanger-Captain of Eos\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"One of the strongest cards in the deck.\\nIt tutors combo pieces, finds utility creatures, protects winning turns, and occasionally functions as a one-sided Time Walk when sacrificed at the right moment.\\n\\nGrand Abolisher\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"The closest thing mono-white has to declaring martial law.\\nWhen this card resolves, opponents suddenly discover how many interaction spells they've been saving.\\n\\nRule of Law Effects\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"The true engine of the deck.\\nMany players view these cards as support pieces.\\nThey're not.\\nThey're the strategy.\\n\\nThe One Ring\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"An absurd source of card advantage that helps mono-white keep pace in games that drag far longer than opponents expected.\\n\\nWalking Ballista\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"The gun.\\nThe entire deck is built around creating a game state where this card becomes inevitable.\\n\\n\\nWin Conditions\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"\\nHeliod + Walking Ballista\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"The classic.\\nGive Ballista lifelink.\\nRemove a counter.\\nDeal damage.\\nGain life.\\nHeliod replaces the counter.\\nRepeat until nobody remains.\\nSimple. Efficient. Beautiful.\\n\\nHeliod + Triskelion\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"A slightly clunkier backup plan that wins through the exact same principle.\\nThe table usually knows what's coming.\\nThat rarely helps them.\\n\\nConcession\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"A surprisingly common outcome.\\nSometimes opponents look around at Rule of Law, Drannith Magistrate, Rest in Peace, Aven Mindcensor, and a hand full of dead cards and decide they've suffered enough.\\n\\n\\nCoolest Plays\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"\\nCasting Silence during upkeep and watching three players collectively realize they no longer have a turn.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"Flashing in a stax piece with Liberator at exactly the wrong moment for someone else.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"Using Ranger-Captain to tutor a combo piece and then sacrificing him the following turn to force it through.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"Winning through a stack containing exactly zero counterspells because nobody was allowed to cast any.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"Looking completely harmless until Heliod suddenly turns a Ballista into a machine gun.\"},{\"attributes\":{\"list\":\"bullet\"},\"insert\":\"\\n\"},{\"insert\":\"\\nWeak Points & What To Watch For\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"\\nCard Advantage\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"The deck is efficient, not explosive.\\nIf the game becomes a grind and The One Ring doesn't show up, resource management matters.\\n\\nCreature Removal\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"Heliod is remarkably resilient, but combo creatures are not.\\nProtecting the actual kill piece is often more important than protecting your commander.\\n\\nBeing the Archenemy\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"People remember Rule of Law.\\nPeople remember Drannith Magistrate.\\nPeople definitely remember the player responsible for both.\\nAccept that attention is part of the strategy.\\nPatience\"},{\"attributes\":{\"header\":3},\"insert\":\"\\n\"},{\"insert\":\"This deck rewards restraint.\\nMany games are won because you waited one turn longer than everyone expected.\\n\\nOne Final Note\"},{\"attributes\":{\"header\":2},\"insert\":\"\\n\"},{\"insert\":\"\\nHeliod isn't a prison deck.\\nPrison implies permanence.\\nThis deck is a negotiation.\\nYou are simply presenting the table with a choice:\\nPlay fair, play slow, and maybe survive.\\nOr let the sun rise, and hear the Ballista fire.\\n\"}]}",
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Bilbo's Gambit",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Giver of Runes",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Pearl Medallion",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Mother of Runes",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Teferi's Protection",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Mana Vault",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "Esper Sentinel",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Sol Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Walking Ballista",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Ethersworn Canonist",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Inventors' Fair",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Containment Priest",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Path to Exile",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Soul Partition",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Flawless Maneuver",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tutor"
+   ],
+   "name": "Recruiter of the Guard",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Counters"
+   ],
+   "name": "Agatha's Soul Cauldron",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Linvala, Keeper of Silence",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Emergence Zone",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Reprieve",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "High Market",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Archon of Emeria",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Liberator, Urza's Battlethopter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Chrome Mox",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Surge of Salvation",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Buried Ruin",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Phyrexian Revoker",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Deafening Silence",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Dauntless Dismantler",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tutor"
+   ],
+   "name": "Ranger-Captain of Eos",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Cavern of Souls",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Abeyance",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Crystal Vein",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Grafdigger's Cage",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Blind Obedience",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Talon Gates of Madara",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Reverent Mantra",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Swords to Plowshares",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Sanctum Prelate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Calamity's Wake",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Hall of Oracles",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Rule of Law",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Soulless Jailer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Weathered Wayfarer",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Rebuff the Wicked",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Authority of the Consuls",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Aven Interrupter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Land Tax",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Vexing Bauble",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tutor"
+   ],
+   "name": "Scrapyard Recombiner",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Angel's Grace",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Winds of Abandon",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Portable Hole",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Drannith Magistrate",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Grim Monolith",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Loran of the Third Path",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Salvage Scout",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Silence",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Aven Mindcensor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "The One Ring",
+   "layout": "normal"
+  },
+  {
+   "quantity": 6,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Rest in Peace",
+   "layout": "normal"
+  },
+  {
+   "quantity": 6,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Smothering Tithe",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Triskelion",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Ancient Tomb",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tutor"
+   ],
+   "name": "Enlightened Tutor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tutor"
+   ],
+   "name": "Ranger of Eos",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Grand Abolisher",
+   "layout": "normal"
+  },
+  {
+   "quantity": 6,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Solitude",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Leonin Arbiter",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Disruptor Flute",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Lotus Petal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Orim's Chant",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Removal"
+   ],
+   "name": "Skyclave Apparition",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Tutor"
+   ],
+   "name": "Tezzeret, Cruel Captain",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Land"
+   ],
+   "name": "Ancient Den",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "Mox Opal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Voice of Victory",
+   "layout": "normal"
+  },
+  {
+   "quantity": 4,
+   "categories": [
+    "Land"
+   ],
+   "name": "Plains",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp"
+   ],
+   "name": "The Mind Stone",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Stax"
+   ],
+   "name": "Phyrexian Censor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Protection"
+   ],
+   "name": "Galadriel's Dismissal",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Ramp",
+    "Draw"
+   ],
+   "name": "Gleaming Splendor",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "name": "Heliod, Sun-Crowned",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Cathar Commando",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Draw"
+   ],
+   "name": "Sensei's Divining Top",
+   "layout": "normal"
+  },
+  {
+   "quantity": 1,
+   "categories": [
+    "Maybeboard"
+   ],
+   "name": "Archivist of Oghma",
+   "layout": "normal"
+  }
+ ]
+}
