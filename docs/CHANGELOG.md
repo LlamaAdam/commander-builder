@@ -6,6 +6,109 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
+
+#### Added
+
+- **`primer` module (018.1).** Deck primers become first-class:
+  `parse_primer` branches on provenance — Archidekt descriptions are
+  Quill Delta JSON (string ops render verbatim, `card-link` embeds
+  render as the card name, image embeds as nothing), Moxfield/plain
+  text passes through untouched — pinned by two real captures (the
+  single-op hazel primer and deck 86888's 59-op formatted Delta, new
+  fixture `archidekt_primer_delta_86888.json`). Imports write a
+  `<deckstem>.primer.md` sidecar (never empty, refuse-clobber
+  semantics) with the card-links block preserved; `.dck` format
+  untouched. Prompt use goes through `clip_for_prompt` — explicit
+  truncation marker, never silent.
+- **Free-text intent (018.2).** `Intent` gains `stated` (the deck's
+  own primer) and `pilot_preferences` (the adopter's words). Both flow
+  into the judge's intent block, clearly labeled, and soft-bias the
+  advisor via `free_text_theme_slugs` — a keyword→slug map bounded to
+  `staples`' existing theme vocabulary, so free text can steer
+  attention but cannot invent themes the app doesn't recognize.
+  **Free text never drives G3 swap labeling**: an intent carrying only
+  free text labels `unknown` exactly like `intent=None`
+  (`classify_swap_direction` now guards on structured signals — the
+  adopt flow routinely builds free-text-only intents, and without the
+  guard those pairings would enter G3's population with a fabricated
+  `staple_ward` direction). The two judge boundary tests moved with
+  the boundary, deliberately.
+- **`commander adopt` (018.3).** Deterministic, offline, read-only:
+  (1) a grounded explanation — the primer's plan cross-checked against
+  the actual list (cards it names that are/aren't present, packages by
+  role/theme, the author's win-line paragraphs quoted verbatim, never
+  paraphrased); (2) small preference-steered suggestions reusing
+  `deck_builder_personalize`'s like-for-like passes, clamped to the
+  polish tier's budget by constant — no mode parameter, no
+  `resolve_tier`, no rebuild env var read: **the rebuild tier is
+  structurally unreachable**, not defaulted off. Primer card-link
+  names are auto-Protected; prose-only primers get an explanation
+  without auto-protection and the output says so (harvest evidence:
+  exact names exist only as Archidekt embeds). "No primer" — the
+  common case, ~75% of even top-ranked decks — degrades to a
+  list-grounded explanation, stated as absent, never an error.
+
+### 2026-08-27 — DFC import fix, dead-backend retirement, G3 computable
+
+#### Fixed
+
+- **DFC/MDFC deck lines now emit the FRONT FACE.** Archidekt names
+  double-faced cards `Front // Back` with a 2-element `faces` array;
+  the adapter passed the joined name through verbatim, so an
+  MDFC-heavy import produced 47/100 lines (including the
+  `[Commander]`) that Forge's loader could only rescue via its
+  front-face fallback index — and `deck_health`'s `_MDFC_LANDS`
+  matched 0 of 14 Pathways. `_entry_name` now returns `faces[0]`'s
+  name for `transform` / `modal_dfc` layouts only (split, adventure,
+  and EDHREC partner-pair names keep their `//` — the separator is
+  overloaded, so layout gates the cut, never string matching). Pinned
+  by `archidekt_deck_mdfc_shape.json`, a live capture of an
+  Esika-commander deck (MDFC commander, Pathways, transform cards);
+  the previously open, test-asserted MDFC name-shape gap is closed.
+- **`analyst.ollama_verdict` retired** (same dead-code shape as
+  `proposer.ollama_propose`, retired 2026-08-17): nothing in the repo
+  could ever set `AnalystConfig.use_ollama`, so the backend had zero
+  production callers. Loud `NotImplementedError` stub + retirement
+  note; the `analyze()` router rung makes NO call and prints the note
+  instead — raising inside the quiet `except NotImplementedError`
+  fall-through ladder would have been silently swallowed (pinned by a
+  zero-calls spy test).
+- **`commander-doctor`'s local-model check tells the truth.** It
+  delegated to a hand-rolled `/api/tags` probe that said OK when the
+  daemon was up but the configured model was never pulled. It now
+  delegates to `local_model.LocalModelClient.preflight` (one source of
+  truth for the `ollama pull <model>` remedy); flag off → GREEN with
+  no socket opened.
+
+#### Added
+
+- **Deck-judge kill criterion G3 is computable** (it was pre-registered
+  prose with no measurement). Each judged swap is labeled
+  `staple_ward | intent_ward | mixed | neither | unknown` from its
+  added cards (staple = `UNIVERSAL_STAPLES_LC` ∪ offline Game
+  Changers; intent = theme slugs / tribal / key wincons via new
+  `staples.card_theme_slugs`, which `detect_themes` now sums so the
+  two can't drift; `game_changers.offline_game_changers()` keeps the
+  judge cache-only). `judge_agreement` reads the arms with
+  pre-registered numbers (2026-08-27, before any data):
+  P(kept | staple-ward) − P(kept | intent-ward) > 0.20, each arm
+  ≥ 10 labeled pairings; thin arms print NOT COMPUTED naming the
+  short arm, never "passing". `intent=None` labels `unknown`, never
+  `staple_ward`. The judge is never shown the label (pinned).
+- **CI capture lane accepts commander searches.** `request.txt` in
+  `tests/fixtures/_captures/` now also takes `commander:<name>` lines
+  (Archidekt v3 search, most-viewed public hit, every line tried in
+  order) alongside numeric deck ids — the mechanism that found the
+  MDFC capture deck, and the lane FP-018.4's primer-corpus harvesting
+  will reuse.
+- **FP-018 "Adopt a deck" scoped** in `docs/future-plans.md`: primer
+  parsing (Quill Delta → text sidecar), free-text intent
+  (`stated` / `pilot_preferences`) flowing into judge + advisor, and a
+  `commander adopt` flow — grounded explanation plus polish-tier-capped,
+  preference-steered small modifications (primer-named cards
+  auto-Protected; the rebuild tier structurally unreachable).
+
 ### 2026-08-20 — three defects the new Playwright smokes found
 
 #### Fixed

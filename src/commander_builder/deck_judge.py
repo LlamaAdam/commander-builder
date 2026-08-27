@@ -32,6 +32,13 @@ PHASE 1 IS OBSERVE-ONLY
   for unvalidated machinery. While it is off, nothing is spent.
 * Phase 2 (``scripts/judge_agreement.py``) produces the agreement table
   that decides whether there is a Phase 3.
+* Each pairing also records a SWAP DIRECTION (staple-ward / intent-ward /
+  mixed / neither / unknown) from
+  ``_deck_judge_prompt.classify_swap_direction``. That is G3's population
+  membership — the input the consensus-bias kill criterion was
+  pre-registered against and, until 2026-08-27, the reason G3 could not be
+  computed at all. The judge is never shown the label; being told "this
+  swap is staple-ward" would turn G3 into a measurement of the label.
 
 BORROWING THE SIM'S DISCIPLINE, NOT SKIPPING IT
 ===============================================
@@ -112,6 +119,7 @@ from ._deck_judge_prompt import (
     DIMENSIONS,
     build_judge_prompt,
     changed_cards,
+    classify_swap_direction,
     judge_system_prompt,
 )
 from ._llm_json import LLMJsonError, extract_json_object
@@ -236,11 +244,18 @@ class JudgeReport:
         back ``kept``. The gate parks the feature at >80% of pairings.
         (Named for the tally it feeds, not for this single row.)
       ``verdict``    — the pooled answer, in the existing vocabulary.
+      ``swap_direction`` — G3 (consensus bias). One of
+        ``_deck_judge_prompt.SWAP_DIRECTIONS``. G3 is not a per-pairing
+        PASS/FAIL the way G1 and G2 are — it compares the judge's
+        approval rate across two POPULATIONS of pairings — so what a row
+        carries is its membership, and ``scripts/judge_agreement.py``
+        does the comparing. ``swap_label`` keeps the counts and the
+        stated reason behind the word so a surprising G3 number can be
+        traced back to individual swaps rather than taken on faith.
 
-    G3 (consensus bias) is not a per-pairing counter — it needs swaps
-    labeled staple-ward vs intent-ward — so it is deliberately absent
-    here rather than faked; ``scripts/judge_agreement.py`` says so in
-    plain words rather than printing a number it cannot compute.
+        Added 2026-08-27. Rows written before that carry neither field and
+        are simply not in G3's population; the script counts them as
+        unlabeled rather than assuming a direction for them.
     """
 
     verdict: str
@@ -254,6 +269,11 @@ class JudgeReport:
     per_order: int = PER_ORDER
     supermajority: int = SUPERMAJORITY
     changed: dict[str, object] = field(default_factory=dict)
+    #: G3's per-pairing membership. Defaults to ``"unknown"`` — a report
+    #: built without the labeling (a hand-constructed one, or an older
+    #: pickled row) must not read as a labeled pairing.
+    swap_direction: str = "unknown"
+    swap_label: dict = field(default_factory=dict)
     intent: Optional[dict] = None
     model: Optional[str] = None
     caveat: str = OPINION_CAVEAT
@@ -573,6 +593,29 @@ def judge_pairing(
         for name in DIMENSIONS
     }
     only_a, only_b, shared = changed_cards(deck_a_text, deck_b_text)
+    # G3's input, computed here and only here: this is the one moment the
+    # changed-card sets, the cache-resolved oracle text and THE INTENT THE
+    # PANEL ACTUALLY JUDGED AGAINST are all in hand. Deriving it later from
+    # a knowledge_log row would re-learn intent from today's deck and label
+    # an old pairing against a standard it was never judged by.
+    #
+    # Never lets a labeling failure sink a panel that already ran: six
+    # judgments have been spent by this point, and a bad lookup is not a
+    # reason to lose them. An unlabeled pairing is simply outside G3's
+    # population, which is the honest degradation.
+    try:
+        swap_label = classify_swap_direction(
+            deck_a_text, deck_b_text, intent=intent, lookup=lookup,
+        )
+    except Exception as exc:  # noqa: BLE001 — see above
+        swap_label = {
+            "direction": "unknown",
+            "reason": f"labeling failed ({type(exc).__name__}: {exc})",
+        }
+        notes.append(
+            f"swap-direction labeling failed ({type(exc).__name__}); this "
+            f"pairing is outside the G3 population."
+        )
     return JudgeReport(
         verdict=verdict,
         votes=votes,
@@ -586,6 +629,8 @@ def judge_pairing(
             "only_in_b": only_b,
             "shared_count": len(shared),
         },
+        swap_direction=str(swap_label.get("direction") or "unknown"),
+        swap_label=swap_label,
         intent=intent.to_dict() if hasattr(intent, "to_dict") else None,
         model=model,
         notes=notes,
@@ -625,6 +670,14 @@ def render_report(report: JudgeReport, deck_a: Path, deck_b: Path) -> str:
             f"  discarded: {report.discarded} judgment(s) — see below"
         )
     lines.append(f"  order flip: {'YES' if report.order_flip else 'no'}")
+    # Printed with its REASON, never as a bare word: "staple_ward" alone
+    # invites the reader to trust a classifier they cannot see, and this
+    # one is a heuristic over two name lists and a theme matcher.
+    reason = str(report.swap_label.get("reason") or "")
+    lines.append(
+        f"  swap direction: {report.swap_direction}"
+        + (f"  ({reason})" if reason else "")
+    )
     lines.append("")
     lines.append("  Per-dimension median (signed toward deck B, -2..+2):")
     for name in DIMENSIONS:

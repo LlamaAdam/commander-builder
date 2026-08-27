@@ -44,14 +44,43 @@ Sacrifice", 98 entries) was captured live and trimmed into
 - **``collectorNumber`` is a string and is not always numeric**: The List
   printings come back as ``"M20-193"`` / ``"HOU-77"`` with
   ``editioncode: "plst"``.
-- **Non-``normal`` layouts need no special handling here**: the capture's
-  one ``layout: "class"`` card (Ninja Teen) carries a single
+- **Most non-``normal`` layouts need no special handling here**: the
+  capture's one ``layout: "class"`` card (Ninja Teen) carries a single
   ``oracleCard.name`` and ``faces: []`` like every other entry.
-  UNPINNED: no modal-DFC/transform card was in this deck, so whether an
-  MDFC's ``name`` is ``"A // B"`` (with ``faces`` populated) is still
-  unverified — capture a real MDFC deck rather than guessing.
+  Double-faced layouts DO — see the next block.
+
+DOUBLE-FACED CARDS (R2-P18 follow-up, 2026-08-27). The gap the block
+above left open ("no modal-DFC/transform card was in this deck") was
+closed by a second live capture: deck 5273595 ("From Cute to Brute -
+Secret Lair Drop"), 100 entries — 53 ``normal``, 25 ``transform``, 22
+``modal_dfc`` — trimmed into
+``tests/fixtures/archidekt_deck_mdfc_shape.json``. It was not a
+formality; it found a real bug:
+
+- **A DFC's ``oracleCard.name`` IS the joined ``"Front // Back"``
+  string**, and ``oracleCard.faces`` is a 2-element list whose
+  ``[0].name`` is the front face. Plain entries keep ``faces: []``, and
+  both shapes appear in the SAME response — the discriminator is
+  per-entry ``layout``, not per-deck.
+- **Forge, and every ``.dck`` reader in this project, names a DFC by its
+  FRONT FACE.** The adapter used to emit the joined string, so an
+  Archidekt import wrote the card line
+  ``1 Bala Ged Recovery // Bala Ged Sanctuary|PLST|ZNR-180`` where Forge
+  wants ``1 Bala Ged Recovery|PLST|ZNR-180``. Fixed in
+  :func:`_entry_name`, which carries the evidence.
+- **A commander can itself be an MDFC**: this deck's is Esika, God of
+  the Tree // The Prismatic Bridge, i.e. ``categories: ["Commander"]``
+  and ``layout: "modal_dfc"`` on one entry. Commander detection is
+  category-driven and unaffected — but the ``[Commander]`` line is a
+  ``.dck`` card line like any other and gets the same front-face
+  treatment.
+- STILL UNPINNED: no split / adventure / flip card is in either capture,
+  so whether Archidekt's ``name`` for those is the card's own full name
+  stays unverified. They are left untouched rather than guessed.
 - **``description`` is a Quill Delta JSON string**, not prose — see
-  ``tests/fixtures/hazel_primer.md``. Nothing here reads it yet.
+  ``tests/fixtures/hazel_primer.md``. Since FP-018.1 (2026-08-27)
+  :func:`to_deck_json` passes it through RAW; rendering lives in
+  ``primer``.
 - **``intentionallySkippedCardData``** (false in the capture) is the API
   telling you the response omitted card data — see :func:`fetch_deck`.
 
@@ -222,9 +251,77 @@ def _split_boards(deck_json: dict) -> tuple[list[dict], list[dict]]:
     return commanders, mainboard
 
 
+#: Archidekt ``oracleCard.layout`` values for cards with TWO PHYSICAL
+#: FACES, whose ``name`` is the joined ``"Front // Back"`` string.
+#:
+#: Exactly the two layouts the MDFC capture proves (R2-P18 follow-up,
+#: deck 5273595, 2026-08-27: 53 ``normal`` / 25 ``transform`` / 22
+#: ``modal_dfc``). Other ``//``-bearing layouts are deliberately absent
+#: rather than guessed — see :func:`_entry_name`.
+_TWO_FACED_LAYOUTS = frozenset({"transform", "modal_dfc"})
+
+
 def _entry_name(entry: dict) -> str:
-    return (((entry.get("card") or {}).get("oracleCard") or {})
-            .get("name") or "").strip()
+    """The card name to write into a ``.dck`` / hand to the corpus.
+
+    For a double-faced card that is the FRONT FACE ALONE, not
+    Archidekt's joined ``"Front // Back"`` string.
+
+    WHY (R2-P18 follow-up, 2026-08-27). The MDFC gap the 2026-08-20
+    capture left open turned out to hide a real bug: this function
+    returned ``oracleCard.name`` verbatim, so every double-faced card in
+    an Archidekt import rendered as
+    ``1 Bala Ged Recovery // Bala Ged Sanctuary|PLST|ZNR-180``. Forge
+    names a DFC by its front face, and so does every reader in this
+    project:
+
+    - ``forge_cards_loader``: a DFC's script carries the FRONT face on
+      its first ``Name:`` line, and ``CardsLoader`` keeps a whole
+      front-face-slug → full-slug fallback index (``_build_dfc_index``)
+      that exists for one reason — "``.dck`` files reference cards by
+      front-face name only" (verified 2026-05-19 against the shipped
+      ``cardsfolder.zip``). That corpus is the supported-name universe
+      ``web/routes_dashboard._sim_coverage`` checks a deck against, and
+      it is the same corpus whose misses become Forge's "An unsupported
+      card was requested" at sim time.
+    - ``deck_health._MDFC_LANDS`` — read through ``consistency`` and
+      ``card_score.is_mdfc_land`` — is keyed on the lowercase FRONT-face
+      name (``"bala ged recovery"``) and matched against names parsed
+      straight out of ``.dck`` lines. The joined string misses it: 14 of
+      the MDFC capture's cards are on that curated list and ALL 14 were
+      counted as zero modal lands — a manabase report silently short by
+      the entire Pathway package.
+    - ``oracle_store`` writes bulk snapshots under a front-face alias
+      because "deck files name DFC / split / adventure cards by their
+      front face"; ``bubble_analysis`` matches corpus names against the
+      user's deck names lowercased, so a corpus keyed ``"A // B"``
+      scores zero reference support for every DFC the user actually
+      plays. Both lanes share this function, so both are fixed at once.
+
+    KEYED ON LAYOUT + ``faces``, NEVER ON SPLITTING ``"//"``. The
+    separator is overloaded: EDHREC joins partner PAIRS with it
+    (``premade_import._commander_card_names`` — "Frodo, Adventurous
+    Hobbit // Sam, Loyal Attendant" is TWO cards), and split / adventure
+    cards carry it inside one card's real name. Only the layouts the
+    capture actually proves get reduced; a split or adventure entry —
+    none is in this deck — passes through untouched rather than being
+    guessed at, the same discipline the fixtures follow.
+
+    The ``//`` split survives only as a drift fallback for the shape
+    "layout says two-faced but ``faces`` is empty", which no healthy
+    capture contains: better a front face derived from the name than a
+    ``.dck`` line Forge cannot resolve.
+    """
+    oracle = ((entry.get("card") or {}).get("oracleCard") or {})
+    name = (oracle.get("name") or "").strip()
+    if oracle.get("layout") not in _TWO_FACED_LAYOUTS:
+        return name
+    faces = oracle.get("faces") or []
+    if faces and isinstance(faces[0], dict):
+        front = (faces[0].get("name") or "").strip()
+        if front:
+            return front
+    return name.split("//")[0].strip() or name
 
 
 def extract_mainboard(deck_json: dict) -> list[str]:
@@ -365,6 +462,12 @@ def to_deck_json(deck_json: dict) -> dict:
     Moxfield publicId and stamping one into the ``Moxfield=`` line would
     poison the re-import dedupe index. The importer records provenance as
     ``Archidekt=<id>`` / ``Source=archidekt`` instead.
+
+    ``description`` passes through RAW (FP-018.1, 2026-08-27) — the Quill
+    Delta JSON string exactly as the API returned it. This client stays a
+    client: rendering the Delta to text is ``primer``'s job, and handing
+    the importer the raw field means the render happens once, at the one
+    place that decides whether a sidecar gets written.
     """
     commanders, mainboard = _split_boards(deck_json)
 
@@ -410,6 +513,11 @@ def to_deck_json(deck_json: dict) -> dict:
     return {
         "name": (deck_json.get("name") or "").strip() or "Untitled",
         "format": "commander",
+        # Raw Quill Delta string (or whatever the API sent) — see the
+        # docstring. Only set when non-empty so consumers can key on
+        # plain truthiness.
+        **({"description": deck_json["description"]}
+           if deck_json.get("description") else {}),
         # ``resolve_bracket`` reads this key first; 0 stays unset so it
         # falls through to its own "unknown" default rather than being
         # handed an out-of-range int.

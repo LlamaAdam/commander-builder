@@ -21,6 +21,11 @@ Public API:
     cards = load_game_changers()  # set of card names
     "Smothering Tithe" in cards   # → True
 
+    from commander_builder.game_changers import offline_game_changers
+
+    cards = offline_game_changers()  # same list, GUARANTEED no network
+                                     # (cache-if-trusted, else bundled)
+
 The fallback list mirrors `prompts/moxfield_audit_v3.md` reference data so
 the two stay in sync if WotC changes either side.
 """
@@ -221,6 +226,39 @@ def _scrape_is_trustworthy(names: set[str]) -> tuple[bool, float]:
         and overlap >= _MIN_FALLBACK_OVERLAP
     )
     return trusted, overlap
+
+
+def offline_game_changers() -> frozenset[str]:
+    """The Game Changers list WITHOUT any chance of a network call.
+
+    ``load_game_changers`` is the right entry point almost everywhere: it
+    refreshes a stale cache, which is how a card WotC removed eventually
+    leaves our list. It is the wrong entry point on a code path that has
+    promised not to touch the network. The deck judge is one such path —
+    ``_deck_judge_prompt`` resolves every card ``cache_only=True`` on
+    purpose, because a judge call runs inside the improve loop's round and
+    must never be the reason a round takes an extra ten minutes — and the
+    2026-08-27 swap-direction labeling runs there too.
+
+    So: the on-disk cache if it exists AND still passes the same trust bar
+    a live scrape must clear, else the bundled fallback. Cache FRESHNESS is
+    deliberately not required — a week-old WotC list beats the bundled one
+    and costs nothing, while requiring freshness here would only ever mean
+    "silently fall back", since this function may not refresh it.
+
+    Returns a frozenset (the caller is doing membership tests, and an
+    immutable answer cannot be mutated back into the module's caches).
+    Never raises: a corrupt cache degrades to the bundled list.
+    """
+    try:
+        data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        cached = {c for c in data.get("cards", []) if _looks_like_card_name(c)}
+        trusted, _overlap = _scrape_is_trustworthy(cached)
+        if trusted:
+            return frozenset(cached)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return _FALLBACK
 
 
 def _log_divergence(names: set[str]) -> None:

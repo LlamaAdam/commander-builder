@@ -5,7 +5,7 @@
   "fetched": "2026-08-20, live API via CI (this sandbox has no egress)",
   "trimmed": "By hand from the 304KB capture: top-level keys the adapter reads plus the ones R2-P18 asked about; 9 of 98 card entries kept VERBATIM (byte-for-byte, nothing edited or synthesized). Only 'description' was altered — truncated to 200 chars; the full text is in tests/fixtures/hazel_primer.md.",
   "entries_kept": "commander (Hazel of the Rootbloom, modifier Foil) | layout 'class' (Ninja Teen) | two multi-quantity basics (Forest x11, Swamp x9) | two Maybeboard entries (deck category includedInDeck: false) | two The List printings with non-numeric collectorNumber (M20-193, HOU-77) | two plain normal spells",
-  "known_gap": "NO modal_dfc / transform card is present in this deck, so the MDFC name shape (\"A // B\" vs face objects in oracleCard.faces) is still UNPINNED. Do not synthesize one — capture a real MDFC deck instead. Every oracleCard.faces in this capture is [].",
+  "closed_gap": "This deck contains NO modal_dfc / transform card — every oracleCard.faces in this capture is [] — so it left the MDFC name shape unpinned. That gap was CLOSED on 2026-08-27 by a second real capture, tests/fixtures/archidekt_deck_mdfc_shape.json (deck 5273595), not by synthesizing one here. Keep this fixture as the single-faced baseline: its faces:[] entries are the control half of the contrast.",
   "full_deck_totals": "98 entries; 16 Maybeboard; 1 commander; 81 mainboard entries summing to 99 cards (Forest x11 + Swamp x9) = 100 with the commander."
  },
  "id": 24864897,

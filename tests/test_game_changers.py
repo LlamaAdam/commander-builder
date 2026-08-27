@@ -524,3 +524,63 @@ def test_degraded_real_fetch_gets_the_short_pin(tmp_path, monkeypatch, capsys):
     clock["t"] += gc._FAILURE_TTL_SEC
     gc.load_game_changers()
     assert fetches["n"] == 2
+
+
+# --- offline_game_changers (added 2026-08-27) ------------------------------
+#
+# Exists for callers that have promised not to touch the network — the deck
+# judge's swap-direction labeling runs inside the improve loop's round on a
+# cache-only-always path. `load_game_changers` is right almost everywhere
+# else precisely because it CAN refresh; here that is the bug.
+
+def test_offline_game_changers_never_fetches(monkeypatch, tmp_path):
+    from commander_builder import game_changers as gc
+
+    def explode(*a, **kw):
+        raise AssertionError("offline_game_changers reached the network")
+    monkeypatch.setattr(gc, "_http_get_text", explode)
+    monkeypatch.setattr("urllib.request.urlopen", explode)
+    monkeypatch.setattr(gc, "CACHE_PATH", tmp_path / "absent.json")
+
+    cards = gc.offline_game_changers()
+    assert cards == gc._FALLBACK
+    assert "Rhystic Study" in cards
+
+
+def test_offline_game_changers_prefers_a_trusted_cache(monkeypatch, tmp_path):
+    """A cached WotC list is more current than the bundled one, and it is
+    the only way a card WotC REMOVED can be absent here."""
+    from commander_builder import game_changers as gc
+
+    cache = tmp_path / "gc.json"
+    # A plausible scrape: the bundled list minus one card, so it clears the
+    # count + overlap trust bar but is demonstrably not the fallback.
+    kept = sorted(gc._FALLBACK - {"Rhystic Study"})
+    cache.write_text(json.dumps({"cards": kept}), encoding="utf-8")
+    monkeypatch.setattr(gc, "CACHE_PATH", cache)
+
+    cards = gc.offline_game_changers()
+    assert "Rhystic Study" not in cards
+    assert "Sol Ring" not in cards          # never was on this list
+    assert "Necropotence" in cards
+
+
+def test_offline_game_changers_rejects_an_untrusted_cache(monkeypatch, tmp_path):
+    """Same trust bar a live scrape faces: a truncated or hand-edited cache
+    must not be served, because this function cannot re-fetch to fix it."""
+    from commander_builder import game_changers as gc
+
+    cache = tmp_path / "gc.json"
+    cache.write_text(json.dumps({"cards": ["Sol Ring", "Rhystic Study"]}),
+                     encoding="utf-8")
+    monkeypatch.setattr(gc, "CACHE_PATH", cache)
+    assert gc.offline_game_changers() == gc._FALLBACK
+
+
+def test_offline_game_changers_survives_a_corrupt_cache(monkeypatch, tmp_path):
+    from commander_builder import game_changers as gc
+
+    cache = tmp_path / "gc.json"
+    cache.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(gc, "CACHE_PATH", cache)
+    assert gc.offline_game_changers() == gc._FALLBACK

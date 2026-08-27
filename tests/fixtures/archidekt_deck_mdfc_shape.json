@@ -1,0 +1,1371 @@
+{
+ "_provenance": {
+  "source": "https://archidekt.com/api/decks/5273595/",
+  "deck": "From Cute to Brute - Secret Lair Drop (public, Archidekt_Precons)",
+  "fetched": "2026-08-27, live API via CI (this sandbox has no egress)",
+  "trimmed": "By hand from the 326KB capture: the same top-level key set as archidekt_deck_shape.json, the categories list VERBATIM (all 10), and 6 of 100 card entries kept VERBATIM (byte-for-byte, nothing edited or synthesized). Nothing was truncated — this deck's 'description' is the empty string.",
+  "why": "Closes the MDFC gap archidekt_deck_shape.json left open: that deck (24864897) contained no double-faced card, so the shape of a DFC entry was unverified. This one is 53 normal / 25 transform / 22 modal_dfc, and its COMMANDER is itself a modal_dfc.",
+  "entries_kept": "modal_dfc commander (Esika, God of the Tree // The Prismatic Bridge, SLD 1155, modifier Foil) | modal_dfc land, a Pathway (Branchloft Pathway // Boulderloft Pathway) | modal_dfc spell-front // land-back (Bala Ged Recovery // Bala Ged Sanctuary) | transform creature (Archangel Avacyn // Avacyn, the Purifier) | transform with a LAND front face (Westvale Abbey // Ormendahl, Profane Prince) | one plain 'normal' control entry (Sol Ring) proving faces:[] and a populated faces list coexist in ONE response.",
+  "dfc_shape": "Every DFC entry carries oracleCard.name as the joined \"Front // Back\" string AND a 2-element oracleCard.faces list whose [0].name is the front face; 'normal' entries carry a bare name and faces: []. layout is 'transform' or 'modal_dfc'. No split / adventure / flip card is in this deck, so those layouts stay unpinned — do not guess them, capture one.",
+  "full_deck_totals": "100 entries, all quantity 1, none excluded (no card sits in the Maybeboard category); 1 commander + 99 mainboard. Layouts: 53 normal, 25 transform, 22 modal_dfc. edhBracket null, intentionallySkippedCardData false, customCards []."
+ },
+ "id": 5273595,
+ "name": "From Cute to Brute - Secret Lair Drop",
+ "createdAt": "2023-08-30T19:43:06.317418Z",
+ "updatedAt": "2023-08-30T19:43:40.900948Z",
+ "deckFormat": 3,
+ "edhBracket": null,
+ "game": null,
+ "description": "",
+ "viewCount": 32535,
+ "hasPrimer": false,
+ "private": false,
+ "unlisted": false,
+ "theorycrafted": false,
+ "points": 9,
+ "userInput": 0,
+ "owner": {
+  "id": 146620,
+  "username": "Archidekt_Precons",
+  "avatar": "https://storage.googleapis.com/topdekt-user/avatars/avatar1466202023-06-13-19:05:27.png",
+  "frame": null,
+  "ckAffiliate": "",
+  "tcgAffiliate": "",
+  "referrerEnum": null
+ },
+ "categories": [
+  {
+   "id": 46450131,
+   "name": "Enchantment",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450130,
+   "name": "Instant",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450129,
+   "name": "Land",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450128,
+   "name": "Sorcery",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450127,
+   "name": "Planeswalker",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450126,
+   "name": "Artifact",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450125,
+   "name": "Creature",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450124,
+   "name": "Commander",
+   "isPremier": true,
+   "includedInDeck": true,
+   "includedInPrice": true
+  },
+  {
+   "id": 46450123,
+   "name": "Maybeboard",
+   "isPremier": false,
+   "includedInDeck": false,
+   "includedInPrice": false
+  },
+  {
+   "id": 46450122,
+   "name": "Sideboard",
+   "isPremier": false,
+   "includedInDeck": true,
+   "includedInPrice": true
+  }
+ ],
+ "deckTags": [],
+ "cards": [
+  {
+   "id": 1467566138,
+   "categories": [
+    "Creature"
+   ],
+   "companion": false,
+   "flippedDefault": false,
+   "label": ",#656565",
+   "modifier": "Foil",
+   "quantity": 1,
+   "customCmc": null,
+   "removedCategories": null,
+   "createdAt": "2023-08-30T19:43:32.950131Z",
+   "updatedAt": "2023-08-30T19:43:32.950143Z",
+   "deletedAt": null,
+   "notes": null,
+   "card": {
+    "id": 120306,
+    "artist": "Nana Qi & GodMachine",
+    "tcgProductId": 496134,
+    "ckFoilId": 277861,
+    "ckNormalId": 0,
+    "cmEd": "",
+    "scgSku": null,
+    "scgFoilSku": "SGL-MTG-PRM-SECRET_SLD_1156-ENF",
+    "cardTraderSku": "246932",
+    "collectorNumber": "1156",
+    "multiverseid": 0,
+    "mtgoFoilId": 0,
+    "mtgoNormalId": 0,
+    "uid": "485211cd-6c9f-4fb6-99da-f876c55531b4",
+    "displayName": null,
+    "releasedAt": "2023-05-08",
+    "contentWarning": false,
+    "edition": {
+     "editioncode": "sld",
+     "editionname": "Secret Lair Drop",
+     "editiondate": "2019-12-02",
+     "editiontype": "box",
+     "mtgoCode": null
+    },
+    "flavor": "",
+    "games": [],
+    "options": [
+     "Foil"
+    ],
+    "scryfallImageHash": "1783916537",
+    "oracleCard": {
+     "id": 703,
+     "cmc": 5,
+     "colorIdentity": [
+      "White",
+      "Red"
+     ],
+     "colors": [
+      "White",
+      "Red"
+     ],
+     "edhrecRank": 7481,
+     "faces": [
+      {
+       "colors": [
+        "White"
+       ],
+       "flavor": "",
+       "manaCost": "{3}{W}{W}",
+       "name": "Archangel Avacyn",
+       "power": "4",
+       "subTypes": [
+        "Angel"
+       ],
+       "superTypes": [
+        "Legendary"
+       ],
+       "text": "Flash\nFlying, vigilance\nWhen Archangel Avacyn enters, creatures you control gain indestructible until end of turn.\nWhen a non-Angel creature you control dies, transform Archangel Avacyn at the beginning of the next upkeep.",
+       "toughness": "4",
+       "types": [
+        "Creature"
+       ],
+       "loyalty": null
+      },
+      {
+       "colors": [
+        "Red"
+       ],
+       "flavor": "\"Wings that once bore hope are now stained with blood. She is our guardian no longer.\"\n—Grete, cathar apostate",
+       "manaCost": "",
+       "name": "Avacyn, the Purifier",
+       "power": "6",
+       "subTypes": [
+        "Angel"
+       ],
+       "superTypes": [
+        "Legendary"
+       ],
+       "text": "Flying\nWhen this creature transforms into Avacyn, the Purifier, it deals 3 damage to each other creature and each opponent.",
+       "toughness": "5",
+       "types": [
+        "Creature"
+       ],
+       "loyalty": null
+      }
+     ],
+     "layout": "transform",
+     "uid": "432b37a5-d32a-4b78-91ab-860aa026b7cc",
+     "legalities": {
+      "alchemy": "not_legal",
+      "legacy": "legal",
+      "oldschool": "not_legal",
+      "modern": "legal",
+      "vintage": "legal",
+      "oathbreaker": "legal",
+      "1v1": "legal",
+      "historicbrawl": "legal",
+      "competitivebrawl": "legal",
+      "premodern": "not_legal",
+      "historic": "legal",
+      "commander": "legal",
+      "paupercommander": "not_legal",
+      "gladiator": "legal",
+      "explorer": null,
+      "brawl": "not_legal",
+      "penny": "legal",
+      "pioneer": "legal",
+      "duel": "legal",
+      "pauper": "not_legal",
+      "standard": "not_legal",
+      "future": "not_legal",
+      "predh": "not_legal",
+      "timeless": "legal",
+      "canlander": "legal"
+     },
+     "manaCost": "",
+     "manaProduction": {
+      "W": null,
+      "U": null,
+      "B": null,
+      "R": null,
+      "G": null,
+      "C": null
+     },
+     "name": "Archangel Avacyn // Avacyn, the Purifier",
+     "power": "",
+     "salt": 0.2,
+     "subTypes": [
+      "Angel"
+     ],
+     "superTypes": [
+      "Legendary"
+     ],
+     "keywords": [
+      "Flying",
+      "Flash",
+      "Vigilance",
+      "Transform"
+     ],
+     "oTags": [
+      "alliteration",
+      "burn creature",
+      "burn player",
+      "combat trick",
+      "death trigger",
+      "delayed trigger",
+      "evasion",
+      "gives indestructible",
+      "group slug",
+      "protects-all",
+      "protects-creature",
+      "sweeper"
+     ],
+     "inheritedTags": [
+      "burn",
+      "card names",
+      "protection",
+      "removal",
+      "removal-burn",
+      "removal-creature",
+      "triggered ability"
+     ],
+     "text": "",
+     "tokens": [
+      "14553"
+     ],
+     "toughness": "",
+     "types": [
+      "Creature"
+     ],
+     "loyalty": null,
+     "canlanderPoints": null,
+     "isPDHCommander": false,
+     "defaultCategory": "Protection",
+     "gameChanger": false,
+     "extraTurns": false,
+     "tutor": false,
+     "massLandDenial": false,
+     "twoCardComboSingelton": false,
+     "twoCardComboIds": [],
+     "atomicCombos": [],
+     "potentialCombos": [],
+     "lang": "en"
+    },
+    "owned": 0,
+    "pinnedStatus": 0,
+    "prices": {
+     "ck": 0.0,
+     "ckfoil": 19.99,
+     "ckMinimum": 2.49,
+     "cm": 0.0,
+     "cmfoil": 10.0,
+     "cmMinimum": 1.0,
+     "mtgo": 0.0,
+     "mtgofoil": 0.0,
+     "mtgoMinimum": 0.02,
+     "tcg": 0.0,
+     "tcgfoil": 23.94,
+     "tcgMinimum": 2.02,
+     "scg": 0.0,
+     "scgfoil": 19.99,
+     "scgMinimum": 19.99,
+     "mp": 0.0,
+     "mpfoil": 20.85,
+     "mpMinimum": 1.87,
+     "tcgLand": 0.0,
+     "tcgLandFoil": 623.0,
+     "tcgLandMinimum": 84.0,
+     "cardTrader": 0.0,
+     "cardTraderFoil": 13.19,
+     "cardTraderMinimum": 1.55
+    },
+    "rarity": "mythic",
+    "globalCategories": []
+   }
+  },
+  {
+   "id": 1467566142,
+   "categories": [
+    "Sorcery"
+   ],
+   "companion": false,
+   "flippedDefault": false,
+   "label": ",#656565",
+   "modifier": "Normal",
+   "quantity": 1,
+   "customCmc": null,
+   "removedCategories": null,
+   "createdAt": "2023-08-30T19:43:32.950248Z",
+   "updatedAt": "2023-08-30T19:43:32.950259Z",
+   "deletedAt": null,
+   "notes": null,
+   "card": {
+    "id": 120324,
+    "artist": "Lucas Staniec",
+    "tcgProductId": 496192,
+    "ckFoilId": 0,
+    "ckNormalId": 277771,
+    "cmEd": "",
+    "scgSku": "SGL-MTG-PWSB-ZNR_180-ENN",
+    "scgFoilSku": null,
+    "cardTraderSku": "248092",
+    "collectorNumber": "ZNR-180",
+    "multiverseid": 0,
+    "mtgoFoilId": 0,
+    "mtgoNormalId": 0,
+    "uid": "07aaa125-4ae8-47d9-8d22-194a9f84bad8",
+    "displayName": null,
+    "releasedAt": "2023-05-08",
+    "contentWarning": false,
+    "edition": {
+     "editioncode": "plst",
+     "editionname": "The List",
+     "editiondate": "2020-09-26",
+     "editiontype": "masters",
+     "mtgoCode": null
+    },
+    "flavor": "",
+    "games": [],
+    "options": [
+     "Normal"
+    ],
+    "scryfallImageHash": "1783916574",
+    "oracleCard": {
+     "id": 21773,
+     "cmc": 3,
+     "colorIdentity": [
+      "Green"
+     ],
+     "colors": [
+      "Green"
+     ],
+     "edhrecRank": 319,
+     "faces": [
+      {
+       "colors": [
+        "Green"
+       ],
+       "flavor": "\"Always have a backup plan.\"\n—Doral, Bala Ged guide",
+       "manaCost": "{2}{G}",
+       "name": "Bala Ged Recovery",
+       "power": "",
+       "subTypes": [],
+       "superTypes": [],
+       "text": "Return target card from your graveyard to your hand.",
+       "toughness": "",
+       "types": [
+        "Sorcery"
+       ],
+       "loyalty": null
+      },
+      {
+       "colors": [],
+       "flavor": "\"I know it's around here somewhere.\"\n—Doral, Bala Ged guide",
+       "manaCost": "",
+       "name": "Bala Ged Sanctuary",
+       "power": "",
+       "subTypes": [],
+       "superTypes": [],
+       "text": "This land enters tapped.\n{T}: Add {G}.",
+       "toughness": "",
+       "types": [
+        "Land"
+       ],
+       "loyalty": null
+      }
+     ],
+     "layout": "modal_dfc",
+     "uid": "d2075f58-b0e9-4e85-b7e6-0523a27a1d5b",
+     "legalities": {
+      "alchemy": "not_legal",
+      "legacy": "legal",
+      "oldschool": "not_legal",
+      "modern": "legal",
+      "vintage": "legal",
+      "oathbreaker": "legal",
+      "1v1": "legal",
+      "historicbrawl": "legal",
+      "competitivebrawl": "legal",
+      "premodern": "not_legal",
+      "historic": "legal",
+      "commander": "legal",
+      "paupercommander": "not_legal",
+      "gladiator": "legal",
+      "explorer": null,
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "pioneer": "legal",
+      "duel": "legal",
+      "pauper": "not_legal",
+      "standard": "not_legal",
+      "future": "not_legal",
+      "predh": "not_legal",
+      "timeless": "legal",
+      "canlander": "legal"
+     },
+     "manaCost": "",
+     "manaProduction": {
+      "W": null,
+      "U": null,
+      "B": null,
+      "R": null,
+      "G": 1,
+      "C": null
+     },
+     "name": "Bala Ged Recovery // Bala Ged Sanctuary",
+     "power": "",
+     "salt": 0.2,
+     "subTypes": [],
+     "superTypes": [],
+     "keywords": [],
+     "oTags": [
+      "activated ability",
+      "cheaper than mv",
+      "regrowth-any",
+      "single target instant/sorcery",
+      "tapland",
+      "utility land"
+     ],
+     "inheritedTags": [
+      "card advantage",
+      "recursion",
+      "recursion-any",
+      "regrowth"
+     ],
+     "text": "",
+     "tokens": [],
+     "toughness": "",
+     "types": [
+      "Sorcery"
+     ],
+     "loyalty": null,
+     "canlanderPoints": null,
+     "isPDHCommander": false,
+     "defaultCategory": "Recursion",
+     "gameChanger": false,
+     "extraTurns": false,
+     "tutor": false,
+     "massLandDenial": false,
+     "twoCardComboSingelton": false,
+     "twoCardComboIds": [],
+     "atomicCombos": [],
+     "potentialCombos": [],
+     "lang": "en"
+    },
+    "owned": 0,
+    "pinnedStatus": 0,
+    "prices": {
+     "ck": 8.99,
+     "ckfoil": 0.0,
+     "ckMinimum": 8.49,
+     "cm": 6.5,
+     "cmfoil": 0.0,
+     "cmMinimum": 5.15,
+     "mtgo": 0.0,
+     "mtgofoil": 0.0,
+     "mtgoMinimum": 0.03,
+     "tcg": 8.1,
+     "tcgfoil": 0.0,
+     "tcgMinimum": 6.86,
+     "scg": 7.99,
+     "scgfoil": 0.0,
+     "scgMinimum": 6.79,
+     "mp": 7.39,
+     "mpfoil": 0.0,
+     "mpMinimum": 5.72,
+     "tcgLand": 444.0,
+     "tcgLandFoil": 0.0,
+     "tcgLandMinimum": 236.0,
+     "cardTrader": 9.81,
+     "cardTraderFoil": 0.0,
+     "cardTraderMinimum": 7.02
+    },
+    "rarity": "uncommon",
+    "globalCategories": []
+   }
+  },
+  {
+   "id": 1467566135,
+   "categories": [
+    "Commander"
+   ],
+   "companion": false,
+   "flippedDefault": false,
+   "label": ",#656565",
+   "modifier": "Foil",
+   "quantity": 1,
+   "customCmc": null,
+   "removedCategories": null,
+   "createdAt": "2023-08-30T19:43:32.950011Z",
+   "updatedAt": "2023-08-30T19:43:40.805545Z",
+   "deletedAt": null,
+   "notes": null,
+   "card": {
+    "id": 120304,
+    "artist": "Nana Qi & GodMachine",
+    "tcgProductId": 496132,
+    "ckFoilId": 277859,
+    "ckNormalId": 0,
+    "cmEd": "",
+    "scgSku": null,
+    "scgFoilSku": "SGL-MTG-PRM-SECRET_SLD_1155-ENF",
+    "cardTraderSku": "246931",
+    "collectorNumber": "1155",
+    "multiverseid": 0,
+    "mtgoFoilId": 0,
+    "mtgoNormalId": 0,
+    "uid": "46d43696-3c63-4c55-bc61-e1560c8b8201",
+    "displayName": null,
+    "releasedAt": "2023-05-08",
+    "contentWarning": false,
+    "edition": {
+     "editioncode": "sld",
+     "editionname": "Secret Lair Drop",
+     "editiondate": "2019-12-02",
+     "editiontype": "box",
+     "mtgoCode": null
+    },
+    "flavor": "",
+    "games": [],
+    "options": [
+     "Foil"
+    ],
+    "scryfallImageHash": "1783916538",
+    "oracleCard": {
+     "id": 22462,
+     "cmc": 3,
+     "colorIdentity": [
+      "White",
+      "Blue",
+      "Black",
+      "Red",
+      "Green"
+     ],
+     "colors": [
+      "White",
+      "Red",
+      "Black",
+      "Green",
+      "Blue"
+     ],
+     "edhrecRank": 2524,
+     "faces": [
+      {
+       "colors": [
+        "Green"
+       ],
+       "flavor": "\"I know this world, from canopy to roots.\"",
+       "manaCost": "{1}{G}{G}",
+       "name": "Esika, God of the Tree",
+       "power": "1",
+       "subTypes": [
+        "God"
+       ],
+       "superTypes": [
+        "Legendary"
+       ],
+       "text": "Vigilance\n{T}: Add one mana of any color.\nOther legendary creatures you control have vigilance and \"{T}: Add one mana of any color.\"",
+       "toughness": "4",
+       "types": [
+        "Creature"
+       ],
+       "loyalty": null
+      },
+      {
+       "colors": [
+        "White",
+        "Blue",
+        "Black",
+        "Red",
+        "Green"
+       ],
+       "flavor": "Starnheim awaits.",
+       "manaCost": "{W}{U}{B}{R}{G}",
+       "name": "The Prismatic Bridge",
+       "power": "",
+       "subTypes": [],
+       "superTypes": [
+        "Legendary"
+       ],
+       "text": "At the beginning of your upkeep, reveal cards from the top of your library until you reveal a creature or planeswalker card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+       "toughness": "",
+       "types": [
+        "Enchantment"
+       ],
+       "loyalty": null
+      }
+     ],
+     "layout": "modal_dfc",
+     "uid": "92023a5d-a143-4950-a71b-d736e6b8e959",
+     "legalities": {
+      "alchemy": "not_legal",
+      "legacy": "legal",
+      "oldschool": "not_legal",
+      "modern": "legal",
+      "vintage": "legal",
+      "oathbreaker": "legal",
+      "1v1": "legal",
+      "historicbrawl": "legal",
+      "competitivebrawl": "legal",
+      "premodern": "not_legal",
+      "historic": "legal",
+      "commander": "legal",
+      "paupercommander": "not_legal",
+      "gladiator": "legal",
+      "explorer": null,
+      "brawl": "not_legal",
+      "penny": "legal",
+      "pioneer": "legal",
+      "duel": "legal",
+      "pauper": "not_legal",
+      "standard": "not_legal",
+      "future": "not_legal",
+      "predh": "not_legal",
+      "timeless": "legal",
+      "canlander": "legal"
+     },
+     "manaCost": "",
+     "manaProduction": {
+      "W": 2,
+      "U": 2,
+      "B": 2,
+      "R": 2,
+      "G": 2,
+      "C": null
+     },
+     "name": "Esika, God of the Tree // The Prismatic Bridge",
+     "power": "",
+     "salt": 1.15,
+     "subTypes": [
+      "God"
+     ],
+     "superTypes": [
+      "Legendary"
+     ],
+     "keywords": [
+      "Vigilance"
+     ],
+     "oTags": [
+      "5c set mechanic commander",
+      "activated ability",
+      "consult-onto-battlefield",
+      "cycle-khm-m-god",
+      "genesis effect",
+      "gives mana ability",
+      "gives tap ability",
+      "gives vigilance",
+      "keyword anthem",
+      "mana dork",
+      "more expensive than mv",
+      "repeatable card advantage",
+      "synergy-legendary",
+      "tap fuel-creature",
+      "triggered ability"
+     ],
+     "inheritedTags": [
+      "card advantage",
+      "consult",
+      "cost ignorer",
+      "cycle",
+      "mana producer",
+      "ramp",
+      "sneak from library",
+      "staple with set's mechanic",
+      "tap outlet"
+     ],
+     "text": "",
+     "tokens": [],
+     "toughness": "",
+     "types": [
+      "Creature"
+     ],
+     "loyalty": null,
+     "canlanderPoints": null,
+     "isPDHCommander": false,
+     "defaultCategory": "Ramp",
+     "gameChanger": false,
+     "extraTurns": false,
+     "tutor": false,
+     "massLandDenial": false,
+     "twoCardComboSingelton": false,
+     "twoCardComboIds": [],
+     "atomicCombos": [],
+     "potentialCombos": [
+      "10951",
+      "237"
+     ],
+     "lang": "en"
+    },
+    "owned": 0,
+    "pinnedStatus": 0,
+    "prices": {
+     "ck": 0.0,
+     "ckfoil": 47.99,
+     "ckMinimum": 20.99,
+     "cm": 0.0,
+     "cmfoil": 26.5,
+     "cmMinimum": 2.95,
+     "mtgo": 0.0,
+     "mtgofoil": 0.0,
+     "mtgoMinimum": 0.02,
+     "tcg": 0.0,
+     "tcgfoil": 39.97,
+     "tcgMinimum": 15.3,
+     "scg": 0.0,
+     "scgfoil": 44.99,
+     "scgMinimum": 19.55,
+     "mp": 0.0,
+     "mpfoil": 39.52,
+     "mpMinimum": 14.57,
+     "tcgLand": 0.0,
+     "tcgLandFoil": 1410.0,
+     "tcgLandMinimum": 505.0,
+     "cardTrader": 0.0,
+     "cardTraderFoil": 37.12,
+     "cardTraderMinimum": 12.27
+    },
+    "rarity": "mythic",
+    "globalCategories": []
+   }
+  },
+  {
+   "id": 1467566148,
+   "categories": [
+    "Land"
+   ],
+   "companion": false,
+   "flippedDefault": false,
+   "label": ",#656565",
+   "modifier": "Normal",
+   "quantity": 1,
+   "customCmc": null,
+   "removedCategories": null,
+   "createdAt": "2023-08-30T19:43:32.950451Z",
+   "updatedAt": "2023-08-30T19:43:32.950462Z",
+   "deletedAt": null,
+   "notes": null,
+   "card": {
+    "id": 120360,
+    "artist": "Titus Lunter",
+    "tcgProductId": 496237,
+    "ckFoilId": 0,
+    "ckNormalId": 277776,
+    "cmEd": "",
+    "scgSku": "SGL-MTG-PWSB-ZNR_258-ENN",
+    "scgFoilSku": null,
+    "cardTraderSku": "248183",
+    "collectorNumber": "ZNR-258",
+    "multiverseid": 0,
+    "mtgoFoilId": 0,
+    "mtgoNormalId": 0,
+    "uid": "655724d5-ee5f-49f5-92d3-7186ed2789d8",
+    "displayName": null,
+    "releasedAt": "2023-05-08",
+    "contentWarning": false,
+    "edition": {
+     "editioncode": "plst",
+     "editionname": "The List",
+     "editiondate": "2020-09-26",
+     "editiontype": "masters",
+     "mtgoCode": null
+    },
+    "flavor": "",
+    "games": [],
+    "options": [
+     "Normal"
+    ],
+    "scryfallImageHash": "1783916552",
+    "oracleCard": {
+     "id": 21731,
+     "cmc": 0,
+     "colorIdentity": [
+      "White",
+      "Green"
+     ],
+     "colors": [],
+     "edhrecRank": 1161,
+     "faces": [
+      {
+       "colors": [],
+       "flavor": "\"Not for the bumble-footed nor wobble-stomached.\"\n—Kreq of Sunder Bay",
+       "manaCost": "",
+       "name": "Branchloft Pathway",
+       "power": "",
+       "subTypes": [],
+       "superTypes": [],
+       "text": "{T}: Add {G}.",
+       "toughness": "",
+       "types": [
+        "Land"
+       ],
+       "loyalty": null
+      },
+      {
+       "colors": [],
+       "flavor": "\"The path is stable. It's the gusts all around it that are a bit 'whoosh—oops—bye.'\"\n—Kreq of Sunder Bay",
+       "manaCost": "",
+       "name": "Boulderloft Pathway",
+       "power": "",
+       "subTypes": [],
+       "superTypes": [],
+       "text": "{T}: Add {W}.",
+       "toughness": "",
+       "types": [
+        "Land"
+       ],
+       "loyalty": null
+      }
+     ],
+     "layout": "modal_dfc",
+     "uid": "7c304547-a4b1-46c9-baed-16d2bfbe16eb",
+     "legalities": {
+      "alchemy": "not_legal",
+      "legacy": "legal",
+      "oldschool": "not_legal",
+      "modern": "legal",
+      "vintage": "legal",
+      "oathbreaker": "legal",
+      "1v1": "legal",
+      "historicbrawl": "legal",
+      "competitivebrawl": "legal",
+      "premodern": "not_legal",
+      "historic": "legal",
+      "commander": "legal",
+      "paupercommander": "not_legal",
+      "gladiator": "legal",
+      "explorer": null,
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "pioneer": "legal",
+      "duel": "legal",
+      "pauper": "not_legal",
+      "standard": "not_legal",
+      "future": "not_legal",
+      "predh": "not_legal",
+      "timeless": "legal",
+      "canlander": "legal"
+     },
+     "manaCost": "",
+     "manaProduction": {
+      "W": 1,
+      "U": null,
+      "B": null,
+      "R": null,
+      "G": 1,
+      "C": null
+     },
+     "name": "Branchloft Pathway // Boulderloft Pathway",
+     "power": "",
+     "salt": 0.13,
+     "subTypes": [],
+     "superTypes": [],
+     "keywords": [],
+     "oTags": [
+      "activated ability",
+      "cycle-znr-pathway"
+     ],
+     "inheritedTags": [
+      "cycle",
+      "cycle-dual-land",
+      "cycle-land",
+      "cycle-pathway",
+      "dual land"
+     ],
+     "text": "",
+     "tokens": [],
+     "toughness": "",
+     "types": [
+      "Land"
+     ],
+     "loyalty": null,
+     "canlanderPoints": null,
+     "isPDHCommander": false,
+     "defaultCategory": null,
+     "gameChanger": false,
+     "extraTurns": false,
+     "tutor": false,
+     "massLandDenial": false,
+     "twoCardComboSingelton": false,
+     "twoCardComboIds": [],
+     "atomicCombos": [],
+     "potentialCombos": [],
+     "lang": "en"
+    },
+    "owned": 0,
+    "pinnedStatus": 0,
+    "prices": {
+     "ck": 4.49,
+     "ckfoil": 0.0,
+     "ckMinimum": 4.49,
+     "cm": 3.99,
+     "cmfoil": 0.0,
+     "cmMinimum": 2.1,
+     "mtgo": 0.0,
+     "mtgofoil": 0.0,
+     "mtgoMinimum": 0.03,
+     "tcg": 3.33,
+     "tcgfoil": 0.0,
+     "tcgMinimum": 2.89,
+     "scg": 3.49,
+     "scgfoil": 0.0,
+     "scgMinimum": 3.39,
+     "mp": 3.63,
+     "mpfoil": 0.0,
+     "mpMinimum": 2.96,
+     "tcgLand": 116.0,
+     "tcgLandFoil": 0.0,
+     "tcgLandMinimum": 107.0,
+     "cardTrader": 4.06,
+     "cardTraderFoil": 0.0,
+     "cardTraderMinimum": 3.55
+    },
+    "rarity": "rare",
+    "globalCategories": []
+   }
+  },
+  {
+   "id": 1467566214,
+   "categories": [
+    "Artifact"
+   ],
+   "companion": false,
+   "flippedDefault": false,
+   "label": ",#656565",
+   "modifier": "Normal",
+   "quantity": 1,
+   "customCmc": null,
+   "removedCategories": null,
+   "createdAt": "2023-08-30T19:43:32.952550Z",
+   "updatedAt": "2023-08-30T19:43:32.952562Z",
+   "deletedAt": null,
+   "notes": null,
+   "card": {
+    "id": 120328,
+    "artist": "Mike Bierek",
+    "tcgProductId": 496222,
+    "ckFoilId": 0,
+    "ckNormalId": 228657,
+    "cmEd": "",
+    "scgSku": "SGL-MTG-PWSB-CMD_261-ENN",
+    "scgFoilSku": null,
+    "cardTraderSku": "248177",
+    "collectorNumber": "CMD-261",
+    "multiverseid": 0,
+    "mtgoFoilId": 0,
+    "mtgoNormalId": 0,
+    "uid": "6d5b06e4-bbc8-405b-bc53-1380dba3696e",
+    "displayName": null,
+    "releasedAt": "2023-05-08",
+    "contentWarning": false,
+    "edition": {
+     "editioncode": "plst",
+     "editionname": "The List",
+     "editiondate": "2020-09-26",
+     "editiontype": "masters",
+     "mtgoCode": null
+    },
+    "flavor": "Lost to time is the artificer's art of trapping light from a distant star in a ring of purest gold.",
+    "games": [],
+    "options": [
+     "Normal"
+    ],
+    "scryfallImageHash": "1783916546",
+    "oracleCard": {
+     "id": 15342,
+     "cmc": 1,
+     "colorIdentity": [],
+     "colors": [],
+     "edhrecRank": 1,
+     "faces": [],
+     "layout": "normal",
+     "uid": "6ad8011d-3471-4369-9d68-b264cc027487",
+     "legalities": {
+      "alchemy": "not_legal",
+      "legacy": "banned",
+      "oldschool": "not_legal",
+      "modern": "not_legal",
+      "vintage": "restricted",
+      "oathbreaker": "banned",
+      "1v1": "legal",
+      "historicbrawl": "not_legal",
+      "competitivebrawl": "not_legal",
+      "premodern": "not_legal",
+      "historic": "not_legal",
+      "commander": "legal",
+      "paupercommander": "not_legal",
+      "gladiator": "not_legal",
+      "explorer": null,
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "pioneer": "not_legal",
+      "duel": "banned",
+      "pauper": "not_legal",
+      "standard": "not_legal",
+      "future": "not_legal",
+      "predh": "legal",
+      "timeless": "not_legal",
+      "canlander": "legal"
+     },
+     "manaCost": "{1}",
+     "manaProduction": {
+      "W": null,
+      "U": null,
+      "B": null,
+      "R": null,
+      "G": null,
+      "C": 2
+     },
+     "name": "Sol Ring",
+     "power": "",
+     "salt": 1.46,
+     "subTypes": [],
+     "superTypes": [],
+     "keywords": [],
+     "oTags": [
+      "activated ability",
+      "adds multiple mana",
+      "full refund",
+      "mana rock"
+     ],
+     "inheritedTags": [
+      "mana producer",
+      "ramp",
+      "refund"
+     ],
+     "text": "{T}: Add {C}{C}.",
+     "tokens": [],
+     "toughness": "",
+     "types": [
+      "Artifact"
+     ],
+     "loyalty": null,
+     "canlanderPoints": 3,
+     "isPDHCommander": false,
+     "defaultCategory": "Ramp",
+     "gameChanger": false,
+     "extraTurns": false,
+     "tutor": false,
+     "massLandDenial": false,
+     "twoCardComboSingelton": false,
+     "twoCardComboIds": [],
+     "atomicCombos": [
+      "17151"
+     ],
+     "potentialCombos": [],
+     "lang": "en"
+    },
+    "owned": 0,
+    "pinnedStatus": 0,
+    "prices": {
+     "ck": 3.49,
+     "ckfoil": 0.0,
+     "ckMinimum": 2.99,
+     "cm": 1.0,
+     "cmfoil": 0.0,
+     "cmMinimum": 0.1,
+     "mtgo": 0.0,
+     "mtgofoil": 0.0,
+     "mtgoMinimum": 0.02,
+     "tcg": 1.93,
+     "tcgfoil": 0.0,
+     "tcgMinimum": 1.46,
+     "scg": 2.49,
+     "scgfoil": 0.0,
+     "scgMinimum": 1.89,
+     "mp": 1.97,
+     "mpfoil": 0.0,
+     "mpMinimum": 1.35,
+     "tcgLand": 73.0,
+     "tcgLandFoil": 0.0,
+     "tcgLandMinimum": 50.0,
+     "cardTrader": 3.74,
+     "cardTraderFoil": 0.0,
+     "cardTraderMinimum": 1.07
+    },
+    "rarity": "uncommon",
+    "globalCategories": []
+   }
+  },
+  {
+   "id": 1467566232,
+   "categories": [
+    "Land"
+   ],
+   "companion": false,
+   "flippedDefault": false,
+   "label": ",#656565",
+   "modifier": "Foil",
+   "quantity": 1,
+   "customCmc": null,
+   "removedCategories": null,
+   "createdAt": "2023-08-30T19:43:32.953088Z",
+   "updatedAt": "2023-08-30T19:43:32.953100Z",
+   "deletedAt": null,
+   "notes": null,
+   "card": {
+    "id": 120302,
+    "artist": "Nana Qi & GodMachine",
+    "tcgProductId": 496138,
+    "ckFoilId": 277867,
+    "ckNormalId": 0,
+    "cmEd": "",
+    "scgSku": null,
+    "scgFoilSku": "SGL-MTG-PRM-SECRET_SLD_1159-ENF",
+    "cardTraderSku": "246942",
+    "collectorNumber": "1159",
+    "multiverseid": 0,
+    "mtgoFoilId": 0,
+    "mtgoNormalId": 0,
+    "uid": "d3182b40-a731-4957-9d6e-a1f69c3aeb5e",
+    "displayName": null,
+    "releasedAt": "2023-05-08",
+    "contentWarning": false,
+    "edition": {
+     "editioncode": "sld",
+     "editionname": "Secret Lair Drop",
+     "editiondate": "2019-12-02",
+     "editiontype": "box",
+     "mtgoCode": null
+    },
+    "flavor": "",
+    "games": [],
+    "options": [
+     "Foil"
+    ],
+    "scryfallImageHash": "1783916537",
+    "oracleCard": {
+     "id": 18722,
+     "cmc": 0,
+     "colorIdentity": [
+      "Black"
+     ],
+     "colors": [
+      "Black"
+     ],
+     "edhrecRank": 1483,
+     "faces": [
+      {
+       "colors": [],
+       "flavor": "",
+       "manaCost": "",
+       "name": "Westvale Abbey",
+       "power": "",
+       "subTypes": [],
+       "superTypes": [],
+       "text": "{T}: Add {C}.\n{5}, {T}, Pay 1 life: Create a 1/1 white and black Human Cleric creature token.\n{5}, {T}, Sacrifice five creatures: Transform this land, then untap it.",
+       "toughness": "",
+       "types": [
+        "Land"
+       ],
+       "loyalty": null
+      },
+      {
+       "colors": [
+        "Black"
+       ],
+       "flavor": "With Griselbrand gone, the Skirsdag eagerly awaited another demon to claim their devotion. Ormendahl did not make them wait long.",
+       "manaCost": "",
+       "name": "Ormendahl, Profane Prince",
+       "power": "9",
+       "subTypes": [
+        "Demon"
+       ],
+       "superTypes": [
+        "Legendary"
+       ],
+       "text": "Flying, lifelink, indestructible, haste",
+       "toughness": "7",
+       "types": [
+        "Creature"
+       ],
+       "loyalty": null
+      }
+     ],
+     "layout": "transform",
+     "uid": "04eeb9ad-5c59-411b-8809-db8349838588",
+     "legalities": {
+      "alchemy": "not_legal",
+      "legacy": "legal",
+      "oldschool": "not_legal",
+      "modern": "legal",
+      "vintage": "legal",
+      "oathbreaker": "legal",
+      "1v1": "legal",
+      "historicbrawl": "legal",
+      "competitivebrawl": "legal",
+      "premodern": "not_legal",
+      "historic": "legal",
+      "commander": "legal",
+      "paupercommander": "not_legal",
+      "gladiator": "legal",
+      "explorer": null,
+      "brawl": "not_legal",
+      "penny": "legal",
+      "pioneer": "legal",
+      "duel": "legal",
+      "pauper": "not_legal",
+      "standard": "not_legal",
+      "future": "not_legal",
+      "predh": "not_legal",
+      "timeless": "legal",
+      "canlander": "legal"
+     },
+     "manaCost": "",
+     "manaProduction": {
+      "W": null,
+      "U": null,
+      "B": null,
+      "R": null,
+      "G": null,
+      "C": 1
+     },
+     "name": "Westvale Abbey // Ormendahl, Profane Prince",
+     "power": "",
+     "salt": 0.13,
+     "subTypes": [],
+     "superTypes": [],
+     "keywords": [
+      "Flying",
+      "Haste",
+      "Lifelink",
+      "Indestructible",
+      "Transform"
+     ],
+     "oTags": [
+      "activated ability",
+      "alliteration",
+      "creatureland",
+      "evasion",
+      "life payment",
+      "mana sink",
+      "out of color token",
+      "repeatable creature tokens",
+      "repeatable lifegain",
+      "sacrifice outlet-creature"
+     ],
+     "inheritedTags": [
+      "animate",
+      "animate self",
+      "card names",
+      "lifegain",
+      "repeatable token generator",
+      "sacrifice outlet",
+      "type change",
+      "utility land"
+     ],
+     "text": "",
+     "tokens": [
+      "21022",
+      "14553"
+     ],
+     "toughness": "",
+     "types": [
+      "Land"
+     ],
+     "loyalty": null,
+     "canlanderPoints": null,
+     "isPDHCommander": false,
+     "defaultCategory": null,
+     "gameChanger": false,
+     "extraTurns": false,
+     "tutor": false,
+     "massLandDenial": false,
+     "twoCardComboSingelton": false,
+     "twoCardComboIds": [],
+     "atomicCombos": [],
+     "potentialCombos": [],
+     "lang": "en"
+    },
+    "owned": 0,
+    "pinnedStatus": 0,
+    "prices": {
+     "ck": 0.0,
+     "ckfoil": 17.99,
+     "ckMinimum": 4.49,
+     "cm": 0.0,
+     "cmfoil": 13.89,
+     "cmMinimum": 1.11,
+     "mtgo": 0.0,
+     "mtgofoil": 0.0,
+     "mtgoMinimum": 0.02,
+     "tcg": 0.0,
+     "tcgfoil": 23.9,
+     "tcgMinimum": 2.02,
+     "scg": 0.0,
+     "scgfoil": 18.39,
+     "scgMinimum": 18.39,
+     "mp": 0.0,
+     "mpfoil": 21.89,
+     "mpMinimum": 2.34,
+     "tcgLand": 0.0,
+     "tcgLandFoil": 655.0,
+     "tcgLandMinimum": 86.0,
+     "cardTrader": 0.0,
+     "cardTraderFoil": 14.16,
+     "cardTraderMinimum": 1.55
+    },
+    "rarity": "rare",
+    "globalCategories": []
+   }
+  }
+ ],
+ "customCards": [],
+ "intentionallySkippedCardData": false
+}

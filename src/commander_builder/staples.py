@@ -521,6 +521,39 @@ _THEME_PATTERNS: list[tuple[str, str, list[str], int]] = [
 ]
 
 
+def card_theme_slugs(oracle_text: str) -> set[str]:
+    """EDHREC tag slugs ONE card's oracle text matches, thresholds ignored.
+
+    ``detect_themes`` answers "what is this DECK about" and therefore
+    applies ``_THEME_PATTERNS``' min-count thresholds (8-12 cards). Some
+    callers need the per-card half of that question — "does this one card
+    pull toward a theme the deck already declared" — where the deck-level
+    threshold is not just unhelpful but impossible: no single card clears
+    a count of 8.
+
+    Added 2026-08-27 for the deck judge's swap-direction labeling
+    (``_deck_judge_prompt.classify_swap_direction``), which needs to ask
+    whether a swapped-in card matches ``intent.themes``. Factored out of
+    ``detect_themes`` rather than restated beside it — a second copy of
+    the pattern loop is a second thing to keep in sync with
+    ``_THEME_PATTERNS``, and the two answers must agree by construction or
+    "this card is on-theme" and "this deck has that theme" can contradict
+    each other.
+
+    Empty / falsy text returns an empty set (never a partial match).
+    """
+    import re as _re
+
+    if not oracle_text:
+        return set()
+    text = oracle_text.lower()
+    return {
+        slug
+        for _theme_name, slug, patterns, _threshold in _THEME_PATTERNS
+        if any(_re.search(p, text, _re.IGNORECASE) for p in patterns)
+    }
+
+
 def detect_themes(deck_oracles: list[tuple[str, str]]) -> list[str]:
     """Scan the deck's card oracle texts and return EDHREC tag
     slugs for any themes that meet their threshold count.
@@ -541,20 +574,17 @@ def detect_themes(deck_oracles: list[tuple[str, str]]) -> list[str]:
     non-tribal themed decks (Spellslinger, Tokens, Aristocrats,
     etc.). Tribal detection is separate (``detect_tribal_type``).
     """
-    import re as _re
-    counts: dict[str, tuple[str, int]] = {}  # slug → (name, count)
-    for name, oracle in deck_oracles:
-        if not oracle:
-            continue
-        text = oracle.lower()
-        for theme_name, slug, patterns, _threshold in _THEME_PATTERNS:
-            if any(_re.search(p, text, _re.IGNORECASE) for p in patterns):
-                _name, prev = counts.get(slug, (theme_name, 0))
-                counts[slug] = (theme_name, prev + 1)
+    # Per-card matching lives in ``card_theme_slugs`` so the deck-level and
+    # card-level answers cannot drift apart; this function is the counting
+    # + thresholding half.
+    counts: dict[str, int] = {}  # slug → count
+    for _name, oracle in deck_oracles:
+        for slug in card_theme_slugs(oracle):
+            counts[slug] = counts.get(slug, 0) + 1
     # Filter to themes that cleared their min-count threshold.
     qualifying: list[tuple[str, int]] = []
-    for theme_name, slug, _patterns, min_count in _THEME_PATTERNS:
-        _n, count = counts.get(slug, (theme_name, 0))
+    for _theme_name, slug, _patterns, min_count in _THEME_PATTERNS:
+        count = counts.get(slug, 0)
         if count >= min_count:
             qualifying.append((slug, count))
     qualifying.sort(key=lambda kv: -kv[1])

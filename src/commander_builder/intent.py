@@ -60,6 +60,17 @@ class Intent:
         ``None`` for non-tribal decks.
     commander_name:
         Canonical name of the primary commander card, or ``None``.
+    stated:
+        FP-018.2 — the deck's OWN primer text (rendered from the
+        source's Quill Delta by ``primer.render_quill_delta``), or
+        ``None`` when the deck has none. Free text: it steers
+        ATTENTION in the judge prompt and soft-biases the advisor,
+        but never invents card facts and never drives swap-direction
+        labeling (see ``_deck_judge_prompt.classify_swap_direction``).
+    pilot_preferences:
+        FP-018.2 — the adopting player's own words about what they
+        like doing, or ``None``. Same free-text contract as
+        ``stated``.
     """
 
     archetype: str = "midrange"
@@ -68,6 +79,8 @@ class Intent:
     color_identity: list[str] = field(default_factory=list)
     tribal_type: Optional[str] = None
     commander_name: Optional[str] = None
+    stated: Optional[str] = None
+    pilot_preferences: Optional[str] = None
 
     def to_dict(self) -> dict:
         from dataclasses import asdict
@@ -262,6 +275,87 @@ def learn_intent(
         tribal_type=tribal_type,
         commander_name=commander_name,
     )
+
+
+# ---------------------------------------------------------------------------
+# FP-018.2 — free text as a SOFT theme signal (2026-08-27)
+# ---------------------------------------------------------------------------
+
+#: Prose keyword -> EDHREC tag slug. The slugs are EXACTLY the vocabulary
+#: of ``staples._THEME_PATTERNS`` — the advisor fetches ``/tags/<slug>``
+#: pages for whatever this yields, so an invented slug would be a dead
+#: fetch, and a slug outside the deck-detection vocabulary would let free
+#: text claim themes the rest of the app cannot recognize. Keywords are
+#: substring-matched casefolded because primers are prose, not oracle
+#: text: "I like sacrificing creatures" has to hit ``sacrifice`` even
+#: though no oracle regex in ``_THEME_PATTERNS`` would.
+_FREE_TEXT_THEME_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("token", "tokens"),
+    ("spellslinger", "spellslinger"),
+    ("instants and sorceries", "spellslinger"),
+    ("sacrific", "sacrifice"),           # sacrifice / sacrificing
+    ("aristocrat", "sacrifice"),
+    ("death trigger", "sacrifice"),
+    ("+1/+1", "plus-1-plus-1-counters"),
+    ("landfall", "landfall"),
+    ("lands matter", "landfall"),
+    ("lifegain", "lifegain"),
+    ("gain life", "lifegain"),
+    ("gaining life", "lifegain"),
+    ("reanimat", "reanimator"),          # reanimate / reanimator
+    ("graveyard", "reanimator"),
+    ("equipment", "equipment"),
+    ("voltron", "equipment"),
+    ("artifact", "artifacts"),
+    ("enchantress", "enchantress"),
+    ("enchantment", "enchantress"),
+)
+
+
+def free_text_theme_slugs(text: Optional[str]) -> list[str]:
+    """Theme slugs a piece of FREE TEXT (primer / pilot preferences)
+    talks about. Keyword match, deduped, first-mention order.
+
+    Deliberately a keyword table and not ``staples.card_theme_slugs``:
+    that function's regexes are tuned to ORACLE wording ("sacrifice a
+    creature", "create ... token") and mostly miss prose. The slugs the
+    two produce are the same vocabulary, so downstream consumers cannot
+    tell the signals apart — which is the point: free text gets a voice
+    in the SAME channel themes already use, not a new one.
+    """
+    if not text:
+        return []
+    folded = text.casefold()
+    out: list[str] = []
+    for keyword, slug in _FREE_TEXT_THEME_KEYWORDS:
+        if keyword in folded and slug not in out:
+            out.append(slug)
+    return out
+
+
+def soft_bias_theme_slugs(intent: Optional["Intent"]) -> list[str]:
+    """The advisor's soft-bias slug list: structured themes first, then
+    slugs the intent's free text mentions.
+
+    Order matters — the advisor caps tag-page fetches at 4 and gives
+    earlier slugs the louder voice, so the DERIVED themes (evidence from
+    the actual list) stay ahead of what the free text merely says. This
+    is a SOFT bias by construction: the slugs only add candidate tag
+    pages to the advisor's pool ranking; nothing is ever filtered out
+    for missing them.
+    """
+    if intent is None:
+        return []
+    out: list[str] = []
+    for slug in list(intent.themes or []):
+        s = slug.strip()
+        if s and s not in out:
+            out.append(s)
+    for text in (intent.stated, intent.pilot_preferences):
+        for s in free_text_theme_slugs(text):
+            if s not in out:
+                out.append(s)
+    return out
 
 
 def intent_protect_cards(intent: Optional["Intent"]) -> list[str]:

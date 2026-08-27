@@ -1,6 +1,5 @@
 """commander-doctor tests — each check exercised in isolation."""
 import json
-import socket
 import urllib.error
 from pathlib import Path
 
@@ -73,38 +72,136 @@ def test_check_cache_dir_red_when_unwritable(tmp_path, monkeypatch):
     assert result.status == RED
 
 
-def test_check_ollama_yellow_when_unreachable(monkeypatch):
-    def network_down(url, timeout=None):
+# --- The local-model tier check (rewired 2026-08-27) ----------------------
+#
+# ``_check_ollama`` no longer hand-rolls an HTTP call; it runs the tier's own
+# ``LocalModelClient.preflight``. So these tests drive the real client with a
+# fake ``urlopen`` — which is what makes the "model not pulled" case testable
+# at all. It was unreachable through the old check by construction: that one
+# reported GREEN as soon as the daemon answered, whatever it answered with.
+
+class _FakeResp:
+    def __init__(self, body): self._body = body
+    def read(self): return self._body
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
+
+def _tags(*names) -> bytes:
+    return json.dumps({"models": [{"name": n} for n in names]}).encode("utf-8")
+
+
+@pytest.fixture
+def tier_on(monkeypatch):
+    """Opt into the local-model tier with a known model + endpoint."""
+    monkeypatch.setenv("COMMANDER_BUILDER_LOCAL_MODEL", "1")
+    monkeypatch.setenv("COMMANDER_BUILDER_LOCAL_MODEL_NAME", "llama3.2:3b")
+    monkeypatch.setenv("COMMANDER_BUILDER_LOCAL_MODEL_URL",
+                       "http://localhost:11434")
+
+
+def test_check_ollama_green_and_silent_when_the_flag_is_off(monkeypatch):
+    """Default OFF. Doctor must not WARN about a tier nobody enabled, and
+    must not open a socket to find that out — a WARN for an optional thing
+    the operator declined is how a real WARN gets ignored."""
+    monkeypatch.delenv("COMMANDER_BUILDER_LOCAL_MODEL", raising=False)
+
+    def explode(*a, **kw):
+        raise AssertionError("doctor checked a disabled tier over the network")
+    monkeypatch.setattr("urllib.request.urlopen", explode)
+
+    result = _check_ollama()
+    assert result.status == GREEN
+    assert "disabled" in result.message
+    assert "COMMANDER_BUILDER_LOCAL_MODEL=1" in result.detail
+
+
+def test_check_ollama_yellow_when_unreachable(monkeypatch, tier_on):
+    def network_down(req, timeout=None):
         raise urllib.error.URLError("connection refused")
     monkeypatch.setattr("urllib.request.urlopen", network_down)
     result = _check_ollama()
     assert result.status == YELLOW
     assert "not reachable" in result.message
+    # The preflight's own remedy text, forwarded verbatim.
+    assert "ollama serve" in result.message
 
 
-def test_check_ollama_green_when_reachable(monkeypatch):
-    payload = json.dumps({"models": [{"name": "llama3.2:3b"}]}).encode("utf-8")
+def test_check_ollama_yellow_when_the_model_is_not_pulled(monkeypatch, tier_on):
+    """The bug this rewire fixes. The daemon is up and answering — the old
+    check called that GREEN — but the configured model was never pulled, so
+    every real call would fail. Doctor must say so, with the exact fix."""
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout=None: _FakeResp(_tags("qwen2.5:7b", "phi3:mini")),
+    )
+    result = _check_ollama()
+    assert result.status == YELLOW
+    assert "not pulled" in result.message
+    assert "ollama pull llama3.2:3b" in result.message
+    # And it names what IS on the daemon, so the operator can pick instead.
+    assert "qwen2.5:7b" in result.message
 
-    class FakeResp:
-        def __init__(self, body): self._body = body
-        def read(self): return self._body
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
 
-    def fake_urlopen(url, timeout=None):
-        return FakeResp(payload)
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+def test_check_ollama_green_when_daemon_and_model_are_both_ready(
+        monkeypatch, tier_on):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout=None: _FakeResp(_tags("llama3.2:3b")),
+    )
     result = _check_ollama()
     assert result.status == GREEN
-    assert "1 model" in result.message
+    assert "llama3.2:3b" in result.message
+    assert "pulled" in result.message
 
 
-def test_check_ollama_yellow_on_timeout(monkeypatch):
-    def slow(url, timeout=None):
-        raise socket.timeout("too slow")
+def test_check_ollama_yellow_on_timeout(monkeypatch, tier_on):
+    def slow(req, timeout=None):
+        raise TimeoutError("too slow")
     monkeypatch.setattr("urllib.request.urlopen", slow)
     result = _check_ollama()
     assert result.status == YELLOW
+
+
+def test_check_ollama_reports_a_wrong_endpoint_as_such(monkeypatch, tier_on):
+    """HTTPError is a URLError subclass; conflating them is what made a
+    not-pulled model read as 'daemon down'. preflight keeps them apart and
+    doctor inherits that."""
+    def wrong_endpoint(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://localhost:11434/api/tags", 404, "Not Found", {}, None,
+        )
+    monkeypatch.setattr("urllib.request.urlopen", wrong_endpoint)
+    result = _check_ollama()
+    assert result.status == YELLOW
+    assert "reachable-but-wrong endpoint" in result.message
+
+
+def test_check_ollama_never_raises_on_an_unexpected_error(monkeypatch, tier_on):
+    """Doctor reports; it does not traceback."""
+    def boom(req, timeout=None):
+        raise RuntimeError("something exotic")
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    result = _check_ollama()
+    assert result.status == YELLOW
+    assert "RuntimeError" in result.message
+
+
+def test_check_ollama_honors_the_configured_model_name(monkeypatch, tier_on):
+    """The endpoint AND the model come from the tier's own env config, not
+    from a hardcoded localhost/llama3.2 pair in doctor."""
+    monkeypatch.setenv("COMMANDER_BUILDER_LOCAL_MODEL_NAME", "qwen2.5:7b")
+    seen = {}
+
+    def capture(req, timeout=None):
+        seen["url"] = req.full_url
+        return _FakeResp(_tags("qwen2.5:7b"))
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+
+    result = _check_ollama()
+    assert result.status == GREEN
+    assert "qwen2.5:7b" in result.message
+    assert seen["url"].endswith("/api/tags")
 
 
 # --- DoctorReport aggregation ---------------------------------------------

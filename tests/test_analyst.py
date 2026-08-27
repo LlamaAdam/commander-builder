@@ -1,9 +1,18 @@
 """analyst.py tests — heuristic verdict logic + router behavior + LLM backends.
 
-LLM backends are mocked (anthropic SDK stand-in for `claude_verdict`,
-urlopen stand-in for `ollama_verdict`) so the suite stays offline. Stub
-fallback paths are also verified — the router catches NotImplementedError
-and degrades to the heuristic.
+The Claude backend is mocked (an anthropic SDK stand-in) so the suite stays
+offline. Stub fallback paths are also verified — the router catches
+NotImplementedError and degrades to the heuristic.
+
+The Ollama VERDICT rung was RETIRED by decision A4 (2026-08-27), the same
+way `proposer.ollama_propose` was on 2026-08-17: a verdict is open-ended
+synthesis, not the narrow supplied-evidence classification a small local
+model can do, and nothing in `src/` ever set `use_ollama` so it never ran.
+What is pinned here is that the retirement is inert AND loud —
+`use_ollama=True` still constructs, makes no network call, and says where
+local models went — and that the router does not swallow the retirement
+note in its quiet NotImplementedError arm. The live local-model tier has
+its own tests in `tests/test_local_model.py`.
 """
 import json
 
@@ -163,13 +172,14 @@ def test_analyze_returns_heuristic_when_strong_signal():
 
 
 def test_analyze_falls_back_to_heuristic_when_llm_unwired(monkeypatch):
-    """Even with use_claude=True, the backends raise NotImplementedError when
-    unwired (no API key, no ollama daemon); router falls back to heuristic."""
+    """Even with use_claude=True, claude_verdict raises NotImplementedError
+    when unwired (no API key); the router falls back to the heuristic. The
+    retired use_ollama rung must not change that — and must not reach the
+    network, so urlopen is booby-trapped rather than merely stubbed."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    import urllib.error
-    def network_down(req, timeout=None):
-        raise urllib.error.URLError("no daemon")
-    monkeypatch.setattr("urllib.request.urlopen", network_down)
+    def no_network(*a, **kw):
+        raise AssertionError("analyze() must not open a socket here")
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
 
     config = AnalystConfig(use_claude=True, use_ollama=True)
     # Noise band: heuristic confidence is low, would normally escalate.
@@ -194,13 +204,36 @@ def test_claude_verdict_unimplemented_without_key(monkeypatch):
         claude_verdict(_input(), AnalystConfig())
 
 
-def test_ollama_verdict_unimplemented_when_daemon_unreachable(monkeypatch):
-    import urllib.error
-    def network_down(req, timeout=None):
-        raise urllib.error.URLError("no daemon")
-    monkeypatch.setattr("urllib.request.urlopen", network_down)
-    with pytest.raises(NotImplementedError, match="not reachable"):
+def test_ollama_verdict_is_retired():
+    """Decision A4: the local-verdict path is retired, not merely unwired.
+    It raises without touching the network and the message points at the
+    replacement (`local_model`) and the reason verdicts stay on Claude."""
+    def explode(*a, **kw):
+        raise AssertionError("retired ollama verdict path made a network call")
+    import urllib.request
+    original = urllib.request.urlopen
+    urllib.request.urlopen = explode
+    try:
+        with pytest.raises(NotImplementedError) as exc_info:
+            ollama_verdict(_input(), AnalystConfig())
+    finally:
+        urllib.request.urlopen = original
+    message = str(exc_info.value)
+    assert "retired" in message
+    assert "local_model" in message
+    assert "COMMANDER_BUILDER_LOCAL_MODEL" in message
+    # It says WHY verdicts stay on Claude, not just that the flag is dead.
+    assert "Claude" in message
+
+
+def test_ollama_verdict_retired_note_matches_the_exception():
+    """One wording, one source of truth: the note the router prints and the
+    note the stub raises are the same string (the proposer retirement's
+    shape)."""
+    from commander_builder.analyst import OLLAMA_VERDICT_RETIRED_NOTE
+    with pytest.raises(NotImplementedError) as exc_info:
         ollama_verdict(_input(), AnalystConfig())
+    assert str(exc_info.value) == OLLAMA_VERDICT_RETIRED_NOTE
 
 
 # --- Verdict serialization -------------------------------------------------
@@ -446,59 +479,90 @@ def test_claude_verdict_non_numeric_confidence_defaults(monkeypatch):
     assert v.label == "kept" and v.confidence == 0.5  # defaulted
 
 
-# --- ollama_verdict success path (mocked HTTP) -----------------------------
+# --- The retired rung inside analyze() -------------------------------------
 
-class _FakeUrlOpenResponse:
-    def __init__(self, body: bytes):
-        self._body = body
-    def read(self): return self._body
-    def __enter__(self): return self
-    def __exit__(self, *a): pass
+def test_analyze_with_use_ollama_makes_no_network_call(monkeypatch, capsys):
+    """A retired flag must be inert, not silently inert. `use_ollama=True`
+    still constructs (config back-compat), reaches NO daemon at all, and
+    prints the retirement note before the router continues down the ladder
+    to the heuristic."""
+    def explode(*a, **kw):
+        raise AssertionError("retired ollama verdict path made a network call")
+    monkeypatch.setattr("urllib.request.urlopen", explode)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    # Noise band: heuristic confidence is 0.4, below the 0.75 bar, so the
+    # router DOES reach the retired rung rather than short-circuiting.
+    v = analyze(_input(old_wins=5, new_wins=6, draws=0, total=11),
+                config=AnalystConfig(use_ollama=True))
+    assert v.source == "heuristic"
+    printed = capsys.readouterr().out
+    assert "retired" in printed
+    assert "local_model" in printed
 
 
-def test_ollama_verdict_parses_daemon_response(monkeypatch):
-    inner = json.dumps({
-        "label": "reverted",
-        "confidence": 0.8,
-        "reasoning": "lost 3-9",
-        "lessons": ["cuts removed too much defense"],
+def test_analyze_does_not_swallow_the_retirement_note(monkeypatch, capsys):
+    """The regression this retirement's SHAPE exists to prevent.
+
+    The router's NotImplementedError arm is a quiet fall-through by
+    contract ("backend not wired" is normal). If the retired stub were
+    still CALLED from inside that try/except, its NotImplementedError
+    would be swallowed whole and the operator would see nothing at all —
+    the same silent degrade the retirement removes. So `analyze()` must
+    never invoke `ollama_verdict`, and must print instead."""
+    calls = []
+
+    def spy(input_, config):
+        calls.append(input_)
+        raise NotImplementedError("must not be called from analyze()")
+    monkeypatch.setattr("commander_builder.analyst.ollama_verdict", spy)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    analyze(_input(old_wins=5, new_wins=6, draws=0, total=11),
+            config=AnalystConfig(use_ollama=True))
+    assert calls == []
+    assert "retired" in capsys.readouterr().out
+
+
+def test_analyze_retired_rung_still_escalates_to_claude(monkeypatch, capsys):
+    """The retired rung is a print, not a `return` and not a `raise`: a
+    config with BOTH flags set must still reach Claude."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    fake_payload = json.dumps({
+        "label": "kept", "confidence": 0.7,
+        "reasoning": "from claude", "lessons": [],
     })
-    payload = json.dumps({"response": inner}).encode("utf-8")
 
-    def fake_urlopen(req, timeout=None):
-        return _FakeUrlOpenResponse(payload)
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    class FakeClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self):
+            class M:
+                def create(self, **kw):
+                    return _fake_anthropic_response(fake_payload)
+            return M()
 
-    v = ollama_verdict(
-        _input(old_wins=9, new_wins=3, draws=0, total=12),
-        AnalystConfig(),
+    import sys, types
+    fake_module = types.ModuleType("anthropic")
+    fake_module.Anthropic = FakeClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+    v = analyze(_input(old_wins=5, new_wins=6, draws=0, total=11),
+                config=AnalystConfig(use_claude=True, use_ollama=True))
+    assert v.source == "claude"
+    assert "retired" in capsys.readouterr().out
+
+
+def test_retired_config_fields_still_construct():
+    """Back-compat: an out-of-tree caller that still passes the retired
+    knobs must not get a TypeError."""
+    config = AnalystConfig(
+        use_ollama=True,
+        ollama_model="llama3.2:3b",
+        ollama_url="http://localhost:11434/api/generate",
     )
-    assert v.source == "ollama"
-    assert v.label == "reverted"
-    assert v.confidence == 0.8
-
-
-def test_ollama_verdict_falls_back_when_daemon_unreachable(monkeypatch):
-    import urllib.error
-
-    def network_down(req, timeout=None):
-        raise urllib.error.URLError("no daemon")
-    monkeypatch.setattr("urllib.request.urlopen", network_down)
-
-    with pytest.raises(NotImplementedError, match="Ollama daemon not reachable"):
-        ollama_verdict(_input(), AnalystConfig())
-
-
-def test_ollama_verdict_normalizes_invalid_label(monkeypatch):
-    inner = json.dumps({"label": "garbage", "confidence": 0.5, "reasoning": "x"})
-    payload = json.dumps({"response": inner}).encode("utf-8")
-
-    def fake_urlopen(req, timeout=None):
-        return _FakeUrlOpenResponse(payload)
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-
-    v = ollama_verdict(_input(), AnalystConfig())
-    assert v.label == "neutral"
+    assert config.use_ollama is True
+    assert config.ollama_model == "llama3.2:3b"
 
 
 # --- LLM-facing sim summaries carry signed margin / winner / draws ---------
@@ -568,43 +632,43 @@ def test_claude_prompt_describes_signed_margin_not_fixed_threshold():
     assert "margin >=4" not in _CLAUDE_VERDICT_SYSTEM
 
 
-def test_ollama_summary_contains_signed_margin_winner_draws(monkeypatch):
-    """Same FIX 3 guarantee for the Ollama path — its old summary omitted
-    the winner entirely and forwarded the absolute margin."""
-    captured = {}
-
-    def fake_urlopen(req, timeout=None):
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        inner = json.dumps({"label": "reverted", "confidence": 0.8,
-                            "reasoning": "x", "lessons": []})
-        return _FakeUrlOpenResponse(
-            json.dumps({"response": inner}).encode("utf-8"))
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-
-    ollama_verdict(_regression_input(), AnalystConfig())
-    prompt = captured["body"]["prompt"]
-    assert '"signed_margin": -6' in prompt
-    assert '"winner": "old"' in prompt
-    assert '"draws": 2' in prompt
-    assert '"h2h_decisive": 20' in prompt
-
-
-def test_summary_derives_winner_when_report_omits_it(monkeypatch):
+def test_summary_derives_winner_when_report_omits_it():
     """AB-shaped sim_report dicts have no 'winner' key; the summary must
-    derive it from the win counts rather than sending null."""
-    captured = {}
+    derive it from the win counts rather than emitting null.
 
-    def fake_urlopen(req, timeout=None):
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        inner = json.dumps({"label": "kept", "confidence": 0.8,
-                            "reasoning": "x", "lessons": []})
-        return _FakeUrlOpenResponse(
-            json.dumps({"response": inner}).encode("utf-8"))
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    Called through ``_summarize_h2h`` directly since the retirement of
+    ``ollama_verdict`` (2026-08-27) left ``claude_verdict`` as its only
+    caller — and that path is already covered above. Pinning the helper
+    itself keeps the derive-the-winner rule tested without a second SDK
+    stub."""
+    from commander_builder.analyst import _summarize_h2h
 
-    ollama_verdict(_input(old_wins=3, new_wins=9, draws=1, total=20),
-                   AnalystConfig())
-    assert '"winner": "new"' in captured["body"]["prompt"]
+    summary = _summarize_h2h({
+        "total_games": 20, "draws": 1,
+        "old_stats": {"wins": 3}, "new_stats": {"wins": 9},
+    })
+    assert summary["winner"] == "new"
+    assert summary["signed_margin"] == 6
+    assert summary["h2h_decisive"] == 12
+
+    # Symmetric, and a genuine tie is reported as one rather than as "new".
+    assert _summarize_h2h({
+        "old_stats": {"wins": 5}, "new_stats": {"wins": 5},
+    })["winner"] == "tie"
+
+
+def test_summary_never_forwards_the_ambiguous_absolute_margin():
+    """``ComparisonReport.margin`` is ``abs(new - old)``: a model reading
+    'margin: 6' on a 6-game REGRESSION writes confidently wrong lessons.
+    The helper must drop it even when the report carries it."""
+    from commander_builder.analyst import _summarize_h2h
+
+    summary = _summarize_h2h({
+        "total_games": 30, "draws": 2, "margin": 6, "winner": "old",
+        "old_stats": {"wins": 13}, "new_stats": {"wins": 7},
+    })
+    assert "margin" not in summary
+    assert summary["signed_margin"] == -6
 
 
 # --- analyze() router with real backends mocked ----------------------------

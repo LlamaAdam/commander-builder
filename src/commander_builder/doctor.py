@@ -18,7 +18,11 @@ Checks performed:
                  hide B&R updates)
   EDHREC:        cache dir writable
   Anthropic:     API key set (yellow if missing — only needed for claude_*)
-  Ollama:        daemon reachable (yellow if not — only needed for ollama_*)
+  Ollama:        local-model tier usable — green+"disabled" when the
+                 COMMANDER_BUILDER_LOCAL_MODEL flag is off (no socket
+                 opened); otherwise daemon reachable AND the configured
+                 model pulled, via local_model.LocalModelClient.preflight
+                 (yellow with the exact `ollama pull ...` remedy if not)
   Anthropic SDK: importable (yellow if not — only needed for claude_*)
 
 Output goes to stdout; --json for structured form. Exit codes:
@@ -33,10 +37,11 @@ import argparse
 import json
 import os
 import shutil
-import socket
 import sys
-import urllib.error
-import urllib.request
+# NOTE (2026-08-27): no urllib/socket imports. The Ollama check used to
+# hand-roll its own HTTP call; it now delegates to
+# ``local_model.LocalModelClient.preflight``, which owns the transport and
+# the error taxonomy. Doctor makes no network call of its own.
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -323,36 +328,85 @@ def _check_anthropic_sdk() -> CheckResult:
         )
 
 
-def _check_ollama(url: str = "http://localhost:11434/api/tags") -> CheckResult:
-    """Reach the daemon via /api/tags (lists installed models). Cheap call."""
+def _check_ollama() -> CheckResult:
+    """Local-model tier health, via ``local_model.LocalModelClient.preflight``.
+
+    2026-08-27 rewire. This check used to hand-roll its own
+    ``urlopen("http://localhost:11434/api/tags")`` and report GREEN the
+    moment the daemon answered, whatever it answered WITH. That is the
+    wrong bar in two directions at once:
+
+      * It passed configurations that cannot work. The tier calls
+        ``COMMANDER_BUILDER_LOCAL_MODEL_NAME`` (default
+        ``local_model.DEFAULT_MODEL``); a running daemon with that model
+        NOT pulled fails every call at runtime, and doctor said "OK".
+        ``LocalModelClient.preflight`` is the one place that checks both
+        halves — and it is the same code the tier itself runs, so doctor
+        now reports on the real gate rather than on a proxy for it.
+      * It reported on a tier the operator may have deliberately left
+        off. The flag (``local_model.is_enabled``) is default-OFF for a
+        reason; a WARN about an unreachable daemon nobody asked for is
+        noise, and noise is how a real WARN gets ignored. Flag off =>
+        GREEN, "disabled", no socket opened at all.
+
+    The remedy text is not restated here either: ``LocalModelUnavailable``
+    already carries the exact command (``ollama serve`` /
+    ``ollama pull <model>`` / which env var to point elsewhere), so this
+    check forwards that message verbatim instead of maintaining a second,
+    driftable copy of it.
+
+    YELLOW rather than RED throughout: the local tier is optional
+    machinery shadowing deterministic classifiers that already ship, so a
+    broken one degrades the project rather than breaking it — same
+    severity the anthropic key/SDK checks use.
+    """
+    # Module import (not from-import) so the test suite's monkeypatches of
+    # ``local_model.is_enabled`` / ``LocalModelClient`` apply — the same
+    # call-time-read convention this module uses for ``knowledge_log``.
+    from . import local_model
+
+    if not local_model.is_enabled():
+        return CheckResult(
+            "ollama", GREEN,
+            "local-model tier disabled — nothing to check.",
+            f"enable with {local_model.LOCAL_MODEL_ENV_VAR}=1 "
+            f"(the deterministic classifiers are the default answer)",
+        )
+
+    config = local_model.LocalModelConfig.from_env()
+    client = local_model.LocalModelClient(config)
     try:
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, ConnectionError, socket.timeout, TimeoutError):
+        client.preflight()
+    except local_model.LocalModelUnavailable as exc:
+        # The message already names the fix; forward it whole.
+        return CheckResult(
+            "ollama", YELLOW, str(exc),
+            f"model: {config.model}   endpoint: {config.base_url}",
+        )
+    except Exception as exc:  # noqa: BLE001 — doctor never tracebacks
         return CheckResult(
             "ollama", YELLOW,
-            "Ollama daemon not reachable — ollama_* backends unavailable.",
-            f"checked: {url}",
+            f"Local-model preflight raised {type(exc).__name__}: {exc}",
+            f"model: {config.model}   endpoint: {config.base_url}",
         )
-    except Exception as exc:  # noqa: BLE001
-        return CheckResult(
-            "ollama", YELLOW,
-            f"Ollama unexpected response: {type(exc).__name__}",
-            str(exc),
-        )
-    models = data.get("models", []) if isinstance(data, dict) else []
     return CheckResult(
         "ollama", GREEN,
-        f"daemon reachable, {len(models)} model(s) installed",
-        f"models: {[m.get('name') for m in models[:3]]}",
+        f"daemon reachable and model {config.model!r} is pulled",
+        f"endpoint: {config.base_url}",
     )
 
 
 # --- Orchestration ---------------------------------------------------------
 
 def run_doctor(skip_ollama: bool = False) -> DoctorReport:
-    """Run all checks and return a DoctorReport. `skip_ollama=True` for tests
-    so we don't depend on the daemon being either reachable or unreachable."""
+    """Run all checks and return a DoctorReport.
+
+    ``skip_ollama=True`` for tests, so the suite never depends on the daemon
+    being either reachable or unreachable. KEPT even though ``_check_ollama``
+    is now a no-op whenever the tier's flag is off (2026-08-27): a developer
+    machine with ``COMMANDER_BUILDER_LOCAL_MODEL=1`` exported in the shell
+    would otherwise put a live preflight back into every test run, and the
+    ``--skip-ollama`` CLI flag is a documented surface besides."""
     report = DoctorReport()
     report.checks.append(_check_python())
     report.checks.append(_check_package())

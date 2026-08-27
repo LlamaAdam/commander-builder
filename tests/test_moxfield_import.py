@@ -1779,3 +1779,108 @@ def test_reimport_carries_the_politics_guard_opt_out(tmp_path, monkeypatch):
     # And the directive still parses after the round-trip.
     from commander_builder.staples import politics_guard_enabled
     assert politics_guard_enabled(text) is False
+
+
+# ---------------------------------------------------------------------------
+# FP-018.1 — the primer sidecar on the Archidekt lane (2026-08-27)
+# ---------------------------------------------------------------------------
+#
+# The `description` shape is capture-pinned for Archidekt only (a Quill
+# Delta JSON string — tests/fixtures/hazel_primer.md), so the sidecar
+# write is gated to that lane; Moxfield's description shape has no capture
+# in this repo and unverified shapes stay untouched (the _entry_name
+# discipline). The REAL Hazel Delta is the test vector here — no
+# synthesized API shapes.
+
+_HAZEL_PRIMER_MD = Path(__file__).parent / "fixtures" / "hazel_primer.md"
+
+
+def _hazel_delta() -> str:
+    text = _HAZEL_PRIMER_MD.read_text(encoding="utf-8")
+    return next(l for l in text.splitlines() if l.startswith('{"ops"'))
+
+
+def test_archidekt_import_writes_the_primer_sidecar(tmp_path,
+                                                    archidekt_stub,
+                                                    capsys):
+    from commander_builder import moxfield_import as mi
+    from commander_builder.primer import read_primer_sidecar
+
+    archidekt_stub["detail"]["description"] = _hazel_delta()
+    path = mi.import_deck("https://archidekt.com/decks/1234567/k",
+                          out_dir=tmp_path, is_user=True)
+    sidecar = path.with_name(path.stem + ".primer.md")
+    assert sidecar.exists()
+    text = read_primer_sidecar(path)
+    assert "sacrifice theme" in text          # the rendered words...
+    assert '{"ops"' not in text               # ...never the raw Delta.
+    # The .dck itself is untouched by the primer (Forge owns the format).
+    assert "sacrifice theme" not in path.read_text(encoding="utf-8")
+    # And the import reports the capture, word-counted.
+    out = capsys.readouterr().out
+    assert "primer captured (" in out and "words)" in out
+
+
+def test_archidekt_import_without_description_writes_no_sidecar(
+        tmp_path, archidekt_stub):
+    from commander_builder import moxfield_import as mi
+
+    path = mi.import_deck("https://archidekt.com/decks/1234567/k",
+                          out_dir=tmp_path, is_user=True)
+    assert not path.with_name(path.stem + ".primer.md").exists()
+    assert not list(tmp_path.glob("*.primer.md"))
+
+
+def test_archidekt_reimport_refreshes_the_sidecar(tmp_path, archidekt_stub):
+    """Re-pull semantics: the deck file is overwritten in place, and the
+    primer must follow — a stale sidecar would misdescribe the deck."""
+    import json as _json
+    from commander_builder import moxfield_import as mi
+    from commander_builder.primer import read_primer_sidecar
+
+    archidekt_stub["detail"]["description"] = _hazel_delta()
+    p1 = mi.import_deck("https://archidekt.com/decks/1234567/k",
+                        out_dir=tmp_path, is_user=True)
+    new_detail = _archidekt_detail()
+    new_detail["description"] = _json.dumps(
+        {"ops": [{"insert": "rewritten primer\n"}]})
+    archidekt_stub["detail"] = new_detail
+    p2 = mi.import_deck("https://archidekt.com/decks/1234567/k",
+                        out_dir=tmp_path, is_user=True)
+    assert p2 == p1
+    assert read_primer_sidecar(p1) == "rewritten primer"
+
+
+def test_moxfield_import_never_writes_a_sidecar(tmp_path, monkeypatch):
+    """Lane gating: a Moxfield payload with a description key does NOT
+    produce a sidecar — that shape is uncaptured, and unverified shapes
+    stay untouched."""
+    from commander_builder import moxfield_import as mi
+
+    deck = _deck_json()
+    deck["description"] = "# A markdown primer"
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: deck)
+    mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert not list(tmp_path.glob("*.primer.md"))
+
+
+def test_sidecar_io_failure_does_not_unwind_the_import(tmp_path,
+                                                       archidekt_stub,
+                                                       monkeypatch,
+                                                       capsys):
+    """The import already succeeded when the sidecar write runs; an I/O
+    blip there must degrade to a warning, never a failed import."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder import primer as primer_mod
+
+    archidekt_stub["detail"]["description"] = _hazel_delta()
+
+    def boom(dck_path, description):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(primer_mod, "write_primer_sidecar", boom)
+    path = mi.import_deck("https://archidekt.com/decks/1234567/k",
+                          out_dir=tmp_path, is_user=True)
+    assert path.exists()
+    err = capsys.readouterr().err
+    assert "primer sidecar could not be written" in err
