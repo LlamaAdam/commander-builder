@@ -8,6 +8,11 @@ were pinned only by shapes this file invented, which is exactly the setup
 in which a wrong assumption about the API passes forever. The synthetic
 helpers below survive only for paths a healthy capture cannot contain:
 malformed entries, missing names, drift in ``edhBracket``.
+
+A SECOND capture — ``tests/fixtures/archidekt_deck_mdfc_shape.json``,
+deck 5273595, 2026-08-27 — closes the double-faced gap the first one
+pinned as open, and vindicated the method: it caught the adapter emitting
+``"Front // Back"`` into ``.dck`` files Forge names by the front face.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from commander_builder.archidekt_client import (
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 REAL_DECK_JSON = FIXTURE_DIR / "archidekt_deck_shape.json"
+MDFC_DECK_JSON = FIXTURE_DIR / "archidekt_deck_mdfc_shape.json"
 PRIMER_MD = FIXTURE_DIR / "hazel_primer.md"
 
 
@@ -35,6 +41,12 @@ PRIMER_MD = FIXTURE_DIR / "hazel_primer.md"
 def real_deck():
     """The trimmed real capture, reloaded per test (tests may mutate it)."""
     return json.loads(REAL_DECK_JSON.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def mdfc_deck():
+    """The second real capture — the double-faced half of the pair."""
+    return json.loads(MDFC_DECK_JSON.read_text(encoding="utf-8"))
 
 
 def card(name, quantity=1, categories=()):
@@ -386,12 +398,15 @@ def test_real_fixture_is_a_capture_not_a_construction(real_deck):
     assert prov["fetched"].startswith("2026-08-20")
     entries = real_deck["cards"]
     assert len(entries) == 9
-    # The known gap, pinned so nobody quietly closes it with a guess: no
-    # modal-DFC / transform card was in this deck, and every oracleCard
-    # in the capture therefore has an EMPTY faces list.
+    # This deck is the SINGLE-FACED baseline of the fixture pair: every
+    # oracleCard here has an empty faces list and a one-face name. It
+    # used to carry a ``known_gap`` note because that left the MDFC shape
+    # unpinned; the gap was closed on 2026-08-27 by a second real capture
+    # (deck 5273595), never by inventing an entry here.
     assert all(e["card"]["oracleCard"]["faces"] == [] for e in entries)
     assert not any("//" in e["card"]["oracleCard"]["name"] for e in entries)
-    assert "MDFC" in prov["known_gap"] or "modal_dfc" in prov["known_gap"]
+    assert "known_gap" not in prov
+    assert "archidekt_deck_mdfc_shape.json" in prov["closed_gap"]
 
 
 def test_real_commander_is_marked_by_the_card_level_category(real_deck):
@@ -602,3 +617,216 @@ def test_primer_holds_the_same_captures_description_verbatim():
     assert "TRUNCATED" in truncated
     assert verbatim.startswith(truncated.split(" …[TRUNCATED", 1)[0])
     assert fixture["hasPrimer"] is True
+
+
+# ---------------------------------------------------------------------------
+# DOUBLE-FACED CARDS (R2-P18 follow-up, 2026-08-27) —
+# archidekt.com/api/decks/5273595/ ("From Cute to Brute - Secret Lair
+# Drop", 100 entries: 53 normal / 25 transform / 22 modal_dfc).
+#
+# The gap the 2026-08-20 capture pinned as OPEN, now closed with real
+# data instead of a guess. Every entry read below is byte-for-byte
+# verbatim from that response, so these tests fail the day Archidekt
+# changes the DFC contract — which is the whole point, because the
+# capture immediately found a live bug in ``_entry_name``.
+# ---------------------------------------------------------------------------
+
+def _oracle(deck: dict, name_startswith: str) -> dict:
+    return next(e["card"]["oracleCard"] for e in deck["cards"]
+                if e["card"]["oracleCard"]["name"].startswith(name_startswith))
+
+
+def test_mdfc_fixture_is_a_capture_not_a_construction(mdfc_deck):
+    """Guard the second fixture the same way as the first: it is
+    evidence. Note what it must NOT be extended with by hand — the
+    provenance names the deck, the fetch date and the entry count."""
+    prov = mdfc_deck["_provenance"]
+    assert "5273595" in prov["source"]
+    assert prov["fetched"].startswith("2026-08-27")
+    assert "VERBATIM" in prov["trimmed"]
+    assert len(mdfc_deck["cards"]) == 6
+    assert mdfc_deck["id"] == 5273595
+    assert mdfc_deck["intentionallySkippedCardData"] is False
+    assert mdfc_deck["customCards"] == []
+
+
+def test_mdfc_name_is_the_joined_front_back_string(mdfc_deck):
+    """THE SHAPE, pinned. A double-faced card's ``oracleCard.name`` is
+    ``"Front // Back"`` — Archidekt does NOT hand back the front face as
+    the name and the back somewhere else. Both DFC layouts in the deck
+    behave identically."""
+    esika = _oracle(mdfc_deck, "Esika")
+    assert esika["layout"] == "modal_dfc"
+    assert esika["name"] == "Esika, God of the Tree // The Prismatic Bridge"
+
+    avacyn = _oracle(mdfc_deck, "Archangel Avacyn")
+    assert avacyn["layout"] == "transform"
+    assert avacyn["name"] == "Archangel Avacyn // Avacyn, the Purifier"
+
+    layouts = {e["card"]["oracleCard"]["layout"] for e in mdfc_deck["cards"]}
+    assert layouts == {"modal_dfc", "transform", "normal"}
+
+
+def test_mdfc_faces_is_a_two_element_list_front_first(mdfc_deck):
+    """``oracleCard.faces`` is populated for a DFC — 2 entries, front
+    first, each a full face object with its own name/manaCost/types. That
+    is what makes a face-based reduction possible at all; splitting the
+    joined name on ``"//"`` is a fallback, not the mechanism."""
+    bala = _oracle(mdfc_deck, "Bala Ged Recovery")
+    assert [f["name"] for f in bala["faces"]] == [
+        "Bala Ged Recovery", "Bala Ged Sanctuary"]
+    assert bala["faces"][0]["types"] == ["Sorcery"]     # spell front...
+    assert bala["faces"][1]["types"] == ["Land"]        # ...land back
+    assert bala["faces"][0]["manaCost"] == "{2}{G}"
+
+    # ...and the SAME response still carries faces: [] for plain cards.
+    # The discriminator is the per-ENTRY layout, not the deck.
+    sol_ring = _oracle(mdfc_deck, "Sol Ring")
+    assert sol_ring["layout"] == "normal" and sol_ring["faces"] == []
+    assert "//" not in sol_ring["name"]
+
+
+def test_mdfc_commander_is_detected_by_category_not_by_layout(mdfc_deck):
+    """This deck's commander is ITSELF a modal DFC (Esika, God of the
+    Tree // The Prismatic Bridge): one entry that is both
+    ``categories: ["Commander"]`` and ``layout: "modal_dfc"``. Commander
+    detection is category-driven, so a two-faced commander must land in
+    ``[Commander]`` — and, being a card line like any other, must carry
+    the front-face name."""
+    esika = next(e for e in mdfc_deck["cards"]
+                 if e["card"]["oracleCard"]["name"].startswith("Esika"))
+    assert esika["categories"] == ["Commander"]
+    assert esika["card"]["oracleCard"]["layout"] == "modal_dfc"
+    premier = [c["name"] for c in mdfc_deck["categories"] if c["isPremier"]]
+    assert premier == ["Commander"]
+
+    out = ac.to_deck_json(mdfc_deck)
+    assert _names(out["boards"]["commanders"]) == ["Esika, God of the Tree"]
+    # ...and it is not also in the 99.
+    assert not any(n.startswith("Esika")
+                   for n in _names(out["boards"]["mainboard"]))
+    assert not any(n.startswith("Esika") for n in extract_mainboard(mdfc_deck))
+
+
+def test_dfc_entries_adapt_to_the_front_face_name(mdfc_deck):
+    """THE BUG THIS CAPTURE FOUND. ``_entry_name`` used to return
+    ``oracleCard.name`` verbatim, so a DFC imported as
+    ``"Bala Ged Recovery // Bala Ged Sanctuary"``. Forge — and every
+    ``.dck`` reader in this project — names a DFC by its FRONT FACE:
+    ``forge_cards_loader`` keeps a front-face-slug index precisely
+    because ".dck files reference cards by front-face name only", and
+    ``deck_health._MDFC_LANDS`` is keyed on the lowercase front face.
+
+    Both layouts reduce; a ``normal`` entry is untouched."""
+    names = extract_mainboard(mdfc_deck)
+    assert names == [
+        "Archangel Avacyn",     # transform
+        "Bala Ged Recovery",    # modal_dfc, spell front
+        "Branchloft Pathway",   # modal_dfc, land front
+        "Sol Ring",             # normal — unchanged
+        "Westvale Abbey",       # transform, LAND front face
+    ]
+    assert not any("//" in n for n in names)
+    # The reduction is the FACE, not a prefix of the joined string: each
+    # name equals faces[0].name exactly.
+    for entry in mdfc_deck["cards"]:
+        oracle = entry["card"]["oracleCard"]
+        if oracle["faces"]:
+            assert ac._entry_name(entry) == oracle["faces"][0]["name"]
+
+
+def test_dfc_front_face_names_are_what_deck_health_counts(mdfc_deck):
+    """Why the front face is not cosmetic: ``deck_health._MDFC_LANDS``
+    (read through ``consistency`` and ``card_score.is_mdfc_land``) is a
+    set of lowercase FRONT-face names matched against names parsed out of
+    ``.dck`` lines. Pre-fix, this deck's modal lands scored ZERO."""
+    from commander_builder.deck_health import _MDFC_LANDS
+
+    names = extract_mainboard(mdfc_deck)
+    assert "bala ged recovery" in _MDFC_LANDS
+    assert "branchloft pathway" in _MDFC_LANDS
+    matched = [n for n in names if n.lower() in _MDFC_LANDS]
+    assert matched == ["Bala Ged Recovery", "Branchloft Pathway"]
+    # The joined form — what the adapter used to emit — matches nothing.
+    joined = [e["card"]["oracleCard"]["name"] for e in mdfc_deck["cards"]]
+    assert not [n for n in joined if n.lower() in _MDFC_LANDS]
+
+
+def test_mdfc_deck_renders_a_forge_dck_end_to_end(mdfc_deck):
+    """The ``.dck`` emission form for DFC names, pinned end to end: front
+    face plus the ``|SET|CN`` printing suffix, and NO ``//`` anywhere in
+    the file — including on the ``[Commander]`` line, whose card is an
+    MDFC in this deck."""
+    from commander_builder.moxfield_import import to_dck
+
+    dck = to_dck(ac.to_deck_json(mdfc_deck)).splitlines()
+    assert dck[:2] == ["[metadata]",
+                       "Name=From Cute to Brute - Secret Lair Drop"]
+    assert dck[dck.index("[Commander]") + 1] == \
+        "1 Esika, God of the Tree|SLD|1155"
+    main = dck[dck.index("[Main]") + 1:]
+    assert main == [
+        "1 Archangel Avacyn|SLD|1156",
+        "1 Bala Ged Recovery|PLST|ZNR-180",
+        "1 Branchloft Pathway|PLST|ZNR-258",
+        "1 Sol Ring|PLST|CMD-261",
+        "1 Westvale Abbey|SLD|1159",
+    ]
+    assert not any("//" in line for line in dck)
+
+    # dck_utils parses those lines back to the same names — the printing
+    # suffix strips, the name survives whole.
+    from commander_builder import dck_utils
+    text = "\n".join(dck) + "\n"
+    assert dck_utils.section_card_names(text, "Commander") == \
+        ["Esika, God of the Tree"]
+    assert dck_utils.section_card_names(text, "Main") == extract_mainboard(
+        mdfc_deck)
+
+
+def test_mdfc_capture_reconfirms_the_board_membership_flag(mdfc_deck):
+    """Independent confirmation from a SECOND deck of the finding the
+    first capture made: ``Sideboard`` carries ``includedInDeck: true``
+    and ``Maybeboard`` false, so board membership is the flag, never the
+    category's name. Two unrelated decks, same user state."""
+    flags = {c["name"]: c["includedInDeck"] for c in mdfc_deck["categories"]}
+    assert flags["Sideboard"] is True and flags["Maybeboard"] is False
+    assert ac._excluded_categories(mdfc_deck) == {"maybeboard"}
+
+
+def test_mdfc_corpus_and_importer_still_agree_on_membership(mdfc_deck):
+    """One walk, one notion of 'part of the deck' — reasserted on the
+    double-faced deck, since ``_entry_name`` is the shared seam that the
+    front-face fix changed."""
+    imported = _names(ac.to_deck_json(mdfc_deck)["boards"]["mainboard"])
+    assert extract_mainboard(mdfc_deck) == imported
+
+
+def test_two_faced_layout_with_empty_faces_falls_back_to_the_split():
+    """SYNTHETIC drift path, and deliberately so: no healthy capture
+    contains ``layout: "modal_dfc"`` with ``faces: []``. If Archidekt
+    ever stops populating faces, a front face split off the joined name
+    still resolves in Forge; the full string does not."""
+    entry = {"quantity": 1, "categories": [], "card": {"oracleCard": {
+        "name": "Bala Ged Recovery // Bala Ged Sanctuary",
+        "layout": "modal_dfc", "faces": []}}}
+    assert ac._entry_name(entry) == "Bala Ged Recovery"
+
+
+def test_unpinned_two_faced_layouts_pass_through_untouched():
+    """Scope guard. ``//`` is overloaded — EDHREC joins partner PAIRS
+    with it and split/adventure cards carry it inside ONE card's real
+    name — so the reduction is keyed on the layouts the capture proves,
+    not on the separator. A layout no capture has shown keeps its name
+    whole rather than being guessed at."""
+    def one(layout, name, faces=()):
+        return {"quantity": 1, "categories": [], "card": {"oracleCard": {
+            "name": name, "layout": layout, "faces": list(faces)}}}
+
+    split = one("split", "Fire // Ice",
+                [{"name": "Fire"}, {"name": "Ice"}])
+    assert ac._entry_name(split) == "Fire // Ice"
+    adventure = one("adventure", "Bonecrusher Giant",
+                    [{"name": "Bonecrusher Giant"}, {"name": "Stomp"}])
+    assert ac._entry_name(adventure) == "Bonecrusher Giant"
+    assert ac._TWO_FACED_LAYOUTS == {"transform", "modal_dfc"}

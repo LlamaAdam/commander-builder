@@ -1,5 +1,0 @@
-commander:Esika, God of the Tree // The Prismatic Bridge
-commander:Valki, God of Lies // Tibalt, Cosmic Impostor
-commander:Birgi, God of Storytelling // Harnfel, Horn of Bounty
-commander:Esika, God of the Tree
-# MDFC capture retry: Archidekt likely indexes the full DFC name

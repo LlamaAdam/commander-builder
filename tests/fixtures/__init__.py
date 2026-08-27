@@ -14,6 +14,14 @@ Currently contains:
   ``archidekt_client``'s adapter pinned only by shapes the test file
   invented. Entries are evidence — extend the fixture from a new
   capture (``_captures/README.md``), never by hand.
+- ``archidekt_deck_mdfc_shape.json`` — a SECOND real detail response
+  (deck 5273595, fetched 2026-08-27), 6 byte-verbatim entries, added
+  because the first deck contained no double-faced card. It pins the
+  ``"Front // Back"`` name + populated ``faces`` shape, an MDFC
+  COMMANDER, and the front-face ``.dck`` form Forge needs — and
+  capturing it found a real bug (see ``archidekt_client._entry_name``).
+  The two are a matched pair: single-faced baseline, double-faced
+  contrast. Neither is a place to hand-add a card.
 - ``hazel_primer.md`` — that deck's owner-written primer
   (``description``, verbatim), kept as the stated-intent test case for
   the FP-016 deck judge.
