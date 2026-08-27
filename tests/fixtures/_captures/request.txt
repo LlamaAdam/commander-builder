@@ -2,7 +2,8 @@ mode: primer-batch
 # FP-018.4 primer corpus: across brackets, weighted toward B3/B4.
 # Roughly: B4-leaning (Atraxa, Edgar, Yuriko, Sisay, Kaalia),
 # B3 (Ur-Dragon, Muldrotha, Meren, Isshin, Pantlaza),
-# B2-leaning (Lathril, Krenko).
+# B2-leaning (Lathril, Krenko). Attempt 2: the first request's commit
+# message accidentally contained the skip-ci token.
 commander: Atraxa, Praetors' Voice
 commander: Edgar Markov
 commander: Yuriko, the Tiger's Shadow
