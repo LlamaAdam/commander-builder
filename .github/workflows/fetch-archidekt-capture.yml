@@ -28,7 +28,7 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - name: Fetch deck JSON
@@ -40,7 +40,7 @@ jobs:
           if [ ! -f tests/fixtures/_captures/request.txt ]; then
             echo "request.txt absent (consumed) -- nothing to fetch"; exit 0
           fi
-          # Two request forms (2026-08-27):
+          # Three request forms (third added 2026-08-27 for FP-018.4):
           #   <deck id>            -- fetch that deck
           #   commander:<name>     -- search decks by commander via the
           #                           documented v3 search endpoint (the
@@ -50,9 +50,129 @@ jobs:
           #                           closed without knowing a deck id: a
           #                           modal_dfc COMMANDER (e.g. a Kaldheim
           #                           god) guarantees an MDFC entry.
+          #   mode: primer-batch   -- FP-018.4 corpus harvest: for EVERY
+          #                           commander: line, walk the top
+          #                           most-viewed public hits and keep the
+          #                           first deck whose description renders
+          #                           (Quill Delta -> text) to >= 200
+          #                           chars. One run, many captures.
+          #                           Unlike the R2-P18 shape captures,
+          #                           these are trimmed IN-RUNNER: the
+          #                           corpus payload is the primer, so the
+          #                           description string is kept
+          #                           byte-verbatim but the card list is
+          #                           reduced to name/qty/categories/
+          #                           layout -- committing a dozen full
+          #                           ~0.5MB deck JSONs would live in git
+          #                           history forever after the consume
+          #                           step deletes them.
           # Number parsing: FIRST number, not all digits concatenated -- a
           # retry marker like '24864897 retry-1' must not become 248648971
           # (exactly what happened on attempt 2).
+          if grep -q '^mode: *primer-batch' tests/fixtures/_captures/request.txt; then
+            python3 - <<'PYBATCH'
+          import json, time, urllib.parse, urllib.request
+
+          # Project UA: a bot-ish UA from a datacenter IP gets a
+          # Cloudflare 403 (learned 2026-08-20); this string is
+          # archidekt_client.USER_AGENT, which live probes succeed with.
+          UA = "commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)"
+
+          def get_json(url):
+              req = urllib.request.Request(url, headers={
+                  "Accept": "application/json", "User-Agent": UA})
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  raw = resp.read()
+              return json.loads(raw)
+
+          def delta_text(desc):
+              # Archidekt's description is a Quill Delta JSON STRING
+              # ({"ops": [{"insert": ...}]}), not prose -- pinned by the
+              # hazel_primer.md capture (2026-08-20). Non-Delta text
+              # passes through verbatim; non-string inserts (embeds)
+              # contribute nothing.
+              try:
+                  ops = json.loads(desc).get("ops") or []
+                  return "".join(op.get("insert") for op in ops
+                                 if isinstance(op.get("insert"), str))
+              except Exception:
+                  return desc or ""
+
+          names = []
+          for line in open("tests/fixtures/_captures/request.txt"):
+              if line.startswith("commander:"):
+                  names.append(line.split(":", 1)[1].strip())
+
+          captured, missed = [], []
+          for name in names:
+              url = ("https://archidekt.com/api/decks/v3/?commanderName="
+                     + urllib.parse.quote(name)
+                     + "&orderBy=-viewCount&pageSize=10")
+              try:
+                  hits = get_json(url).get("results") or []
+              except Exception as e:
+                  print(f"search failed for {name!r}: {e}")
+                  missed.append(name)
+                  continue
+              hits = [h for h in hits if not h.get("private")]
+              found = None
+              for h in hits[:5]:
+                  did = h["id"]
+                  try:
+                      deck = get_json(f"https://archidekt.com/api/decks/{did}/")
+                  except Exception as e:
+                      print(f"  fetch failed for deck {did}: {e}")
+                      time.sleep(1)
+                      continue
+                  text = delta_text(deck.get("description") or "")
+                  if len(text) >= 200:
+                      trimmed = {
+                          "_provenance": {
+                              "source": f"https://archidekt.com/api/decks/{did}/",
+                              "requested_commander": name,
+                              "note": ("trimmed in-runner for the FP-018.4 "
+                                       "primer corpus; description is the "
+                                       "verbatim API string"),
+                          },
+                          "id": deck.get("id"),
+                          "name": deck.get("name"),
+                          "viewCount": deck.get("viewCount"),
+                          "format": deck.get("format"),
+                          "description": deck.get("description"),
+                          "cards": [
+                              {
+                                  "quantity": c.get("quantity"),
+                                  "categories": c.get("categories"),
+                                  "name": ((c.get("card") or {})
+                                           .get("oracleCard") or {}).get("name"),
+                                  "layout": ((c.get("card") or {})
+                                             .get("oracleCard") or {}).get("layout"),
+                              }
+                              for c in deck.get("cards") or []
+                          ],
+                      }
+                      out = f"tests/fixtures/_captures/primer_corpus_{did}.json"
+                      with open(out, "w") as f:
+                          json.dump(trimmed, f, indent=1)
+                      print(f"kept deck {did} for {name!r} "
+                            f"(primer {len(text)} chars)")
+                      found = did
+                      break
+                  print(f"  deck {did}: primer too thin "
+                        f"({len(text)} chars) -- next hit")
+                  time.sleep(1)
+              if found is None:
+                  print(f"no primer-bearing public deck for {name!r}")
+                  missed.append(name)
+              time.sleep(1)
+
+          print(f"captured {len(captured) or len(names) - len(missed)}"
+                f"/{len(names)}; missed: {missed or 'none'}")
+          if len(missed) == len(names):
+              raise SystemExit("zero captures -- failing loudly")
+          PYBATCH
+            exit 0
+          fi
           UA="commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)"
           if grep -q '^commander:' tests/fixtures/_captures/request.txt; then
             # Try EVERY commander: line until one search hits — MDFC
@@ -119,11 +239,16 @@ jobs:
           PY
       - name: Commit capture to the calling branch
         run: |
-          if ! ls tests/fixtures/_captures/archidekt_deck_*.json >/dev/null 2>&1; then
+          # Porcelain check rather than a filename glob: single mode
+          # writes archidekt_deck_<id>.json, batch mode writes
+          # primer_corpus_<id>.json; request.txt itself is already
+          # committed (it was the trigger), so anything dirty under
+          # _captures/ is a fresh capture.
+          if ! git status --porcelain tests/fixtures/_captures/ | grep -q .; then
             echo "nothing captured -- skipping commit"; exit 0
           fi
           git config user.name "archidekt-capture[bot]"
           git config user.email "noreply@users.noreply.github.com"
           git add tests/fixtures/_captures/
-          git commit -m "chore: capture Archidekt deck API response (raw material for the R2-P18 fixture; delete after trimming) [skip ci]"
+          git commit -m "chore: capture Archidekt API response(s) (raw material; delete after consuming) [skip ci]"
           git push
