@@ -1,2 +1,0 @@
-mode: primer-batch
-per-site: 25
