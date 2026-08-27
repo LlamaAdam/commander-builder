@@ -6,6 +6,66 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-27 — DFC import fix, dead-backend retirement, G3 computable
+
+#### Fixed
+
+- **DFC/MDFC deck lines now emit the FRONT FACE.** Archidekt names
+  double-faced cards `Front // Back` with a 2-element `faces` array;
+  the adapter passed the joined name through verbatim, so an
+  MDFC-heavy import produced 47/100 lines (including the
+  `[Commander]`) that Forge's loader could only rescue via its
+  front-face fallback index — and `deck_health`'s `_MDFC_LANDS`
+  matched 0 of 14 Pathways. `_entry_name` now returns `faces[0]`'s
+  name for `transform` / `modal_dfc` layouts only (split, adventure,
+  and EDHREC partner-pair names keep their `//` — the separator is
+  overloaded, so layout gates the cut, never string matching). Pinned
+  by `archidekt_deck_mdfc_shape.json`, a live capture of an
+  Esika-commander deck (MDFC commander, Pathways, transform cards);
+  the previously open, test-asserted MDFC name-shape gap is closed.
+- **`analyst.ollama_verdict` retired** (same dead-code shape as
+  `proposer.ollama_propose`, retired 2026-08-17): nothing in the repo
+  could ever set `AnalystConfig.use_ollama`, so the backend had zero
+  production callers. Loud `NotImplementedError` stub + retirement
+  note; the `analyze()` router rung makes NO call and prints the note
+  instead — raising inside the quiet `except NotImplementedError`
+  fall-through ladder would have been silently swallowed (pinned by a
+  zero-calls spy test).
+- **`commander-doctor`'s local-model check tells the truth.** It
+  delegated to a hand-rolled `/api/tags` probe that said OK when the
+  daemon was up but the configured model was never pulled. It now
+  delegates to `local_model.LocalModelClient.preflight` (one source of
+  truth for the `ollama pull <model>` remedy); flag off → GREEN with
+  no socket opened.
+
+#### Added
+
+- **Deck-judge kill criterion G3 is computable** (it was pre-registered
+  prose with no measurement). Each judged swap is labeled
+  `staple_ward | intent_ward | mixed | neither | unknown` from its
+  added cards (staple = `UNIVERSAL_STAPLES_LC` ∪ offline Game
+  Changers; intent = theme slugs / tribal / key wincons via new
+  `staples.card_theme_slugs`, which `detect_themes` now sums so the
+  two can't drift; `game_changers.offline_game_changers()` keeps the
+  judge cache-only). `judge_agreement` reads the arms with
+  pre-registered numbers (2026-08-27, before any data):
+  P(kept | staple-ward) − P(kept | intent-ward) > 0.20, each arm
+  ≥ 10 labeled pairings; thin arms print NOT COMPUTED naming the
+  short arm, never "passing". `intent=None` labels `unknown`, never
+  `staple_ward`. The judge is never shown the label (pinned).
+- **CI capture lane accepts commander searches.** `request.txt` in
+  `tests/fixtures/_captures/` now also takes `commander:<name>` lines
+  (Archidekt v3 search, most-viewed public hit, every line tried in
+  order) alongside numeric deck ids — the mechanism that found the
+  MDFC capture deck, and the lane FP-018.4's primer-corpus harvesting
+  will reuse.
+- **FP-018 "Adopt a deck" scoped** in `docs/future-plans.md`: primer
+  parsing (Quill Delta → text sidecar), free-text intent
+  (`stated` / `pilot_preferences`) flowing into judge + advisor, and a
+  `commander adopt` flow — grounded explanation plus polish-tier-capped,
+  preference-steered small modifications (primer-named cards
+  auto-Protected; the rebuild tier structurally unreachable).
+
 ### 2026-08-20 — three defects the new Playwright smokes found
 
 #### Fixed

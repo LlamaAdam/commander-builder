@@ -102,13 +102,13 @@ read any layer. Everything else honors the invariant.
 | `moxfield_push` | Render `.dck` as Moxfield textarea format (pipe→parens), clipboard copy | Authentication. `_api_push` is a typed stub (won't-do). |
 | `scryfall_client` | Card lookups, disk cache, color identity, forced refresh | Anything beyond card metadata (archetype is its own thing). |
 | `edhrec_client` | EDHREC commander page + average-deck fetch, schema-tolerant `__NEXT_DATA__` walk, retry-with-backoff (5xx/429/URLError, `Retry-After` honored, capped at 30 s) | What to do with the data. Heuristic advisor + meta-test consume. |
-| `staples` | `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`, `classify_role_extended` (canonical), frequency labels, confidence tiers, role saturation thresholds, manabase essentials, tribal essentials | Recommendation logic. Advisors use these. |
+| `staples` | `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`, `classify_role_extended` (canonical), frequency labels, confidence tiers, role saturation thresholds, manabase essentials, tribal essentials, `card_theme_slugs` (per-card theme membership; `detect_themes` sums it, so deck- and card-level answers cannot drift) | Recommendation logic. Advisors use these. |
 | `archetype` | Deck-classifier v2: oracle-derived signals (combos+tutors, interaction, stax patterns, tribal, curve) with a filename hint and a midrange default | Proposing changes. The old Claude/Ollama stubs are GONE (pinned by `test_llm_stubs_are_gone`); local tagging now lives in `local_model`. |
 | `deck_judge` / `_deck_judge_prompt` | FP-016 Phase 1: blinded 6-judgment panel (3 per order, deck-keyed agreement, 5-of-panel supermajority), diff-focused intent-anchored prompts, schema-v4 `judge_verdict`/`judge_report` beside the sim verdict | Advancing decks or gating anything — observe-only by contract. Game outcomes: Forge decides which deck is BETTER, only Forge. |
 | `cli` | The `commander` umbrella: 29-subcommand registry (1:1 aliases of every console script), grouped help from each module's own docstring, verbatim argv/exit-code passthrough | Any behavior. It is an alias layer — the hyphenated scripts stay canonical. |
 | `init_cli` | Guided first-run sequencing (deps → oracle prime → decks → pool) with measured cost warnings, `--yes`/`--dry-run`, resumable by probing real artifacts rather than a state file | The steps themselves — it composes `bootstrap`, `oracle_store`, `moxfield_import`, `pool_curator`. |
 | `local_model` | Local-model tier (A4): preflight, schema-first tasks with the evidence supplied, closed-taxonomy validation, degrade-to-deterministic routers, agreement harness | Proposals and verdicts — those stay on Claude. It also owns no taxonomy of its own; it imports `staples`' and `archetype`'s. |
-| `game_changers` | WotC Game Changers list (HTML scrape, 7-day cache, bundled fallback) | Bracket-fitting. The advisor + dashboard consume. |
+| `game_changers` | WotC Game Changers list (HTML scrape, 7-day cache, bundled fallback); `offline_game_changers()` for cache-only callers (trusted disk cache → bundled fallback, never network — the deck judge's swap labeling uses it) | Bracket-fitting. The advisor + dashboard consume. |
 | `pool_curator` | Round-robin tournament, candidate ranking, top-6 split with archetype/color diversity, persisted pool JSON | Picking candidates. That's the user / `moxfield_import`. |
 | `run_match` | User deck vs curated pool (or fallback opponents), `MatchupReport` | Improvement decisions. That's the analyst loop. |
 | `compare_versions` | Old-vs-new head-to-head A/B sim; parallel pod dispatch; adaptive early-stop; intra-pod abort; card-level diff | Whether the new version is "better". That's `analyst`. |
@@ -136,7 +136,7 @@ read any layer. Everything else honors the invariant.
 | `report` | Markdown rendering of one deck's iteration lineage; cross-deck recent-iterations summary | Mutating the log. Read-only. |
 | `revert_to` | Restore deck to a previous iteration's snapshot blob; emits Moxfield push blob | Push step. User pastes. |
 | `export` | JSON dump/restore of knowledge_log (full / per-deck / recent-N filter); skip-existing semantics | Schema validation. Trusts the dump. |
-| `doctor` | 10 environment checks; GREEN/YELLOW/RED status; `--json` output | Fixing problems. Reports only. |
+| `doctor` | 10 environment checks; GREEN/YELLOW/RED status; `--json` output. The local-model check delegates to `local_model.LocalModelClient.preflight` (flag off → GREEN with no socket; failures forward the preflight's own remedy text verbatim) | Fixing problems. Reports only. |
 | `status` | Decks-per-bracket, curated pools, recent reports, knowledge_log stats | The work itself. Pure observation. |
 | `deck_dashboard` | Stat tiles, mana curve, categories, theme tags (incl. tribal type), suggested adds, est. price, inferred bracket | Mutation. The web app's audit endpoint does. |
 | `deck_builder` (FP-014 orchestrator) | Build-from-scratch: commander + bracket → legal exactly-99. Seeds from `edhrec_client.fetch_average_deck` (or a role-target shell), enforces commander/singleton/99/color-identity, owns the land budget, renders the `.dck`; `commander-build` CLI + `--improve` hand-off | Manabase fill + personalization (its two sub-modules); running the sim (`commander-improve`). |
@@ -219,8 +219,8 @@ the CLI workflow and the web app collapse to this shape.
    ┌──────────────────────────────────────────────────────────────┐
    │  analyst.analyze(audit_manifest, sim_report):                │
    │    → Verdict { label, confidence, reasoning, lessons }       │
-   │    heuristic_verdict default; claude_verdict / ollama_verdict│
-   │    available with API key / running daemon.                  │
+   │    heuristic_verdict default; claude_verdict with API key.   │
+   │    ollama_verdict retired 2026-08-27 — see local_model.      │
    └──────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -496,7 +496,7 @@ require changing module boundaries.
 | Seam | Default | Alternatives |
 |------|---------|--------------|
 | `improvement_advisor.advise(source=...)` | `"heuristic"` (EDHREC inclusion%/synergy) | `"bracket_peers"` (Moxfield peer rankings), `"claude"` (LLM-synthesized via `_advisor_claude`); each mapped to a different module |
-| `analyst.analyze()` router | `heuristic_verdict` | `claude_verdict` (anthropic SDK; `ANTHROPIC_API_KEY` or BYO-key header), `ollama_verdict` (HTTP POST to `localhost:11434/api/generate`) |
+| `analyst.analyze()` router | `heuristic_verdict` | `claude_verdict` (anthropic SDK; `ANTHROPIC_API_KEY` or BYO-key header) (`ollama_verdict` retired 2026-08-27 — nothing in the repo could ever set its flag; verdicts stay on Claude by policy, local models on `local_model`'s narrow tasks) |
 | `proposer.propose()` router | `manual_propose` (read `audit_manifest.json`) | `claude_propose` (`ollama_propose` retired 2026-08-17 — a tool-less 3B model could not execute the 706-line browser audit prompt; local models moved to `local_model`'s narrow tasks) |
 | `forge_runner` AI | Forge built-in heuristic AI | Phase 4 (out of scope today): Claude-as-pilot via decision-point hooks |
 | `moxfield_push._api_push` | `NotImplementedError` (WON'T-DO for personal-use scope) | — |
@@ -774,4 +774,9 @@ reacting against.
 
 Retired at the same time: `proposer.ollama_propose`, which fed all 706
 lines of the browser audit prompt to `llama3.2:3b` and waited 600
-seconds for a full swap manifest.
+seconds for a full swap manifest. `analyst.ollama_verdict` followed on
+2026-08-27 — the same dead-code shape (no caller in the repo could ever
+set `AnalystConfig.use_ollama`), retired the same way: the router rung
+makes no call and prints the retirement note, because raising from
+inside `analyze()`'s quiet `except NotImplementedError` fall-through
+would have been swallowed silently.
