@@ -51,6 +51,57 @@ TOP_N = 6                                 # final pool size before slice split
 DEFAULT_GAMES_PER_POD = 3
 DEFAULT_PODS_PER_DECK = 3
 
+# z for the Wilson score interval's lower bound. 1.96 == a two-sided 95%
+# interval, the same confidence level the analyst's binomial test defaults
+# to — one project-wide notion of "confident".
+WILSON_Z = 1.96
+
+# Decimal places the Wilson bound is rounded to for RANKING (the exact
+# value is still what gets serialized). Two places is one percentage point
+# of win rate — an order of magnitude inside the ~+/-0.09 standard error of
+# a 30-game sample, so a finer difference is not a difference in evidence,
+# it is float noise. Bounds that agree here are treated as tied, which is
+# what lets the suspected-inflated demotion in CandidateScore.rank_key ever
+# fire (see its docstring: under strict equality it could not).
+WILSON_RANK_BAND = 2
+
+
+def wilson_lower_bound(wins: int, games: int, z: float = WILSON_Z) -> float:
+    """Lower bound of the Wilson score interval for ``wins / games``.
+
+    WHY RANKING NEEDS THIS. The curator used to sort on RAW win rate, which
+    is not comparable across candidates: ``schedule_pods`` aims for ~3 pods
+    each but pod size is forced to 4, a timed-out pod contributes fewer
+    completed games to everyone in it, and a deck whose Match-Result name
+    fails to map contributes none. So 3-0 in one salvaged pod outranked
+    20-10 across seven — one is a coin flip, the other a measurement, and
+    raw win rate calls the coin flip better. ``top6``, the Pool A/B split
+    and therefore the opposition every user deck is measured against all
+    inherit that error.
+
+    The Wilson lower bound discounts the rate by the uncertainty in it, so
+    a small sample is penalized in proportion to how small it is: 3/3
+    scores 0.44, 20/30 scores 0.49 and correctly ranks higher. It is
+    monotonic in wins for fixed games, so within one sample size the old
+    order is preserved exactly — the ranking only changes where sample
+    sizes differ, which is the case it exists to fix.
+
+    Chosen for the reasons ``analyst`` picked an exact binomial test: no
+    scipy here, and these are tens of games where a naive normal
+    approximation is at its worst. Wilson also stays well-behaved at 0 and
+    100%, where the normal interval runs off the end of [0, 1].
+
+    ``games <= 0`` returns 0.0 — no evidence ranks last, never first.
+    """
+    if games <= 0:
+        return 0.0
+    n = float(games)
+    phat = wins / n
+    denominator = 1.0 + (z * z) / n
+    centre = phat + (z * z) / (2.0 * n)
+    margin = z * math.sqrt((phat * (1.0 - phat) + (z * z) / (4.0 * n)) / n)
+    return max(0.0, (centre - margin) / denominator)
+
 
 # An archetype classifier is a function that returns one of:
 #   "aggro" | "midrange" | "control" | "combo" | "stax"
@@ -103,6 +154,55 @@ class CandidateScore:
             and self.win_rate > INFLATED_WIN_RATE_THRESHOLD
         )
 
+    @property
+    def wilson_score(self) -> float:
+        """Wilson lower bound on this candidate's win rate — the RANKING
+        key (see :func:`wilson_lower_bound` for why raw win rate is not)."""
+        return wilson_lower_bound(self.wins, self.games_played)
+
+    @property
+    def rank_key(self) -> tuple:
+        """Sort key for the qualifier ranking, best FIRST.
+
+        ``(-banded_wilson, inflated, -wilson, -win_rate, filename)``:
+
+        1. ``-banded_wilson`` — the evidence-weighted win rate, rounded to
+           ``WILSON_RANK_BAND``. See below for why it is banded.
+        2. ``inflated`` — ``False`` sorts before ``True``, so a candidate
+           tagged ``suspected_inflated`` is DEMOTED below an untagged one
+           holding an indistinguishable Wilson bound. The tag has existed
+           since the curator was written and was, until now, written to the
+           pool JSON and then ignored. A >75% win rate against a
+           bracket-matched field usually means the deck is mis-bracketed or
+           farming one bad matchup, and seeding the pool with it makes every
+           later user matchup read as "your deck is weak". Demotion, not
+           rejection: the tag is a SUSPICION, and the operator (who still
+           sees it in the JSON) makes the call.
+        3. ``-wilson`` (exact), then ``-win_rate``, then ``filename`` —
+           deterministic tie-breaks. The old
+           ``sort(key=win_rate, reverse=True)`` left ties in dict-insertion
+           order, so two 50% decks could swap places between runs.
+
+        WHY THE BAND EXISTS — and why "demote at EQUAL Wilson bound" needs
+        it to mean anything. Both ``wilson_score`` and ``suspected_inflated``
+        are pure functions of the same ``(wins, games_played)`` pair, so an
+        EXACT float tie in the bound implies an exact tie in the win rate,
+        which implies both candidates carry the same flag. Under strict
+        equality the inflation term could therefore never break a tie: it
+        would be dead code that looks like a policy. Banding makes it real
+        by treating bounds that agree to ``WILSON_RANK_BAND`` as tied — and
+        they genuinely are: 7 wins in 9 games (bound 0.4526, flagged) and 20
+        in 32 (bound 0.4525, clean) are the same measurement, and the clean
+        one is the safer pool seat.
+        """
+        return (
+            -round(self.wilson_score, WILSON_RANK_BAND),
+            self.suspected_inflated,
+            -self.wilson_score,
+            -self.win_rate,
+            self.filename,
+        )
+
 
 @dataclass
 class CuratedPool:
@@ -126,6 +226,9 @@ class CuratedPool:
             s["win_rate"] = wr
             s["confirm_action_per_game"] = confirm / played if played else 0.0
             s["suspected_inflated"] = played > 0 and wr > INFLATED_WIN_RATE_THRESHOLD
+            # The ranking key itself, so a post-mortem can see WHY a deck
+            # placed where it did without re-deriving the interval.
+            s["wilson_score"] = wilson_lower_bound(wins, played)
         return d
 
     def to_json(self, **kwargs) -> str:
@@ -477,8 +580,11 @@ def curate_bracket(
       3. Round-robin: each deck plays `pods_per_deck` pods × `games_per_pod` games.
       4. Aggregate wins / games_played / confirmAction per candidate.
       5. Apply AI-pilotability gate (reject confirmAction > MAX/game).
-      6. Sort by win rate; take TOP_N; split into Pool A/B with diversity rules.
-      7. Tag suspected_inflated; persist to `_pools/B<n>.json`.
+      6. Rank by CandidateScore.rank_key (Wilson lower bound, with
+         suspected-inflated decks demoted at equal bound); take TOP_N;
+         split into Pool A/B with diversity rules.
+      7. Persist to `_pools/B<n>.json` (the suspected_inflated tag rides
+         along in the JSON for the operator).
     """
     runner = runner or ForgeRunner.locate()
 
@@ -580,8 +686,22 @@ def curate_bracket(
             )
 
     qualified = [s for s in scores.values() if s.rejected_reason is None]
-    qualified.sort(key=lambda s: s.win_rate, reverse=True)
+    # Rank on the Wilson lower bound, with suspected-inflated decks demoted
+    # at equal bound — see CandidateScore.rank_key. NOT raw win rate: the
+    # schedule does not hand every candidate the same number of games, so
+    # raw rates aren't comparable across the field.
+    qualified.sort(key=lambda s: s.rank_key)
     top6 = qualified[:TOP_N]
+    for s in top6:
+        if s.suspected_inflated:
+            print(
+                f"  NOTE: {s.filename} tagged suspected_inflated "
+                f"(win_rate={s.win_rate:.2f} > {INFLATED_WIN_RATE_THRESHOLD}) "
+                f"— demoted below untagged decks at equal Wilson bound "
+                f"({s.wilson_score:.3f}); still seated. Check its [B{bracket}] "
+                f"tag before trusting matchups against it.",
+                flush=True,
+            )
     rejected = [s for s in scores.values() if s.rejected_reason is not None]
 
     pool_a, pool_b = _split_into_slices(top6) if top6 else ([], [])
@@ -706,8 +826,18 @@ def _list_bracket_candidates(bracket: int, deck_dir: Path = DECK_DIR) -> list[st
                   recipe's like-weighted sampling is the intended amount of
                   popularity bias. Mirrors run_match._fallback_opponents.
     [REF] decks (meta_test's imported community references) are deliberately
-    KEPT: they are real, playable community builds at the bracket — exactly
-    the population the curator exists to rank.
+    KEPT as candidates: they are real, playable community builds at the
+    bracket — exactly the population the curator exists to rank.
+
+    Candidacy is now the ONLY seat [REF] is welcome in. Until 2026-08-17 they
+    were ALSO filler-eligible in ``_proposer_sim._pick_filler_decks``, which
+    made the [PREMADE] exclusion above arbitrary rather than principled —
+    [REF] is Moxfield top-likes, the same popularity bias. The rule that
+    replaced it keys on what the SEAT does, not on the import tag: a
+    candidate seat gets RANKED (its strength becomes an output the operator
+    reads, so a popular deck is signal), while a filler seat is never ranked
+    (its strength silently sets the A/B baseline, so a popularity-skewed
+    filler is invisible bias). Hence [REF] stays here and is excluded there.
 
     Note: globbing `*[B<n>].dck` doesn't work — pathlib treats the brackets
     as a character class. We glob `*.dck` and filter by suffix instead."""

@@ -425,6 +425,219 @@ def test_auto_propose_protection_is_case_insensitive(tmp_path, monkeypatch):
     assert len(proposal.dropped_for_protection) == 3
 
 
+# ---------------------------------------------------------------------------
+# Politics enforcement net — decision C2 / round-2 review R2-P09
+# ---------------------------------------------------------------------------
+#
+# The curator's candidate CUTS are already politics-filtered upstream
+# (``advise()`` runs ``_filter_for_politics`` over every source) and the
+# prompt tells Claude to pick from those candidates — but Claude
+# deviates, which is why the ADD side has three post-response nets. The
+# cut side had only ``Protect=`` until 2026-08-20. These tests pin the
+# missing net on the one loop decision C2 was written for: the
+# unattended ``commander-auto-curate`` / ``commander-improve`` path.
+#
+# ORACLE-TEXT PROVENANCE: the stub cards below carry SYNTHETIC oracle
+# bodies written to the printed template — the same rule the politics
+# section of test_staples.py records. Pattern-level coverage (including
+# the real Smothering Tithe text) lives there; the only thing under
+# test here is whether auto_propose consults the predicate at all.
+
+def _patch_politics_lookup(monkeypatch, universe: dict):
+    """Pin the cache-only Scryfall seam the politics net resolves
+    through.
+
+    ``auto_propose`` imports ``lookup_card`` from ``scryfall_client``
+    at call time and passes ``cache_only=True``, so patching the module
+    attribute is enough — and it keeps the test off the network, which
+    is the point of resolving cache-only in the first place."""
+    def _fake(name, cache=True, cache_only=False):
+        return universe.get((name or "").strip())
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    return _fake
+
+
+_POLITICS_UNIVERSE = {
+    # SYNTHETIC — Rhystic-tax template ("unless that player pays").
+    "Rhystic Study": {
+        "name": "Rhystic Study",
+        "type_line": "Enchantment",
+        "oracle_text": (
+            "Whenever an opponent casts a spell, you may draw a card "
+            "unless that player pays {1}."
+        ),
+    },
+    # SYNTHETIC — goad keyword.
+    "Disrupt Decorum": {
+        "name": "Disrupt Decorum",
+        "type_line": "Sorcery",
+        "oracle_text": "Goad all creatures you don't control.",
+    },
+    # Control: no politics mechanic, must stay cuttable.
+    "Divination": {
+        "name": "Divination",
+        "type_line": "Sorcery",
+        "oracle_text": "Draw two cards.",
+    },
+}
+
+
+def _politics_deck(tmp_path, *, guard_off: bool = False, protect: str = ""):
+    deck = tmp_path / "[USER] Politics [B3].dck"
+    meta = "[metadata]\nName=Politics\n"
+    if guard_off:
+        meta += "PoliticsGuard=off\n"
+    if protect:
+        meta += f"Protect={protect}\n"
+    deck.write_text(
+        meta + "[Commander]\n1 Test Commander\n"
+        "[Main]\n1 Rhystic Study\n1 Disrupt Decorum\n1 Divination\n",
+        encoding="utf-8",
+    )
+    return deck
+
+
+def test_auto_propose_shields_politics_cuts(tmp_path, monkeypatch):
+    """A curator deviation proposing a politics-card cut is refused and
+    recorded; the non-politics cut goes through untouched."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_politics_lookup(monkeypatch, _POLITICS_UNIVERSE)
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [],
+        "cuts": ["Rhystic Study", "Disrupt Decorum", "Divination"],
+        "rationale": "margin says these do nothing",
+    }))
+
+    proposal = auto_propose(
+        deck_path=_politics_deck(tmp_path), bracket=3,
+        advice_report=_stub_advice_report(),
+    )
+
+    assert proposal.cuts == ["Divination"]
+    assert proposal.dropped_for_politics == [
+        "Rhystic Study", "Disrupt Decorum",
+    ]
+
+
+def test_auto_propose_politics_net_honors_per_deck_opt_out(
+    tmp_path, monkeypatch,
+):
+    """``[metadata] PoliticsGuard=off`` makes the net a pass-through —
+    the user who opted out gets their cut, and nothing is recorded as
+    shielded."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_politics_lookup(monkeypatch, _POLITICS_UNIVERSE)
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [], "cuts": ["Rhystic Study"], "rationale": "x",
+    }))
+
+    proposal = auto_propose(
+        deck_path=_politics_deck(tmp_path, guard_off=True), bracket=3,
+        advice_report=_stub_advice_report(),
+    )
+
+    assert proposal.cuts == ["Rhystic Study"]
+    assert proposal.dropped_for_politics == []
+
+
+def test_auto_propose_politics_never_blocks_adds(tmp_path, monkeypatch):
+    """The guard shields cuts; it never touches adds (it must not
+    promote politics cards, and it must not block them either)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_politics_lookup(monkeypatch, _POLITICS_UNIVERSE)
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["Rhystic Study"], "cuts": ["Divination"], "rationale": "x",
+    }))
+
+    proposal = auto_propose(
+        deck_path=_politics_deck(tmp_path), bracket=3,
+        advice_report=_stub_advice_report(),
+    )
+
+    assert proposal.adds == ["Rhystic Study"]
+    assert proposal.cuts == ["Divination"]
+    assert proposal.dropped_for_politics == []
+
+
+def test_auto_propose_protected_politics_cut_lands_in_one_bucket(
+    tmp_path, monkeypatch,
+):
+    """A cut that is BOTH protected and political is reported once.
+
+    The politics net runs over the protection filter's survivors, so
+    ``Protect=`` wins the attribution and the ``dropped_*`` fields'
+    exactly-one-reason invariant holds."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_politics_lookup(monkeypatch, _POLITICS_UNIVERSE)
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [], "cuts": ["Rhystic Study"], "rationale": "x",
+    }))
+
+    proposal = auto_propose(
+        deck_path=_politics_deck(tmp_path), bracket=3,
+        advice_report=_stub_advice_report(),
+        protected_cards=["Rhystic Study"],
+    )
+
+    assert proposal.dropped_for_protection == ["Rhystic Study"]
+    assert proposal.dropped_for_politics == []
+
+
+def test_auto_propose_politics_net_resolves_cache_only(
+    tmp_path, monkeypatch,
+):
+    """Resolution is cache-only: a cold cache degrades to 'not
+    shielded', it never fires a networked lookup per proposed cut.
+
+    Pins the latency contract of the unattended loop — one round must
+    not grow a 20s-timeout-capable round trip per proposed cut."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    seen: list[tuple[str, bool]] = []
+
+    def _fake(name, cache=True, cache_only=False):
+        seen.append(((name or "").strip(), cache_only))
+        return _POLITICS_UNIVERSE.get((name or "").strip())
+
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake,
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": [], "cuts": ["Rhystic Study"], "rationale": "x",
+    }))
+
+    auto_propose(
+        deck_path=_politics_deck(tmp_path), bracket=3,
+        advice_report=_stub_advice_report(),
+    )
+
+    # Other seams in auto_propose (commander resolution for the
+    # color-identity net) legitimately use the networked form, so scope
+    # the assertion to lookups of the proposed CUT.
+    cut_lookups = [flag for name, flag in seen if name == "Rhystic Study"]
+    assert cut_lookups, "the politics net never resolved the proposed cut"
+    assert all(cut_lookups), (
+        "a politics-net lookup ran with cache_only=False — that is a "
+        "network round trip per proposed cut"
+    )
+
+
 def test_auto_propose_injects_protected_block_into_prompt(
     tmp_path, monkeypatch,
 ):
@@ -2540,19 +2753,19 @@ def test_auto_curate_main_rejects_negative_max(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_verdict_from_ab_kept_when_new_deck_wins():
-    """20-12 over 32 decisive games (>= the min-decisive threshold) with
-    margin=1 -> kept."""
+    """24-8 over 32 decisive games (>= the min-decisive threshold, and a
+    statistically significant split: exact binomial p ~= 0.007) -> kept."""
     from commander_builder.proposer import _verdict_from_ab
     from commander_builder.forge_runner import ABResult
-    ab = ABResult(wins_a=12, wins_b=20, games=32, status="done")
+    ab = ABResult(wins_a=8, wins_b=24, games=32, status="done")
     assert _verdict_from_ab(ab, margin=1) == "kept"
 
 
 def test_verdict_from_ab_reverted_when_old_deck_wins():
-    """20-12 the other way (wins_a > wins_b) over enough games -> reverted."""
+    """24-8 the other way (wins_a > wins_b) over enough games -> reverted."""
     from commander_builder.proposer import _verdict_from_ab
     from commander_builder.forge_runner import ABResult
-    ab = ABResult(wins_a=20, wins_b=12, games=32, status="done")
+    ab = ABResult(wins_a=24, wins_b=8, games=32, status="done")
     assert _verdict_from_ab(ab, margin=1) == "reverted"
 
 
@@ -2563,6 +2776,24 @@ def test_verdict_from_ab_neutral_within_margin():
     from commander_builder.forge_runner import ABResult
     ab = ABResult(wins_a=20, wins_b=21, games=41, status="done")
     assert _verdict_from_ab(ab, margin=2) == "neutral"
+
+
+def test_verdict_from_ab_12_8_is_neutral_16_4_is_not():
+    """Significance regression test (2026-08-14): under the null the pair
+    split is ~Binomial(n, 0.5), so 12-8 over 20 decisive has p ~= 0.50 —
+    the old |delta| >= margin rule called HALF of all neutral swaps
+    kept/reverted. 12-8 must be neutral; 16-4 (p ~= 0.012) resolves."""
+    from commander_builder.proposer import _verdict_from_ab
+    from commander_builder.forge_runner import ABResult
+    assert _verdict_from_ab(
+        ABResult(wins_a=8, wins_b=12, games=20, status="done"),
+        margin=1) == "neutral"
+    assert _verdict_from_ab(
+        ABResult(wins_a=4, wins_b=16, games=20, status="done"),
+        margin=1) == "kept"
+    assert _verdict_from_ab(
+        ABResult(wins_a=16, wins_b=4, games=20, status="done"),
+        margin=1) == "reverted"
 
 
 def test_verdict_from_ab_inconclusive_below_min_decisive():
@@ -2576,11 +2807,18 @@ def test_verdict_from_ab_inconclusive_below_min_decisive():
     # Just under the threshold is still inconclusive ...
     assert _verdict_from_ab(
         ABResult(wins_a=9, wins_b=10, games=19, status="done")) == "inconclusive"
-    # ... and exactly at the threshold resolves normally.
+    # ... and exactly at the threshold resolves normally (16-4 over 20:
+    # p ~= 0.012 < 0.05).
     assert _verdict_from_ab(
-        ABResult(wins_a=8, wins_b=12, games=20, status="done"), margin=1) == "kept"
-    # The threshold is tunable for callers that know N is trustworthy.
-    assert _verdict_from_ab(ab, margin=1, min_decisive=1) == "kept"
+        ABResult(wins_a=4, wins_b=16, games=20, status="done"), margin=1) == "kept"
+    # The min_decisive gate is tunable, but bypassing it does NOT bypass
+    # the significance test: 1-3 clears the (lowered) gate yet p = 0.625,
+    # so the verdict is a trusted-sample near-tie, not 'kept'.
+    assert _verdict_from_ab(ab, margin=1, min_decisive=1) == "neutral"
+    # A unanimous 0-6 IS significant even at tiny n (p = 2/64 ~= 0.031).
+    assert _verdict_from_ab(
+        ABResult(wins_a=0, wins_b=6, games=6, status="done"),
+        margin=1, min_decisive=1) == "kept"
 
 
 def test_verdict_from_ab_pending_when_sim_did_not_complete():
@@ -2679,6 +2917,39 @@ def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):
     assert all(not p.startswith("[USER]") for p in picks)
     assert "[USER] Mine [B3].dck" not in picks
     assert "[USER] Mine v2 [B3].dck" not in picks
+
+
+def test_pick_filler_decks_excludes_ref_decks(tmp_path):
+    """2026-08-17: [REF] (meta_test's Moxfield top-likes) is no longer
+    filler-eligible. It carries the same popularity bias [PREMADE] is
+    excluded for, and a filler seat is never ranked — its strength just
+    sets the A/B baseline, so the bias would be invisible."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    for name in ("Filler A [B3].dck", "Filler B [B3].dck",
+                 "[REF] Top Liked [B3].dck", "[REF] Also Top [B3].dck"):
+        (tmp_path / name).write_text("a", encoding="utf-8")
+    picks = _pick_filler_decks(
+        tmp_path, exclude_paths=[], count=2, target_bracket=3,
+        rng=_rnd.Random(0),
+    )
+    assert sorted(picks) == ["Filler A [B3].dck", "Filler B [B3].dck"]
+
+
+def test_pick_filler_decks_returns_empty_rather_than_seating_a_ref(tmp_path):
+    """The exclusion is absolute, not a preference: with only [REF]
+    decks left the picker returns [] (caller surfaces "no fillers" and
+    skips the sim) instead of falling back to a biased seat."""
+    import random as _rnd
+    from commander_builder.proposer import _pick_filler_decks
+    for name in ("[REF] Top Liked [B3].dck", "[REF] Also Top [B3].dck",
+                 "Filler A [B3].dck"):
+        (tmp_path / name).write_text("a", encoding="utf-8")
+    picks = _pick_filler_decks(
+        tmp_path, exclude_paths=[], count=2, target_bracket=3,
+        rng=_rnd.Random(0),
+    )
+    assert picks == []
 
 
 def test_pick_filler_decks_prefers_same_bracket(tmp_path):
@@ -3100,6 +3371,130 @@ def test_auto_curate_main_post_sim_reports_actual_decisive_shortfall(
     its = iterations_for_deck("sf-id", db_path=db)
     assert len(its) == 1
     assert its[0].verdict == "inconclusive"
+
+
+# ---------------------------------------------------------------------------
+# --run-sim defaults to the verdict floor (2026-08-17 owner decision)
+#
+# --sim-games used to default to 5 (~2 expected decisive games), so the
+# flagship close-the-loop flag could only ever record 'inconclusive' —
+# structurally unable to close the loop it exists for. The default now
+# derives from _proposer_sim.min_sim_games_for_verdict(); --smoke carries
+# the old cheap behaviour and says up front that it records inconclusive.
+# ---------------------------------------------------------------------------
+
+def _run_sim_cli(tmp_path, monkeypatch, extra_argv, *, ab_wins=(10, 30),
+                 ab_games=40):
+    """Drive auto_curate_main through --run-sim with every external
+    dependency stubbed (Anthropic, advisor, Forge). Returns (rc, db path,
+    list of the ``games`` values run_ab_simulation was called with)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["A"], "cuts": ["C"], "rationale": "x",
+    }))
+    _patch_advisor(monkeypatch, _stub_advice_report())
+
+    from commander_builder.forge_runner import ABResult
+    seen_games: list[int] = []
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        seen_games.append(games)
+        return ABResult(
+            deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+            wins_a=ab_wins[0], wins_b=ab_wins[1], games=ab_games,
+            status="done",
+        )
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation", fake_ab_sim,
+    )
+
+    deck = tmp_path / "[USER] Floor [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Floor\nMoxfield=floor-id\n"
+        "[Commander]\n1 Test\n[Main]\n1 C\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Filler A.dck").write_text("a", encoding="utf-8")
+    (tmp_path / "Filler B.dck").write_text("a", encoding="utf-8")
+    db = tmp_path / "knowledge_log.sqlite"
+
+    from commander_builder.proposer import auto_curate_main
+    rc = auto_curate_main([
+        str(deck), "--bracket", "3", "--db-path", str(db), "--run-sim",
+        *extra_argv,
+    ])
+    return rc, db, seen_games
+
+
+def test_auto_curate_main_default_games_come_from_the_verdict_constant(
+    tmp_path, monkeypatch, capsys,
+):
+    """The default must be DERIVED from the gate, not a second hardcoded
+    copy of it: whatever min_sim_games_for_verdict() returns is what a
+    bare --run-sim plays. Pinned end-to-end (the number the sim actually
+    receives), not just at the parser."""
+    from commander_builder._proposer_sim import min_sim_games_for_verdict
+
+    rc, db, seen_games = _run_sim_cli(tmp_path, monkeypatch, [])
+    assert rc == 0
+    assert seen_games == [min_sim_games_for_verdict()]
+    assert seen_games == [40]  # ceil(20 decisive / 0.5) — pinned
+
+    captured = capsys.readouterr()
+    # Up-front cost line, in the repo's voice: what it costs, why, and
+    # the cheap alternative.
+    assert "running 40 pod games" in captured.out
+    assert "min)" in captured.out
+    assert "--smoke" in captured.out
+    # At the floor the sub-threshold warning must NOT fire ...
+    assert "WARNING" not in captured.err
+    # ... and the verdict can actually resolve, which is the whole point.
+    from commander_builder.knowledge_log import iterations_for_deck
+    assert iterations_for_deck("floor-id", db_path=db)[0].verdict == "kept"
+
+
+def test_auto_curate_main_smoke_restores_five_games_and_warns(
+    tmp_path, monkeypatch, capsys,
+):
+    """--smoke is the old cheap behaviour, kept as an explicit opt-in —
+    and it must SAY that its verdict will be 'inconclusive' rather than
+    letting the operator discover it from the row afterwards."""
+    from commander_builder._proposer_cli import SMOKE_SIM_GAMES
+
+    rc, db, seen_games = _run_sim_cli(
+        tmp_path, monkeypatch, ["--smoke"], ab_wins=(2, 3), ab_games=5,
+    )
+    assert rc == 0
+    assert SMOKE_SIM_GAMES == 5
+    assert seen_games == [5]
+
+    captured = capsys.readouterr()
+    assert "running 5 pod games" in captured.out
+    assert "inconclusive" in captured.out          # stated BEFORE the sim
+    assert "NOT a verdict" in captured.out
+    # The pre-existing sub-threshold warning still fires on stderr.
+    assert "WARNING" in captured.err
+    # ... and the row really does land 'inconclusive', as advertised.
+    from commander_builder.knowledge_log import iterations_for_deck
+    assert (iterations_for_deck("floor-id", db_path=db)[0].verdict
+            == "inconclusive")
+
+
+def test_auto_curate_main_explicit_sim_games_beats_smoke(
+    tmp_path, monkeypatch, capsys,
+):
+    """--sim-games N stays the exact override. When it disagrees with
+    --smoke the typed number wins (the operator meant it) — but the CLI
+    says so instead of silently honouring one of two conflicting flags."""
+    rc, _db, seen_games = _run_sim_cli(
+        tmp_path, monkeypatch, ["--smoke", "--sim-games", "60"])
+    assert rc == 0
+    assert seen_games == [60]
+    err = capsys.readouterr().err
+    assert "--smoke and --sim-games 60" in err
 
 
 def test_auto_curate_main_rejects_out_of_range_bracket(tmp_path, capsys):
@@ -4099,3 +4494,103 @@ def test_auto_curate_main_json_carries_deck_score_when_flag_on(
     payload = json.loads(capsys.readouterr().out)
     assert payload["deck_score"]["verdict"] == "keep"
     assert payload["deck_score"]["change_budget"] == [0, 2]
+
+
+# ---------------------------------------------------------------------------
+# All-fillers-excluded message (round-2 review 2026-08-20, R2-P22)
+# ---------------------------------------------------------------------------
+#
+# Adding [REF] to the exclusion list (2026-08-17) can zero out the filler
+# pool on a box that never harvested an opponent pool. The old message said
+# only "found 0 ... Sim skipped", which reads as "your deck dir is empty" to
+# an operator looking at a directory full of .dck files.
+
+class _SimArgs:
+    """Minimal stand-in for the auto-curate argparse namespace, holding
+    only what ``_run_sim_and_record`` reads before it gives up."""
+
+    def __init__(self, deck_path, *, bracket=3, sim_fillers=""):
+        self.deck_path = deck_path
+        self.bracket = bracket
+        self.sim_fillers = sim_fillers
+        self.sim_games = 40
+        self.json = False
+
+
+def _skip_message(tmp_path, filenames, *, sim_fillers=""):
+    """Run the sim orchestrator against a deck dir that can't seat a pod
+    and return the message it produced."""
+    from commander_builder.proposer import _run_sim_and_record
+    deck = tmp_path / "[USER] Mine [B3].dck"
+    deck.write_text("[Main]\n", encoding="utf-8")
+    out = tmp_path / "[USER] Mine v2 [B3].dck"
+    out.write_text("[Main]\n", encoding="utf-8")
+    for name in filenames:
+        (tmp_path / name).write_text("a", encoding="utf-8")
+    _result, error, verdict = _run_sim_and_record(
+        _SimArgs(deck, sim_fillers=sim_fillers),
+        out_path=out,
+        iteration_id=1,
+        db_path=tmp_path / "kl.sqlite",
+    )
+    assert verdict == "pending"
+    return error
+
+
+def test_all_fillers_excluded_message_names_cause_and_remedy(tmp_path):
+    msg = _skip_message(tmp_path, [
+        "[REF] Top Liked [B3].dck",
+        "[REF] Also Top [B3].dck",
+        "[PREMADE] Precon [B3].dck",
+    ])
+    # The count is still there (it was never wrong, just insufficient)...
+    assert "found 0" in msg
+    # ...plus what actually happened, with the census...
+    assert "prefix-excluded" in msg
+    assert "[REF] x2" in msg
+    assert "[PREMADE] x1" in msg
+    # ...and both remedies, named as commands the operator can run.
+    assert "commander-import --harvest 3" in msg
+    assert "--sim-fillers" in msg
+
+
+def test_empty_deck_dir_keeps_the_short_message(tmp_path):
+    """No .dck files at all is a different state: nothing was excluded,
+    so the exclusion explanation would be a lie."""
+    msg = _skip_message(tmp_path, [])
+    assert "found 0" in msg
+    assert "prefix-excluded" not in msg
+
+
+def test_partially_stocked_dir_keeps_the_short_message(tmp_path):
+    """One eligible filler and one excluded deck is a 'not enough decks'
+    problem, not an exclusion problem — the pod needs two."""
+    msg = _skip_message(tmp_path, [
+        "Filler A [B3].dck", "[REF] Top Liked [B3].dck",
+    ])
+    assert "prefix-excluded" not in msg
+
+
+def test_explicit_sim_fillers_shortfall_keeps_the_short_message(tmp_path):
+    """An explicit --sim-fillers list that came up short is a typo, not a
+    policy question — explaining the exclusion rule would misdirect."""
+    msg = _skip_message(
+        tmp_path, ["[REF] Top Liked [B3].dck"],
+        sim_fillers="[REF] Top Liked [B3].dck",
+    )
+    assert "prefix-excluded" not in msg
+
+
+def test_filler_exclusion_census_counts_by_prefix(tmp_path):
+    from commander_builder._proposer_sim import _filler_exclusion_census
+    for name in ("[USER] Mine [B3].dck", "[CONTROL] Cal [B3].dck",
+                 "[PREMADE] Precon [B3].dck", "[REF] Top [B3].dck",
+                 "Filler A [B3].dck"):
+        (tmp_path / name).write_text("a", encoding="utf-8")
+    census = _filler_exclusion_census(tmp_path, [])
+    assert census["total"] == 5
+    assert census["eligible"] == 1
+    assert census["excluded"] == 4
+    assert census["by_prefix"] == {
+        "[USER]": 1, "[CONTROL]": 1, "[PREMADE]": 1, "[REF]": 1,
+    }

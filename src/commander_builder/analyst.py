@@ -31,10 +31,59 @@ Python — no framework lock-in.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 from ._llm_json import extract_json_object
+
+
+# --- Verdict statistics ----------------------------------------------------
+
+# Canonical decisive-games floor for ANY confident verdict, shared by every
+# verdict path (this module's heuristic_verdict and
+# ``_proposer_sim._verdict_from_ab``, which imports it from here). Below
+# this many HEAD-TO-HEAD decisive games (old_wins + new_wins; draws and
+# filler-seat wins excluded) the win-rate standard error is ~0.5/sqrt(N)
+# (N=10 -> +/-0.16, N=20 -> +/-0.11), which swamps the ~0.01-0.05 effect a
+# curator swap actually has, so the result is inconclusive regardless of
+# how lopsided the split looks.
+#
+# 2026-08-16 alignment: AnalystConfig previously defaulted to 8 (an early
+# empirical guess) while _proposer_sim gated at 20 — the SAME sim outcome
+# could earn a confident kept/reverted from the analyst path but
+# 'inconclusive' from the auto-curate path. One constant, one floor.
+MIN_DECISIVE_GAMES_FOR_VERDICT = 20
+
+
+def binomial_two_sided_p(k: int, n: int) -> float:
+    """Exact two-sided binomial test of ``k`` successes in ``n`` trials
+    against the null hypothesis p = 0.5.
+
+    Returns P(|X - n/2| >= |k - n/2|) for X ~ Binomial(n, 0.5) — the
+    probability that a truly neutral swap would produce a head-to-head
+    split at least this lopsided by chance. Symmetric in k vs n-k, so the
+    same function scores improvements and regressions.
+
+    Why an exact test and not a Wilson interval or scipy: scipy is not a
+    dependency of this project, the decisive-game counts here are small
+    (tens, not thousands) where normal approximations are at their worst,
+    and under the p=0.5 null the exact tail sum is ~5 lines of
+    ``math.comb``. The old fixed absolute-margin thresholds were
+    game-count-invariant: with 20 decisive games, P(|new-old| >= 4) under
+    the null is ~0.50, so half of all *neutral* swaps earned a confident
+    kept/reverted verdict. A p-value scales the bar with the sample size.
+
+    Edge cases: n <= 0 returns 1.0 (no evidence, never significant).
+    """
+    if n <= 0:
+        return 1.0
+    # |2k - n| == 2 * |k - n/2|; integer math avoids float comparisons.
+    dev = abs(2 * k - n)
+    tail = sum(
+        math.comb(n, i) for i in range(n + 1) if abs(2 * i - n) >= dev
+    )
+    return tail / (2 ** n)
 
 
 # --- Inputs and outputs ----------------------------------------------------
@@ -68,10 +117,27 @@ class Verdict:
 @dataclass
 class AnalystConfig:
     """Knobs for the verdict router. Defaults are empirical guesses; tune as
-    we accumulate iteration data."""
-    margin_strong_threshold: int = 4   # |new_wins - old_wins| ≥ 4 in 20 games → strong signal
-    margin_noise_threshold: int = 2    # |delta| ≤ 2 → noise; punt to LLM if available
-    min_decisive_games: int = 8        # If most games drew, the sim isn't conclusive
+    we accumulate iteration data.
+
+    2026-08-14 — significance-based verdicts. ``heuristic_verdict`` now
+    scores the head-to-head split with an exact two-sided binomial test
+    against p=0.5 (see ``binomial_two_sided_p``); a strong kept/reverted
+    verdict requires ``p < alpha``. The two ``margin_*`` knobs below are
+    DEPRECATED: they are accepted for backward compatibility (existing
+    callers may still construct AnalystConfig with them) but are no
+    longer read anywhere — a fixed absolute margin is game-count-
+    invariant and mislabels ~50% of neutral swaps at 20 decisive games.
+    Tune ``alpha`` instead.
+    """
+    margin_strong_threshold: int = 4   # DEPRECATED (unread): superseded by `alpha`
+    margin_noise_threshold: int = 2    # DEPRECATED (unread): superseded by `alpha`
+    alpha: float = 0.05                # two-sided significance bar for kept/reverted
+    # Head-to-head decisive games needed for any verdict. Defaults to the
+    # canonical module-level MIN_DECISIVE_GAMES_FOR_VERDICT (20) so this
+    # gate and _proposer_sim._verdict_from_ab's agree — the old default of
+    # 8 let the analyst render confident verdicts on samples the
+    # auto-curate path correctly called 'inconclusive'.
+    min_decisive_games: int = MIN_DECISIVE_GAMES_FOR_VERDICT
     use_claude: bool = False           # Set True when ANTHROPIC_API_KEY is wired.
     use_ollama: bool = False           # Set True when local model is running.
     claude_model: str = "claude-sonnet-4-5"
@@ -142,27 +208,43 @@ def analyze(input_: AnalystInput, config: Optional[AnalystConfig] = None) -> Ver
 # --- Heuristic backend (no LLM, deterministic) -----------------------------
 
 def heuristic_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
-    """Render a verdict from numeric thresholds alone. Cheap, deterministic,
-    handles the obvious cases well. Confidence drops when the sim was
-    inconclusive (mostly draws) or the margin sits in the noise band."""
+    """Render a verdict from the head-to-head numbers alone. Cheap,
+    deterministic, handles the obvious cases well.
+
+    Decisive convention (2026-08-14 fix): decisive = old_wins + new_wins —
+    HEAD-TO-HEAD decisive games only, matching knowledge_log's win-rate
+    denominator and ``_proposer_sim._verdict_from_ab``. The old
+    ``total_games - draws`` counted games won by the two FILLER seats in
+    the 4-player pod (roughly half of all pod games), so the
+    min_decisive_games gate effectively always passed even when the A/B
+    pair had won only 2-3 games between them.
+
+    Significance (2026-08-14 fix): the kept/reverted call is an exact
+    two-sided binomial test of the split against p=0.5
+    (``binomial_two_sided_p``), strong only when p < ``config.alpha``.
+    Confidence mapping: strong verdicts carry ``min(0.97, 1 - p)`` —
+    always >= 1 - alpha = 0.95, above the router's 0.75 escalation bar,
+    same role the old fixed 0.85 played. Non-significant splits stay
+    "neutral" at 0.4 (below the bar, so the router may escalate to an
+    LLM) and the draws-dominated/inconclusive gate stays at 0.3."""
     sim = input_.sim_report
     old_wins = sim.get("old_stats", {}).get("wins", 0)
     new_wins = sim.get("new_stats", {}).get("wins", 0)
     total = sim.get("total_games", 0)
     draws = sim.get("draws", 0)
-    decisive = total - draws
+    decisive = old_wins + new_wins   # head-to-head only; fillers/draws excluded
     delta = new_wins - old_wins
 
-    lessons: list[str] = []
-
-    # Inconclusive sim: too many draws to read a signal.
+    # Inconclusive sim: too few head-to-head decisive games to read a
+    # signal (draws and filler-seat wins took the rest).
     if decisive < config.min_decisive_games:
         return Verdict(
             label="neutral",
             confidence=0.3,
             reasoning=(
                 f"Inconclusive: only {decisive}/{total} games were decisive "
-                f"({draws} draws). Below the {config.min_decisive_games}-game "
+                f"head-to-head wins ({draws} draws; the rest went to filler "
+                f"seats). Below the {config.min_decisive_games}-game "
                 "minimum for a reliable verdict."
             ),
             lessons=[
@@ -172,36 +254,35 @@ def heuristic_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
             source="heuristic",
         )
 
-    # Strong improvement.
-    if delta >= config.margin_strong_threshold:
+    p_value = binomial_two_sided_p(new_wins, decisive)
+
+    # Statistically significant improvement / regression.
+    if p_value < config.alpha and delta != 0:
+        label = "kept" if delta > 0 else "reverted"
+        verb = "won" if delta > 0 else "lost"
         return Verdict(
-            label="kept",
-            confidence=0.85,
-            reasoning=f"New version won {new_wins}-{old_wins} (margin {delta}) over {decisive} decisive games.",
-            lessons=_extract_swap_lessons(input_.audit_manifest, "kept"),
+            label=label,
+            confidence=min(0.97, 1.0 - p_value),
+            reasoning=(
+                f"New version {verb} {new_wins}-{old_wins} (signed margin "
+                f"{delta:+d}) over {decisive} head-to-head decisive games; "
+                f"exact binomial p={p_value:.4f} < alpha={config.alpha}."
+            ),
+            lessons=_extract_swap_lessons(input_.audit_manifest, label),
             source="heuristic",
         )
 
-    # Strong regression.
-    if delta <= -config.margin_strong_threshold:
-        return Verdict(
-            label="reverted",
-            confidence=0.85,
-            reasoning=f"New version lost {new_wins}-{old_wins} (margin {-delta}) over {decisive} decisive games.",
-            lessons=_extract_swap_lessons(input_.audit_manifest, "reverted"),
-            source="heuristic",
-        )
-
-    # Noise band — heuristic uncertain. Confidence stays low so the router
-    # escalates to LLM when one is configured.
+    # Not significant — heuristic uncertain. Confidence stays low so the
+    # router escalates to LLM when one is configured.
     return Verdict(
         label="neutral",
         confidence=0.4,
         reasoning=(
-            f"Within noise: delta {delta} over {decisive} decisive games is below "
-            f"the {config.margin_strong_threshold}-game threshold. Could be variance."
+            f"Within noise: {new_wins}-{old_wins} over {decisive} head-to-head "
+            f"decisive games is not statistically significant (exact binomial "
+            f"p={p_value:.4f} >= alpha={config.alpha}). Could be variance."
         ),
-        lessons=lessons,
+        lessons=[],
         source="heuristic",
     )
 
@@ -239,14 +320,26 @@ Output JSON ONLY (no prose, no markdown). Schema:
   "lessons": ["transferable observation 1", "..."]
 }
 
-Verdict rules:
-- "kept": clear improvement (margin >=4 wins / 20 games, OR meaningful \
-qualitative gain — e.g. avg ending life much higher, fewer eliminations).
-- "reverted": clear regression. Same threshold inverted.
-- "neutral": within noise OR sim was inconclusive (most games drew).
+The sim summary reports signed_margin = new_wins - old_wins (positive \
+means the NEW version won more head-to-head games), the winner, draws, \
+and h2h_decisive = old_wins + new_wins (games the compared pair actually \
+won; draws and games won by the two filler seats are excluded).
 
-Confidence: 0.85+ for clear signals; 0.5-0.7 for noisy cases; below 0.5 \
-when the sim itself doesn't carry signal (e.g. >50% draws).
+Verdict rules:
+- "kept": signed_margin > 0 AND the split is statistically meaningful at \
+the reported h2h_decisive count — judge it like an exact binomial test of \
+new_wins/h2h_decisive against a 50/50 null (e.g. 16-4 over 20 decisive is \
+significant, p~0.01; 12-8 over 20 is NOT, p~0.5 — a coin would do that \
+half the time). A meaningful qualitative gain (avg ending life much \
+higher, fewer eliminations) can also justify "kept".
+- "reverted": signed_margin < 0 under the same significance standard.
+- "neutral": the split is within binomial noise for the sample size, OR \
+the sim was inconclusive (few h2h_decisive games: most games drew or \
+went to filler seats).
+
+Confidence: 0.85+ for statistically clear signals; 0.5-0.7 for noisy \
+cases; below 0.5 when the sim itself doesn't carry signal (e.g. >50% \
+draws or very few h2h_decisive games).
 
 Lessons should be transferable observations another iteration could learn \
 from — patterns about cards, archetypes, or deck-tuning. Not just \
@@ -280,6 +373,38 @@ def _safe_confidence(value: object) -> float:
         return 0.5
 
 
+def _summarize_h2h(sim: dict) -> dict:
+    """Build the shared head-to-head core of the LLM-facing sim summary.
+
+    2026-08-14 fix: the old summaries forwarded ``sim['margin']`` —
+    ``ComparisonReport.margin`` is ``abs(new - old)``, so a model reading
+    "margin: 6" on a 6-game REGRESSION would write confidently wrong
+    lessons; the ollama summary also omitted the winner. The core now
+    carries the SIGNED margin (new_wins - old_wins, computed from the win
+    counts rather than trusted from the report), the winner (derived the
+    same way when the report doesn't say), draws, and h2h_decisive
+    (old_wins + new_wins — the head-to-head sample size the verdict
+    prompt's significance language refers to)."""
+    old_wins = sim.get("old_stats", {}).get("wins", 0)
+    new_wins = sim.get("new_stats", {}).get("wins", 0)
+    winner = sim.get("winner")
+    if winner is None:
+        winner = (
+            "new" if new_wins > old_wins
+            else "old" if old_wins > new_wins
+            else "tie"
+        )
+    return {
+        "total_games": sim.get("total_games", 0),
+        "draws": sim.get("draws", 0),
+        "old_wins": old_wins,
+        "new_wins": new_wins,
+        "signed_margin": new_wins - old_wins,
+        "h2h_decisive": old_wins + new_wins,
+        "winner": winner,
+    }
+
+
 def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     """Render a verdict via the Claude API.
 
@@ -306,12 +431,7 @@ def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     # has per-pod telemetry the analyst doesn't need.
     sim = input_.sim_report
     summary = {
-        "total_games": sim.get("total_games", 0),
-        "draws": sim.get("draws", 0),
-        "old_wins": sim.get("old_stats", {}).get("wins", 0),
-        "new_wins": sim.get("new_stats", {}).get("wins", 0),
-        "margin": sim.get("margin", 0),
-        "winner": sim.get("winner"),
+        **_summarize_h2h(sim),
         "old_stats": {
             k: sim.get("old_stats", {}).get(k)
             for k in ("avg_ending_life", "avg_damage_taken",
@@ -377,13 +497,10 @@ def ollama_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     import urllib.request
 
     sim = input_.sim_report
-    summary = {
-        "total_games": sim.get("total_games", 0),
-        "draws": sim.get("draws", 0),
-        "old_wins": sim.get("old_stats", {}).get("wins", 0),
-        "new_wins": sim.get("new_stats", {}).get("wins", 0),
-        "margin": sim.get("margin", 0),
-    }
+    # Same signed-margin/winner/draws/decisive core as claude_verdict —
+    # see _summarize_h2h for why the ABSOLUTE report margin is never
+    # forwarded to a model.
+    summary = _summarize_h2h(sim)
     instruction = (
         _CLAUDE_VERDICT_SYSTEM
         + "\n\nDeck swap to evaluate:\n"

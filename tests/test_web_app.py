@@ -679,9 +679,17 @@ def test_dashboard_includes_printing_savings_key_offline(client):
     resp = client.get("/api/dashboard?deck=Alpha")
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["printing_savings"] == {
-        "total": 0.0, "count": 0, "suggestions": [],
-    }
+    savings = body["printing_savings"]
+    # Subset, not equality: the block is an ADDITIVE contract (the price
+    # freshness fields are a later addition), and the invariant this
+    # test guards is "the offline shape is a well-formed zero", not
+    # "these are the only three keys". Equality here made every future
+    # additive field a false failure.
+    for key, expected in (
+        ("total", 0.0), ("count", 0), ("suggestions", []),
+    ):
+        assert key in savings
+        assert savings[key] == expected
 
 
 def test_dashboard_printing_savings_with_cheaper_printings(client, monkeypatch):
@@ -860,6 +868,214 @@ def test_dashboard_section_unknown_name_404s(client):
     body = resp.get_json()
     assert "unknown dashboard section" in body["error"]
     assert body["sections"] == ["lift_picks", "pricing"]
+
+
+# ---------------------------------------------------------------------------
+# Forge sim coverage (roadmap #4 — surface Forge-unsupported cards)
+# ---------------------------------------------------------------------------
+
+class _FakeCardsLoader:
+    """Stand-in for forge_cards_loader.CardsLoader: supports exactly the
+    names it is constructed with; context-manager protocol like the real
+    thing."""
+
+    def __init__(self, supported):
+        self._supported = {s.lower() for s in supported}
+
+    def load_one(self, name):
+        return "Name:x" if name.lower() in self._supported else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+
+def test_dashboard_sim_coverage_flags_forge_unsupported_cards(
+    client, monkeypatch,
+):
+    """Both dashboard payloads carry an additive ``sim_coverage`` key
+    naming the cards the vendored Forge corpus has no script for — the
+    same DB gap that makes a sim log "An unsupported card was
+    requested". Cultivate is made the one unsupported card here."""
+    monkeypatch.setattr(
+        "commander_builder.forge_cards_loader.CardsLoader.locate",
+        lambda forge_dir: _FakeCardsLoader(["Forest", "Test Cmdr"]),
+    )
+    for url in ("/api/dashboard?deck=Alpha", "/api/dashboard/core?deck=Alpha"):
+        body = client.get(url).get_json()
+        cov = body["sim_coverage"]
+        assert cov["available"] is True, url
+        # 3 DISTINCT names: Test Cmdr (commander), Forest, Cultivate.
+        assert cov["checked_count"] == 3, url
+        assert cov["unsupported_count"] == 1, url
+        assert cov["unsupported_names"] == ["Cultivate"], url
+
+
+def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client):
+    """No vendor/forge (this test checkout) is "couldn't check", NOT
+    "all supported": available=False with empty fields, and the
+    dashboard renders normally."""
+    resp = client.get("/api/dashboard/core?deck=Alpha")
+    assert resp.status_code == 200
+    cov = resp.get_json()["sim_coverage"]
+    assert cov == {
+        "available": False,
+        "checked_count": 0,
+        "unsupported_count": 0,
+        "unsupported_names": [],
+    }
+
+
+def test_dashboard_sim_coverage_probe_failure_is_not_fatal(
+    client, monkeypatch,
+):
+    """A blown-up corpus probe degrades to the unavailable shape — the
+    dashboard must render regardless (same fail-quiet contract as the
+    pricing / lift sections)."""
+    def boom(forge_dir):
+        raise RuntimeError("corpus exploded")
+
+    monkeypatch.setattr(
+        "commander_builder.forge_cards_loader.CardsLoader.locate", boom,
+    )
+    resp = client.get("/api/dashboard?deck=Alpha")
+    assert resp.status_code == 200
+    cov = resp.get_json()["sim_coverage"]
+    assert cov["available"] is False
+    assert cov["unsupported_names"] == []
+
+
+def test_static_js_renders_sim_coverage_pill(client):
+    """The dashboard JS actually shows the coverage data to the user —
+    the whole point of the fix was that unsupported cards were parsed
+    but never displayed."""
+    js = client.get("/static/app.js").get_data(as_text=True)
+    assert "sim_coverage" in js
+    assert "showSimCoverageAlert" in js
+
+
+# ---------------------------------------------------------------------------
+# M1: the Forge corpus loader is memoized across requests
+# ---------------------------------------------------------------------------
+# _sim_coverage used to build a throwaway CardsLoader per request. Any
+# MDFC front face (or any unsupported card) misses the direct slug lookup
+# and falls through to the loader's DFC index — a full ~32k-file corpus
+# scan — which the NEXT dashboard load then paid all over again on a
+# brand-new instance. The loader is now memoized at module level, keyed
+# on a corpus signature so a Forge upgrade still invalidates it.
+
+class _CountingCardsLoader:
+    """CardsLoader stand-in that records how many times the expensive
+    corpus index got built (``warm``) vs. how many instances existed."""
+
+    def __init__(self, counts):
+        self._counts = counts
+        counts["constructed"] += 1
+
+    def warm(self):
+        self._counts["indexed"] += 1
+
+    def load_one(self, name):
+        return "Name:x" if name.lower() == "forest" else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return None
+
+
+@pytest.fixture
+def fake_corpus(tmp_path, monkeypatch):
+    """Point VENDOR_FORGE at a tmp tree that LOOKS like an unzipped
+    Forge cards corpus (``res/cardsfolder/<letter>/``), and hand back a
+    counting CardsLoader.locate stand-in plus its counter dict.
+
+    A real corpus is absent from this checkout, so without this the
+    memo path never engages (``_corpus_signature`` returns None and
+    ``_corpus_loader`` deliberately falls through uncached).
+    """
+    from commander_builder.web import routes_dashboard
+
+    forge_dir = tmp_path / "forge"
+    cardsfolder = forge_dir / "res" / "cardsfolder"
+    (cardsfolder / "f").mkdir(parents=True)
+    (cardsfolder / "f" / "forest.txt").write_text("Name:Forest\n")
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.VENDOR_FORGE", forge_dir,
+    )
+
+    counts = {"constructed": 0, "indexed": 0}
+    monkeypatch.setattr(
+        "commander_builder.forge_cards_loader.CardsLoader.locate",
+        lambda forge_dir: _CountingCardsLoader(counts),
+    )
+    routes_dashboard._reset_corpus_cache()
+    try:
+        yield cardsfolder, counts
+    finally:
+        # Never leak a memoized fake into another test's process state.
+        routes_dashboard._reset_corpus_cache()
+
+
+def test_dashboard_builds_corpus_index_once_across_requests(
+    client, fake_corpus,
+):
+    """Two consecutive dashboard payloads share ONE loader and pay the
+    corpus index build exactly once — the M1 regression."""
+    _cardsfolder, counts = fake_corpus
+
+    first = client.get("/api/dashboard/core?deck=Alpha")
+    assert first.status_code == 200
+    assert first.get_json()["sim_coverage"]["available"] is True
+    assert counts == {"constructed": 1, "indexed": 1}
+
+    second = client.get("/api/dashboard/core?deck=Alpha")
+    assert second.status_code == 200
+    # Same answer, no second corpus scan.
+    assert (
+        second.get_json()["sim_coverage"]
+        == first.get_json()["sim_coverage"]
+    )
+    assert counts == {"constructed": 1, "indexed": 1}
+
+
+def test_dashboard_corpus_cache_invalidates_when_forge_corpus_changes(
+    client, fake_corpus,
+):
+    """A Forge upgrade (corpus mtime moves) must NOT be served from the
+    stale memo — otherwise the dashboard reports coverage for the old
+    card DB until the process restarts."""
+    cardsfolder, counts = fake_corpus
+
+    client.get("/api/dashboard/core?deck=Alpha")
+    assert counts["constructed"] == 1
+
+    # Simulate re-extracting the corpus: same path, newer mtime.
+    import os as _os
+    st = cardsfolder.stat()
+    _os.utime(cardsfolder, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+
+    resp = client.get("/api/dashboard/core?deck=Alpha")
+    assert resp.status_code == 200
+    assert resp.get_json()["sim_coverage"]["available"] is True
+    assert counts == {"constructed": 2, "indexed": 2}
+
+
+def test_dashboard_sim_coverage_still_fail_quiet_with_memoized_loader(
+    client, monkeypatch,
+):
+    """The memo must not turn a corpus failure into a 500: with no
+    vendored corpus the loader lookup still raises and the payload keeps
+    the fail-quiet unavailable shape."""
+    from commander_builder.web import routes_dashboard
+
+    routes_dashboard._reset_corpus_cache()
+    resp = client.get("/api/dashboard/core?deck=Alpha")
+    assert resp.status_code == 200
+    assert resp.get_json()["sim_coverage"]["available"] is False
 
 
 def test_dashboard_core_and_section_share_deck_and_bracket_validation(client):
@@ -1545,6 +1761,53 @@ def test_propose_swap_runs_compare_and_returns_summary(client, monkeypatch):
     assert any("Lotus Cobra" in s for s in body["diff"]["added"])
 
 
+# --- R2-P20: the save default is computed server-side ----------------------
+#
+# app.js used to derive it from ComparisonReport.winner (ANY lead) plus a
+# bare 20-decisive gate — the era-3 rule the 2026-08-14 significance fix
+# retired — and save_iteration stores the checked radio verbatim into a row
+# stamped with the CURRENT era. The sim response now carries the verdict
+# the CLI's binomial test would assign, and the p-value behind it.
+
+def test_propose_swap_returns_a_significance_based_suggested_verdict(
+    client, monkeypatch,
+):
+    _stub_compare(monkeypatch, winner="new", old_wins=20, new_wins=21)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 10,
+    })
+    body = resp.get_json()
+    # winner still says "new" (any lead) — the SUGGESTION does not.
+    assert body["winner"] == "new"
+    sv = body["suggested_verdict"]
+    assert sv["verdict"] == "neutral"
+    assert sv["decisive"] == 41
+    assert sv["p_value"] > sv["alpha"]
+    assert sv["min_decisive"] == 20
+
+
+def test_propose_swap_suggests_kept_on_a_significant_split(
+    client, monkeypatch,
+):
+    _stub_compare(monkeypatch, winner="new", old_wins=15, new_wins=30)
+    new_text = (
+        "[metadata]\nName=Alpha v2\n\n"
+        "[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n" + "1 Forest\n" * 35 + "1 Lotus Cobra\n" * 5
+    )
+    resp = client.post("/api/propose_swap", json={
+        "deck": "Alpha", "new_text": new_text, "games": 10,
+    })
+    sv = resp.get_json()["suggested_verdict"]
+    assert sv["verdict"] == "kept"
+    assert sv["p_value"] < sv["alpha"]
+
+
 def test_propose_swap_forwards_early_stop_metadata(client, monkeypatch):
     """Sprint 1B: when compare() reports it stopped early, the
     /api/propose_swap response surfaces pods_completed / pods_planned
@@ -2197,6 +2460,393 @@ def test_deck_text_put_overwrites(client, deck_dir):
 def test_deck_text_put_400_on_empty(client):
     resp = client.put("/api/deck_text?deck=Alpha", json={"text": ""})
     assert resp.status_code == 400
+
+
+# --- M2: restamp + shape gate + atomic write -------------------------------
+# This route was the one deck writer that took raw user-pasted text and
+# did a bare write_text: no Name= restamp (so pasting deck A's text into
+# deck B stored Name=A under B's filename, and Forge then attributed
+# every one of B's wins to a name no filename normalizes to), no shape
+# check, no atomicity.
+
+def test_deck_text_put_restamps_foreign_name_to_file_stem(client, deck_dir):
+    """Pasting Bravo's text into Alpha's editor must land under
+    ``Name=Alpha`` — the filename is the deck's identity."""
+    foreign = (deck_dir / "Bravo.dck").read_text(encoding="utf-8")
+    assert "Name=Bravo" in foreign  # precondition: it really is Bravo's
+
+    resp = client.put("/api/deck_text?deck=Alpha", json={"text": foreign})
+    assert resp.status_code == 200
+    assert resp.get_json()["saved"] is True
+
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert "Name=Alpha" in on_disk
+    assert "Name=Bravo" not in on_disk
+
+
+def test_deck_text_put_restamp_leaves_card_content_intact(client, deck_dir):
+    """Only the Name= line is touched — every card line and every other
+    metadata key survives the save byte-for-byte."""
+    new_body = (
+        "[metadata]\nName=Some Other Deck\nMoxfield=https://example/x\n\n"
+        "[Commander]\n1 New Cmdr\n\n"
+        "[Main]\n1 Forest\n2 Cultivate\n"
+    )
+    resp = client.put("/api/deck_text?deck=Alpha", json={"text": new_body})
+    assert resp.status_code == 200
+
+    on_disk = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert on_disk == new_body.replace("Name=Some Other Deck", "Name=Alpha")
+
+
+def test_deck_text_put_synthesizes_name_when_absent(client, deck_dir):
+    """A paste with no Name= at all still comes out stamped, rather than
+    leaving Forge to invent a display name nothing maps back."""
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[Commander]\n1 New Cmdr\n\n[Main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+    assert "Name=Alpha" in (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+
+
+def test_deck_text_put_400_without_main_section(client, deck_dir):
+    """A partial paste (no [Main]) must not replace a working deck."""
+    before = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[Commander]\n1 New Cmdr\n",
+    })
+    assert resp.status_code == 400
+    assert "[Main]" in resp.get_json()["error"]
+    # Rejected write left the deck untouched.
+    assert (deck_dir / "Alpha.dck").read_text(encoding="utf-8") == before
+
+
+def test_deck_text_put_accepts_lowercase_main_header(client, deck_dir):
+    """Section headers are case-insensitive everywhere else in the
+    codebase (dck_utils.iter_section_lines); the gate matches."""
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+
+
+def test_deck_text_put_leaves_no_temp_files_behind(client, deck_dir):
+    """The atomic write's temp file is renamed away, and never matches
+    the ``*.dck`` glob every deck enumerator uses."""
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[Main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+    assert sorted(p.name for p in deck_dir.iterdir()) == [
+        "Alpha.dck", "Bravo.dck",
+    ]
+
+
+def test_deck_text_put_preserves_file_mode(client, deck_dir):
+    """mkstemp creates 0600; the saved deck must keep the mode it had,
+    not silently become owner-only on every edit."""
+    target = deck_dir / "Alpha.dck"
+    target.chmod(0o644)
+    resp = client.put("/api/deck_text?deck=Alpha", json={
+        "text": "[metadata]\nName=Alpha\n\n[Main]\n1 Forest\n",
+    })
+    assert resp.status_code == 200
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_deck_text_put_flags_bracket_tag_unverified_on_main_change(
+    client, deck_dir,
+):
+    """Bonus hint: a bracket-tagged filename whose mainboard just
+    changed gets ``bracket_tag_unverified`` so the UI can offer a
+    re-check. The bracket itself is NOT re-estimated in the request."""
+    from urllib.parse import quote
+
+    tagged = _write_deck(deck_dir, "[USER] Gamma [B3]")
+    url = f"/api/deck_text?deck={quote('[USER] Gamma [B3]')}"
+
+    unchanged = tagged.read_text(encoding="utf-8")
+    resp = client.put(url, json={"text": unchanged})
+    assert resp.status_code == 200
+    assert resp.get_json()["bracket_tag_unverified"] is False
+
+    changed = unchanged.replace("1 Cultivate\n", "1 Sol Ring\n", 1)
+    resp = client.put(url, json={"text": changed})
+    assert resp.status_code == 200
+    assert resp.get_json()["bracket_tag_unverified"] is True
+
+
+def test_deck_text_put_no_bracket_flag_on_untagged_filename(client, deck_dir):
+    """No [B<n>] in the filename → nothing to be unverified about."""
+    body = "[metadata]\nName=Alpha\n\n[Main]\n1 Island\n"
+    resp = client.put("/api/deck_text?deck=Alpha", json={"text": body})
+    assert resp.status_code == 200
+    assert resp.get_json()["bracket_tag_unverified"] is False
+
+
+# ---------------------------------------------------------------------------
+# BracketUnverified= marker lifecycle (2026-08-20)
+#
+# The flag used to be derived per-request from "did THIS save change the
+# mainboard?", so it described a state that outlived the request with an
+# answer that didn't. These pin the four legs of the real lifecycle: set
+# on change, PERSIST across a no-op save, cleared by the flow that
+# actually re-estimates the bracket, and absent for untagged decks.
+# ---------------------------------------------------------------------------
+
+_GAMMA = "[USER] Gamma [B3]"
+
+
+def _deck_text_url(deck_id: str) -> str:
+    from urllib.parse import quote
+    return f"/api/deck_text?deck={quote(deck_id)}"
+
+
+def test_bracket_marker_persists_across_a_no_op_save(client, deck_dir):
+    """THE regression (Playwright smoke, 2026-08-20). First save changes
+    the mainboard → flagged. The user then clicks "Save changes" again
+    without touching anything: the server compares the new on-disk text
+    against the identical submitted text, sees no change — and must STILL
+    report the tag unverified, because nothing has re-verified it."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    assert client.put(url, json={"text": changed}).get_json()[
+        "bracket_tag_unverified"
+    ] is True
+
+    # Re-save the text the editor now holds — byte-identical to disk.
+    resaved = client.get(url).get_json()["text"]
+    for _ in range(2):
+        body = client.put(url, json={"text": resaved}).get_json()
+        assert body["bracket_tag_unverified"] is True
+
+
+def test_bracket_marker_is_stored_in_deck_metadata(client, deck_dir):
+    """It survives the request because it is written into the deck's own
+    ``[metadata]`` block — the ``Protect=`` / ``PoliticsGuard=``
+    precedent, which Forge ignores and which travels with the file."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+
+    from commander_builder import dck_meta, dck_utils
+    on_disk = tagged.read_text(encoding="utf-8")
+    assert dck_meta.read_bracket_unverified(on_disk) == 3
+    # In the metadata block, above the first card section...
+    lines = on_disk.splitlines()
+    assert lines.index("BracketUnverified=3") < lines.index("[Commander]")
+    # ...and therefore invisible to the mainboard comparison that set it.
+    assert (
+        dck_utils.main_card_quantities(on_disk)
+        == dck_utils.main_card_quantities(changed)
+    )
+
+
+def test_bracket_marker_survives_a_hand_deleted_line(client, deck_dir):
+    """The marker is read from DISK, not from the submitted body: the
+    editor round-trips the file through a textarea, so reading the
+    submitted copy would let a user dismiss a safety warning by deleting
+    a line."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+
+    stripped = "".join(
+        ln for ln in client.get(url).get_json()["text"].splitlines(True)
+        if not ln.startswith("BracketUnverified=")
+    )
+    assert "BracketUnverified" not in stripped
+    body = client.put(url, json={"text": stripped}).get_json()
+    assert body["bracket_tag_unverified"] is True
+
+
+def test_deck_text_get_reports_the_persisted_marker(client, deck_dir):
+    """GET carries the flag too, so reopening the editor still shows the
+    warning — the point of moving it off the one PUT response."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    assert client.get(url).get_json()["bracket_tag_unverified"] is False
+
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+    assert client.get(url).get_json()["bracket_tag_unverified"] is True
+
+
+def test_bracket_marker_goes_stale_when_the_tag_is_renamed(client, deck_dir):
+    """The user's answer to the warning may be "you're right, it IS a B4
+    deck" — they rename the file. The marker stores the bracket it was
+    raised for, so a marker for [B3] stops describing a [B4] filename,
+    and the next save sweeps the stale line."""
+    tagged = _write_deck(deck_dir, _GAMMA)
+    url = _deck_text_url(_GAMMA)
+    changed = tagged.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    client.put(url, json={"text": changed})
+
+    retagged_id = "[USER] Gamma [B4]"
+    retagged = deck_dir / f"{retagged_id}.dck"
+    tagged.rename(retagged)
+    retagged_url = _deck_text_url(retagged_id)
+
+    assert client.get(retagged_url).get_json()[
+        "bracket_tag_unverified"
+    ] is False
+    body = client.put(
+        retagged_url,
+        json={"text": retagged.read_text(encoding="utf-8")},
+    ).get_json()
+    assert body["bracket_tag_unverified"] is False
+    assert "BracketUnverified" not in retagged.read_text(encoding="utf-8")
+
+
+def test_untagged_deck_never_gets_a_bracket_marker(client, deck_dir):
+    """No declared bracket, nothing to invalidate — and no directive
+    written into a file that has no use for it."""
+    url = "/api/deck_text?deck=Alpha"
+    body = client.get(url).get_json()["text"].replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    resp = client.put(url, json={"text": body}).get_json()
+    assert resp["bracket_tag_unverified"] is False
+    assert "BracketUnverified" not in (
+        deck_dir / "Alpha.dck"
+    ).read_text(encoding="utf-8")
+    assert client.get(url).get_json()["bracket_tag_unverified"] is False
+
+
+def _mark_unverified(client, deck_dir, deck_id: str = _GAMMA):
+    """Drive a real mainboard-changing save so the marker is set the way
+    production sets it (no hand-written fixture to drift)."""
+    path = _write_deck(deck_dir, deck_id)
+    url = _deck_text_url(deck_id)
+    changed = path.read_text(encoding="utf-8").replace(
+        "1 Cultivate\n", "1 Sol Ring\n", 1,
+    )
+    assert client.put(url, json={"text": changed}).get_json()[
+        "bracket_tag_unverified"
+    ] is True
+    return path, url
+
+
+def _stub_estimate(monkeypatch, estimate: int, level=None, confidence="high"):
+    """Pin ``bracket_estimator.estimate_bracket``'s verdict. The dashboard
+    imports it inside ``build_dashboard``, so patching the source module
+    is what the call actually resolves."""
+    def fake(deck_text, declared=None, **_kw):
+        return {
+            "estimate": estimate,
+            "floor": 1,
+            "confidence": confidence,
+            "reasons": [],
+            "signals": {},
+            "declared": declared,
+            "mismatch": level == "mismatch",
+            "mismatch_level": level,
+        }
+    monkeypatch.setattr(
+        "commander_builder.bracket_estimator.estimate_bracket", fake,
+    )
+
+
+def test_dashboard_clears_marker_when_the_estimate_confirms_the_tag(
+    client, deck_dir, monkeypatch,
+):
+    """The dashboard is the ONLY endpoint that recomputes a bracket
+    rather than reading the filename, so it is the only one that can say
+    the tag has a measurement behind it again."""
+    from commander_builder import dck_meta
+    from urllib.parse import quote
+
+    path, url = _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, 3, level=None)
+
+    resp = client.get(f"/api/dashboard/core?deck={quote(_GAMMA)}")
+    assert resp.status_code == 200
+    assert dck_meta.read_bracket_unverified(
+        path.read_text(encoding="utf-8"),
+    ) is None
+    assert client.get(url).get_json()["bracket_tag_unverified"] is False
+
+
+@pytest.mark.parametrize(
+    "estimate,level,confidence",
+    [
+        (4, "mismatch", "high"),   # estimator says the tag is WRONG
+        (4, "check", "medium"),    # soft disagreement
+        (2, "low_signal", "low"),  # signal starvation, not evidence
+    ],
+)
+def test_dashboard_keeps_marker_when_the_estimate_does_not_confirm(
+    client, deck_dir, monkeypatch, estimate, level, confidence,
+):
+    """Clearing on a disagreement would delete the warning exactly when
+    it was right; clearing on ``low_signal`` would hand an all-clear to
+    the decks the estimator admits it cannot read."""
+    from commander_builder import dck_meta
+    from urllib.parse import quote
+
+    path, url = _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, estimate, level=level, confidence=confidence)
+
+    assert client.get(
+        f"/api/dashboard/core?deck={quote(_GAMMA)}",
+    ).status_code == 200
+    assert dck_meta.read_bracket_unverified(
+        path.read_text(encoding="utf-8"),
+    ) == 3
+    assert client.get(url).get_json()["bracket_tag_unverified"] is True
+
+
+def test_dashboard_bracket_override_cannot_clear_the_marker(
+    client, deck_dir, monkeypatch,
+):
+    """``?bracket=`` is the tile's override dropdown — a what-if, not a
+    re-declaration. "Show me this as a B5" must not verify a [B3] tag."""
+    from commander_builder import dck_meta
+    from urllib.parse import quote
+
+    path, _url = _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, 5, level=None)
+
+    assert client.get(
+        f"/api/dashboard/core?deck={quote(_GAMMA)}&bracket=5",
+    ).status_code == 200
+    assert dck_meta.read_bracket_unverified(
+        path.read_text(encoding="utf-8"),
+    ) == 3
+
+
+def test_dashboard_marker_clear_never_breaks_the_load(
+    client, deck_dir, monkeypatch,
+):
+    """A read-only deck dir (or a lost race with a concurrent save) must
+    degrade to "the warning persists", never to a dashboard 500."""
+    from urllib.parse import quote
+
+    _mark_unverified(client, deck_dir)
+    _stub_estimate(monkeypatch, 3, level=None)
+
+    def boom(_path, _text):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(
+        "commander_builder.web.routes_dashboard.atomic_write_text", boom,
+    )
+    resp = client.get(f"/api/dashboard/core?deck={quote(_GAMMA)}")
+    assert resp.status_code == 200
 
 
 def test_deck_text_delete_removes(client, deck_dir):
@@ -3363,10 +4013,20 @@ def test_correlation_summary_endpoint_reports_enabled_state(client, monkeypatch)
     assert resp.get_json()["enabled"] is True
 
 
-def test_log_error_writes_to_log_file(client, tmp_path, deck_dir):
+def test_log_error_writes_to_log_file(client, tmp_path, deck_dir, monkeypatch):
     """JS error collector appends to a server-side log; we don't read
     it back via API (avoid making this an exfiltration vector), so
-    the test inspects the file directly."""
+    the test inspects the file directly.
+
+    The sink moved to the per-user config home on 2026-08-16 — it used
+    to be derived positionally as ``deck_dir.parent.parent``, which put
+    runtime telemetry inside the vendored Forge tree. Path-resolution
+    edge cases, the legacy breadcrumb, and the byte cap are covered in
+    test_web_meta_paths.py; this pins that the payload still lands."""
+    config_home = tmp_path / "js_error_cfghome"
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG", str(config_home / "config.json")
+    )
     payload = {
         "kind": "error",
         "message": "ReferenceError: foo is not defined",
@@ -3379,9 +4039,10 @@ def test_log_error_writes_to_log_file(client, tmp_path, deck_dir):
     body = resp.get_json()
     assert body["ok"] is True
     assert "ref" in body and body["ref"]
-    # Log file lives next to the deck_dir's grandparent (vendor/forge → vendor).
-    log_path = deck_dir.parent.parent / "_js_errors.log"
+    log_path = config_home / "_js_errors.log"
     assert log_path.exists()
+    # And emphatically NOT in the old positional location.
+    assert not (deck_dir.parent.parent / "_js_errors.log").exists()
     contents = log_path.read_text(encoding="utf-8")
     assert "ReferenceError: foo is not defined" in contents
     assert "runProposeSwap" in contents
@@ -3393,15 +4054,19 @@ def test_log_error_400_on_missing_message(client):
     assert resp.status_code == 400
 
 
-def test_log_error_caps_oversized_payload(client, deck_dir):
+def test_log_error_caps_oversized_payload(client, tmp_path, monkeypatch):
     """Defense against runaway browser dumps — message capped at 2000
     chars, stack at 4000."""
+    config_home = tmp_path / "js_cap_cfghome"
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG", str(config_home / "config.json")
+    )
     huge = "x" * 5000
     resp = client.post("/api/log_error", json={
         "message": huge, "stack": huge,
     })
     assert resp.status_code == 200
-    log_path = deck_dir.parent.parent / "_js_errors.log"
+    log_path = config_home / "_js_errors.log"
     contents = log_path.read_text(encoding="utf-8")
     # Should contain at most 2000 'x' in the MSG line and 4000 in STACK.
     msg_line = next(
@@ -3966,10 +4631,17 @@ def test_audit_payload_carries_suggested_mode(client, monkeypatch, deck_dir):
     assert resp.status_code == 200
     body = resp.get_json()
     sug = body["suggested_mode"]
-    assert set(sug.keys()) == {"mode", "health_score", "fallback"}
+    assert set(sug.keys()) == {
+        # rebuild_suppressed / note joined the shape 2026-08-17 when the
+        # rebuild tier became opt-in; both are inert unless the score
+        # actually wanted rebuild.
+        "mode", "health_score", "fallback", "rebuild_suppressed", "note",
+    }
     assert sug["mode"] == "polish"
     assert sug["health_score"] is None
     assert sug["fallback"] is True
+    assert sug["rebuild_suppressed"] is False
+    assert sug["note"] is None
     # No ?mode= param -> nothing was applied.
     assert body["curation_mode"] is None
 
@@ -5398,6 +6070,37 @@ def test_save_iteration_persists_row(save_client):
     assert detail["audit_manifest"]["added"][0]["card"] == "Lotus Cobra"
 
 
+def test_save_iteration_stores_signed_margin_for_regression(save_client):
+    """THE BUG (2026-08-13): the /api/propose_swap response body carries
+    ComparisonReport.margin = abs(new_wins - old_wins) — the UI's
+    "decided by N games" display value — and save_iteration stored it
+    verbatim. knowledge_log documents the margin column as the SIGNED
+    new_wins - old_wins (the convention every CLI writer follows), so a
+    web-saved REGRESSION landed with a positive margin, reading as "new
+    deck ahead" in every cross-run analysis. The writer must recompute
+    the signed delta from the stats and ignore the payload's absolute
+    margin."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "reverted",
+        # Exactly what the UI forwards after a losing swap: the
+        # propose_swap response, margin already absolute. Old deck won
+        # 12-4, so the stored (signed) margin must be -8.
+        "sim_report": {
+            "winner": "old", "old_wins": 12, "new_wins": 4,
+            "old_games": 20, "new_games": 20, "draws": 0,
+            "margin": 8, "total_games": 20, "mode": "pod", "bracket": 3,
+        },
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["margin"] == -8
+    # Win rates keep the head-to-head decisive denominator (12 + 4).
+    assert detail["win_rate_old"] == round(12 / 16, 4)
+    assert detail["win_rate_new"] == round(4 / 16, 4)
+
+
 def test_save_iteration_defaults_deck_snapshot_from_disk(save_client):
     client, db = save_client
     resp = client.post("/api/save_iteration", json={
@@ -5555,6 +6258,103 @@ def test_verdict_breakdown_400_without_deck_param(save_client):
     resp = client.get("/api/verdict_breakdown")
     assert resp.status_code == 400
     assert "deck" in resp.get_json()["error"]
+
+
+# --- R2-P19: the breakdown route carries the era split --------------------
+
+def test_verdict_breakdown_route_reports_the_era_split(save_client):
+    """Flat per-version counts stay (the dashboard pills index them), but
+    the payload now says which measurement eras they pooled — an era-3
+    'kept' (|margin| >= 4) is not an era-4 'kept' (significant test)."""
+    client, db = save_client
+    from commander_builder.knowledge_log import Iteration, record_iteration
+    for era, verdict in [(3, "kept"), (4, "kept"), (4, "reverted")]:
+        record_iteration(
+            Iteration(deck_id="Alpha", deck_name="Alpha", bracket=3,
+                      audit_version="v3", verdict=verdict,
+                      measurement_era=era),
+            db_path=db,
+        )
+    body = client.get("/api/verdict_breakdown?deck=Alpha").get_json()
+
+    assert body["breakdown"]["v3"]["kept"] == 2      # unchanged shape
+    assert body["comparable_era"] == 4
+    assert body["spans_multiple_eras"] is True
+    assert body["eras_present"] == ["3", "4"]
+    by_era = body["breakdown"]["v3"]["by_era"]
+    assert by_era["3"]["kept"] == 1
+    assert by_era["4"]["kept"] == 1 and by_era["4"]["reverted"] == 1
+
+
+def test_verdict_breakdown_route_single_era_is_not_flagged(save_client):
+    client, _ = save_client
+    client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "audit_version": "v3", "verdict": "kept",
+    })
+    body = client.get("/api/verdict_breakdown?deck=Alpha").get_json()
+    assert body["spans_multiple_eras"] is False
+    assert body["eras_present"] == ["4"]
+
+
+# --- R2-P06: web-saved rows record the rule their verdict was offered
+#     against --------------------------------------------------------------
+
+def test_save_iteration_stamps_verdict_provenance(save_client):
+    """The stored sim_report says what the server suggested and under
+    which parameters, so a human-chosen label is auditable instead of
+    being a bare string whose bar has to be guessed from the code
+    version that wrote it."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {
+            "winner": "new", "old_wins": 15, "new_wins": 30,
+            "total_games": 45, "draws": 0,
+        },
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    report = detail["sim_report"]
+    assert report["suggested_verdict"]["verdict"] == "kept"
+    assert report["verdict_params"]["alpha"] == 0.05
+    assert report["verdict_params"]["min_decisive"] == 20
+    assert report["verdict_params"]["margin"] == 1
+    assert report["verdict_overrides_suggestion"] is False
+
+
+def test_save_iteration_records_an_override_of_the_suggestion(save_client):
+    """The user can still store any verdict — the row just says the
+    discipline suggested something else. This is the 21-20 case the old
+    web default pre-checked as 'kept' with no record at all."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {
+            "winner": "new", "old_wins": 20, "new_wins": 21,
+            "total_games": 41, "draws": 0,
+        },
+    })
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["verdict"] == "kept"                        # honored
+    report = detail["sim_report"]
+    assert report["suggested_verdict"]["verdict"] == "neutral"
+    assert report["verdict_overrides_suggestion"] is True
+
+
+def test_save_iteration_without_a_split_stamps_no_provenance(save_client):
+    """A manifest-only save has no split to score — don't fabricate one."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "pending",
+        "sim_report": {"note": "audit only"},
+    })
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert "verdict_params" not in detail["sim_report"]
+    assert "suggested_verdict" not in detail["sim_report"]
 
 
 def test_save_iteration_handles_missing_sim_report(save_client):
@@ -6815,6 +7615,99 @@ def test_mutation_gate_covers_put(client):
 
 
 # ---------------------------------------------------------------------------
+# Host-header gate (2026-08-17 — DNS rebinding)
+# ---------------------------------------------------------------------------
+# Binding loopback does not make the server unreachable from a browser:
+# a page can point a hostname it controls at 127.0.0.1 and become
+# same-origin, at which point the mutation gate above is no defense (a
+# same-origin fetch sets any Content-Type it likes and READS the
+# response). The Host header still names the hostname the page asked
+# for, so the before_request gate 403s anything that isn't loopback.
+
+@pytest.mark.parametrize("host", [
+    "127.0.0.1", "127.0.0.1:5000", "localhost", "localhost:5000",
+    "[::1]", "[::1]:5000", "::1", "LocalHost:5000",
+])
+def test_is_loopback_host_accepts_loopback_forms(host):
+    from commander_builder.web.app import _is_loopback_host
+    assert _is_loopback_host(host) is True
+
+
+@pytest.mark.parametrize("host", [
+    None, "", "   ",
+    "evil.example", "evil.example:5000",
+    "127.0.0.1.evil.example",          # suffix trick
+    "evil.example:127.0.0.1",          # the host is not the port
+    "localhost.evil.example",
+    "127.0.0.1:notaport",
+    "127.0.0.1:",
+    "[::1",                            # unterminated literal
+    "[::1]junk",
+    "0.0.0.0:5000", "192.168.1.5:5000",
+])
+def test_is_loopback_host_rejects_everything_else(host):
+    from commander_builder.web.app import _is_loopback_host
+    assert _is_loopback_host(host) is False
+
+
+def test_host_gate_403s_a_rebound_get(client):
+    """A GET carrying an attacker-controlled Host is refused before the
+    route runs — deck contents are what's being protected here."""
+    resp = client.get("/api/decks", headers={"Host": "evil.example:5000"})
+    assert resp.status_code == 403
+    body = resp.get_json()
+    assert "Host" in body["error"]
+    assert body["received"] == "evil.example:5000"
+
+
+def test_host_gate_403s_a_rebound_json_post(client):
+    """A well-formed JSON POST (which sails through the mutation gate)
+    still dies on the Host check."""
+    resp = client.post(
+        "/api/log_error", json={"message": "rebound"},
+        headers={"Host": "evil.example"},
+    )
+    assert resp.status_code == 403
+
+
+def test_host_gate_403s_a_lan_host(client):
+    """--host 0.0.0.0 still binds, but a LAN Host header is refused —
+    the documented consequence of the non-configurable gate."""
+    resp = client.get("/api/health", headers={"Host": "192.168.1.5:5000"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("host", [
+    "127.0.0.1:5000", "localhost:5000", "[::1]:5000", "localhost",
+])
+def test_host_gate_allows_loopback_hosts(client, host):
+    resp = client.get("/api/health", headers={"Host": host})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
+
+
+def test_host_gate_leaves_the_default_test_client_working(client):
+    """Flask's test client sends ``Host: localhost`` — the whole suite
+    depends on that passing the gate untouched."""
+    resp = client.get("/api/decks")
+    assert resp.status_code == 200
+
+
+def test_host_gate_covers_static_assets(client):
+    """Static files go through the same before_request hook: loopback
+    serves them, a rebound Host doesn't."""
+    ok = client.get("/static/app.css")
+    assert ok.status_code == 200
+    rebound = client.get("/static/app.css", headers={"Host": "evil.example"})
+    assert rebound.status_code == 403
+
+
+def test_host_gate_leaves_the_root_template_working(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # import_deck bracket validation (item 2)
 # ---------------------------------------------------------------------------
 # bracket is baked into the filename as "[B<n>]"; downstream
@@ -6912,11 +7805,15 @@ def test_deck_audit_and_dashboard_gc_counts_agree_on_mixed_case(
 # log_error size cap (item 4)
 # ---------------------------------------------------------------------------
 
-def test_log_error_stops_writing_past_cap(client, deck_dir, monkeypatch):
+def test_log_error_stops_writing_past_cap(client, tmp_path, monkeypatch):
     """Past the size cap the endpoint returns 200 with logged:false and
     the file stops growing — best-effort sink, never errors the client
     (a browser error handler must not see its own sink fail)."""
-    log_path = deck_dir.parent.parent / "_js_errors.log"
+    config_home = tmp_path / "js_capstop_cfghome"
+    monkeypatch.setenv(
+        "COMMANDER_BUILDER_CONFIG", str(config_home / "config.json")
+    )
+    log_path = config_home / "_js_errors.log"
     # The log lives in a directory shared across tests in this session;
     # start clean so the tiny monkeypatched cap is meaningful.
     if log_path.exists():

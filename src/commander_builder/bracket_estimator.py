@@ -6,25 +6,31 @@ they poison sim pools or mislead the dashboard.
 
 WHERE THE RULES COME FROM — this module deliberately invents nothing.
 Every hard bound and weighted signal cites an existing encoding of the
-official bracket rules already in this repo:
+official bracket rules already in this repo, read against the
+2025-10-21 WotC bracket update (and the 2026-02-09 B&R follow-up):
 
   * ``prompts/moxfield_audit_v3.md`` "BRACKET RULES" table — the
     repo's canonical transcription of WotC's per-bracket Game Changer
     caps: B1/B2 allow ZERO Game Changers, B3 allows a MAX of 3,
     B4/B5 are unlimited.
   * The same prompt's "Auto-Bracket Bumper Heuristic" reference data —
-    the LAND DESTRUCTION/MLD and EXTRA TURNS card lists reproduced
-    below, and the "stacking 4+ tutors auto-bumps" rule the tutor
-    signal implements.
+    the LAND DESTRUCTION/MLD and EXTRA TURNS seed lists reproduced
+    (and since extended) below. NOTE the prompt's "stacking 4+
+    tutors auto-bumps" rule transcribed a pre-Oct-2025 beta
+    restriction that the 2025-10-21 update REPEALED — tutor caps left
+    the official bracket rules entirely; the Game Changers list is
+    what carries the efficient tutors now. Tutor density therefore
+    survives here only as a clearly-labeled power-level HEURISTIC
+    (weighted signal), never a rule citation — see DEFAULT_WEIGHTS.
   * ``game_changers.py`` — the official Game Changers list
     (``load_game_changers``), dynamic-fetch + offline fallback.
-  * ``combo_detection.py`` — ``combo_bracket_floor``: a game-ending
-    TWO-card combo floors a deck at B4 (WotC: B1-B3 prohibit
-    early-game two-card infinite combos), a 3+-card game-ending combo
-    floors at B3. NOTE combo_detection now refines the two-card case
-    by combo SPEED (summed mana value) and returns B3 for a provably
-    late-game pair; this module deliberately keeps the stricter
-    count-only reading for its own floor — see the two-card floor
+  * ``combo_detection.py`` — ``combo_bracket_floor``: the 2025-10-21
+    rules gate two-card game-ending combos on SPEED, not bare count —
+    an early-assembling pair floors at B4 while a late-assembling
+    (~turn 6+) pair is B3-legal; a 3+-card game-ending combo floors
+    at B3. This module defers to that per-combo floor verbatim
+    (combo_detection still floors B4 when the speed can't be resolved
+    offline — conservative on missing data). See the combo floor
     comment in ``_estimate_bracket_inner``.
   * ``deck_dashboard._power_bracket`` — the pre-existing nudge
     heuristic whose curve bands (<=2.6 tight / >3.4 high) and
@@ -85,33 +91,122 @@ CardLookup = Callable[[str], Optional[dict]]
 # Rule data — name-based card lists, each citing its repo source
 # ---------------------------------------------------------------------------
 
-# Mass land denial. Source: prompts/moxfield_audit_v3.md, "Auto-Bracket
-# Bumper Heuristic" -> "LAND DESTRUCTION/MLD" list (verbatim). WotC's
-# bracket guidance prohibits mass land denial in brackets 1-3, so ANY
-# of these is a hard B4 floor — see _hard_floor below.
+# Mass land denial. Seed source: prompts/moxfield_audit_v3.md,
+# "Auto-Bracket Bumper Heuristic" -> "LAND DESTRUCTION/MLD" list;
+# extended 2026-08 with the well-known misses (Sunder through Death
+# Cloud below). WotC's bracket guidance prohibits mass land denial in
+# brackets 1-3, so ANY of these is a hard B4 floor — see the floors in
+# ``_estimate_bracket_inner``. This is the OFFLINE FALLBACK: the
+# refresh tooling (scripts/refresh_card_lists.py --only mld, backed by
+# _card_list_refresh.mld_names_from_snapshots) diffs it against the
+# local oracle snapshots so a maintainer can fold in new printings.
 _MLD_CARDS = frozenset(c.lower() for c in (
+    # Audit-prompt seed list
     "Armageddon", "Ravages of War", "Catastrophe", "Cataclysm",
     "Wildfire", "Obliterate", "Jokulhaups", "Decree of Annihilation",
+    # 2026-08 extension — long-standing MLD staples the seed missed
+    "Sunder", "Fall of the Thran", "Global Ruin", "Impending Disaster",
+    "Keldon Firebombers", "Epicenter", "Burning of Xinye", "Death Cloud",
 ))
 
-# Extra-turn spells. Source: prompts/moxfield_audit_v3.md "EXTRA TURNS"
-# list (verbatim). WotC: B1/B2 no extra turns; B3 allows them only when
-# not CHAINED. We can't simulate chaining from a static list, so we use
-# the same conservative proxy as combo_detection uses for "early game":
-# TWO OR MORE extra-turn cards = chaining potential = hard B4 floor;
-# a single one is only a weighted nudge (B3-legal by rule).
+# Extra-turn spells. Seed source: prompts/moxfield_audit_v3.md "EXTRA
+# TURNS" list; extended 2026-08 with the well-known misses (Alrund's
+# Epiphany through Savor the Moment below). Refresh tooling:
+# scripts/refresh_card_lists.py --only extra-turns, backed by
+# _card_list_refresh.extra_turn_names_from_snapshots ("take(s) an/N
+# extra turn(s)" oracle text over the local snapshot store).
+#
+# BRACKET READING (2025-10-21 rules): B1/B2 no extra turns; B3 allows
+# them in LOW QUANTITIES so long as they are not CHAINED or looped.
+# The bare count-of-two proxy this module used to floor on encoded the
+# stricter pre-Oct-2025 beta reading; the chaining operationalization
+# now lives in ``_estimate_bracket_inner`` (see the extra-turn floor
+# comment there and ``_EXTRA_TURN_REPEATABLE_ENABLERS`` /
+# ``_EXTRA_TURN_ONESHOT_REBUYS``).
 _EXTRA_TURN_CARDS = frozenset(c.lower() for c in (
+    # Audit-prompt seed list
     "Time Warp", "Temporal Manipulation", "Walk the Aeons",
     "Time Stretch", "Nexus of Fate", "Expropriate",
+    # 2026-08 extension — widely-played extra-turn spells the seed missed
+    "Alrund's Epiphany", "Temporal Mastery", "Part the Waterveil",
+    "Capture of Jingzhou", "Temporal Trespass",
+    "Karn's Temporal Sundering", "Savor the Moment",
 ))
 
-# Tutors, for the density signal. Sources:
+# Recursion / copy pieces that turn a "low quantity" of extra-turn
+# spells into a CHAIN: rebuy the spell from the graveyard or copy it
+# on the stack. Curated (oracle text can't cleanly separate "returns
+# instants/sorceries" recursion aimed at time magic from generic value
+# recursion — human judgment stays in the loop, same stance as the
+# tutor list).
+#
+# SPLIT BY REPEATABILITY (round-2 bracket-floor correctness pass). The
+# 2025-10-21 WotC bracket language restricts extra turns below B4 when
+# they are "CHAINED OR LOOPED"; B3 allows them in low quantities
+# otherwise. A chain/loop needs an engine that rebuys or copies turn
+# spells REPEATEDLY — a ONE-SHOT rebuy (Eternal Witness returning one
+# Time Warp, Fork copying one) yields exactly one additional turn and
+# then is spent: that is "low quantities plus value", not a chain, and
+# hard-flooring it at B4 slammed ordinary B3 lists. The one axis that
+# separates the buckets is: after the enabler does its thing once, can
+# it do it again without outside help?
+#
+#   * REPEATABLE (hard B4 floor at 2+ extra-turn cards): the enabler
+#     survives its own use or rebuys spells en masse — buyback returns
+#     the copy engine to hand every cast (Reiterate); a permanent
+#     copies every turn spell you cast, forever (Mirari); a fetchable
+#     land re-tops the turn spell each time it re-enters (Mystic
+#     Sanctuary); a mass rebuy hands the whole graveyard back
+#     (Timetwister, Underworld Breach, Past in Flames).
+#   * ONE-SHOT (weighted signal, NO hard floor at 2): single rebuys and
+#     single copies — Eternal Witness / Regrowth / Mystic Retrieval
+#     (one card back, once), Snapcaster Mage / Torrential Gearhulk
+#     (one flashback / one free cast), Twincast / Fork (one copy),
+#     Narset's Reversal (copies AND rebounds the turn spell, but
+#     spends ITSELF — the loop dies without a second Reversal),
+#     Dualcaster Mage (one ETB copy), and the bare ETB-recursion
+#     creatures Archaeomancer / Mnemonic Wall / Scholar of the Ages:
+#     repeating those requires a blink engine, which is out of static
+#     name-list reach, so the bare creatures stay one-shot.
+#
+# Used by the extra-turn chaining floor below: 2+ extra-turn spells
+# PLUS a REPEATABLE engine is a credible loop (hard B4 floor); 2 with
+# only one-shot rebuys is the "low quantities" B3 allowance carrying an
+# extra weighted nudge (see DEFAULT_WEIGHTS["extra_turn_oneshot_rebuy"]).
+# The 3+ raw-density floor is unchanged and independent of this split.
+_EXTRA_TURN_REPEATABLE_ENABLERS = frozenset(c.lower() for c in (
+    # Buyback / permanent copy engines
+    "Reiterate", "Mirari",
+    # Fetchable, recurring graveyard-to-library rebuy
+    "Mystic Sanctuary",
+    # Mass rebuy
+    "Timetwister", "Underworld Breach", "Past in Flames",
+))
+
+_EXTRA_TURN_ONESHOT_REBUYS = frozenset(c.lower() for c in (
+    # Single graveyard rebuy
+    "Archaeomancer", "Mnemonic Wall", "Scholar of the Ages",
+    "Eternal Witness", "Regrowth", "Mystic Retrieval",
+    "Snapcaster Mage", "Torrential Gearhulk",
+    # Single stack copy
+    "Narset's Reversal", "Twincast", "Fork", "Dualcaster Mage",
+))
+
+# Tutors, for the density signal. HEURISTIC ONLY as of the 2025-10-21
+# rules update: WotC removed tutor restrictions from the brackets (the
+# audit prompt's "stacking 4+ tutors auto-bumps" rule transcribed the
+# repealed beta text), and the Game Changers list is the official
+# carrier of the efficient tutors now. Tutor density is still a real
+# consistency/power signal, so the list stays — as a weighted
+# heuristic, never a rule citation. Kept CURATED by hand: oracle text
+# can't cleanly separate tutors from fetches/ramp, so no snapshot
+# refresh path exists for this list. Sources:
 #   * the Game-Changer tutors from game_changers._FALLBACK (Demonic /
 #     Vampiric / Mystical / Worldly / Enlightened Tutor, Imperial Seal,
 #     Gamble) — they also count in the GC signal, which is correct:
 #     they carry both kinds of bracket pressure;
-#   * the prompt's "TUTORS (mass)" auto-bumper list (Diabolic Intent,
-#     Grim Tutor, Personal Tutor, Sylvan Tutor);
+#   * the prompt's "TUTORS (mass)" list (Diabolic Intent, Grim Tutor,
+#     Personal Tutor, Sylvan Tutor);
 #   * a handful of ubiquitous non-GC tutors so a tutor-dense deck
 #     that avoids the GC list still reads as tutor-dense. Name-based
 #     (not oracle-text ``classify_role``) so the count is deterministic
@@ -170,8 +265,11 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     # prompt table (B3 = "Max 3" GCs). Mirrors the dominant role the GC
     # count plays in deck_dashboard._power_bracket.
     "game_changer": 0.4,
-    # Tutor density. The prompt's mass-tutor rule is a step, not a
-    # slope: "stacking 4+ tutors auto-bumps". 2-3 tutors = half signal.
+    # Tutor density — power-level HEURISTIC, not a rule (the official
+    # "stacking 4+ tutors auto-bumps" step was repealed 2025-10-21;
+    # the GC list carries efficient tutors now). The step shape is
+    # kept from the old rule because it still models consistency well:
+    # 4+ tutors = full signal, 2-3 = half.
     "tutors_4_plus": 1.0,
     "tutors_2_3": 0.5,
     # Per non-GC fast-mana rock/ritual (capped at 4 counted). Fast mana
@@ -186,8 +284,20 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     # charges (capped at 2 counted) — a deck with several combo lines
     # is more committed than one accidental pairing.
     "combo_line": 0.25,
-    # One extra-turn card (B3-legal; 2+ is a hard floor instead).
+    # Per NON-CHAINING extra-turn card, capped at 2 counted (B3 allows
+    # "low quantities" of un-chained extra turns — 2025-10-21 rules).
+    # A chaining count/setup is a hard B4 floor instead, so this
+    # weight only ever fires for 1-2 cards without a repeatable chain
+    # engine.
     "extra_turn_single": 0.25,
+    # Per ONE-SHOT rebuy/copy piece (capped at 2 counted) alongside 2+
+    # extra-turn cards. One-shot rebuys (Eternal Witness, Fork, ...)
+    # can't sustain the "chained or looped" line the 2025-10-21 rules
+    # floor on, so they are a power nudge — same magnitude per card as
+    # extra_turn_single — never a floor. Fires only at 2+ extra-turn
+    # cards: a single Time Warp plus Snapcaster is generic value, not
+    # extra-turn pressure.
+    "extra_turn_oneshot_rebuy": 0.25,
     # Curve bands from _power_bracket: <=2.6 avg CMC reads "tuned low
     # curve"; >=3.8 reads "casual battlecruiser" and pulls DOWN.
     "curve_tight": 0.5,
@@ -522,6 +632,10 @@ def _estimate_bracket_inner(
     )
     mld_hits = sorted(names_set & _MLD_CARDS)
     extra_turn_hits = sorted(names_set & _EXTRA_TURN_CARDS)
+    extra_turn_repeatable_hits = sorted(
+        names_set & _EXTRA_TURN_REPEATABLE_ENABLERS
+    )
+    extra_turn_oneshot_hits = sorted(names_set & _EXTRA_TURN_ONESHOT_REBUYS)
     tutor_hits = sorted(names_set & _TUTOR_CARDS)
     fast_mana_hits = sorted(names_set & _FAST_MANA_CARDS)
     salt_count = _offline_salt_count(names_set)
@@ -545,33 +659,41 @@ def _estimate_bracket_inner(
             f"floor B4: {n_gc} Game Changers exceeds B3's max of 3 "
             f"(bracket rules table)"
         )
-    if n_two_card_combos:
-        # A game-ending TWO-card combo floors at B4 (WotC: B1-B3
-        # prohibit early-game two-card infinite combos).
-        #
-        # DELIBERATELY STRICTER THAN combo_bracket_floor. That function
-        # now measures "early" via the combo's summed mana value and
-        # returns B3 for a provably late-game pair. We keep the
-        # count-only reading here because its speed proxy depends on a
-        # WARM Scryfall cache: the same deck would estimate B4 cold and
-        # B3 warm, and a floor that moves with cache state is worse than
-        # one that is uniformly conservative — this estimator's output
-        # gates sim-pool hygiene and the build steering loop. Revisit
-        # once combo speed can be resolved offline for every combo in
-        # the bundled DB.
-        floor = max(floor, 4)
-        reasons.append(
-            f"floor B4: {n_two_card_combos} game-ending two-card "
-            f"combo(s) detected (combo_detection bracket floor)"
+    if combos:
+        # Defer to combo_detection.combo_bracket_floor per combo (the
+        # ``bracket_floor`` annotation each entry already carries).
+        # That is the repo's encoding of the OFFICIAL 2025-10-21 rule:
+        # only CHEAP/EARLY-assembling two-card game-ending combos are
+        # prohibited below B4; a late-assembling (~turn 6+, proxied by
+        # summed mana value) two-card combo is B3-legal, as is any
+        # 3+-card game-ending combo. This module used to hard-floor
+        # EVERY two-card combo at B4 (the stricter pre-Oct-2025 beta
+        # reading) — that slammed canonical B3 lists like Exquisite
+        # Blood + Sanguine Bond up to Optimized. Cache-state wobble is
+        # accepted: combo_bracket_floor already returns the STRICT B4
+        # floor when a piece's mana value can't be resolved offline
+        # (cold cache), so uncertainty degrades conservative, never
+        # permissive.
+        combo_floor = max(
+            int(c.get("bracket_floor") or 1) for c in combos
         )
-    elif combos:
-        # 3+-card game-ending combos: combo_bracket_floor says B3
-        # (more setup = later; still a deliberate combo finish).
-        floor = max(floor, 3)
-        reasons.append(
-            f"floor B3: {len(combos)} game-ending combo(s) of 3+ cards "
-            f"(combo_detection bracket floor)"
+        n_early = sum(
+            1 for c in combos if int(c.get("bracket_floor") or 1) >= 4
         )
+        if combo_floor >= 4:
+            floor = max(floor, 4)
+            reasons.append(
+                f"floor B4: {n_early} cheap/early two-card game-ending "
+                f"combo(s) detected (combo_detection speed-refined "
+                f"bracket floor; B1-B3 prohibit early two-card combos)"
+            )
+        elif combo_floor >= 3:
+            floor = max(floor, 3)
+            reasons.append(
+                f"floor B3: {len(combos)} game-ending combo(s), all "
+                f"late-game two-card or 3+-card lines (combo_detection "
+                f"bracket floor; B3-legal per the 2025-10-21 rules)"
+            )
     if mld_hits:
         # Mass land denial is prohibited below B4 (WotC guidance; the
         # audit prompt's MLD auto-bumper list is the repo encoding).
@@ -579,14 +701,44 @@ def _estimate_bracket_inner(
         reasons.append(
             f"floor B4: mass land denial present ({', '.join(mld_hits)})"
         )
-    if len(extra_turn_hits) >= 2:
-        # 2+ extra-turn spells = chaining potential; B3 only allows
-        # UN-chained extra turns (audit prompt EXTRA TURNS list).
+    # Extra turns: the 2025-10-21 rules target extra turns that are
+    # "CHAINED OR LOOPED"; B3 explicitly allows "low quantities" of
+    # non-chaining ones, so a bare count of 2 is no longer a floor
+    # (that was the pre-Oct-2025 beta reading). OPERATIONALIZATION of
+    # "chained or looped", from a static list: (a) 3+ extra-turn cards
+    # — at that density the turns realistically cast back-to-back,
+    # which is the chained experience the rule targets regardless of
+    # intent; or (b) 2+ extra-turn cards alongside a REPEATABLE
+    # rebuy/copy engine (_EXTRA_TURN_REPEATABLE_ENABLERS) that can
+    # recur or duplicate them turn after turn — a credible loop.
+    # ONE-SHOT rebuys (_EXTRA_TURN_ONESHOT_REBUYS — Eternal Witness,
+    # Fork, bare Archaeomancer, ...) buy back a single turn once and
+    # are spent: that cannot sustain a chain, so they contribute the
+    # extra_turn_oneshot_rebuy weighted nudge instead of a floor (see
+    # the repeatability split comment on the two frozensets). A single
+    # extra-turn card never floors, even with recursion present (one
+    # Time Warp + Archaeomancer is a slow 2-card value engine
+    # combo_detection would flag separately if it were game-ending).
+    extra_turns_chain = (
+        len(extra_turn_hits) >= 3
+        or (len(extra_turn_hits) >= 2 and extra_turn_repeatable_hits)
+    )
+    if extra_turns_chain:
         floor = max(floor, 4)
-        reasons.append(
-            f"floor B4: {len(extra_turn_hits)} extra-turn cards "
-            f"(chaining potential; B3 allows only un-chained extra turns)"
-        )
+        if len(extra_turn_hits) >= 3:
+            reasons.append(
+                f"floor B4: {len(extra_turn_hits)} extra-turn cards — "
+                f"density reads as chaining (B3 allows only low "
+                f"quantities of non-chaining extra turns)"
+            )
+        else:
+            reasons.append(
+                f"floor B4: {len(extra_turn_hits)} extra-turn cards "
+                f"plus repeatable recursion/copy engine "
+                f"({', '.join(extra_turn_repeatable_hits[:3])}) — "
+                f"chaining potential (the 2025-10-21 rules floor "
+                f"chained-or-looped extra turns at B4)"
+            )
 
     # --- WEIGHTED SIGNALS inside the bounds ---------------------------------
     # Base = 2.0: the stock-precon B2 "Core" baseline (prompt table).
@@ -606,7 +758,8 @@ def _estimate_bracket_inner(
         fired += 1
         reasons.append(
             f"+{w['tutors_4_plus']:.1f}: {len(tutor_hits)} tutors — "
-            f"'stacking 4+ tutors auto-bumps' (audit prompt)"
+            f"tutor-dense (consistency heuristic; not an official "
+            f"bracket rule since the 2025-10-21 update)"
         )
     elif len(tutor_hits) >= 2:
         score += w["tutors_2_3"]
@@ -641,13 +794,31 @@ def _estimate_bracket_inner(
         reasons.append(
             f"+{pts:.1f}: {len(combos)} game-ending combo line(s)"
         )
-    if len(extra_turn_hits) == 1:
-        score += w["extra_turn_single"]
+    if extra_turn_hits and not extra_turns_chain:
+        # Non-chaining low quantities (1-2 cards): B3-legal by rule,
+        # so a weighted nudge per card rather than a floor.
+        pts = w["extra_turn_single"] * min(len(extra_turn_hits), 2)
+        score += pts
         fired += 1
         reasons.append(
-            f"+{w['extra_turn_single']:.1f}: one extra-turn card "
-            f"({extra_turn_hits[0]})"
+            f"+{pts:.1f}: {len(extra_turn_hits)} non-chaining "
+            f"extra-turn card(s) ({', '.join(extra_turn_hits[:2])})"
         )
+        if len(extra_turn_hits) >= 2 and extra_turn_oneshot_hits:
+            # One-shot rebuys/copies alongside 2 extra-turn cards: a
+            # single extra rebuy each, not a chain — the demoted form
+            # of the old hard floor (see the repeatability split).
+            pts = w["extra_turn_oneshot_rebuy"] * min(
+                len(extra_turn_oneshot_hits), 2
+            )
+            score += pts
+            fired += 1
+            reasons.append(
+                f"+{pts:.1f}: {len(extra_turn_oneshot_hits)} one-shot "
+                f"extra-turn rebuy/copy piece(s) "
+                f"({', '.join(extra_turn_oneshot_hits[:2])}) — single "
+                f"rebuys, not a chain (no B4 floor)"
+            )
     if avg_cmc is not None and avg_cmc > 0:
         # Curve bands lifted from deck_dashboard._power_bracket:
         # <=2.6 = tight/tuned, >3.4 = high-curve casual (we use >=3.8
@@ -719,6 +890,14 @@ def _estimate_bracket_inner(
             "n_two_card_combos": n_two_card_combos,
             "mld_cards": mld_hits,
             "extra_turn_cards": extra_turn_hits,
+            # Split by repeatability (2025-10-21 "chained or looped"):
+            # only the repeatable engines participate in the B4 floor.
+            # "extra_turn_chain_enablers" keeps the pre-split key name
+            # for payload consumers and now carries the floor-relevant
+            # (repeatable) hits.
+            "extra_turn_chain_enablers": extra_turn_repeatable_hits,
+            "extra_turn_repeatable_enablers": extra_turn_repeatable_hits,
+            "extra_turn_oneshot_rebuys": extra_turn_oneshot_hits,
             "tutor_count": len(tutor_hits),
             "tutors": tutor_hits,
             "fast_mana_count": len(fast_mana_hits),

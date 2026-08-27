@@ -17,6 +17,8 @@ Notes:
 - The Flask import is deferred so this module is harmless to import
   when the ``[web]`` extra is missing — only ``create_app`` raises.
 - All paths are validated against ``deck_dir`` to prevent traversal.
+- Every request must arrive with a loopback ``Host`` header (2026-08-17
+  DNS-rebinding gate, see ``_is_loopback_host``); anything else 403s.
 """
 from __future__ import annotations
 
@@ -101,6 +103,49 @@ def _cleanup_stale_staged_files(
         except OSError:
             pass
     return deleted
+
+
+# Host headers the server answers to. Anything else is treated as a
+# rebinding attempt — see ``_is_loopback_host`` and the before_request
+# gate in ``create_app``. ``localhost`` is here because that's what
+# Flask's own test client sends (and what most people type); the
+# bracketed and bare IPv6 loopback forms are both accepted because
+# browsers and curl disagree about which one lands in the header.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
+
+
+def _is_loopback_host(host_header: Optional[str]) -> bool:
+    """True when a ``Host`` header names a loopback address (any port).
+
+    Accepts ``127.0.0.1``, ``localhost``, ``::1`` and ``[::1]``, each
+    with an optional ``:<digits>`` port suffix. Everything else —
+    including a missing/empty header, a non-numeric port, and any
+    attacker-controlled DNS name — is False.
+
+    Split from the request hook so the parsing is unit-testable
+    without a live app: the port-stripping is the only fiddly part
+    (an IPv6 literal is full of colons, so a naive ``split(":")[0]``
+    would turn ``[::1]:5000`` into ``[``).
+    """
+    if not host_header:
+        return False
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        # Bracketed IPv6 literal: the port (if any) follows the "]".
+        closing = host.find("]")
+        if closing < 0:
+            return False
+        hostname, port = host[:closing + 1], host[closing + 1:]
+    elif host.count(":") == 1:
+        hostname, _sep, rest = host.partition(":")
+        port = ":" + rest
+    else:
+        # No colon (bare name) or many (a bare IPv6 literal, which
+        # cannot carry a port without brackets).
+        hostname, port = host, ""
+    if port and not port[1:].isdigit():
+        return False
+    return hostname in _LOOPBACK_HOSTS
 
 
 def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
@@ -231,6 +276,27 @@ def create_app(
     app.config["DECK_DIR"] = deck_dir
     app.config["KNOWLEDGE_DB"] = knowledge_db
 
+    # --- Request gate: Host validation + cross-origin mutation gate ---
+    #
+    # HOST CHECK (2026-08-17). The server binds loopback by default, but
+    # "binds loopback" is not "only reachable from this machine": a page
+    # the user visits can point a hostname it controls at 127.0.0.1 (DNS
+    # rebinding), and the browser then treats
+    # ``http://evil.example:5000`` as SAME-ORIGIN with this server. The
+    # mutation gate below doesn't help there — a same-origin fetch may
+    # set any Content-Type it likes, READ the response, and drive
+    # ``GET /api/decks`` or ``PUT /api/config`` (which holds the
+    # Anthropic token) at will.
+    #
+    # The Host header is the one thing that still names the ORIGINAL
+    # hostname the page asked for, so rejecting every Host that isn't a
+    # loopback name kills the rebinding path outright. Deliberately not
+    # configurable (owner's call): no env var, no allowlist, nothing to
+    # get wrong. Consequence to know about — ``--host 0.0.0.0`` still
+    # binds, but requests arriving with a LAN Host header (e.g.
+    # ``192.168.1.5:5000``) now 403. That surface was already
+    # unauthenticated and is not a use case this project supports.
+    #
     # --- Cross-origin mutation gate (2026-07-19 adversarial review) ---
     # Every mutating endpoint used ``request.get_json(force=True)``,
     # which happily parses a ``text/plain`` body as JSON. A text/plain
@@ -253,7 +319,21 @@ def create_app(
     from flask import jsonify as _jsonify, request as _request
 
     @app.before_request
-    def _require_json_for_mutations():
+    def _gate_request():
+        # Host first: a rebound request is hostile regardless of method,
+        # and GET routes leak deck contents + the redacted config.
+        # ``request.host`` is the Host header verbatim (Werkzeug only
+        # falls back to SERVER_NAME when the header is absent, which
+        # this rejects anyway).
+        if not _is_loopback_host(_request.host):
+            return _jsonify({
+                "error": (
+                    "Host header must be 127.0.0.1 / localhost / [::1] "
+                    "(with an optional port) — this server is "
+                    "loopback-only"
+                ),
+                "received": _request.host or None,
+            }), 403
         if _request.method not in ("POST", "PUT", "PATCH", "DELETE"):
             return None
         if _request.mimetype != "application/json":

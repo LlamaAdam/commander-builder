@@ -13,9 +13,15 @@ from commander_builder.bandit import (
     Arm,
     BanditResult,
     EpsilonGreedy,
+    PullOutcome,
+    SKIP_REASON_CLASSES,
+    SKIP_STRUCTURAL,
+    SKIP_TRANSIENT,
     ThompsonSampling,
     UCB1,
+    classify_skip_reason,
     make_policy,
+    record_skip,
     run_bandit,
     update_arm,
 )
@@ -245,6 +251,333 @@ def test_make_policy_thompson_with_hyperparams():
 def test_make_policy_unknown_still_raises():
     with pytest.raises(ValueError):
         make_policy("gp_bo")
+
+
+# --- skip API + PullOutcome (P03: failures are not observations) ----------
+
+def test_record_skip_leaves_reward_stats_unchanged():
+    a = Arm("a", pulls=2, total_reward=1.0)
+    record_skip(a, "apply_failed: boom")
+    assert a.pulls == 2
+    assert a.total_reward == 1.0
+    assert a.mean == 0.5
+    assert a.skips == 1
+    assert a.skip_reason == "apply_failed: boom"
+
+
+def test_run_bandit_skipped_pull_does_not_update_arm_and_retires_it():
+    """Regression (P03): a crashed/apply-failed pull must leave the
+    arm's pull count and statistics unchanged — the old code folded
+    failures in as 0.0-reward 'measured ties'. A STRUCTURAL skip also
+    retires the arm so the budget flows to measurable arms (R2-D6)."""
+    outcomes = {
+        "fails": PullOutcome.skip("swap_dropped_by_legality"),
+        "works": PullOutcome(reward=0.5, accepted=False, verdict="neutral"),
+    }
+    arms = [Arm("fails"), Arm("works")]
+    res = run_bandit(
+        arms, rounds=4, evaluate=lambda arm: outcomes[arm.key],
+        policy=UCB1(), rng=random.Random(0),
+    )
+    failing = next(a for a in arms if a.key == "fails")
+    working = next(a for a in arms if a.key == "works")
+    # The failed pull entered NO statistics...
+    assert failing.pulls == 0
+    assert failing.total_reward == 0.0
+    assert failing.mean == 0.0
+    # ...but is recorded as a skip with its reason.
+    assert failing.skips == 1
+    assert failing.skip_reason == "swap_dropped_by_legality"
+    assert failing.retired is True
+    assert res.skipped == 1
+    skip_rows = [h for h in res.history if h.skipped]
+    assert len(skip_rows) == 1
+    assert skip_rows[0].reward is None and skip_rows[0].accepted is False
+    # The remaining budget went to the arm that produces signal.
+    assert working.pulls == 3
+    assert res.total_reward == 1.5
+    # A skipped pull never counts toward total_reward or best-arm mean.
+    assert res.best_arm_key == "works"
+
+
+def test_run_bandit_none_reward_is_a_skip_and_all_retired_stops_early():
+    """A bare ``None`` is an unreasoned skip -> 'no_signal' -> TRANSIENT,
+    so the arm stays selectable and the run spends its whole budget.
+    Only STRUCTURAL retirement ends a run early (R2-D6)."""
+    arms = [Arm("a")]
+    res = run_bandit(arms, rounds=5, evaluate=lambda arm: None,
+                     policy=UCB1(), rng=random.Random(0))
+    assert arms[0].pulls == 0
+    assert arms[0].skips == 5
+    assert arms[0].retired is False
+    assert res.skipped == 5
+    assert res.rounds_run == 5
+    assert res.best_arm_key is None
+
+    structural = [Arm("a")]
+    res2 = run_bandit(
+        structural, rounds=5,
+        evaluate=lambda arm: PullOutcome.skip("swap_dropped_by_legality"),
+        policy=UCB1(), rng=random.Random(0),
+    )
+    assert structural[0].retired is True
+    assert res2.rounds_run == 1  # the only arm retired -> early stop
+
+
+# --- R2-D6: structural vs transient skip classification -------------------
+#
+# One skip of ANY kind used to retire an arm forever, on a stated premise
+# that skip failures "are typically structural". That was false for most
+# of the vocabulary: a crashed JVM and a zero-decisive sim are sampling
+# luck, uncorrelated with swap quality, and killing an arm on one
+# permanently removes it from a run whose whole purpose is repeated
+# measurement.
+
+@pytest.mark.parametrize("reason,expected", [
+    # STRUCTURAL — the swap can never apply to this deck.
+    ("swap_dropped_by_legality", SKIP_STRUCTURAL),
+    # TRANSIENT — the swap is fine, the measurement attempt wasn't.
+    ("apply_failed", SKIP_TRANSIENT),
+    ("apply_failed: RuntimeError: boom", SKIP_TRANSIENT),
+    ("fillers_unavailable", SKIP_TRANSIENT),
+    ("fillers_unavailable: need 2 for a 4-player pod, found 1",
+     SKIP_TRANSIENT),
+    ("sim_failed", SKIP_TRANSIENT),
+    ("sim_failed: jvm died", SKIP_TRANSIENT),
+    ("sim_skipped", SKIP_TRANSIENT),
+    ("sim_pending", SKIP_TRANSIENT),
+    ("sim_running", SKIP_TRANSIENT),
+    ("sim_loop_unattributed", SKIP_TRANSIENT),
+    ("sim_unknown", SKIP_TRANSIENT),
+    ("zero_decisive_games", SKIP_TRANSIENT),
+    ("no_signal", SKIP_TRANSIENT),
+])
+def test_every_shipped_skip_reason_is_classified(reason, expected):
+    """Each reason the codebase actually produces is pinned to its class
+    explicitly — no default bucket decides any of them, and the free-text
+    detail after the colon never changes the answer."""
+    assert classify_skip_reason(reason) == expected
+
+
+def test_the_classification_table_covers_the_whole_vocabulary():
+    """Every entry is one of the two classes, and exactly one reason is
+    structural."""
+    assert set(SKIP_REASON_CLASSES.values()) == {
+        SKIP_STRUCTURAL, SKIP_TRANSIENT}
+    structural = {k for k, v in SKIP_REASON_CLASSES.items()
+                  if v == SKIP_STRUCTURAL}
+    assert structural == {"swap_dropped_by_legality"}
+
+
+def test_every_ab_status_the_evaluator_can_format_is_in_the_table(capsys):
+    """The evaluator builds its sim skip reason as ``f"sim_{status}"``
+    from an ABResult status. Every non-'done' status forge_batch declares
+    must therefore already be classified — otherwise a perfectly normal
+    JVM outcome trips the unclassified-reason path in production."""
+    from commander_builder import forge_batch
+
+    statuses = {
+        getattr(forge_batch, name) for name in dir(forge_batch)
+        if name.startswith("_AB_STATUS_")
+    } - {"done"}
+    for status in statuses:
+        assert f"sim_{status}" in SKIP_REASON_CLASSES, status
+    # ...plus the fallback the evaluator uses for a missing status.
+    assert "sim_unknown" in SKIP_REASON_CLASSES
+    assert "unclassified" not in capsys.readouterr().err
+
+
+def test_unknown_skip_reason_is_transient_and_warns_loudly(capsys):
+    """A reason nobody classified must NOT silently fall into a default
+    bucket. It resolves transient — mis-retiring an arm deletes it from
+    the search invisibly, while a needless re-pull shows up in the skip
+    count — and says so on stderr so the omission gets fixed."""
+    assert classify_skip_reason("sim_timed_out_waiting") == SKIP_TRANSIENT
+    err = capsys.readouterr().err
+    assert "unclassified skip reason" in err
+    assert "sim_timed_out_waiting" in err
+    assert "NOT retired" in err
+
+
+def test_unknown_skip_reason_does_not_retire_the_arm(capsys):
+    arms = [Arm("a")]
+    run_bandit(arms, rounds=2,
+               evaluate=lambda arm: PullOutcome.skip("brand_new_reason"),
+               policy=UCB1(), rng=random.Random(0))
+    assert arms[0].retired is False
+    assert arms[0].skips == 2
+    assert "unclassified skip reason" in capsys.readouterr().err
+
+
+def test_none_reason_classifies_as_transient_without_warning(capsys):
+    """``record_skip(arm)`` with no reason stores 'no_signal', which IS
+    in the table — it must not trip the unknown-reason warning."""
+    a = Arm("a")
+    record_skip(a)
+    assert a.skip_reason == "no_signal"
+    assert a.retired is False
+    assert "unclassified" not in capsys.readouterr().err
+
+
+def test_transient_skips_never_retire_however_many_accumulate():
+    """'Never counts toward retirement' means never — there is no
+    N-strikes rule hiding behind the classification."""
+    a = Arm("a")
+    for _ in range(50):
+        record_skip(a, "sim_failed: jvm died")
+    assert a.skips == 50
+    assert a.retired is False
+    assert a.retire_reason is None
+
+
+def _broken_and_fine(policy, rounds):
+    """One arm that always skips transiently, one that always measures."""
+    def evaluate(arm):
+        if arm.key == "broken":
+            return PullOutcome.skip("sim_failed: jvm died")
+        return PullOutcome(reward=0.5, accepted=False, verdict="neutral")
+
+    arms = [Arm("broken"), Arm("fine")]
+    res = run_bandit(arms, rounds=rounds, evaluate=evaluate, policy=policy,
+                     rng=random.Random(0))
+    return arms[0], arms[1], res
+
+
+def test_a_transient_skipped_arm_does_not_starve_its_siblings():
+    """Cold-start identifies an unpulled arm by ``pulls == 0``, which a
+    skip leaves untouched. With transient skips no longer retiring, a
+    naive ``untried[0]`` would hand every round to the same broken arm
+    forever and no sibling would ever get its first pull."""
+    broken, fine, res = _broken_and_fine(UCB1(), rounds=4)
+    assert broken.pulls == 0 and broken.retired is False
+    assert fine.pulls >= 1          # it got measured despite going second
+    assert res.best_arm_key == "fine"
+
+
+@pytest.mark.parametrize("policy", [UCB1(), EpsilonGreedy(epsilon=0.0)])
+def test_a_transient_skipped_arm_cannot_monopolize_the_budget(policy):
+    """The other half of the starvation problem: once every OTHER arm has
+    been measured, the failing arm is the only one left with pulls == 0,
+    so an unguarded cold-start would hand it every remaining round of an
+    overnight budget.
+
+    The fairness rule interleaves retries with evidence-gathering — an
+    arm that has failed k times waits until every measured arm has k
+    pulls — so a broken arm costs about one round in len(arms) instead of
+    all of them, and is still never retired."""
+    broken, fine, res = _broken_and_fine(policy, rounds=20)
+    assert broken.retired is False              # never retired...
+    assert broken.skips >= 2                    # ...and genuinely retried
+    assert broken.skips <= 20 // 2 + 1          # ...but not monopolizing
+    assert fine.pulls >= 20 // 2 - 1            # the real evidence got made
+    assert res.rounds_run == 20
+
+
+def test_selection_never_scores_an_arm_that_has_no_measurement():
+    """UCB1 divides by ``pulls``; an arm that has only ever skipped still
+    has pulls == 0. Before transient skips existed the exhaustive
+    cold-start made that unreachable — now the scoring phase has to
+    exclude it explicitly rather than raise ZeroDivisionError."""
+    seq = {
+        "a": PullOutcome.skip("sim_failed: jvm died"),
+        "b": PullOutcome(reward=0.4, accepted=False, verdict="neutral"),
+        "c": PullOutcome(reward=-0.9, accepted=False, verdict="reverted"),
+    }
+    arms = [Arm("a"), Arm("b"), Arm("c")]
+    res = run_bandit(arms, rounds=25, evaluate=lambda arm: seq[arm.key],
+                     policy=UCB1(), rng=random.Random(0))
+    assert res.rounds_run == 25                  # no crash, full budget
+    # ...and the never-measured arm never wins "best", despite its
+    # placeholder mean of 0.0 outranking c's real -0.9.
+    assert res.best_arm_key == "b"
+
+
+def test_cold_start_keeps_list_order_when_nothing_skipped():
+    """The skip-aware ordering must be a no-op in the normal case: with
+    no skips anywhere, cold-start still walks the arms in list order."""
+    arms = [Arm("first"), Arm("second"), Arm("third")]
+    picked: list[str] = []
+
+    def evaluate(arm):
+        picked.append(arm.key)
+        return 0.5
+
+    run_bandit(arms, rounds=3, evaluate=evaluate, policy=UCB1(),
+               rng=random.Random(0))
+    assert picked == ["first", "second", "third"]
+
+
+def test_arm_stats_distinguish_retired_from_merely_skipped():
+    """An arm with skips but ``retired=False`` was hit by transient
+    failures only and stayed in the search; the JSON has to say which."""
+    import json
+    arms = [Arm("transient"), Arm("structural")]
+    outcomes = {
+        "transient": PullOutcome.skip("sim_failed: jvm died"),
+        "structural": PullOutcome.skip("swap_dropped_by_legality"),
+    }
+    res = run_bandit(arms, rounds=4, evaluate=lambda arm: outcomes[arm.key],
+                     policy=UCB1(), rng=random.Random(0))
+    stats = {s["key"]: s for s in json.loads(json.dumps(res.to_dict()))[
+        "arm_stats"]}
+    assert stats["transient"]["skips"] >= 1
+    assert stats["transient"]["retired"] is False
+    assert stats["transient"]["retire_reason"] is None
+    assert stats["structural"]["retired"] is True
+    assert stats["structural"]["retire_reason"] == "swap_dropped_by_legality"
+
+
+def test_pull_outcome_accept_decouples_from_reward_threshold():
+    """Acceptance rides the significance verdict the evaluator reports,
+    not a raw reward-vs-threshold comparison: a small-but-significant
+    reward can accept while a large-but-insignificant one must not."""
+    seq = iter([
+        PullOutcome(reward=0.1, accepted=True, verdict="kept"),
+        PullOutcome(reward=0.9, accepted=False, verdict="inconclusive"),
+    ])
+    arms = [Arm("a")]
+    res = run_bandit(arms, rounds=2, evaluate=lambda arm: next(seq),
+                     policy=UCB1(), accept_threshold=1.0,
+                     rng=random.Random(0))
+    assert res.accepted == 1
+    assert [h.accepted for h in res.history] == [True, False]
+    assert [h.verdict for h in res.history] == ["kept", "inconclusive"]
+    assert arms[0].pulls == 2  # both were real measurements
+
+
+def test_bare_float_evaluator_keeps_threshold_semantics():
+    """Back-compat: scripted float rewards still accept via
+    accept_threshold, and never skip."""
+    arms = [Arm("a")]
+    res = run_bandit(arms, rounds=3, evaluate=lambda arm: 2.0,
+                     policy=UCB1(), accept_threshold=1.0,
+                     rng=random.Random(0))
+    assert res.accepted == 3
+    assert res.skipped == 0
+    assert arms[0].pulls == 3
+
+
+def test_unskipped_outcome_without_reward_raises():
+    bad = PullOutcome(reward=None, accepted=True)  # contract violation
+    with pytest.raises(ValueError):
+        run_bandit([Arm("a")], rounds=1, evaluate=lambda arm: bad,
+                   policy=UCB1(), rng=random.Random(0))
+
+
+def test_skip_fields_json_serializable():
+    import json
+    arms = [Arm("a"), Arm("b")]
+    seq = iter([PullOutcome.skip("sim_failed: jvm died"),
+                PullOutcome(reward=0.25, accepted=False, verdict="neutral")])
+    res = run_bandit(arms, rounds=2, evaluate=lambda arm: next(seq),
+                     policy=UCB1(), rng=random.Random(0))
+    blob = json.loads(json.dumps(res.to_dict()))
+    assert blob["skipped"] == 1
+    assert blob["history"][0]["skipped"] is True
+    assert "sim_failed" in blob["history"][0]["skip_reason"]
+    stats_by_key = {s["key"]: s for s in blob["arm_stats"]}
+    assert stats_by_key["a"]["skips"] == 1
+    assert stats_by_key["b"]["pulls"] == 1
 
 
 def test_thompson_result_json_serializable():

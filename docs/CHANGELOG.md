@@ -6,6 +6,281 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-20 — three defects the new Playwright smokes found
+
+#### Fixed
+
+- **The unverified bracket tag now survives the next click.** The
+  deck-editor PUT's `bracket_tag_unverified` flag was derived per
+  request from "did THIS save change the mainboard?", so clicking
+  "Save changes" a second time without touching anything compared the
+  just-written text against itself, answered false, and closed the modal
+  with the warning gone — the [B3]-filename-over-a-B4-list pool-poisoning
+  path reopened by the most natural next click. The state now lives in
+  the deck's own `[metadata]` block as `BracketUnverified=<n>` (new
+  helpers in `dck_meta`, following the `Protect=` / `PoliticsGuard=`
+  precedent Forge ignores), is reported by every `deck_text` GET and PUT,
+  and is retired only where a bracket is genuinely recomputed: the
+  dashboard's `bracket_estimate` agreeing with the filename tag. Storing
+  the DIGIT is what makes a retag self-clearing — rename the file to
+  `[B4]` and a `=3` marker stops describing anything.
+  `moxfield_import._merge_local_metadata` carries the marker across
+  same-id re-imports alongside `Protect=` / `PoliticsGuard=`: a re-import
+  rewrites the mainboard, so it must never be the thing that retires it.
+- **The bracket warning looks like a warning.** It rendered in `.muted`,
+  the same grey as the "Saving…"/"Saved." chatter it replaced. New
+  `.status-warn` class (`--warn` token, same bordered idiom as
+  `.replay-truncated-banner`); `.muted` is now routine status only, and
+  every writer to the save-status line goes through one helper so a warn
+  class cannot linger on the next message.
+- **A soft dashboard refresh no longer blanks the sidebar selection.**
+  `highlight(null)` cleared `.active` / `aria-current` from every deck
+  row before checking whether it had a row to select; it now resolves the
+  row by deck id and, failing that, keeps the current selection.
+
+### 2026-08-17 — owner-decision batch 1: honesty, scope, and provenance
+
+Follows the 2026-08-17 review of the sixteen open product decisions
+raised by three AI review rounds plus a negative-mode critique.
+
+#### Added
+
+- **LLM deck judge, Phase 1** (`deck_judge.py`, FP-016 — observe-only,
+  off by default behind `COMMANDER_BUILDER_DECK_JUDGE`). A blinded
+  panel of six judgments (three per presentation order, agreement
+  counted on the deck so position bias is a detector, 5-of-panel
+  supermajority else `inconclusive`) answers the question the sim
+  cannot: is the candidate better built for its intent at a real
+  table. Stored as schema-v4 `judge_verdict`/`judge_report` beside —
+  never instead of — the sim verdict; it cannot advance a deck or gate
+  anything, and `scripts/judge_agreement.py` tracks the pre-registered
+  kill criteria that decide whether it ever becomes more. Blinding is
+  enforced structurally (the prompt builder can only see card names —
+  deck files' `Name=` lines carry v1/v2 and would leak the answer).
+- **Round-2 decisions implemented (R2-D1..D6, owner review 2026-08-20).**
+  `--strategy bandit` finally writes history: one knowledge-log row per
+  ACCEPTED pull (manifest = the single swap, snapshot = the candidate,
+  provenance-stamped sim report, parent-chained) — restoring revert,
+  lineage and FP-013 counting for the one strategy that had none; only
+  accepting pulls log, since a pull is an iteration exactly when it
+  changes the deck. A confirmation that could not RUN now labels its
+  row `inconclusive` instead of the self-contradictory `pending`.
+  Skip-retirement splits structural (retires immediately) from
+  transient (never retires) with every reason explicitly classified —
+  and fixing that exposed two cold-start bugs the decision alone would
+  have shipped (a flaky arm could starve siblings of their first pull,
+  then monopolize the remaining rounds; `_cold_start_order` now
+  interleaves by skip count). The unattended loop is repositioned in
+  copy as a false-positive-proof screen whose expected overnight
+  outcome is "nothing advanced", with the corrected throughput numbers
+  (0.13%/round, ~1.3% per 10-round run) printed beside the 1-in-1,600
+  figure. `backfill_web_margins.py --era-boundary-report` lists the
+  2026-08-14 rows for the owner's era-boundary call, zero writes.
+- **Archidekt adapter pinned against the real API** (R2-P18, from a
+  live CI capture of an owner-provided deck). The documented
+  `includedInDeck` invariant was FALSE against real data (a Sideboard
+  can be `true` — the flag is per-deck user state, not a category-name
+  property); `fetch_deck` now raises when the API omits card data
+  (`intentionallySkippedCardData`), closing a path that wrote a 0-card
+  deck and printed success. Nine card entries kept byte-for-byte
+  verbatim with provenance; the MDFC name shape remains an open,
+  test-asserted gap.
+- **`commander` umbrella CLI + guided `commander-init`** (decisions B1
+  and B2). One front door aliases all 28 hyphenated scripts 1:1 with
+  grouped help; a tripwire test fails when a script is added without a
+  subcommand. `commander-init` sequences dependency check → oracle
+  prime → deck acquisition → pool curation with measured cost warnings
+  before anything expensive, `--yes`/`--dry-run`, and resumability by
+  probing real artifacts (jar present, cache count, candidates, pool
+  JSON) instead of a state file.
+- **Playwright web smokes** (decision B3) — the 4,300-line `app.js`'s
+  first automated tests: twelve hermetic smokes (verdict-radio
+  discipline with production's own p-values, `Name=` restamp, error
+  paths, era sub-lines), mutation-checked before landing, plus a
+  path-filtered `web smokes` CI job. They immediately found the
+  dismissable bracket warning (fixed same day — see below).
+- **Weekly real-Forge canary** (decision B4) — one 4-game pod against
+  the LATEST Forge release every Monday, reusing
+  `calibration_check.py`'s good-deck-vs-do-nothing-controls contract;
+  raw Forge logs upload on failure.
+- **Local-model tier for narrow tagging** (`local_model.py`, decision
+  A4 — the question this review started from). Local models stop doing
+  proposal/verdict work and start doing tasks where the evidence is
+  *supplied* and the answer comes from a closed list: `role_tag` and
+  `archetype_tag`, each degrading to the existing deterministic
+  classifier on any failure. Preflight checks the daemon *and* that the
+  model is pulled, naming the exact `ollama pull` command. Taxonomies
+  are imported from `staples`/`archetype` rather than copied, so they
+  cannot drift. Ships with an agreement harness that measures the tier
+  against the deterministic classifier — reporting agreement, expressly
+  not accuracy — because whether this tier earns production use is a
+  question for data. Off by default behind
+  `COMMANDER_BUILDER_LOCAL_MODEL`; no production call site is wired to
+  it yet, deliberately.
+- **Politics guard (on by default).** Forge's AI does not negotiate,
+  pick an archenemy, or model an opponent's incentive to pay a tax, so
+  goad / monarch / vote / tempting-offer / Rhystic-tax / pillow-fort
+  cards read to the sim as no-ops — and a loop that cuts what doesn't
+  move the margin will "empirically" cut exactly the cards that define
+  multiplayer Commander. `staples` now tags them from oracle text (six
+  tags, with guards so cumulative-upkeep "unless you pay" and soft-
+  counter "unless its controller pays" don't match), and the advisor's
+  cut paths exempt them: the heuristic loop, `card_score`'s ranking,
+  and the orchestrator (the only path Claude's and bracket-peers' cuts
+  traverse). Skips are disclosed as `AdviceReport.skipped_for_politics`.
+  *Correction 2026-08-20 (round-2 review R2-P09/P10): the original
+  entry claimed "all three cut paths" as if that were every cut path in
+  the program — `auto_propose`'s curation stage was NOT covered (its
+  candidate pool was filtered, but its post-response net enforced only
+  `Protect=`, so a curator deviation could still cut politics cards),
+  and the tax pattern missed the punisher template ("that player may
+  pay... If the player doesn't"), i.e. Smothering Tithe — the card the
+  pattern's own comment named. Both fixed in the round-2 batch.*
+  Per-deck opt-out: `[metadata] PoliticsGuard=off`, carried across
+  re-imports, failing safe to ON on any unrecognized value.
+- **Archidekt is a real single-deck import lane** (`import_deck(source=)`
+  / `--archidekt`). Acquisition previously rode Moxfield's undocumented
+  private API alone, so one ToS or CDN change stranded imports,
+  harvest, bracket peers and meta-test references simultaneously.
+  Fallback fires on 5xx/403/URLError/parse failures but NOT on 404 — a
+  working API saying "no such deck" must not silently import a
+  different one — and no id translation is attempted. Moxfield-only
+  capabilities (bulk bracket harvest, top-likes search) now name the
+  working alternative when they fail.
+- **`measurement_era` on every knowledge-log row** (schema v3). The log
+  spans four incompatible measurement regimes — pre-seat-attribution,
+  mixed win-rate denominators, head-to-head margin verdicts, and
+  significance-based verdicts — and nothing marked which row belonged
+  to which, so any pooled analysis silently mixed them. Date decides
+  the era and id only breaks ties; rows whose era can't be established
+  stay NULL rather than guessed. Supersedes the `--min-id 314`
+  heuristic in STATUS.
+- **`COMMANDER_BUILDER_REBUILD_TIER`** — auto-mode may now select the
+  30+30 rebuild tier only when this is set. That tier is a ~6x cost
+  multiplier gated on the deck-health score, which has never been
+  validated (the same epistemic class as CardScore, which failed three
+  pre-registered gates). `--mode rebuild` is unaffected.
+
+#### Changed
+
+- **The bracket-unverified warning survives no-op saves** (found by the
+  new smokes on their first day): the state moved into a
+  `BracketUnverified=<n>` `[metadata]` directive — read from disk so a
+  textarea edit can't dismiss it, storing the bracket digit so a
+  retag self-invalidates, cleared only where a bracket is actually
+  computed (the dashboard estimator, matching the declared tag; a
+  `?bracket=` override can never clear it), and carried across
+  re-imports. It also gets warning styling instead of the muted
+  routine-status class.
+- **`proposer.ollama_propose` retired.** It fed all 706 lines of the
+  browser audit prompt — which opens "STEP 0 — ASK ME FIRST" — to
+  `llama3.2:3b` and waited 600 seconds for a complete swap manifest. A
+  tool-less 3B model could only fail to parse or fabricate, and nothing
+  in `src/` ever enabled the path anyway. It is now a loud
+  `NotImplementedError` pointing at `local_model` (deleting it would
+  turn imports into an `ImportError` that explains nothing), and
+  `propose()` no longer calls it at all — a raise inside the router
+  ladder would have been swallowed by the quiet fall-through contract,
+  recreating the silent degrade this fixes.
+- **`--sim-games` defaults to the verdict floor** (40 pod games, from
+  `min_sim_games_for_verdict()`) instead of 5. At 5 games `--run-sim`
+  could only ever record `inconclusive`, so the flagship
+  close-the-loop flag structurally could not close the loop. A cost
+  line prints before the spend, and `--smoke` restores the 5-game
+  sanity check while saying plainly it will record inconclusive.
+- **Unattended improve runs replicate before advancing.** A candidate
+  now needs a SECOND independent A/B in the same direction before it
+  becomes the base deck. Greedy round-chaining defaults ON (a false
+  `kept` otherwise becomes the baseline every later round is measured
+  against); the interactive bandit explorer defaults OFF, since UCB1
+  already re-pulls arms. `--replicate` / `--no-replicate` override.
+  A failed replication invents no new verdict label: the row takes the
+  second run's verdict plus a `replication_failed:` note, with run 1's
+  sim report intact. Confirmed swaps cost 2x sim time.
+- **Host-header validation on the web server.** The `before_request`
+  hook now rejects any request whose Host isn't loopback
+  (`127.0.0.1` / `localhost` / `::1`, optional port), closing the
+  DNS-rebinding path by which a malicious page could become
+  same-origin with the local UI and read decks or `PUT /api/config`.
+  Serving with `--host 0.0.0.0` now 403s LAN Host headers — the
+  intended trade for a personal localhost tool.
+- **`[REF]` decks no longer fill sim filler seats.** They were
+  popularity-selected (Moxfield top-likes) exactly like `[PREMADE]`
+  decks, which are excluded for that reason; `[REF]` remains a pool
+  *candidate*, since a ranked seat and an unranked filler seat are
+  different jobs.
+- **README states the bot-meta caveat** where it makes the
+  ground-truth claim: a `kept` verdict certifies "better against
+  Forge's AI" — an AI that misplays whole card classes and loops ~25%
+  of soak games — not "better at your table."
+
+
+### 2026-08-14 — AI-review roadmap: five correctness/currency fixes
+
+Implements the joint top-5 roadmap from the 2026-08-13 two-AI review
+(code reviewer + MTG domain analyst; findings and cross-examination
+recorded in the mtga-advisor repo, `docs/ollama-analysis/`).
+
+#### Fixed
+
+- **Auto-propose now applies the proposal to disk** before simming
+  (`iteration_loop.propose_then_iterate`): it proposes against the OLD
+  deck, materializes `--new` via `apply_proposal_to_deck`, records the
+  APPLIED adds/cuts as the manifest (LLM intent kept under
+  `requested_*`), and fails fast if `--new` already exists. Previously
+  the recorded manifest and the simmed diff were unrelated, poisoning
+  the knowledge log.
+- **Web `save_iteration` stores the signed margin** (`new_wins -
+  old_wins`), ignoring the absolute `ComparisonReport.margin` the
+  propose_swap payload carries. Web-saved regressions no longer read as
+  improvements in pooled analysis.
+- **Commander's free first mulligan is modelled** (`consistency.py`,
+  CR 103.5c) — the module previously claimed the rule doesn't exist
+  while `deck_builder_manabase` depended on it; every keep/on-curve
+  stat was systematically pessimistic.
+- **Land-band contradiction resolved**: `deck_health` imports the
+  builder's `LAND_COUNT_BAND` (33-40) instead of a hand-kept (33,38),
+  so the grader stops docking the app's own 39-40-land builds.
+
+#### Changed
+
+- **A/B verdicts are significance-based** (`analyst.heuristic_verdict`,
+  `_proposer_sim._verdict_from_ab`): decisive = head-to-head wins only
+  (filler-won pod games no longer count), and kept/reverted requires an
+  exact two-sided binomial test vs p=0.5 at alpha 0.05 (>= 15-5 at 20
+  decisive) instead of a game-count-invariant |margin| >= 4 — which
+  labeled ~half of neutral swaps confidently. LLM-facing sim summaries
+  now carry `signed_margin`, `winner`, `draws`, `h2h_decisive`.
+- **Bracket estimator re-based on the 2025-10-21 / 2026-02-09 official
+  bracket rules**: two-card-combo floor defers to `combo_detection`'s
+  speed rule (late pairs are B3-legal), the repealed 4+-tutor auto-bump
+  is demoted to a labeled power heuristic, and the extra-turn B4 floor
+  keys on chainability (3+ cards, or 2 + a recursion/copy enabler)
+  instead of bare count >= 2.
+- **EDHREC ingestion is JSON-first**: commander/tag/salt/average-deck
+  fetchers try `json.edhrec.com` before falling back to the
+  `__NEXT_DATA__` HTML scrape.
+- **Manabase tiers modernized**: the 10 triomes (3+ color identities)
+  and the 10 MKM surveil duals (top budget-tier two-color duals) join
+  the essentials tiers; `target_land_count` learns optional MDFC
+  spell-front discounting.
+
+#### Added
+
+- **Extra-turn and MLD card lists are regenerable from oracle
+  snapshots** (`scripts/refresh_card_lists.py --only extra-turns|mld`,
+  diff-and-review like the MDFC flow) and both hardcoded fallbacks
+  gained their well-known misses (+7 extra-turn, +8 MLD names). Tutors
+  stay curated — oracle text can't separate tutors from fetches/ramp.
+- **Legality staleness surfacing**: `LegalityReport` carries
+  `data_age_days` + `data_warning` when backing oracle snapshots are
+  older than 45 days (WotC now runs seven B&R windows a year), and
+  `commander-doctor` gained an oracle-snapshot freshness check.
+- **Sim-coverage warning on the dashboard**: deck names are
+  preflight-checked against the vendored Forge card-script corpus;
+  cards Forge can't simulate surface as a warning pill + detail modal
+  instead of silently-partial sim data.
+
 ### 2026-08-05 — FP-010: desktop EXE rebuilt against current master
 
 #### Changed

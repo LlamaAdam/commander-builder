@@ -22,8 +22,15 @@ Functions still defined here:
 - ``_resolve_deck_path``        deck id / explicit path → real file
 - ``_bracket_from_filename``    parse [B<n>] suffix from a deck name
 - ``_match_pct_from_evidence``  evidence dict → 0..100 or None
+- ``suggested_verdict``         A/B split → significance-tested verdict
+                                suggestion (+ the p-value behind it)
 - ``_iteration_to_dict``        Iteration row → JSON-friendly dict
 - ``read_protected_cards``      [metadata] Protect= entries → list
+- ``atomic_write_text``         crash-safe .dck overwrite (temp+rename)
+
+The one non-pure function here is ``atomic_write_text`` (it writes a
+file); it is still Flask-independent, which is the property this module
+actually guarantees.
 
 External callers should NOT import from this module — it's an
 internal layout detail. The web layer's public surface stays
@@ -32,6 +39,8 @@ internal layout detail. The web layer's public surface stays
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -175,6 +184,80 @@ def _match_pct_from_evidence(evidence: dict | None) -> int | None:
     return max(1, min(100, round(raw)))
 
 
+def suggested_verdict(old_wins, new_wins) -> dict:
+    """Server-computed verdict suggestion for a web A/B result.
+
+    Returns ``{verdict, p_value, decisive, min_decisive, alpha, margin,
+    basis}`` -- the label the CLI's ``_verdict_from_ab`` would assign to
+    this split, plus the numbers that produced it so the UI can show the
+    reasoning instead of an unexplained pre-checked radio.
+
+    WHY this exists (2026-08-20): the browser used to pick the default
+    itself with ``decisive < 20 ? "inconclusive" : winner === "new" ?
+    "kept" : ...``, where ``winner`` is ``ComparisonReport``'s ANY-lead
+    field. That is the era-3 rule the 2026-08-14 significance fix
+    retired: it pre-selects "Kept (apply changes)" on a 21-20 over 41
+    decisive games (exact two-sided p ~= 1.0). A default is the label
+    most saves get, and ``save_iteration`` stores the radio verbatim into
+    a row stamped with the CURRENT era and eligible for FP-013's
+    training floor -- so the "era 4 verdicts pool cleanly" claim rested
+    on the web user never accepting a default. The suggestion now comes
+    from the same exact binomial test (``analyst.binomial_two_sided_p``)
+    and the same decisive-game floor every other writer uses; the user
+    can still override with any radio.
+
+    The margin pre-filter is pinned to the default of 1 (a no-op
+    relative to the test): there is no ``--sim-margin`` on this path, and
+    inventing a larger minimum effect for the browser would make web rows
+    mean something different from CLI rows under the same era stamp.
+    """
+    from ..analyst import MIN_DECISIVE_GAMES_FOR_VERDICT, binomial_two_sided_p
+    from .._proposer_sim import VERDICT_ALPHA
+
+    try:
+        old_w = int(old_wins or 0)
+        new_w = int(new_wins or 0)
+    except (TypeError, ValueError):
+        old_w = new_w = 0
+    decisive = old_w + new_w
+    base = {
+        "decisive": decisive,
+        "min_decisive": MIN_DECISIVE_GAMES_FOR_VERDICT,
+        "alpha": VERDICT_ALPHA,
+        "margin": 1,
+    }
+    if decisive < MIN_DECISIVE_GAMES_FOR_VERDICT:
+        return {
+            **base, "verdict": "inconclusive", "p_value": None,
+            "basis": (
+                f"{decisive} decisive games is below the "
+                f"{MIN_DECISIVE_GAMES_FOR_VERDICT}-game floor — no verdict "
+                f"is trustworthy at this sample size."
+            ),
+        }
+    p = binomial_two_sided_p(new_w, decisive)
+    delta = new_w - old_w
+    if delta == 0 or p >= VERDICT_ALPHA:
+        return {
+            **base, "verdict": "neutral", "p_value": p,
+            "basis": (
+                f"{old_w}-{new_w} over {decisive} decisive games, exact "
+                f"two-sided p={p:.3f} ≥ α={VERDICT_ALPHA} — a real "
+                f"near-tie at a trustworthy sample size."
+            ),
+        }
+    return {
+        **base,
+        "verdict": "kept" if delta > 0 else "reverted",
+        "p_value": p,
+        "basis": (
+            f"{old_w}-{new_w} over {decisive} decisive games, exact "
+            f"two-sided p={p:.3f} < α={VERDICT_ALPHA} — the "
+            f"{'new' if delta > 0 else 'old'} deck's lead is significant."
+        ),
+    }
+
+
 def _iteration_to_dict(it) -> dict:
     """JSON-friendly projection of an Iteration. Drops the deck_snapshot
     blob to keep payloads small — callers can re-request the full row
@@ -297,3 +380,56 @@ def read_protected_cards(deck_text: str) -> list[str]:
             # always comma-named.
             _add(value)
     return protected
+
+
+# ---------------------------------------------------------------------------
+# .dck write primitive.
+#
+# Lived in ``routes_decks`` (M2 fix, 2026-08) with a note saying it was
+# kept there because that blueprint was "the only writer that takes raw
+# user-pasted text". It stopped being the only writer on 2026-08-20:
+# ``routes_dashboard`` clears the ``BracketUnverified=`` marker when a
+# bracket re-estimation actually verifies the declared tag, and that
+# write must be exactly as crash-safe as the editor's. A shared primitive
+# beats one blueprint reaching into another's private name.
+# ---------------------------------------------------------------------------
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace ``path``'s contents with ``text`` atomically.
+
+    Writes a temp file in the SAME directory (``os.replace`` is only
+    atomic within one filesystem) and renames it over the target, so a
+    crash / full disk mid-write leaves the previous deck intact instead
+    of a truncated one. The temp name is dot-prefixed and ends in
+    ``.tmp`` — never ``.dck`` — so the deck enumerators that glob
+    ``*.dck`` can never pick up a half-written file.
+
+    ``fsync`` before the rename so the rename cannot be reordered ahead
+    of the data on a crash. The replacement inherits the ORIGINAL file's
+    mode — ``mkstemp`` creates 0600, and silently narrowing a deck file
+    to owner-only on every save would be an invisible side effect of an
+    unrelated fix. Raises ``OSError`` like ``write_text``.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = None
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        # Only reachable when the rename did NOT happen (a successful
+        # os.replace consumes tmp_name), so this never deletes live data.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise

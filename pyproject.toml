@@ -37,7 +37,17 @@ dev = [
 [project.scripts]
 # CLI entry points so users can `commander-import ...` instead of
 # `python -m commander_builder.moxfield_import ...`. Kept the long forms too
-# since they're already documented in PROJECT.md and audit_workflow.md.
+# since they're already documented in docs/architecture.md and README.md.
+#
+# `commander` (B1) is the umbrella multiplexer over every script below:
+# `commander improve ...` == `commander-improve ...`, same code and same
+# exit codes. It is an ALIAS layer, not a migration — every hyphenated
+# script stays registered. `cli.COMMANDS` must stay 1:1 with this table;
+# tests/test_cli.py fails if a script is added without a subcommand.
+commander            = "commander_builder.cli:main"
+# `commander-init` (B2) sequences the first-run pipeline (deps -> oracle
+# store -> decks -> pool) that was previously spread across four docs.
+commander-init       = "commander_builder.init_cli:main"
 commander-import     = "commander_builder.moxfield_import:main"
 commander-push       = "commander_builder.moxfield_push:main"
 commander-snapshot   = "commander_builder.snapshot_deck:main"
@@ -65,6 +75,17 @@ commander-corpus-themes = "commander_builder.corpus_themes:main"
 commander-tournament  = "commander_builder.edhtop16_client:main"
 commander-builder-desktop = "commander_builder.desktop:main"
 commander-builder-bootstrap = "commander_builder.bootstrap:main"
+# The local-model tier's CLI, including the agreement harness the
+# COMMANDER_LOCAL_MODEL opt-in is gated on. Registered 2026-08-20 (R2-P17):
+# the module documents `python -m commander_builder.local_model`, but the
+# repo's own "when you add a module" checklist ends with "register the
+# console script", and the harness a user must run BEFORE deciding whether
+# to enable the tier should not require knowing the module path.
+commander-local-model = "commander_builder.local_model:main"
+# The FP-016 deck judge's ad-hoc surface (2026-08-20). `cli.COMMANDS` must
+# stay 1:1 with this table and tests/test_cli.py enforces it, so the
+# subcommand and the script land together or not at all.
+commander-judge       = "commander_builder.deck_judge:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

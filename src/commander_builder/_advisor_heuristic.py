@@ -20,7 +20,12 @@ from typing import Optional
 from ._advisor_models import DeckDiagnosis, SwapRecommendation
 from ._advisor_role_helpers import _role_for_card
 from .edhrec_client import AverageDeck, CardEntry, CommanderPage
-from .staples import is_land, is_universal_staple
+from .staples import (
+    is_land,
+    is_politics_card_name,
+    is_universal_staple,
+    politics_guard_enabled,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +617,22 @@ def _heuristic_swap_recommendations(
     # Giada deck, for instance). Cache-only detection -- no network.
     commander_tribal = _commander_tribal_subtype(edhrec_page.commander_name)
 
+    # Politics guard (decision C2, 2026-08-17). EDHREC absence is the only
+    # cut signal this loop has, and it is a POPULARITY signal — the cards
+    # this project would otherwise validate an absence-cut against are
+    # judged by Forge's AI, which cannot goad, cannot race the monarch,
+    # cannot bargain in a vote and pays a Rhystic tax without noticing.
+    # So the sim can never produce evidence FOR keeping one of these, and
+    # the A/B margin can never produce honest evidence against it either.
+    # Shield rather than down-rank, matching how ``card_score``'s cut
+    # rails treat a guard rail as a refusal. ON by default; one deck opts
+    # out with ``PoliticsGuard=off`` in its ``[metadata]``.
+    #
+    # Cache-only lookup, exactly like the tribal bypass above: a cold card
+    # falls through to the existing cut behavior instead of stalling the
+    # audit on a Scryfall fetch.
+    politics_guard = politics_guard_enabled(deck_text or "")
+
     # ``deck_cards`` is a set, and with more absence-candidates than
     # ``cut_limit`` the truncation below would otherwise keep whichever
     # cards happened to iterate first — set order varies per process
@@ -643,6 +664,14 @@ def _heuristic_swap_recommendations(
             if commander_tribal and _card_has_subtype(card, commander_tribal):
                 # In-tribe card -- preserve it even though EDHREC's
                 # commander page didn't list it.
+                continue
+            if politics_guard and is_politics_card_name(card,
+                                                        _cached_scryfall):
+                # Sim-invisible (goad / monarch / vote / tempting offer /
+                # Rhystic tax / pillow fort). Skipped in-loop rather than
+                # filtered afterwards so the shield doesn't eat one of the
+                # ``cut_limit`` slots -- same treatment as the is_land /
+                # is_universal_staple skips above.
                 continue
             recs.append(SwapRecommendation(
                 card=card,

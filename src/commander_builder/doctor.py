@@ -12,6 +12,10 @@ Checks performed:
   Decks dir:     Forge deck directory exists + at least one [B<n>].dck
   Knowledge log: SQLite file accessible + schema present
   Scryfall:      cache dir writable
+  Oracle snaps:  snapshot store present + fresh enough for legality
+                 verdicts (yellow when empty or older than
+                 deck_legality.STALE_SNAPSHOT_DAYS — stale snapshots
+                 hide B&R updates)
   EDHREC:        cache dir writable
   Anthropic:     API key set (yellow if missing — only needed for claude_*)
   Ollama:        daemon reachable (yellow if not — only needed for ollama_*)
@@ -225,6 +229,76 @@ def _check_cache_dir(name: str, path: Path) -> CheckResult:
     return CheckResult(name, GREEN, f"writable", f"path: {path}")
 
 
+def _check_oracle_snapshots() -> CheckResult:
+    """Oracle-snapshot store freshness.
+
+    ``scryfall_client.lookup_card`` serves snapshots from disk forever
+    (no TTL), so ``deck_legality``'s ban sweep is only as current as
+    the store's last refresh — and WotC now runs seven B&R windows a
+    year. Age is measured off the NEWEST snapshot mtime (the last
+    refresh activity, matching ``oracle_store.snapshot_age_days``'s
+    mtime convention); older than
+    ``deck_legality.STALE_SNAPSHOT_DAYS`` goes YELLOW with the fix
+    command. Cheap: one directory scan of stat calls, no JSON parsing,
+    no network.
+    """
+    import time
+
+    # Module attributes read at call time so test monkeypatches apply.
+    from . import scryfall_client
+    from .deck_legality import STALE_SNAPSHOT_DAYS
+
+    snap_dir = scryfall_client.CACHE_DIR
+    if not snap_dir.is_dir():
+        return CheckResult(
+            "oracle_snapshots", YELLOW,
+            "No oracle-snapshot store — legality checks will report "
+            "unverified. Run `commander-oracle-refresh --from-bulk "
+            "--everything` to populate it.",
+            f"expected: {snap_dir}",
+        )
+    newest = 0.0
+    count = 0
+    try:
+        for p in snap_dir.glob("*.json"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            count += 1
+            if mtime > newest:
+                newest = mtime
+    except OSError as exc:
+        return CheckResult(
+            "oracle_snapshots", YELLOW,
+            f"Oracle-snapshot store unreadable: {exc}",
+            f"path: {snap_dir}",
+        )
+    if count == 0:
+        return CheckResult(
+            "oracle_snapshots", YELLOW,
+            "Oracle-snapshot store is empty — legality checks will "
+            "report unverified. Run `commander-oracle-refresh "
+            "--from-bulk --everything` to populate it.",
+            f"path: {snap_dir}",
+        )
+    age_days = (time.time() - newest) / 86400.0
+    if age_days >= STALE_SNAPSHOT_DAYS:
+        return CheckResult(
+            "oracle_snapshots", YELLOW,
+            f"Oracle snapshots last refreshed {age_days:.0f} days ago "
+            f"(threshold {STALE_SNAPSHOT_DAYS:g}) — bans from newer B&R "
+            f"windows may be invisible. Run `commander-oracle-refresh "
+            f"--from-bulk`.",
+            f"{count} snapshots at {snap_dir}",
+        )
+    return CheckResult(
+        "oracle_snapshots", GREEN,
+        f"{count} snapshots, last refreshed {age_days:.0f} day(s) ago",
+        f"path: {snap_dir}",
+    )
+
+
 def _check_anthropic_key() -> CheckResult:
     if "ANTHROPIC_API_KEY" not in os.environ:
         return CheckResult(
@@ -287,6 +361,7 @@ def run_doctor(skip_ollama: bool = False) -> DoctorReport:
     report.checks.append(_check_decks_dir())
     report.checks.append(_check_knowledge_log())
     report.checks.append(_check_cache_dir("scryfall_cache", SCRYFALL_CACHE))
+    report.checks.append(_check_oracle_snapshots())
     report.checks.append(_check_cache_dir("edhrec_cache", EDHREC_CACHE))
     report.checks.append(_check_anthropic_key())
     report.checks.append(_check_anthropic_sdk())

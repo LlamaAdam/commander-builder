@@ -12,6 +12,15 @@ on per deck and the run aggregates everything into one NDJSON stream
 (one JSON object per line). Already-versioned decks are skipped
 unless ``--force`` is passed so a re-run picks up where the previous
 batch left off without redoing API spend.
+
+``--run-sim`` defaults to the VERDICT FLOOR (2026-08-17): ``--sim-games``
+now defaults to ``_proposer_sim.min_sim_games_for_verdict()`` (40 total
+pod games = the 20-decisive gate at the repo's 0.5 expected-decisive
+fraction) instead of the historical 5. At 5 the flagship close-the-loop
+flag could only ever record 'inconclusive' -- it was structurally unable
+to close the loop it exists for. The cheap old behaviour survives as an
+explicit opt-in, ``--smoke``, which says up front that its verdict will
+be 'inconclusive'; ``--sim-games N`` remains the exact override.
 """
 from __future__ import annotations
 
@@ -26,9 +35,81 @@ from .proposer import (
     apply_proposal_to_deck,
 )
 from ._proposer_sim import (
+    EXPECTED_DECISIVE_FRACTION,
+    MIN_DECISIVE_GAMES_FOR_VERDICT,
     _log_auto_curate_iteration,
     _run_sim_and_record,
+    min_sim_games_for_verdict,
 )
+
+
+# Pod games a ``--smoke`` run plays: the historical ``--sim-games``
+# default, demoted to a named opt-in on 2026-08-17. 5 total games is ~2
+# expected decisive, so the verdict is 'inconclusive' by construction --
+# useful as "does the whole pipeline run end to end on this deck?", never
+# as evidence about the swap. Naming it makes that a choice the operator
+# makes rather than a default they inherit.
+SMOKE_SIM_GAMES = 5
+
+# Rough wall-clock per 4-player pod game, used ONLY for the up-front cost
+# line. Phase 1B clocked B3-B5 pod games at 96-120s each (see
+# forge_runner.DEFAULT_TIMEOUT_PER_GAME_SEC's comment) and
+# run_ab_simulation plays a run's games serially in one JVM, so 100s sits
+# in the middle of the measured band. Deliberately an ESTIMATE shown to
+# the operator before the spend, not a budget anything enforces.
+_APPROX_SECONDS_PER_POD_GAME = 100
+
+
+def _estimate_sim_minutes(games: int) -> int:
+    """Minutes a ``games``-game A/B sim is expected to take (rounded up,
+    floor of 1).
+
+    Operator-facing estimate only -- see ``_APPROX_SECONDS_PER_POD_GAME``
+    for the measurement it is derived from and why it is approximate.
+    """
+    import math
+    return max(1, math.ceil(games * _APPROX_SECONDS_PER_POD_GAME / 60))
+
+
+def _print_sim_cost_line(args) -> None:
+    """Tell the operator what ``--run-sim`` is about to cost, BEFORE the
+    advisor/curator/Forge spend starts.
+
+    Added 2026-08-17 alongside the ``--sim-games`` default move to the
+    verdict floor: the new default is ~8x the old one in Forge time, so a
+    silent bump would be the kind of surprise this project's warnings
+    exist to prevent. Two shapes, because the two runs mean different
+    things -- a verdict-grade run states the cost and points at
+    ``--smoke``; a sub-floor run states, up front, that the row it writes
+    will say 'inconclusive'.
+
+    Goes to stderr under ``--json`` (stdout must stay machine-parseable
+    for batch drivers and commander-improve's per-round capture), stdout
+    otherwise -- the same channel rule the ``--mode auto`` disclosure and
+    the sub-threshold warning already follow.
+    """
+    stream = sys.stderr if args.json else sys.stdout
+    minutes = _estimate_sim_minutes(args.sim_games)
+    floor = min_sim_games_for_verdict()
+    if args.sim_games >= floor:
+        print(
+            f"[sim] running {args.sim_games} pod games (~{minutes} min) -- "
+            f"the minimum for a statistically meaningful verdict "
+            f"({MIN_DECISIVE_GAMES_FOR_VERDICT} decisive games, and the 2 "
+            f"filler seats win ~half the pod games); pass --smoke for a "
+            f"{SMOKE_SIM_GAMES}-game sanity check.",
+            file=stream, flush=True,
+        )
+        return
+    expected_decisive = int(args.sim_games * EXPECTED_DECISIVE_FRACTION)
+    print(
+        f"[sim] running {args.sim_games} pod games (~{minutes} min) -- a "
+        f"sanity check, NOT a verdict: ~{expected_decisive} expected "
+        f"decisive games is below the {MIN_DECISIVE_GAMES_FOR_VERDICT}-"
+        f"decisive gate, so this iteration will record 'inconclusive'. "
+        f"Pass --sim-games {floor} (the default) for a verdict.",
+        file=stream, flush=True,
+    )
 
 
 def auto_curate_main(argv: Optional[list[str]] = None) -> int:
@@ -189,30 +270,49 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "DECISIVE games (won by the old or new deck "
                         "itself -- the 2 filler seats win ~half the pod "
                         "games, so budget ~2x that in total games); "
-                        "below that the verdict is recorded as "
-                        "'inconclusive', so at the default --sim-games "
-                        "5 this is a smoke signal, not a decisive "
-                        "test. Skipped automatically under --dry-run "
-                        "or --no-log (no row to update).")
-    # Default stays 5 on purpose: auto-curate's --run-sim is a cheap
-    # smoke signal, and silently 8x-ing every operator's Forge bill is
-    # not this flag's call -- the sub-threshold warning printed at sim
-    # start tells them the verdict will be 'inconclusive' and what to
-    # pass instead. (commander-improve, whose whole point is advancing
-    # on 'kept', defaults to 45.) UNITS in the help text below: this
-    # flag is TOTAL 4-player-pod games; the 20-game verdict gate counts
-    # DECISIVE games (head-to-head wins only, ~half the total because
-    # the two filler seats win the rest) -- hence "40+, e.g. 45", not
-    # "20, e.g. 25".
-    p.add_argument("--sim-games", type=int, default=5,
-                   help="TOTAL 4-player pod games per A/B sim (default "
-                        "5 -- far below what a verdict needs, on "
-                        "purpose: a cheap smoke signal). Verdicts need "
-                        ">= 20 DECISIVE games, i.e. games won by the "
-                        "old or new deck itself; the 2 filler seats "
-                        "win ~half the pod games, so expect decisive "
-                        "~= total/2 and pass >= 40 total, e.g. 45, "
-                        "for a verdict that can resolve. "
+                        "since 2026-08-17 --sim-games therefore "
+                        "defaults to that floor (40 total) so this flag "
+                        "can actually close the loop. Pass --smoke for "
+                        "the old cheap 5-game signal, which records "
+                        "'inconclusive'. Skipped automatically under "
+                        "--dry-run or --no-log (no row to update).")
+    # 2026-08-17: --smoke carries the cheap old behaviour so the default
+    # could move to the verdict floor without deleting the "just prove
+    # the pipeline runs" mode operators actually used it for.
+    p.add_argument("--smoke", action="store_true",
+                   help=f"Cheap sanity check instead of a verdict-grade "
+                        f"sim: run {SMOKE_SIM_GAMES} pod games (the "
+                        f"pre-2026-08-17 --sim-games default) to prove "
+                        f"the pipeline runs end to end. Says so up "
+                        f"front, because ~{int(SMOKE_SIM_GAMES * EXPECTED_DECISIVE_FRACTION)} "
+                        f"expected decisive games is far below the "
+                        f"{MIN_DECISIVE_GAMES_FOR_VERDICT}-decisive gate "
+                        f"-- the iteration row WILL record "
+                        f"'inconclusive', never kept/reverted/neutral. "
+                        f"An explicit --sim-games N overrides this.")
+    # Default is the VERDICT FLOOR, resolved from the constants rather
+    # than hardcoded (see _proposer_sim.min_sim_games_for_verdict). The
+    # sentinel None distinguishes "operator picked a number" from "took
+    # the default", which is what makes --smoke's cheaper default and
+    # the explicit-override precedence expressible. Before 2026-08-17
+    # this defaulted to 5, ~2 expected decisive: --run-sim -- the
+    # flagship close-the-loop flag -- could then only ever write
+    # 'inconclusive', so the loop it exists to close structurally never
+    # closed. UNITS in the help text below: this flag is TOTAL
+    # 4-player-pod games; the 20-game verdict gate counts DECISIVE games
+    # (head-to-head wins only, ~half the total because the two filler
+    # seats win the rest) -- hence a 40-game floor for a 20-decisive gate.
+    p.add_argument("--sim-games", type=int, default=None,
+                   help=f"TOTAL 4-player pod games per A/B sim (default "
+                        f"{min_sim_games_for_verdict()} -- the smallest "
+                        f"budget whose EXPECTED decisive count reaches "
+                        f"the verdict gate). Verdicts need >= "
+                        f"{MIN_DECISIVE_GAMES_FOR_VERDICT} DECISIVE "
+                        f"games, i.e. games won by the old or new deck "
+                        f"itself; the 2 filler seats win ~half the pod "
+                        f"games, so expect decisive ~= total/2. Below "
+                        f"the default the run records 'inconclusive' "
+                        f"(see --smoke). "
                         "The harness alternates seat order "
                         "per game, so total games = 2 * this number "
                         "isn't quite right -- it's exactly this "
@@ -244,6 +344,22 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "Soft-biases candidate adds toward those archetypes. "
                         "Empty / absent = no bias.")
     args = p.parse_args(argv)
+
+    # Resolve --sim-games from its sentinel (2026-08-17). Precedence:
+    # explicit --sim-games N > --smoke > the verdict floor. An explicit
+    # number wins over --smoke deliberately -- the operator who typed a
+    # game count meant it -- but say so on stderr rather than silently
+    # honouring one of two flags that disagree.
+    if args.sim_games is None:
+        args.sim_games = (
+            SMOKE_SIM_GAMES if args.smoke else min_sim_games_for_verdict()
+        )
+    elif args.smoke:
+        print(
+            f"[sim] --smoke and --sim-games {args.sim_games} both given; "
+            f"the explicit game count wins.",
+            file=sys.stderr, flush=True,
+        )
 
     # Exactly one of {deck_path, --batch} must be provided. Reject
     # both-set and neither-set up front so the user gets a clean
@@ -287,6 +403,14 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     if not args.deck_path.exists():
         print(f"ERROR: deck not found: {args.deck_path}", flush=True)
         return 2
+
+    # Up-front sim cost, printed BEFORE the advisor + curator spend so
+    # the operator can still Ctrl-C. Only when the sim will actually run:
+    # --run-sim is ignored under --dry-run / --no-log (there is no row to
+    # update), and quoting a Forge bill that is never charged would be
+    # its own kind of dishonesty.
+    if args.run_sim and not args.dry_run and not args.no_log:
+        _print_sim_cost_line(args)
 
     # Adaptive change budget (--mode auto): resolve the tier from the
     # deck's health score BEFORE the caps below, so the rest of the
@@ -632,6 +756,17 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
               f"{len(proposal.dropped_for_protection)}")
         for c in proposal.dropped_for_protection:
             print(f"  [LOCKED] {c}")
+    if proposal.dropped_for_politics:
+        # Decision C2 / R2-P09 (2026-08-20). Printed with the shared
+        # shield sentence so the CLI, the advisor's skip records and any
+        # UI pill all disclose the same refusal in the same words —
+        # the guard removing a cut has to be visible, not silent.
+        from .staples import POLITICS_SHIELD_REASON
+        print(f"Dropped by the politics guard: "
+              f"{len(proposal.dropped_for_politics)}")
+        print(f"  ({POLITICS_SHIELD_REASON})")
+        for c in proposal.dropped_for_politics:
+            print(f"  [POLITICS] {c}")
     if proposal.dropped_for_color_identity:
         print(f"Dropped for color identity (off-color): "
               f"{len(proposal.dropped_for_color_identity)}")

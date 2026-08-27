@@ -8,7 +8,10 @@ detailed metrics ``update_iteration_sim`` persists.
 
 Public symbols:
 
-  ``_DEFAULT_SIM_MARGIN``         — minimum delta to call kept/reverted.
+  ``_DEFAULT_SIM_MARGIN``         — legacy minimum-delta pre-filter for
+                                    kept/reverted (see VERDICT_ALPHA).
+  ``VERDICT_ALPHA``               — two-sided binomial significance level
+                                    the kept/reverted call must clear.
   ``EXPECTED_DECISIVE_FRACTION``  — expected decisive share of TOTAL pod
                                     games (filler seats win the rest).
   ``min_sim_games_for_verdict()`` — smallest --sim-games whose expected
@@ -34,19 +37,39 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Canonical decisive-games floor, defined next to the binomial test it
+# gates (analyst owns the verdict statistics; this module already imports
+# ``binomial_two_sided_p`` from there — same direction, no cycle).
+# Re-exported under its historical name: ``improve`` and callers import
+# ``_proposer_sim.MIN_DECISIVE_GAMES_FOR_VERDICT``.
+from .analyst import MIN_DECISIVE_GAMES_FOR_VERDICT  # noqa: F401
 
-# Minimum margin (wins_b - wins_a) for an A/B run to be called a kept
-# vs reverted vs neutral outcome. Default 1 means a 3-2 result is
-# 'kept' rather than 'neutral' -- on a 5-game sim that's a meaningful
-# signal even though it's noisy. The CLI can tune via --sim-margin.
+
+# Minimum absolute margin (|wins_b - wins_a|) for an A/B run to even be
+# CONSIDERED kept/reverted. Historical knob (the CLI tunes it via
+# --sim-margin) kept for backward compatibility, now a coarse pre-filter:
+# since 2026-08-14 the actual kept/reverted call additionally requires
+# the split to be statistically significant (exact two-sided binomial
+# test vs p=0.5 at VERDICT_ALPHA — see _verdict_from_ab). At the default
+# margin=1 the significance test is strictly stricter, so the knob only
+# matters when a caller raises it ABOVE what significance demands.
 _DEFAULT_SIM_MARGIN = 1
 
-# Below this many DECISIVE games (wins_a + wins_b, draws excluded), an A/B
+# Two-sided significance level for the kept/reverted call. A fixed
+# absolute margin is game-count-invariant — under the null (a truly
+# neutral swap) pair-decisive wins split ~Binomial(n, 0.5), so with 20
+# decisive games P(|new - old| >= 4) ~= 0.50: half of all neutral swaps
+# would earn a confident verdict. The exact binomial test scales the bar
+# with the decisive count instead (at n=20 significance needs a 15-5
+# split; at n=40, 27-13 — exact tails give p(26,40)=0.081, p(27,40)=0.039).
+VERDICT_ALPHA = 0.05
+
+# MIN_DECISIVE_GAMES_FOR_VERDICT (imported from ``analyst`` above): below
+# that many DECISIVE games (wins_a + wins_b, draws excluded), an A/B
 # result is too noisy to call: the win-rate standard error is ~0.5/sqrt(N)
 # (N=10 -> +/-0.16, N=20 -> +/-0.11), which swamps the ~0.01-0.05 effect a
 # curator swap actually has. Below the threshold the verdict is 'inconclusive'
 # rather than a confident kept/reverted that a single-game flip could invert.
-MIN_DECISIVE_GAMES_FOR_VERDICT = 20
 
 # Unit converter between --sim-games and the gate above. --sim-games is
 # TOTAL 4-player-pod games, but the gate counts DECISIVE games -- games
@@ -80,15 +103,20 @@ def min_sim_games_for_verdict() -> int:
 
 
 def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
-                     min_decisive: int = MIN_DECISIVE_GAMES_FOR_VERDICT) -> str:
+                     min_decisive: int = MIN_DECISIVE_GAMES_FOR_VERDICT,
+                     alpha: float = VERDICT_ALPHA) -> str:
     """Map an ``ABResult`` to a verdict label.
 
     Returns one of 'kept' / 'reverted' / 'neutral' / 'inconclusive' / 'pending':
 
-      'kept'         -- new deck won at least ``margin`` more games than old
-      'reverted'     -- old deck won at least ``margin`` more games than new
-      'neutral'      -- difference within margin at a TRUSTWORTHY sample size
-                        (e.g. 21-20 over 41 decisive games)
+      'kept'         -- new deck won more AND the split is statistically
+                        significant (exact two-sided binomial test vs
+                        p=0.5, p < ``alpha``) AND |delta| >= ``margin``
+      'reverted'     -- same standard with old deck ahead
+      'neutral'      -- difference within binomial noise at a TRUSTWORTHY
+                        sample size (e.g. 21-20 over 41 decisive games,
+                        or 12-8 over 20 — p ~= 0.5, a coin does that half
+                        the time)
       'inconclusive' -- fewer than ``min_decisive`` decisive games, so the
                         result is below the noise floor regardless of margin
                         (a 3-2 at 5 games is a coin flip, not a tie)
@@ -98,7 +126,19 @@ def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
     real near-tie we can trust; 'inconclusive' is "not enough games to say."
     Gating low-N runs to 'inconclusive' stops a noise verdict from being
     recorded as authoritative.
+
+    2026-08-14 -- significance requirement added. The old rule was
+    ``|delta| >= margin`` alone, which is game-count-invariant: at the
+    default margin=1 ANY non-tied split over 20+ decisive games earned a
+    confident kept/reverted. Now the split must also clear an exact
+    binomial test (``analyst.binomial_two_sided_p``) at ``alpha``.
+    ``margin`` is retained as a backward-compatible pre-filter for
+    callers (--sim-margin) that want a LARGER minimum effect than
+    significance alone demands; at its default of 1 it is a no-op
+    relative to the test.
     """
+    from .analyst import binomial_two_sided_p
+
     status = getattr(ab_result, "status", None)
     if status != "done":
         return "pending"
@@ -108,11 +148,11 @@ def _verdict_from_ab(ab_result, *, margin: int = _DEFAULT_SIM_MARGIN,
     if decisive < min_decisive:
         return "inconclusive"
     delta = wins_b - wins_a
-    if delta >= margin:
-        return "kept"
-    if delta <= -margin:
-        return "reverted"
-    return "neutral"
+    if abs(delta) < margin:
+        return "neutral"
+    if binomial_two_sided_p(wins_b, decisive) >= alpha:
+        return "neutral"
+    return "kept" if delta > 0 else "reverted"
 
 
 def _ab_to_iteration_fields(ab_result) -> dict:
@@ -152,6 +192,64 @@ def _ab_to_iteration_fields(ab_result) -> dict:
     return fields
 
 
+#: Filename prefixes that are never filler-eligible. One tuple so the picker
+#: and the "why did I get zero fillers?" census (R2-P22, 2026-08-20) can
+#: never drift apart — the census exists to EXPLAIN this exact list, and a
+#: second hand-maintained copy would eventually explain the wrong one.
+#: Rationale per prefix lives in ``_pick_filler_decks``' docstring.
+_FILLER_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "[USER]", "[CONTROL]", "[PREMADE]", "[REF]",
+)
+
+
+def _filler_exclusion_census(
+    deck_dir: Path, exclude_paths: "list[Path]",
+) -> dict:
+    """Why the filler pool is what it is: ``{total, pair, eligible,
+    excluded, by_prefix}``.
+
+    ``exclude_paths`` (the v_n / v_n+1 decks being compared) is checked
+    FIRST and counted as ``pair``, never as a prefix exclusion: those two
+    files are the subject of the sim, and blaming their ``[USER]`` prefix
+    for the empty pool would explain the wrong thing to the operator.
+
+    Round-2 review 2026-08-20 (R2-P22). Adding ``[REF]`` to the exclusion
+    list (2026-08-17) can zero out the filler pool on a box that never ran a
+    bracket harvest — a deck dir of imports plus meta-test references is a
+    realistic non-harvest setup, and it regressed from "ran the sim" to
+    "Sim skipped", with a message that named only the count. An operator
+    staring at a directory full of .dck files was told, in effect, that the
+    files they can see do not exist.
+
+    Called ONLY on the failure path, so the extra directory walk costs
+    nothing in the normal case.
+    """
+    by_prefix: dict[str, int] = {}
+    exclude_set = {p.name for p in exclude_paths}
+    total = eligible = pair = 0
+    for p in deck_dir.glob("*.dck"):
+        total += 1
+        if p.name in exclude_set:
+            pair += 1
+            continue
+        matched = next(
+            (pre for pre in _FILLER_EXCLUDED_PREFIXES
+             if p.name.startswith(pre)),
+            None,
+        )
+        if matched is not None:
+            by_prefix[matched] = by_prefix.get(matched, 0) + 1
+        else:
+            eligible += 1
+    return {
+        "total": total,
+        "pair": pair,
+        "eligible": eligible,
+        "excluded": sum(by_prefix.values()),
+        "by_prefix": by_prefix,
+    }
+
+
 def _pick_filler_decks(
     deck_dir: Path,
     exclude_paths: list[Path],
@@ -180,8 +278,17 @@ def _pick_filler_decks(
         identical copy in the filler slots would be self-defeating).
       - Skip ``[USER]`` prefixed decks (those are the user's own
         work; the opponent pool is everything WITHOUT the prefix),
-        ``[CONTROL]`` calibration decks, and ``[PREMADE]``
-        popularity-ranked imports (they'd skew filler strength).
+        ``[CONTROL]`` calibration decks, ``[PREMADE]``
+        popularity-ranked imports, and -- since 2026-08-17 --
+        ``[REF]`` meta-test references. ``[REF]`` decks are Moxfield
+        top-likes: the SAME popularity bias ``[PREMADE]`` is excluded
+        for, so seating them as fillers made that exclusion arbitrary
+        rather than principled. The asymmetry now survives only where
+        it is earned: ``[REF]`` stays a pool CANDIDATE in
+        ``pool_curator._list_bracket_candidates`` (a real playable
+        community build, worth RANKING) but is no longer filler-
+        eligible, because a filler seat is never ranked -- its
+        strength silently sets the A/B baseline instead.
       - When ``target_bracket`` is given, group candidates by
         |bracket_of_candidate - target_bracket| and walk the buckets
         from delta=0 up. Each bucket is shuffled via ``rng`` for
@@ -201,9 +308,7 @@ def _pick_filler_decks(
     exclude_set = {p.name for p in exclude_paths}
     candidates = [
         p.name for p in deck_dir.glob("*.dck")
-        if not p.name.startswith("[USER]")
-        and not p.name.startswith("[CONTROL]")  # never use a calibration deck as filler
-        and not p.name.startswith("[PREMADE]")  # popularity-ranked; would skew filler strength
+        if not p.name.startswith(_FILLER_EXCLUDED_PREFIXES)
         and p.name not in exclude_set
     ]
     if not candidates:
@@ -297,6 +402,34 @@ def _run_sim_and_record(
             f"[sim] Need 2+ filler decks in {deck_dir} for a 4-player "
             f"Commander pod; found {len(filler_names)}. Sim skipped."
         )
+        # Say WHY, when the reason is the prefix exclusion rather than an
+        # empty directory (R2-P22, 2026-08-20). "found 0" in a directory
+        # full of .dck files reads as a bug in the tool; naming the rule
+        # and the two remedies makes it an actionable state. Only added
+        # for auto-picked fillers — an explicit --sim-fillers list that
+        # came up short is a typo, not a policy question.
+        if not args.sim_fillers:
+            census = _filler_exclusion_census(
+                deck_dir, [args.deck_path, out_path],
+            )
+            if census["excluded"] and not census["eligible"]:
+                breakdown = ", ".join(
+                    f"{pre} x{n}"
+                    for pre, n in sorted(census["by_prefix"].items())
+                )
+                msg += (
+                    f" All {census['excluded']} of the other .dck files "
+                    f"there are prefix-excluded from filler duty "
+                    f"({breakdown}): [USER] decks are yours, [CONTROL] "
+                    f"are calibration decks, and [PREMADE]/[REF] are "
+                    f"popularity-ranked imports whose strength would "
+                    f"silently set the A/B baseline. Fix it by harvesting "
+                    f"an opponent pool (`commander-import --harvest "
+                    f"{args.bracket}`) or by "
+                    f"naming seats explicitly with --sim-fillers "
+                    f"\"<file1.dck>,<file2.dck>\" (which bypasses the "
+                    f"exclusion)."
+                )
         if not args.json:
             print(msg, flush=True)
         # Still write 'pending' verdict explicitly so the row's state
@@ -355,6 +488,19 @@ def _run_sim_and_record(
     sim_payload = ab_result.to_dict()
     verdict = _verdict_from_ab(ab_result, margin=args.sim_margin)
     sim_fields = _ab_to_iteration_fields(ab_result)
+    # Verdict provenance (2026-08-20, R2-P06): stamp the exact
+    # parameters this verdict was computed under into the row's
+    # sim_report, so it is auditable without knowing which code
+    # version (or --sim-margin) wrote it. Same mechanism as improve's
+    # replication writer and the web save writer; this was the third
+    # and last verdict writer without it.
+    if isinstance(sim_fields.get("sim_report"), dict):
+        from .knowledge_log import SIM_REPORT_VERDICT_PARAMS_KEY, verdict_provenance
+        sim_fields["sim_report"][SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
+            margin=args.sim_margin,
+            alpha=VERDICT_ALPHA,
+            min_decisive=MIN_DECISIVE_GAMES_FOR_VERDICT,
+        )
 
     # Post-sim honesty: the pre-sim warning above is an ESTIMATE
     # (expected fraction 0.5); this reports the MEASURED outcome. When
@@ -463,6 +609,11 @@ def _log_auto_curate_iteration(
         "source": proposal.source,
         "dropped_for_bracket": list(proposal.dropped_for_bracket),
         "dropped_for_protection": list(proposal.dropped_for_protection),
+        # Politics-shielded cuts (decision C2 / R2-P09, 2026-08-20).
+        # Persisted beside the other refusal buckets so a later reader
+        # can tell "the curator proposed no cuts" apart from "the guard
+        # refused the cuts the curator proposed".
+        "dropped_for_politics": list(proposal.dropped_for_politics),
         "dropped_for_color_identity": list(proposal.dropped_for_color_identity),
         "dropped_for_balance": list(proposal.dropped_for_balance),
         # Pair-drops from apply-time decklist validation — each entry

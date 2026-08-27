@@ -1,8 +1,14 @@
-"""proposer.py tests — manual backend works fully, Claude/Ollama stubs.
+"""proposer.py tests — manual backend works fully, Claude stub, Ollama retired.
 
 The router fallback behavior is the most important guarantee: if Claude is
 configured but unavailable (no key, no SDK, etc.), the call falls back to
 manual rather than crashing the iteration loop.
+
+The Ollama proposal rung was RETIRED by decision A4 (a local model cannot
+execute the 706-line audit workflow). What is pinned here is that the
+retirement is inert AND loud: `use_ollama=True` still constructs, makes no
+network call, and says where local models went. The live local-model tier
+has its own tests in `tests/test_local_model.py`.
 """
 import json
 from pathlib import Path
@@ -140,11 +146,17 @@ def test_claude_propose_unimplemented_without_sdk(tmp_path, monkeypatch):
         claude_propose(input_, ProposerConfig())
 
 
-@pytest.mark.slow
-def test_ollama_propose_is_unimplemented(tmp_path):
+def test_ollama_propose_is_retired(tmp_path):
+    """Decision A4: the local-proposal path is retired, not merely
+    unwired. It raises without touching the network and the message
+    points at the replacement (`local_model`) and the reason."""
     input_ = _make_input(tmp_path)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError) as exc_info:
         ollama_propose(input_, ProposerConfig())
+    message = str(exc_info.value)
+    assert "retired" in message
+    assert "local_model" in message
+    assert "COMMANDER_BUILDER_LOCAL_MODEL" in message
 
 
 # --- propose() router behavior --------------------------------------------
@@ -232,20 +244,25 @@ def test_propose_garbage_claude_response_is_loud_not_manual(
     assert manual_calls == []
 
 
-def test_propose_garbage_ollama_response_is_loud_not_manual(
-        tmp_path, monkeypatch):
-    """Same loud-error rule for the Ollama backend: a daemon that answers
-    with non-JSON must surface LLMJsonError, not degrade to manual."""
-    from commander_builder._llm_json import LLMJsonError
-    payload = json.dumps({"response": "not json at all"}).encode("utf-8")
-
-    def fake_urlopen(req, timeout=None):
-        return _FakeUrlOpenResponse(payload)
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+def test_propose_with_use_ollama_makes_no_network_call(
+        tmp_path, monkeypatch, capsys):
+    """A retired flag must be inert, not silently inert. `use_ollama=True`
+    still constructs (config back-compat), reaches NO daemon at all, and
+    prints the retirement note before falling through to manual."""
+    def explode(*a, **kw):
+        raise AssertionError("retired ollama path made a network call")
+    monkeypatch.setattr("urllib.request.urlopen", explode)
 
     input_ = _make_input(tmp_path)
-    with pytest.raises(LLMJsonError, match="ollama_propose"):
-        propose(input_, ProposerConfig(use_ollama=True))
+    manifest = input_.deck_path.parent / f"{input_.deck_path.name}.audit_manifest.json"
+    _write_manifest(manifest, rationale="manual after retirement")
+
+    out = propose(input_, ProposerConfig(use_ollama=True))
+    assert out.source == "manual"
+    assert out.rationale == "manual after retirement"
+    printed = capsys.readouterr().out
+    assert "retired" in printed
+    assert "local_model" in printed
 
 
 # --- claude_propose success path (mocked Anthropic SDK) --------------------
@@ -415,43 +432,6 @@ def test_claude_propose_handles_empty_response(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="empty response"):
         claude_propose(_make_input(tmp_path), ProposerConfig())
     # monkeypatch.setitem auto-cleans up.
-
-
-# --- ollama_propose success path (mocked HTTP) -----------------------------
-
-class _FakeUrlOpenResponse:
-    def __init__(self, body: bytes):
-        self._body = body
-    def read(self): return self._body
-    def __enter__(self): return self
-    def __exit__(self, *a): pass
-
-
-def test_ollama_propose_parses_daemon_response(tmp_path, monkeypatch):
-    inner = json.dumps({
-        "added": ["LocalCard"], "removed": ["StaleCard"],
-        "rationale": "tightened curve", "audit_version": "v3",
-    })
-    payload = json.dumps({"response": inner}).encode("utf-8")
-
-    def fake_urlopen(req, timeout=None):
-        return _FakeUrlOpenResponse(payload)
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-
-    out = ollama_propose(_make_input(tmp_path), ProposerConfig())
-    assert out.source == "ollama"
-    assert out.added == ["LocalCard"]
-    assert out.removed == ["StaleCard"]
-
-
-def test_ollama_propose_falls_back_when_daemon_unreachable(tmp_path, monkeypatch):
-    import urllib.error
-    def network_down(req, timeout=None):
-        raise urllib.error.URLError("daemon not running")
-    monkeypatch.setattr("urllib.request.urlopen", network_down)
-
-    with pytest.raises(NotImplementedError, match="Ollama daemon not reachable"):
-        ollama_propose(_make_input(tmp_path), ProposerConfig())
 
 
 # ---------------------------------------------------------------------------

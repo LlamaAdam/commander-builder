@@ -22,6 +22,14 @@ claude) produces its recommendations:
   the UI can render a "not owned" badge. Inert when no collection
   is registered.
 
+- ``_filter_for_politics`` (2026-08-17, decision C2): drops CUT
+  candidates the Forge AI cannot value — goad / monarch / vote /
+  tempting-offer / Rhystic-tax / pillow-fort cards. The source-
+  agnostic half of the politics guard: ``_advisor_heuristic``
+  shields its own cut loop in place, but the Claude and
+  bracket-peers backends propose cuts this module never sees
+  otherwise.
+
 Extracted from ``improvement_advisor.py`` as part of the per-source
 module split. External code keeps importing from
 ``commander_builder.improvement_advisor``.
@@ -32,7 +40,13 @@ from __future__ import annotations
 from typing import Optional
 
 from ._advisor_models import SwapRecommendation
-from .staples import ROLE_SATURATION_THRESHOLDS, is_role_saturated
+from .staples import (
+    POLITICS_SHIELD_REASON,
+    ROLE_SATURATION_THRESHOLDS,
+    is_role_saturated,
+    politics_guard_enabled,
+    politics_tags_for_name,
+)
 
 
 def _filter_for_saturation(
@@ -141,6 +155,66 @@ def _filter_for_ownership(
             rec.evidence = {}
         rec.evidence["owned"] = owned
         kept.append(rec)
+    return kept, skipped
+
+
+def _filter_for_politics(
+    recs: list[SwapRecommendation],
+    deck_text: str = "",
+    lookup=None,
+) -> tuple[list[SwapRecommendation], list[dict]]:
+    """Drop CUT candidates the Forge AI structurally cannot value.
+
+    Decision C2 (2026-08-17). The A/B loop's margin is measured against
+    Forge's AI, which does not negotiate, does not pick an archenemy and
+    does not model an opponent's incentive to pay a tax. So goad, the
+    monarch, votes, tempting offers, Rhystic taxes and pillow-fort
+    deterrents all read to the sim as no-ops — and a loop that cuts what
+    doesn't move the margin will "empirically" cut exactly the cards that
+    define multiplayer Commander. A near-zero margin on one of these is
+    not evidence against the card; it is evidence the instrument is
+    blind to it, so these cards are exempted from margin-driven cuts
+    rather than merely down-ranked. (Same refusal-not-preference
+    semantics as ``card_score.cut_candidates``' guard rails.)
+
+    Scope, deliberately narrow:
+
+    - **Cuts only.** An ADD rec for a politics card is untouched — the
+      guard shields, it never promotes. Nothing here makes a politics
+      card more likely to be recommended.
+    - **Per-deck opt-out honored.** ``PoliticsGuard=off`` in the deck's
+      ``[metadata]`` block makes this a pass-through (see
+      ``staples.politics_guard_enabled``). ``deck_text=""`` — a caller
+      that doesn't hold the file — keeps the guard ON, matching the
+      default.
+
+    Returns ``(kept_recs, skipped_records)``; each skipped record is
+    ``{card, reason, politics_tags}`` with ``reason`` set to the shared
+    ``staples.POLITICS_SHIELD_REASON`` sentence, so the report and UI
+    disclose the refusal in the project's voice instead of silently
+    shipping a shorter cut list — the same disclosure contract
+    ``_filter_for_saturation`` and ``_filter_for_ownership`` honor.
+
+    ``lookup`` is the injectable Scryfall-shaped resolver; tests and
+    cache-only callers pass their own so this never touches the network.
+    """
+    if not politics_guard_enabled(deck_text):
+        return recs, []
+    kept: list[SwapRecommendation] = []
+    skipped: list[dict] = []
+    for rec in recs:
+        if rec.action != "cut":
+            kept.append(rec)
+            continue
+        tags = politics_tags_for_name(rec.card, lookup)
+        if not tags:
+            kept.append(rec)
+            continue
+        skipped.append({
+            "card": rec.card,
+            "reason": POLITICS_SHIELD_REASON,
+            "politics_tags": list(tags),
+        })
     return kept, skipped
 
 

@@ -75,6 +75,21 @@ whole point of the report is that a user acts on it. Concretely:
     and callers that need the three-state answer read ``status``
     (``"legal"`` / ``"illegal"`` / ``"unverified"``).
 
+Data freshness
+--------------
+``scryfall_client.lookup_card`` serves disk snapshots FOREVER — there
+is no TTL, so a card banned after its snapshot was written keeps
+reading "legal" until someone refreshes the store, and WotC now runs
+seven B&R windows a year. Rather than adding refetch storms over the
+~32k-snapshot store, every ``validate_deck`` report carries the age of
+the OLDEST snapshot backing its verdict (file mtime, the same
+snapshot-age convention as ``oracle_store.snapshot_age_days`` /
+``BULK_FRESH_DAYS``) and a ``data_warning`` string once that age
+crosses ``STALE_SNAPSHOT_DAYS`` — "legality data as of <date>, N days
+old; run ``commander-oracle-refresh --from-bulk``". The warning is
+informational only: it never flips ``legal``/``status``, because stale
+data is a reason to refresh, not evidence of a violation.
+
 Documented limitations
 ----------------------
   - **Companions.** The ``.dck`` format has no companion slot, so a
@@ -94,6 +109,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Callable, Iterable, Optional
 
@@ -107,6 +123,14 @@ from .web.deck_text_ops import _dck_name_key, _is_basic_land_name
 # which is why we check the TOTAL and let the commander-count check
 # police the split. See dck_utils.COMMANDER_DECK_SIZE.
 DECK_SIZE = dck_utils.COMMANDER_DECK_SIZE
+
+#: Oldest-backing-snapshot age (days) beyond which a legality report
+#: carries a staleness warning. ~45 days spans roughly one B&R window
+#: at WotC's current seven-windows-a-year cadence, so a store older
+#: than this has plausibly missed an update. A CONSTANT, not a config
+#: knob: the number is a documented judgment call, and every consumer
+#: (validate_deck, doctor) should agree on it.
+STALE_SNAPSHOT_DAYS = 45.0
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +220,12 @@ class LegalityReport:
     ``status`` / ``verified``. An outage yields ``legal=True`` with a
     populated ``unverified`` list, never ``legal=False``: we do not
     fail a deck on data we don't have.
+
+    ``data_age_days`` is the age of the OLDEST disk snapshot backing
+    the verdict (None when nothing on disk backs it — injected-lookup
+    test runs, empty store), and ``data_warning`` is the human
+    staleness sentence once that age crosses ``STALE_SNAPSHOT_DAYS``.
+    Both are informational: they never affect ``legal``/``status``.
     """
     legal: bool
     violations: tuple[Violation, ...] = ()
@@ -203,6 +233,8 @@ class LegalityReport:
     card_count: int = 0
     commander_count: int = 0
     lookup_failures: int = 0
+    data_age_days: Optional[float] = None
+    data_warning: Optional[str] = None
 
     @property
     def verified(self) -> bool:
@@ -238,6 +270,8 @@ class LegalityReport:
             "lookup_failures": self.lookup_failures,
             "violations": [v.to_dict() for v in self.violations],
             "unverified": [v.to_dict() for v in self.unverified],
+            "data_age_days": self.data_age_days,
+            "data_warning": self.data_warning,
         }
 
 
@@ -274,6 +308,63 @@ class BanScan:
             "unverified": list(self.unverified),
             "checked": self.checked,
         }
+
+
+# ---------------------------------------------------------------------------
+# Snapshot freshness
+# ---------------------------------------------------------------------------
+
+def snapshot_staleness(
+    names: Iterable[str],
+    *,
+    threshold_days: float = STALE_SNAPSHOT_DAYS,
+) -> tuple[Optional[float], Optional[str]]:
+    """``(oldest_age_days, warning)`` for the disk snapshots behind
+    ``names``.
+
+    Reads the shared oracle-snapshot store via
+    ``oracle_store.snapshot_age_days`` (file mtime — the repo's
+    existing snapshot-age convention). Names with no snapshot are
+    simply not counted: "never cached" is a resolution problem the
+    unverified buckets already report, not a freshness problem. The
+    OLDEST age is the honest one to surface — a single ancient
+    snapshot is exactly where a post-snapshot banning hides.
+
+    Returns ``(None, None)`` when nothing on disk backs the names (or
+    the store can't be read at all). ``warning`` is None below
+    ``threshold_days`` and the "legality data as of <date>, N days
+    old; run refresh" sentence at/above it. Never raises.
+    """
+    try:
+        from .oracle_store import snapshot_age_days
+    except Exception:  # noqa: BLE001 — freshness is a bonus, never a blocker
+        return None, None
+    ages: list[float] = []
+    seen: set[str] = set()
+    for name in names:
+        key = _dck_name_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            age = snapshot_age_days(name)
+        except Exception:  # noqa: BLE001 — one bad stat must not sink the scan
+            age = None
+        if age is not None:
+            ages.append(age)
+    if not ages:
+        return None, None
+    oldest = max(ages)
+    if oldest < threshold_days:
+        return oldest, None
+    as_of = datetime.now(timezone.utc) - timedelta(days=oldest)
+    return oldest, (
+        f"Legality data as of {as_of:%Y-%m-%d} — the oldest card "
+        f"snapshot backing this verdict is {oldest:.0f} days old "
+        f"(warning threshold {threshold_days:g}). Bans from newer B&R "
+        f"windows may be invisible; run "
+        f"`commander-oracle-refresh --from-bulk` to refresh."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1139,13 @@ def validate_deck(
         )
     _check_banned(display, cards, violations, unverified)
 
+    # Freshness is read from the shared disk-snapshot store regardless
+    # of the injected ``lookup``: every production lookup (the default,
+    # routes_decks' cache-only wrapper, card_score's memoizer) is a
+    # view over that same store, and hermetic test stubs simply find no
+    # snapshots and get (None, None).
+    data_age_days, data_warning = snapshot_staleness(display.values())
+
     return LegalityReport(
         legal=not violations,
         violations=tuple(violations),
@@ -1055,4 +1153,6 @@ def validate_deck(
         card_count=sum(quantities.values()),
         commander_count=commanders,
         lookup_failures=cards.failures,
+        data_age_days=data_age_days,
+        data_warning=data_warning,
     )

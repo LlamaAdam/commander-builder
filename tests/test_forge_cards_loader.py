@@ -262,6 +262,78 @@ def test_loader_dfc_index_does_not_shadow_regular_cards(tmp_path):
     assert "Sol Ring" in (loader.load_one("Sol Ring") or "")
 
 
+def test_loader_warm_builds_dfc_index_eagerly_and_once(tmp_path):
+    """``warm()`` pays the full-corpus DFC scan up front so a shared,
+    long-lived loader (the web dashboard's memoized instance) never
+    hands the 1-2s lazy scan to a user-facing request thread. It is
+    idempotent: a second call must not re-scan."""
+    zip_path = tmp_path / "cardsfolder.zip"
+    _build_fixture_zip(zip_path, {
+        "bala_ged_recovery_bala_ged_sanctuary": (
+            "Name:Bala Ged Recovery\nAlternateMode:DoubleFaced\n"
+            "Name:Bala Ged Sanctuary\n"
+        ),
+    })
+    loader = CardsLoader(zip_path=zip_path)
+    assert loader._dfc_index is None  # nothing built yet
+
+    loader.warm()
+    built = loader._dfc_index
+    assert built == {
+        "bala_ged_recovery": "bala_ged_recovery_bala_ged_sanctuary",
+    }
+
+    # Idempotent: the SAME dict object survives, i.e. no second scan.
+    loader.warm()
+    assert loader._dfc_index is built
+    # And a front-face lookup still resolves off the warmed index.
+    assert "Bala Ged Sanctuary" in (loader.load_one("Bala Ged Recovery") or "")
+
+
+def test_loader_dfc_index_is_built_once_under_concurrent_lookups(tmp_path):
+    """Two threads missing on the same MDFC front face at once must
+    share ONE index build — a shared loader that ran the ~32k-file scan
+    per racing thread would be worse than the per-request loader this
+    memoization replaced."""
+    import threading
+
+    zip_path = tmp_path / "cardsfolder.zip"
+    _build_fixture_zip(zip_path, {
+        "bala_ged_recovery_bala_ged_sanctuary": (
+            "Name:Bala Ged Recovery\nAlternateMode:DoubleFaced\n"
+            "Name:Bala Ged Sanctuary\n"
+        ),
+    })
+    loader = CardsLoader(zip_path=zip_path)
+
+    builds = []
+    real_build = loader._build_dfc_index
+
+    def counting_build():
+        builds.append(1)
+        return real_build()
+
+    loader._build_dfc_index = counting_build
+
+    # Barrier parties == worker count: the main thread does NOT wait on
+    # it, it only starts and joins.
+    start = threading.Barrier(4)
+    results = []
+
+    def worker():
+        start.wait()
+        results.append(loader.load_one("Bala Ged Recovery"))
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(builds) == 1
+    assert all(r is not None for r in results)
+
+
 def test_loader_context_manager_closes_zip(tmp_path):
     """``with CardsLoader(...) as loader:`` closes the zip on exit
     so a pile of analyzer invocations doesn't leak file handles."""

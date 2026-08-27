@@ -1,0 +1,86 @@
+# One-shot capture helper (2026-08-20, R2-P18). The dev sandbox's egress
+# proxy blocks archidekt.com on every lane, and the round-2 fix for the
+# Archidekt adapter needs the REAL API response shape for a deck --
+# synthesizing it is the exact failure mode the fixture would exist to
+# catch. CI runners have open egress, so this workflow_dispatch job
+# fetches one deck's JSON and commits it to the calling branch under
+# tests/fixtures/_captures/ as raw material. It is NOT the fixture:
+# the checked-in fixture is hand-trimmed from this capture with
+# provenance noted, and the capture file is deleted once consumed.
+name: fetch-archidekt-capture
+
+# Trigger: push-based rather than workflow_dispatch, because GitHub only
+# registers dispatchable workflows from the DEFAULT branch, and this
+# helper lives on a feature branch. Committing a request file both
+# triggers the run and carries the deck id.
+on:
+  push:
+    branches: ["claude/ollama-code-analysis-ak77i1"]
+    paths: ["tests/fixtures/_captures/request.txt"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archidekt-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch deck JSON
+        run: |
+          # Deleting the request file (the consume step) also matches
+          # this workflow's paths filter -- that push must be a clean
+          # no-op, not a failure (learned 2026-08-20: the fixture
+          # cleanup triggered a red X on the PR).
+          if [ ! -f tests/fixtures/_captures/request.txt ]; then
+            echo "request.txt absent (consumed) -- nothing to fetch"; exit 0
+          fi
+          # First NUMBER in the file, not all digits concatenated -- a
+          # retry marker like '24864897 retry-1' must not become
+          # 248648971 (which is exactly what happened on attempt 2).
+          DECK_ID="$(grep -oE '[0-9]+' tests/fixtures/_captures/request.txt | head -1)"
+          if [ -z "$DECK_ID" ]; then echo "request.txt must contain a numeric deck id"; exit 1; fi
+          echo "deck id: $DECK_ID"
+          # First attempt (2026-08-20) 403'd: Cloudflare rejects a
+          # bot-ish UA from a datacenter IP. Use the PROJECT UA string
+          # (archidekt_client.USER_AGENT, which the live probe of
+          # 2026-07-25 succeeded with), and fall back to a browser UA.
+          fetch() {
+            curl -sS --fail --max-time 60 \
+              -H "Accept: application/json" \
+              -H "User-Agent: $1" \
+              "https://archidekt.com/api/decks/$DECK_ID/" \
+              -o "tests/fixtures/_captures/archidekt_deck_$DECK_ID.json"
+          }
+          fetch "commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)" \
+            || fetch "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+          python3 - <<'PY'
+          import json, collections, glob
+          hits = glob.glob("tests/fixtures/_captures/archidekt_deck_*.json")
+          if not hits:
+              raise SystemExit(0)
+          path = hits[0]
+          data = json.load(open(path))
+          print("top-level keys:", sorted(data.keys()))
+          cards = data.get("cards", [])
+          layouts = collections.Counter(
+              (c.get("card", {}).get("oracleCard", {}) or {}).get("layout")
+              for c in cards
+          )
+          print("card count:", len(cards), "layouts:", dict(layouts))
+          PY
+      - name: Commit capture to the calling branch
+        run: |
+          if ! ls tests/fixtures/_captures/archidekt_deck_*.json >/dev/null 2>&1; then
+            echo "nothing captured -- skipping commit"; exit 0
+          fi
+          git config user.name "archidekt-capture[bot]"
+          git config user.email "noreply@users.noreply.github.com"
+          git add tests/fixtures/_captures/
+          git commit -m "chore: capture Archidekt deck API response (raw material for the R2-P18 fixture; delete after trimming) [skip ci]"
+          git push

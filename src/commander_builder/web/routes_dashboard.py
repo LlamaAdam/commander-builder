@@ -30,6 +30,22 @@ any external script) rely on keeps working. All three routes share the
 ``_pricing_section`` / ``_lift_section`` helpers, so the two shapes can
 never drift.
 
+SIM COVERAGE (2026-08, roadmap #4). Both dashboard payloads additionally
+carry an additive ``sim_coverage`` key — cards the vendored Forge build
+has no script for (see ``_sim_coverage``). Forge sims silently omit
+such cards ("An unsupported card was requested" in the logs, which
+``log_parser`` counts but nothing ever showed a user), so the dashboard
+now flags the gap before anyone trusts a sim verdict built on them.
+
+BRACKET RE-VERIFICATION (2026-08-20). The dashboard is otherwise
+read-only, with ONE deliberate exception: when its bracket estimate
+agrees with the filename's ``[B<n>]`` tag, it retires the deck's
+``BracketUnverified=`` marker (written by the deck-editor PUT — see
+``routes_decks`` and ``dck_meta``). This is the only place in the app
+that recomputes a bracket rather than reading one, so it is the only
+place that can honestly say the tag has a measurement behind it again.
+See ``_clear_verified_bracket_marker`` for the exact conditions.
+
 Built via ``make_dashboard_blueprint(deck_dir, knowledge_db,
 list_decks, resolve_deck_path)``. The two helper functions are
 passed in (rather than imported) because they're still defined in
@@ -42,6 +58,7 @@ refactor (tier-3 issue #3.1).
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +66,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from ..deck_dashboard import build_dashboard
 from ..knowledge_log import (
+    MIN_COMPARABLE_VERDICT_ERA,
     audit_card_diff,
     get_iteration,
     iteration_graph_for_deck,
@@ -64,6 +82,7 @@ from ._helpers import (
     _build_suggested_adds,
     _iteration_to_dict,
     _resolve_deck_path,
+    atomic_write_text,
 )
 from .deck_pricing import printing_savings_for_deck_text
 
@@ -130,6 +149,244 @@ _DEFERRED_SECTIONS = {
     "pricing": _pricing_section,
     "lift_picks": _lift_section,
 }
+
+
+# Empty/unavailable sim-coverage shape. ``available: False`` means "the
+# vendored Forge corpus could not be consulted" — a fresh checkout with
+# no vendor/forge, or a read error — which is NOT the same statement as
+# "every card is supported"; the UI hides the tile instead of showing a
+# confident zero (the fail-quiet convention every other probe follows).
+_SIM_COVERAGE_UNAVAILABLE = {
+    "available": False,
+    "checked_count": 0,
+    "unsupported_count": 0,
+    "unsupported_names": [],
+}
+
+
+# --- Memoized Forge corpus loader (M1 fix, 2026-08) --------------------
+#
+# ``_sim_coverage`` used to construct a fresh ``CardsLoader`` per request
+# and throw it away. Any deck containing an MDFC front-face reference (or
+# any unsupported card) misses the direct slug lookup and falls through
+# to the loader's DFC index — a full ~32k-file corpus scan (~1-2s) —
+# which the next dashboard load then paid AGAIN on a brand-new instance.
+#
+# The fix: one long-lived ``CardsLoader`` shared at module level, keyed
+# on a cheap corpus signature (path + mtime of whichever layout
+# ``CardsLoader.locate`` would pick). A Forge upgrade — new
+# ``cardsfolder.zip`` or refreshed unzipped tree — changes the signature
+# and transparently rebuilds the loader on the next request. The DFC
+# index is warmed at build time, so request threads only ever do O(1)
+# lookups.
+#
+# Thread-safety: ``_CORPUS_LOCK`` serializes cache check + build (Flask's
+# threaded server plus the routes_decks/routes_sim background job threads
+# can hit this concurrently); the loader itself is also internally locked
+# (see forge_cards_loader) so sharing one instance across threads is
+# safe. An evicted loader is deliberately NOT ``close()``d — another
+# request thread may still be reading from it; its zip handle is
+# reclaimed with the object (one dangling handle per Forge upgrade, at
+# most).
+_CORPUS_LOCK = threading.Lock()
+_CORPUS_LOADER = None  # Optional[CardsLoader], but keep import lazy
+_CORPUS_SIG: Optional[tuple] = None
+
+
+def _corpus_signature() -> Optional[tuple]:
+    """Cheap identity of the vendored Forge card corpus, or None when
+    no corpus is present on disk.
+
+    Mirrors ``CardsLoader.locate``'s preference order (unzipped letter
+    tree first, then the zip bundle) so the signature tracks the same
+    source the loader would read. mtime granularity is enough for the
+    case that matters: a Forge upgrade ships a new ``cardsfolder.zip``
+    (mtime + size both move) or re-extracts the tree (the cardsfolder
+    dir's own mtime moves as its letter subdirs are recreated).
+
+    Deliberately NOT a content hash. Known blind spot: editing a single
+    card script in place under ``cardsfolder/<letter>/`` leaves the
+    parent dir's mtime untouched, so the memo survives. That is a
+    hand-editing-Forge-internals scenario, not a supported upgrade path,
+    and paying a 32k-file hash on every dashboard request to catch it
+    would reintroduce exactly the cost this memo removes. Restart the
+    server (or bump the cardsfolder dir) after such an edit.
+    """
+    from ..forge_runner import VENDOR_FORGE
+
+    base = Path(VENDOR_FORGE) / "res" / "cardsfolder"
+    zip_path = base / "cardsfolder.zip"
+    try:
+        if base.is_dir() and any(p.is_dir() for p in base.iterdir()):
+            return ("directory", str(base), base.stat().st_mtime_ns)
+        if zip_path.is_file():
+            st = zip_path.stat()
+            return ("zip", str(zip_path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    return None
+
+
+def _corpus_loader():
+    """Return the shared, memoized ``CardsLoader`` for the vendored
+    Forge corpus, (re)building it when the corpus signature changed.
+
+    When no corpus signature is computable (fresh checkout, CI), this
+    falls through to a plain ``CardsLoader.locate`` call — uncached —
+    which raises ``FileNotFoundError`` exactly like before, preserving
+    ``_sim_coverage``'s fail-quiet unavailable contract (and letting
+    tests that monkeypatch ``locate`` keep their per-request fakes).
+    """
+    global _CORPUS_LOADER, _CORPUS_SIG
+    from ..forge_cards_loader import CardsLoader
+    from ..forge_runner import VENDOR_FORGE
+
+    sig = _corpus_signature()
+    if sig is None:
+        return CardsLoader.locate(VENDOR_FORGE)
+    with _CORPUS_LOCK:
+        if _CORPUS_SIG == sig and _CORPUS_LOADER is not None:
+            return _CORPUS_LOADER
+        loader = CardsLoader.locate(VENDOR_FORGE)
+        # Pay the one-time DFC scan HERE, inside the build lock, so no
+        # request thread ever trips the lazy 1-2s scan mid-response.
+        # getattr-guarded: test fakes only need load_one().
+        warm = getattr(loader, "warm", None)
+        if callable(warm):
+            warm()
+        _CORPUS_LOADER = loader
+        _CORPUS_SIG = sig
+        return loader
+
+
+def _reset_corpus_cache() -> None:
+    """Drop the memoized corpus loader. Test hook — production code
+    never needs it (signature comparison handles invalidation)."""
+    global _CORPUS_LOADER, _CORPUS_SIG
+    with _CORPUS_LOCK:
+        _CORPUS_LOADER = None
+        _CORPUS_SIG = None
+
+
+def _sim_coverage(path: Path) -> dict:
+    """Forge sim coverage for one deck: which cards the vendored Forge
+    build has NO card script for.
+
+    WHY (2026-08, roadmap #4): ``log_parser`` has always extracted
+    Forge's "An unsupported card was requested" lines, but that parse
+    result is folded away inside ``compare_versions`` and never reaches
+    a web response — so a deck full of cards Forge can't simulate runs
+    its A/B sims as silently-partial data (Forge just plays on without
+    those cards). This probe surfaces the same DB gap *before* any sim,
+    by checking every [Commander]/[Main] card name against the vendored
+    Forge card-script corpus (``forge_cards_loader`` — the exact corpus
+    whose misses produce the log line at sim time).
+
+    Purely local + offline (zip/directory lookups, no network, no JVM),
+    fast enough to ride inline on the core dashboard payload. Additive:
+    a new ``sim_coverage`` key, nothing renamed or removed.
+
+    Returns ``{available, checked_count, unsupported_count,
+    unsupported_names}``; the unavailable shape (``available: False``)
+    on any failure — never a 500, never a fabricated all-clear.
+    """
+    try:
+        from .. import dck_utils
+
+        text = path.read_text(encoding="utf-8")
+        names: list[str] = []
+        seen: set[str] = set()
+        for section in ("Commander", "Main"):
+            for name in dck_utils.section_card_names(text, section):
+                key = name.strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    names.append(name.strip())
+        if not names:
+            return dict(_SIM_COVERAGE_UNAVAILABLE)
+        # Shared memoized loader (M1 fix) — NOT a context manager here:
+        # the instance outlives the request, so closing it would break
+        # every other in-flight and future dashboard load.
+        loader = _corpus_loader()
+        unsupported = sorted(
+            n for n in names if loader.load_one(n) is None
+        )
+        return {
+            "available": True,
+            "checked_count": len(names),
+            "unsupported_count": len(unsupported),
+            "unsupported_names": unsupported,
+        }
+    except FileNotFoundError:
+        # No vendor/forge (fresh checkout, CI) — expected, not an error.
+        return dict(_SIM_COVERAGE_UNAVAILABLE)
+    except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
+        current_app.logger.warning("sim coverage probe failed: %s", exc)
+        return dict(_SIM_COVERAGE_UNAVAILABLE)
+
+
+# --- Bracket re-verification (2026-08-20) ------------------------------
+#
+# THE OTHER HALF of the ``BracketUnverified=`` marker the deck-editor PUT
+# writes (``routes_decks.deck_text`` / ``dck_meta``). A marker that only
+# ever gets set is a permanent scold, so it needs the one place where the
+# declared bracket genuinely regains a measurement.
+#
+# WHERE THAT IS. ``build_dashboard`` runs ``bracket_estimator`` over the
+# deck text as it exists on disk RIGHT NOW and reports estimate-versus-
+# declared — it is what renders the Bracket tile's "Estimated bracket: 3
+# — declared 3 ✓". That IS the re-estimation the editor's warning asks
+# for ("Re-estimate the bracket before using it as a bracket-tagged
+# reference deck"), and there is no other endpoint that computes a
+# bracket rather than reading the filename (``/api/deck_audit`` and
+# ``/api/audit`` both take the declared bracket as INPUT).
+#
+# WHY ONLY AGREEMENT CLEARS IT. A mismatch/check verdict is the estimator
+# saying the tag is wrong — clearing on that would delete the warning
+# precisely when it was right. And a ``low_signal`` verdict is the
+# module's own name for signal starvation, not evidence, so it cannot
+# retire anything either: decks the estimator can't read are exactly the
+# ones a false all-clear would hurt. Only ``mismatch_level is None``
+# (estimate == declared) counts.
+#
+# WHY THE FILENAME, NOT THE REQUEST'S BRACKET. ``?bracket=`` is the tile's
+# override dropdown — a what-if, not a re-declaration. Verifying against
+# an overridden bracket would let "show me this as a B5" clear a [B3]
+# deck's marker.
+
+def _clear_verified_bracket_marker(
+    path: Path, estimate: Optional[dict],
+) -> None:
+    """Drop the ``BracketUnverified=`` marker when ``estimate`` confirms.
+
+    No-ops unless all of: the filename carries a ``[B<n>]`` tag, the deck
+    actually holds a marker for THAT bracket, and ``estimate`` is an
+    agreeing verdict computed against the same declared bracket. So the
+    common case (no marker) costs one metadata scan of text already read.
+
+    Fail-quiet by contract: this is a side effect of a read-only route,
+    and a read-only deck directory or a lost race with a concurrent save
+    must degrade to "the warning persists", never to a dashboard 500.
+    """
+    declared = _bracket_from_filename(path.name)
+    if declared is None or not estimate:
+        return
+    if estimate.get("declared") != declared:
+        return
+    if estimate.get("estimate") != declared:
+        return
+    if estimate.get("mismatch_level") is not None:
+        return
+    try:
+        from .. import dck_meta
+        text = path.read_text(encoding="utf-8")
+        if dck_meta.read_bracket_unverified(text) != declared:
+            return
+        atomic_write_text(path, dck_meta.clear_bracket_unverified(text))
+    except Exception as exc:  # noqa: BLE001 — never break a dashboard load
+        current_app.logger.warning(
+            "bracket marker clear failed for %s: %s", path.name, exc,
+        )
 
 
 def make_dashboard_blueprint(
@@ -217,7 +474,18 @@ def make_dashboard_blueprint(
                 current_app.logger.warning("advise failed: %s", exc)
 
         data = build_dashboard(path, bracket=bracket, suggested=suggested)
-        return data.to_dict()
+        payload = data.to_dict()
+        # Forge sim coverage (roadmap #4): additive key on BOTH the full
+        # and the core payloads — fast, offline, fail-quiet, so it needs
+        # no deferred-section round trip.
+        payload["sim_coverage"] = _sim_coverage(path)
+        # build_dashboard just re-estimated the bracket from the CURRENT
+        # deck text; if it agrees with the filename tag, the tag has a
+        # measurement behind it again. That is the re-verification the
+        # editor's "NOT re-verified" warning asks for, so retire the
+        # marker here (see _clear_verified_bracket_marker).
+        _clear_verified_bracket_marker(path, payload.get("bracket_estimate"))
+        return payload
 
     @bp.route("/api/dashboard")
     def dashboard():
@@ -518,12 +786,22 @@ def make_dashboard_blueprint(
 
     @bp.route("/api/verdict_breakdown")
     def verdict_breakdown_route():
-        """Per-audit-version verdict counts for one deck.
+        """Per-audit-version verdict counts for one deck, split by era.
 
-        Returns ``{deck_id, total_iterations, breakdown: {<version>:
-        {kept, reverted, neutral, pending, total}}}``. UI consumes this
-        to show "kept 4/5 v3 swaps, kept 2/3 v4 swaps" when the deck
-        has accumulated enough iterations to be meaningful (≥5).
+        Returns ``{deck_id, total_iterations, comparable_era,
+        spans_multiple_eras, breakdown: {<version>: {kept, reverted,
+        neutral, inconclusive, pending, total, by_era: {<era>: {...}}}}}``.
+        UI consumes this to show "kept 4/5 v3 swaps, kept 2/3 v4 swaps"
+        when the deck has accumulated enough iterations to be meaningful
+        (≥5).
+
+        2026-08-20: the per-version totals still pool every measurement
+        era (kept for back-compat with the dashboard's existing pills),
+        but ``by_era`` now travels with them and the two scalars say
+        outright when the pooled number mixes label conventions —
+        an era-3 'kept' means |margin| >= 4, an era-4 'kept' means a
+        significant binomial test. ``comparable_era`` is the era whose
+        verdicts mean what the current pipeline writes.
         """
         deck_id = request.args.get("deck")
         if not deck_id:
@@ -535,9 +813,15 @@ def make_dashboard_blueprint(
         except Exception as exc:  # pragma: no cover - sqlite errors
             return jsonify({"error": str(exc)}), 500
         total = sum(b.get("total", 0) for b in breakdown.values())
+        eras_seen: set[str] = set()
+        for b in breakdown.values():
+            eras_seen.update((b.get("by_era") or {}).keys())
         return jsonify({
             "deck_id": deck_id,
             "total_iterations": total,
+            "comparable_era": MIN_COMPARABLE_VERDICT_ERA,
+            "eras_present": sorted(eras_seen),
+            "spans_multiple_eras": len(eras_seen) > 1,
             "breakdown": breakdown,
         })
 

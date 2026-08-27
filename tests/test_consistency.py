@@ -316,7 +316,13 @@ def test_commander_on_curve_falls_as_mana_value_rises():
     )
     assert one["commander_mana_value"] == 1
     assert seven["commander_mana_value"] == 7
-    assert one["p_commander_on_curve"] > two["p_commander_on_curve"]
+    # Under the free first mulligan (CR 103.5c) a healthy mono-color
+    # manabase casts BOTH a 1-drop and a 2-drop commander on curve in
+    # essentially every trial — the two sit together at the ceiling, so
+    # the low end is >= (ties allowed), while the 7-drop must still be
+    # strictly, visibly harder.
+    assert one["p_commander_on_curve"] >= two["p_commander_on_curve"]
+    assert one["p_commander_on_curve"] > 0.95
     assert two["p_commander_on_curve"] > seven["p_commander_on_curve"]
 
 
@@ -448,6 +454,69 @@ def test_color_screw_not_triggered_by_missing_lands():
         trials=300, seed=14, lookup=fake_lookup,
     )
     assert stats["p_color_screw"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Free first mulligan (CR 103.5c)
+# ---------------------------------------------------------------------------
+
+def test_free_mulligan_is_modelled_and_surfaced():
+    """The Commander free mulligan (CR 103.5c) is part of the model and
+    the returned dict says so, so the FP-002 dataset can tell a rules
+    change from RNG drift."""
+    stats = opening_hand_stats(
+        LAND_NORMAL, trials=200, seed=0, lookup=fake_lookup,
+    )
+    assert stats["free_mulligans"] == consistency.FREE_MULLIGANS == 1
+
+
+def test_first_mulligan_redraws_a_full_seven():
+    """A hand kept after exactly ONE mulligan still has 7 cards. Under
+    a no-free-mulligan London model every mulligan costs at least one
+    card, forcing avg_opening_hand_size <= 7 - mulligan_rate; the free
+    first mulligan breaks that bound whenever any hand keeps its second
+    7. LAND_LIGHT mulligans often, so the separation is wide."""
+    stats = opening_hand_stats(
+        LAND_LIGHT, trials=1500, seed=4, lookup=fake_lookup,
+    )
+    assert stats["mulligan_rate"] > 0.2  # the probe is actually probing
+    assert stats["avg_opening_hand_size"] > 7 - stats["mulligan_rate"]
+
+
+def test_free_mulligan_improves_kept_hands(monkeypatch):
+    """Direction check: granting the free mulligan must only ever HELP
+    — bigger kept hands and better land drops than the same seed run
+    without it. (free => keepable-hand/land stats up, never down.)"""
+    with_free = opening_hand_stats(
+        LAND_LIGHT, trials=1500, seed=4, lookup=fake_lookup,
+    )
+    monkeypatch.setattr(consistency, "FREE_MULLIGANS", 0)
+    without = opening_hand_stats(
+        LAND_LIGHT, trials=1500, seed=4, lookup=fake_lookup,
+    )
+    assert with_free["avg_opening_hand_size"] > without["avg_opening_hand_size"]
+    assert with_free["p_3_lands_by_t3"] >= without["p_3_lands_by_t3"]
+    # The first-7 stats are properties of the DECK, not the mulligan
+    # rule. The two runs' RNG streams diverge after the first trial
+    # that mulligans differently, so they agree in distribution (within
+    # Monte-Carlo noise), not byte-for-byte.
+    assert with_free["p_keepable_7"] == pytest.approx(
+        without["p_keepable_7"], abs=0.05,
+    )
+    assert with_free["mulligan_rate"] == pytest.approx(
+        without["mulligan_rate"], abs=0.05,
+    )
+
+
+def test_forced_keep_floor_is_unchanged_by_the_free_mulligan():
+    """The worst kept hand is still 7 - MAX_MULLIGANS cards: the free
+    mulligan adds a redraw, not extra bottoming. 99 Mountains never
+    keeps early, so every trial rides the policy to the floor."""
+    stats = opening_hand_stats(
+        _deck([(99, "Mountain")], "Red Two Drop"),
+        trials=100, seed=0, lookup=fake_lookup,
+    )
+    assert stats["avg_opening_hand_size"] == 7.0 - consistency.MAX_MULLIGANS
 
 
 # ---------------------------------------------------------------------------

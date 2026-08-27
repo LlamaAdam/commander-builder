@@ -20,6 +20,7 @@ exactly ONE card short of?
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -133,10 +134,13 @@ def detect_combos_in_deck(deck_text: str, combos: list[dict] | None = None) -> l
 # ordinary upgraded decks — an Exquisite Blood + Sanguine Bond deck is the
 # canonical B3 list — all the way to Optimized.
 #
-# So we gate on combo SPEED, proxied by the summed mana value of its pieces.
-# MV is the only speed measure available from a static list, and it is a
-# decent one: a combo you must pay 12 total mana for cannot be assembled in
-# the early game, while a 4-mana pair can. See _LATE_GAME_COMBO_MV.
+# So we gate on combo SPEED, proxied by the EFFECTIVE combined mana value of
+# its pieces (printed MVs, except creatures cheated in by a reanimation
+# piece are priced at the reanimation spell's MV — see the reanimation
+# block below _LATE_GAME_COMBO_MV). MV is the only speed measure available
+# from a static list, and it is a decent one: a combo you must pay 12 total
+# mana for cannot be assembled in the early game, while a 4-mana pair can.
+# See _LATE_GAME_COMBO_MV.
 #
 # The mapping from a detected combo to the lowest bracket that permits it:
 #   * game-ending, <=2 cards, combined MV >= _LATE_GAME_COMBO_MV -> floor 3
@@ -164,6 +168,111 @@ _COMBO_BRACKET_CEILING = 5  # B5/cEDH: unrestricted
 # (Sanguine Bond + Exquisite Blood = 11, Mikaeus + Triskelion = 12) sit
 # above. Tunable: raising it makes the estimator stricter, never unsafe.
 _LATE_GAME_COMBO_MV = 7
+
+# --------------------------------------------------------------------------- #
+# Reanimation-aware speed pricing (round-2 bracket-floor correctness pass)
+# --------------------------------------------------------------------------- #
+# Summing PRINTED mana values mis-prices reanimator combos: Worldgorger
+# Dragon (9) + Animate Dead (2) sums to 11 and read as "late-game
+# B3-legal", but nobody hard-casts the Dragon — the real line is
+# "Dragon in graveyard, cast Animate Dead" and assembles for ~3 mana on
+# turn 2-3. Under-flagging an early combo is exactly the failure this
+# module exists to prevent (see combo_bracket_floor), so when a combo
+# piece is a REANIMATION effect, the creature it cheats out is priced at
+# the reanimation spell's MV rather than its printed MV:
+#
+#   effective piece cost = min(printed MV, cheapest reanimation MV in
+#                              the combo)          — for creature pieces
+#   effective piece cost = printed MV              — for everything else
+#
+# Worldgorger + Animate Dead: 2 + min(9, 2) = 4 < 7 -> early -> floor B4.
+# The min() keeps a partner that is genuinely cheaper than the
+# reanimation spell priced at its cast cost (you'd just cast it).
+#
+# Classification is name-first, oracle-text-second:
+#   * ``_REANIMATION_SPELLS`` — hard-tagged canonical reanimation
+#     spells, so the fix works fully OFFLINE with a cold snapshot cache
+#     (the same stance as game_changers' bundled fallback). Names alone
+#     suffice; no oracle text needed.
+#   * ``_REANIMATION_PATTERNS`` — regexes over the piece's oracle text
+#     (from the local Scryfall snapshot store the default lookup
+#     already reads) so unlisted reanimation spells are still caught
+#     when their text is available. Written against REAL Scryfall
+#     wording (see tests/fixtures/real_oracles.py), covering the three
+#     shapes:
+#       - "Return ... creature card ... from/of ... graveyard ... to
+#         the battlefield"      (Persist, Corpse Dance, Life // Death)
+#       - "Put ... creature card from a graveyard onto the battlefield"
+#                               (Reanimate, Necromancy)
+#       - "Enchant creature card in a graveyard"
+#                               (Animate Dead, Dance of the Dead)
+#     Victimize's return clause ("return the chosen cards to the
+#     battlefield") names the creatures a sentence earlier, out of
+#     pattern reach — it is carried by the hard-tagged set.
+#
+# Missing-data behavior is UNCHANGED and conservative: a piece whose MV
+# can't be resolved still makes _combined_mana_value return None, which
+# combo_bracket_floor treats as unknown -> early -> B4. A piece whose
+# TYPE can't be resolved is treated as reanimation-eligible (repricing
+# can only LOWER the effective cost, i.e. the strict direction).
+_REANIMATION_SPELLS = frozenset(c.lower() for c in (
+    "Animate Dead", "Necromancy", "Dance of the Dead", "Reanimate",
+    "Persist", "Life // Death", "Victimize", "Corpse Dance",
+))
+
+_REANIMATION_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # "Return target non-legendary creature card from your graveyard to
+    # the battlefield" (Persist); "Return the top creature card of your
+    # graveyard to the battlefield" (Corpse Dance); "Return all
+    # creature cards from your graveyard to the battlefield" (Death
+    # half of Life // Death). Clause-bounded ([^.\n]*) so a match never
+    # spans sentences.
+    r"return[^.\n]*creature card[^.\n]*(?:from|of)[^.\n]*graveyard"
+    r"[^.\n]*to the battlefield",
+    # "Put target creature card from a graveyard onto the battlefield
+    # under your control" (Reanimate, Necromancy).
+    r"put[^.\n]*creature card[^.\n]*from[^.\n]*graveyard"
+    r"[^.\n]*onto the battlefield",
+    # The graveyard-aura shape (Animate Dead, Dance of the Dead) — the
+    # enchant line is the stable signature; the return clause lives in
+    # an errata-prone replacement paragraph that varies by printing.
+    r"enchant creature card in a graveyard",
+))
+
+
+def _oracle_text(data: dict) -> str:
+    """Full oracle text of a Scryfall snapshot, joining ``card_faces``
+    when the top level has none (split/adventure/MDFC layouts — e.g.
+    Life // Death keeps its text on the faces)."""
+    text = data.get("oracle_text")
+    if text:
+        return str(text)
+    faces = data.get("card_faces") or []
+    return "\n".join(
+        str(f.get("oracle_text") or "") for f in faces if isinstance(f, dict)
+    )
+
+
+def _is_reanimation_spell(name: str, data: dict) -> bool:
+    """True when the combo piece is a reanimation effect: hard-tagged
+    name (the offline floor) or oracle text matching a reanimation
+    shape (see _REANIMATION_PATTERNS)."""
+    if name.lower() in _REANIMATION_SPELLS:
+        return True
+    text = _oracle_text(data)
+    if not text:
+        return False
+    return any(p.search(text) for p in _REANIMATION_PATTERNS)
+
+
+def _reanimation_eligible_target(data: dict) -> bool:
+    """True when the piece could plausibly be cheated in by a
+    reanimation spell: it's a creature, or its type is UNKNOWN —
+    unknown reprices, which is the strict/conservative direction."""
+    type_line = data.get("type_line")
+    if type_line is None:
+        return True
+    return "creature" in str(type_line).lower()
 
 
 def is_game_ending(combo: dict) -> bool:
@@ -200,8 +309,18 @@ def _cached_scryfall(card_name: str) -> Optional[dict]:
 
 
 def _combined_mana_value(combo: dict, lookup: CardLookup) -> Optional[float]:
-    """Summed mana value of every piece of ``combo``, or None if ANY piece
-    can't be resolved.
+    """EFFECTIVE combined mana value of every piece of ``combo``, or None
+    if ANY piece can't be resolved.
+
+    "Effective" (not "printed"): when the combo contains a reanimation
+    spell (see _REANIMATION_SPELLS / _REANIMATION_PATTERNS), each
+    creature piece is priced at ``min(printed MV, cheapest reanimation
+    MV)`` — the real assembly path puts the creature in the graveyard
+    and cheats it out for the reanimation spell's cost, so summing
+    printed MVs would classify Worldgorger Dragon (9) + Animate Dead
+    (2) as an 11-mana "late-game" line when it actually assembles for
+    ~3-4 mana. Combos with no reanimation piece keep the plain printed
+    sum.
 
     All-or-nothing on purpose: a partial sum understates the combo's cost,
     which would push it below the late-game threshold and produce the
@@ -212,7 +331,7 @@ def _combined_mana_value(combo: dict, lookup: CardLookup) -> Optional[float]:
     cards = combo.get("cards") or []
     if not cards:
         return None
-    total = 0.0
+    pieces: list[tuple[float, bool, dict]] = []  # (mv, is_reanim, data)
     for name in cards:
         try:
             data = lookup(name)
@@ -224,9 +343,21 @@ def _combined_mana_value(combo: dict, lookup: CardLookup) -> Optional[float]:
         if cmc is None:
             return None
         try:
-            total += float(cmc)
+            mv = float(cmc)
         except (TypeError, ValueError):
             return None
+        pieces.append((mv, _is_reanimation_spell(name, data), data))
+
+    reanim_mvs = [mv for mv, is_reanim, _d in pieces if is_reanim]
+    if not reanim_mvs:
+        return sum(mv for mv, _is_reanim, _d in pieces)
+    cheapest_reanim = min(reanim_mvs)
+    total = 0.0
+    for mv, is_reanim, data in pieces:
+        if not is_reanim and _reanimation_eligible_target(data):
+            total += min(mv, cheapest_reanim)
+        else:
+            total += mv
     return total
 
 

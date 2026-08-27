@@ -78,7 +78,10 @@ def test_card_at_exactly_one_dollar_is_skipped(monkeypatch):
            {"Cheapo": _card("1.00")},
            {"Cheapo": [_printing("0.01")]})
     out = printing_savings_for_deck_text(_deck("1 Cheapo"))
-    assert out == {"total": 0.0, "count": 0, "suggestions": []}
+    assert out == {
+        "total": 0.0, "count": 0, "suggestions": [],
+        "price_data_age_days": None, "price_data_stale": False,
+    }
 
 
 def test_one_dollar_floor_blocks_small_savings(monkeypatch):
@@ -270,7 +273,12 @@ def test_suggestion_payload_shape(monkeypatch):
            {"Card": _card("10.00", set_code="cur")},
            {"Card": [_printing("2.00", set_code="chp", collector="42")]})
     out = printing_savings_for_deck_text(_deck("1 Card"))
-    assert set(out) == {"total", "count", "suggestions"}
+    assert set(out) == {
+        "total", "count", "suggestions",
+        # P19 freshness signal over the snapshots these prices came
+        # from — see test_deck_pricing.py for its semantics.
+        "price_data_age_days", "price_data_stale",
+    }
     s = out["suggestions"][0]
     assert s == {
         "card": "Card",
@@ -286,8 +294,11 @@ def test_suggestion_payload_shape(monkeypatch):
 
 def test_empty_deck_text(monkeypatch):
     _patch(monkeypatch, {}, {})
+    # P19 added the two freshness keys; nothing was priced here, so the
+    # age is unknown. Staleness itself is covered in test_deck_pricing.
     assert printing_savings_for_deck_text("") == {
         "total": 0.0, "count": 0, "suggestions": [],
+        "price_data_age_days": None, "price_data_stale": False,
     }
 
 
@@ -307,7 +318,10 @@ def test_offline_with_nothing_cached_degrades_to_empty(monkeypatch):
         "commander_builder.scryfall_client.lookup_card_prints", offline,
     )
     out = printing_savings_for_deck_text(_deck("1 A", "1 B", "1 C"))
-    assert out == {"total": 0.0, "count": 0, "suggestions": []}
+    assert out == {
+        "total": 0.0, "count": 0, "suggestions": [],
+        "price_data_age_days": None, "price_data_stale": False,
+    }
 
 
 def test_breaker_switches_to_cache_only_after_first_failure(monkeypatch):

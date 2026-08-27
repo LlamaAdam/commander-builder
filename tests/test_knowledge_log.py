@@ -5,6 +5,7 @@ Each test uses a tmp_path-scoped DB so they don't pollute the real history.
 import pytest
 
 from commander_builder.knowledge_log import (
+    SCHEMA_VERSION,
     Iteration,
     get_iteration,
     init_db,
@@ -409,6 +410,156 @@ def test_verdict_breakdown_scoped_to_one_deck(db):
     assert out["v3"]["reverted"] == 0  # d2's row excluded
 
 
+# --- R2-P19: the breakdown must not pool verdicts across eras --------------
+#
+# knowledge_log's own schema docstring: "any pooled analysis must bucket
+# rows by measurement_era". This function used to SELECT verdict alone —
+# an era-1 'kept' (seat-attribution artifact), an era-3 'kept'
+# (|margin| >= 4) and an era-4 'kept' (significant binomial test) all
+# landed in one pile and were served to the dashboard as a "kept rate".
+
+def test_verdict_breakdown_splits_counts_by_measurement_era(db):
+    for era, verdict in [(1, "kept"), (3, "kept"), (4, "kept"),
+                         (4, "reverted")]:
+        record_iteration(
+            Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                      audit_version="v3", verdict=verdict,
+                      measurement_era=era),
+            db_path=db,
+        )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+
+    # Flat totals unchanged (back-compat with the dashboard's pills).
+    assert out["v3"]["kept"] == 3
+    assert out["v3"]["total"] == 4
+    # ...but the era split now travels with them.
+    by_era = out["v3"]["by_era"]
+    assert by_era["1"]["kept"] == 1 and by_era["1"]["total"] == 1
+    assert by_era["3"]["kept"] == 1
+    assert by_era["4"]["kept"] == 1 and by_era["4"]["reverted"] == 1
+    assert by_era["4"]["total"] == 2
+
+
+def test_verdict_breakdown_buckets_null_era_as_unknown(db):
+    """An unclassifiable row (the 2026-05-21/22 fix session, the
+    07-19/20 mixed-denominator window) must read as 'unknown', never be
+    rounded into an era. Written with a real in-window timestamp so the
+    v3 backfill leaves it NULL the way it does in production."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept",
+                  created_at="2026-07-19T10:00:00+00:00"),
+        db_path=db,
+    )
+    out = verdict_breakdown_for_deck("d1", db_path=db)
+    assert out["v3"]["by_era"]["unknown"]["kept"] == 1
+
+
+def test_verdict_breakdown_era_buckets_are_zero_padded(db):
+    """Same KeyError-free contract the flat buckets have."""
+    record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  audit_version="v3", verdict="kept", measurement_era=4),
+        db_path=db,
+    )
+    bucket = verdict_breakdown_for_deck("d1", db_path=db)["v3"]["by_era"]["4"]
+    for label in ("kept", "reverted", "neutral", "inconclusive", "pending"):
+        assert label in bucket
+    assert bucket["reverted"] == 0
+
+
+# --- R2-P04 / R2-P06: second-writer semantics ------------------------------
+
+def test_update_iteration_sim_appends_notes_when_asked(db):
+    """A second writer (improve's replication confirm) must be able to
+    ADD to the note without destroying the first writer's measurement."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  verdict="kept", verdict_notes="A/B sim: old 15, new 30"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         notes="replication_confirmed: run 2 kept",
+                         notes_append=True, db_path=db)
+    notes = get_iteration(iid, db_path=db).verdict_notes
+    assert "A/B sim: old 15, new 30" in notes
+    assert "replication_confirmed: run 2 kept" in notes
+
+
+def test_update_iteration_sim_replaces_notes_by_default(db):
+    """Default stays REPLACE — the first writer owns the note."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3,
+                  verdict="pending", verdict_notes="old note"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept", notes="new note",
+                         db_path=db)
+    assert get_iteration(iid, db_path=db).verdict_notes == "new note"
+
+
+def test_update_iteration_sim_append_on_a_blank_note_is_a_plain_set(db):
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="pending"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept", notes="first",
+                         notes_append=True, db_path=db)
+    assert get_iteration(iid, db_path=db).verdict_notes == "first"
+
+
+def test_update_iteration_sim_merges_into_an_existing_sim_report(db):
+    """The merge adds a key beside the measured record instead of
+    replacing the blob the first writer stored."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="kept",
+                  sim_report={"status": "done", "wins_a": 15, "wins_b": 30}),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         sim_report_merge={"replication": {"ran": True}},
+                         db_path=db)
+    report = get_iteration(iid, db_path=db).sim_report
+    assert report["wins_a"] == 15 and report["wins_b"] == 30
+    assert report["replication"] == {"ran": True}
+
+
+def test_update_iteration_sim_merge_on_a_row_with_no_sim_report(db):
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="pending"),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         sim_report_merge={"verdict_params": {"margin": 1}},
+                         db_path=db)
+    assert get_iteration(iid, db_path=db).sim_report == {
+        "verdict_params": {"margin": 1}}
+
+
+def test_update_iteration_sim_merge_composes_with_a_fresh_sim_report(db):
+    """When a caller passes BOTH, the merge lands on top of the fresh
+    report — not on the stale stored one."""
+    iid = record_iteration(
+        Iteration(deck_id="d1", deck_name="d1", bracket=3, verdict="pending",
+                  sim_report={"stale": True}),
+        db_path=db,
+    )
+    update_iteration_sim(iteration_id=iid, verdict="kept",
+                         sim_report={"wins_a": 1},
+                         sim_report_merge={"extra": 2}, db_path=db)
+    report = get_iteration(iid, db_path=db).sim_report
+    assert report == {"wins_a": 1, "extra": 2}
+
+
+def test_verdict_provenance_records_the_parameters_used():
+    from commander_builder.knowledge_log import verdict_provenance
+    p = verdict_provenance(margin=6, alpha=0.05, min_decisive=20)
+    assert p["margin"] == 6
+    assert p["alpha"] == 0.05
+    assert p["min_decisive"] == 20
+    assert "binomial" in p["rule"]
+
+
 def test_pricing_series_returns_empty_for_no_iterations(db):
     """No iterations → empty list. Caller renders 'no data' state."""
     assert pricing_series_for_deck("no-such-deck", db_path=db) == []
@@ -655,7 +806,9 @@ def test_init_db_migrates_v1_to_v2_adds_milestone_column(tmp_path):
     assert row["verdict"] == "kept"   # legacy row intact
     assert row["milestone"] is None   # new column NULL by default
     cur = conn.execute("SELECT version FROM schema_version")
-    assert cur.fetchone()["version"] == 2
+    # Whatever the current schema version is — a v1 database is upgraded
+    # all the way, not to some intermediate step.
+    assert cur.fetchone()["version"] == SCHEMA_VERSION
     conn.close()
 
 
@@ -670,6 +823,257 @@ def test_init_db_migration_is_idempotent(tmp_path):
     set_milestone(it_id, "still-works", db_path=p)
     row = get_iteration(it_id, db_path=p)
     assert row.milestone == "still-works"
+
+
+# ---------------------------------------------------------------------------
+# measurement_era column (schema v3, 2026-08-17)
+# ---------------------------------------------------------------------------
+# The log spans three mutually incompatible measurement conventions and
+# nothing on a row said which one produced its numbers. Every new row is
+# now stamped; historical rows are backfilled where the boundary is
+# KNOWN and left NULL where it isn't (a NULL means "unknown", never a
+# fourth era).
+
+@pytest.mark.parametrize("created_at,row_id,expected", [
+    # Era 1 — pre-seat-attribution. The DATE decides; ``id < 314``
+    # (STATUS.md's boundary for the owner's log) only breaks the tie
+    # inside the 2026-05-21/22 fix session or when there's no date.
+    ("2026-03-01T00:00:00+00:00", 12, 1),
+    ("2026-03-01T00:00:00+00:00", None, 1),
+    ("2026-05-21T12:00:00+00:00", 12, 1),    # mid-session, pre-fix id
+    ("2026-05-21T12:00:00+00:00", 400, 2),   # mid-session, post-fix id
+    (None, 12, 1),                           # no date -> id boundary only
+    # A low id does NOT make a recent row an artifact: ids restart at 1
+    # in every fresh database, so the date has to win.
+    ("2026-08-15T00:00:00+00:00", 1, 4),
+    # Era 2 — seat-attributed, mixed win-rate denominators.
+    ("2026-06-01T00:00:00+00:00", 400, 2),
+    ("2026-07-18T23:59:59+00:00", None, 2),
+    # Era 3 — head-to-head decisive denominator, margin-threshold verdicts.
+    ("2026-07-20T00:00:00+00:00", 500, 3),
+    ("2026-08-13T23:59:59+00:00", None, 3),
+    # Era 4 — significance-based verdicts.
+    ("2026-08-14T00:00:00+00:00", 900, 4),
+    ("2026-09-01T12:00:00+00:00", None, 4),
+    # Unknown — never guessed.
+    (None, None, None),
+    ("", None, None),
+    (None, 400, None),                          # no date, id proves nothing
+    ("2026-07-19T12:00:00+00:00", 450, None),   # the mixed-writer window
+    ("2026-05-21T12:00:00+00:00", None, None),  # mid fix-session, no id
+])
+def test_measurement_era_for_boundaries(created_at, row_id, expected):
+    from commander_builder.knowledge_log import measurement_era_for
+    assert measurement_era_for(created_at, row_id) == expected
+
+
+# --- R2-D5: the era-3/4 boundary is inspectable without being moved ------
+#
+# The 2026-08-14 significance change was a COMMIT, not a midnight
+# cutover, so rows written that morning are stamped era 4 on a bare date
+# rule. The override below exists ONLY so the backfill script's
+# report-only mode can show the owner what a shifted boundary would
+# reclassify, using this one function rather than a second copy of its
+# rules.
+
+def test_significance_start_override_reclassifies_only_the_boundary_day():
+    from commander_builder.knowledge_log import measurement_era_for
+    shifted = "2026-08-15"
+    # The ambiguous day drops back to era 3 under the shifted boundary...
+    assert measurement_era_for("2026-08-14T08:15:00+00:00", 900) == 4
+    assert measurement_era_for("2026-08-14T08:15:00+00:00", 900,
+                               significance_start=shifted) == 3
+    # ...the day AFTER is era 4 either way...
+    assert measurement_era_for("2026-08-15T09:00:00+00:00", 901,
+                               significance_start=shifted) == 4
+    # ...and the earlier boundaries are untouched by the override.
+    assert measurement_era_for("2026-07-19T12:00:00+00:00", 450,
+                               significance_start=shifted) is None
+    assert measurement_era_for("2026-06-01T00:00:00+00:00", 400,
+                               significance_start=shifted) == 2
+
+
+def test_significance_start_defaults_to_the_shipped_constant():
+    """The override is opt-in per call: nothing that WRITES a row may
+    reach it, so a stored stamp can never come from a report."""
+    from commander_builder.knowledge_log import (
+        _SIGNIFICANCE_START, measurement_era_for,
+    )
+    assert _SIGNIFICANCE_START == "2026-08-14"
+    assert measurement_era_for("2026-08-14T00:00:01+00:00", 900) == 4
+    assert measurement_era_for(
+        "2026-08-14T00:00:01+00:00", 900,
+        significance_start=_SIGNIFICANCE_START) == 4
+
+
+def test_recording_a_boundary_day_row_uses_the_shipped_boundary(db):
+    """A live write stamps through the module constant, not an override."""
+    from commander_builder.knowledge_log import (
+        Iteration, get_iteration, record_iteration,
+    )
+    iid = record_iteration(Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        created_at="2026-08-14T08:15:00+00:00"), db_path=db)
+    assert get_iteration(iid, db_path=db).measurement_era == 4
+
+
+def test_measurement_eras_mapping_documents_every_stamped_value():
+    from commander_builder.knowledge_log import (
+        CURRENT_MEASUREMENT_ERA,
+        MEASUREMENT_ERAS,
+    )
+    assert set(MEASUREMENT_ERAS) == {1, 2, 3, 4}
+    assert CURRENT_MEASUREMENT_ERA in MEASUREMENT_ERAS
+    assert all(v.strip() for v in MEASUREMENT_ERAS.values())
+
+
+def test_record_iteration_stamps_the_current_era(db):
+    from commander_builder.knowledge_log import CURRENT_MEASUREMENT_ERA
+    row = get_iteration(_add_row(db), db_path=db)
+    assert row.measurement_era == CURRENT_MEASUREMENT_ERA
+
+
+def test_record_iteration_classifies_a_backdated_row_by_its_timestamp(db):
+    """A row carrying an older created_at (a merge/import fold) is
+    stamped from ITS OWN measurement date, not from today."""
+    it_id = record_iteration(
+        Iteration(
+            deck_id="old", deck_name="old", bracket=3,
+            created_at="2026-08-01T00:00:00+00:00",
+        ),
+        db_path=db,
+    )
+    assert get_iteration(it_id, db_path=db).measurement_era == 3
+
+
+def test_record_iteration_leaves_an_unclassifiable_row_null(db):
+    """The 2026-07-19/20 window is a MIXED population by writer — NULL
+    is the honest answer, not a rounded-off era."""
+    it_id = record_iteration(
+        Iteration(
+            deck_id="mixed", deck_name="mixed", bracket=3,
+            created_at="2026-07-19T08:00:00+00:00",
+        ),
+        db_path=db,
+    )
+    # And it STAYS None: the migration's backfill re-scans NULL rows on
+    # every init_db, and must not label this row era 1 just because a
+    # fresh database handed it a low id.
+    init_db(db)
+    assert get_iteration(it_id, db_path=db).measurement_era is None
+
+
+def test_record_iteration_honors_an_explicit_era(db):
+    it_id = record_iteration(
+        Iteration(
+            deck_id="x", deck_name="x", bracket=3, measurement_era=2,
+        ),
+        db_path=db,
+    )
+    assert get_iteration(it_id, db_path=db).measurement_era == 2
+
+
+def _legacy_v2_db(tmp_path, rows):
+    """Hand-build a v2 database (milestone, no measurement_era) holding
+    ``rows`` of (id, created_at)."""
+    import sqlite3
+    p = tmp_path / "legacy_v2.sqlite"
+    conn = sqlite3.connect(p)
+    conn.executescript("""
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        CREATE TABLE iterations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deck_id TEXT NOT NULL, deck_name TEXT NOT NULL,
+            bracket INTEGER NOT NULL, parent_id INTEGER,
+            audit_version TEXT, audit_manifest TEXT, sim_report TEXT,
+            verdict TEXT NOT NULL DEFAULT 'pending', verdict_notes TEXT,
+            win_rate_old REAL, win_rate_new REAL, margin INTEGER,
+            created_at TEXT NOT NULL, deck_snapshot TEXT, milestone TEXT
+        );
+        INSERT INTO schema_version (version) VALUES (2);
+    """)
+    for row_id, created_at in rows:
+        conn.execute(
+            "INSERT INTO iterations (id, deck_id, deck_name, bracket, "
+            "created_at, verdict, margin) VALUES (?, ?, ?, 3, ?, 'kept', 4)",
+            (row_id, f"deck{row_id}", f"deck{row_id}", created_at),
+        )
+    conn.commit()
+    conn.close()
+    return p
+
+
+def test_migration_v2_to_v3_backfills_known_eras_only(tmp_path):
+    """The backfill classifies by id/date where the boundary is known
+    and leaves the rest NULL. It must not touch any other column."""
+    import sqlite3
+    p = _legacy_v2_db(tmp_path, [
+        (12, "2026-04-01T00:00:00+00:00"),    # id < 314 -> era 1
+        (400, "2026-06-15T00:00:00+00:00"),   # era 2
+        (450, "2026-07-19T09:00:00+00:00"),   # mixed window -> unknown
+        (500, "2026-07-25T00:00:00+00:00"),   # era 3
+        (900, "2026-08-15T00:00:00+00:00"),   # era 4
+    ])
+    init_db(p)
+
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT id, measurement_era, verdict, margin FROM iterations "
+        "ORDER BY id"
+    )
+    rows = {r["id"]: r for r in cur.fetchall()}
+    assert rows[12]["measurement_era"] == 1
+    assert rows[400]["measurement_era"] == 2
+    assert rows[450]["measurement_era"] is None
+    assert rows[500]["measurement_era"] == 3
+    assert rows[900]["measurement_era"] == 4
+    # Nothing else was reprocessed.
+    assert all(r["verdict"] == "kept" and r["margin"] == 4
+               for r in rows.values())
+    cur = conn.execute("SELECT version FROM schema_version")
+    assert cur.fetchone()["version"] == SCHEMA_VERSION
+    conn.close()
+
+
+def test_migration_v2_to_v3_is_idempotent_and_preserves_stamps(tmp_path):
+    """Re-running init_db doesn't re-classify: a row whose era was set
+    (by the first pass, or by hand) keeps it, and the still-unknown row
+    stays NULL rather than drifting into an era."""
+    import sqlite3
+    p = _legacy_v2_db(tmp_path, [
+        (400, "2026-06-15T00:00:00+00:00"),
+        (450, "2026-07-19T09:00:00+00:00"),
+    ])
+    init_db(p)
+    conn = sqlite3.connect(p)
+    conn.execute("UPDATE iterations SET measurement_era = 9 WHERE id = 400")
+    conn.commit()
+    conn.close()
+
+    init_db(p)
+    init_db(p)
+
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute("SELECT id, measurement_era FROM iterations")
+    rows = {r["id"]: r["measurement_era"] for r in cur.fetchall()}
+    assert rows[400] == 9      # a set value is never rewritten
+    assert rows[450] is None
+    conn.close()
+
+
+def test_from_row_tolerates_a_pre_v3_row(tmp_path):
+    """A Row out of a database the migration hasn't touched has no
+    measurement_era key — reads must degrade to None, not IndexError
+    (the same legacy guard milestone carries)."""
+    import sqlite3
+    p = _legacy_v2_db(tmp_path, [(400, "2026-06-15T00:00:00+00:00")])
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM iterations WHERE id = 400").fetchone()
+    conn.close()
+    assert Iteration.from_row(row).measurement_era is None
 
 
 # --- decisive_win_rate — the one win-rate convention (2026-07-19) -----------
@@ -749,3 +1153,103 @@ def test_fp013_gate_progress_min_games_override(db):
     progress = _gate_progress(db_path=db, min_games=5)
     assert progress["count"] == 1
     assert progress["min_games"] == 5
+
+
+# --- measurement-era floor (2026-08-17) ------------------------------------
+#
+# The triple's SHAPE was never the whole question. A row from before the
+# seat-attribution fix can carry a manifest, a decided verdict and a
+# 60-game sim report and still be worthless as training data, because its
+# wins were credited to the wrong deck. The fine-tune learns the VERDICT,
+# so the era that matters is the one that produced the LABEL.
+
+def _era_row(db, era, *, games=40, verdict="kept"):
+    it = Iteration(
+        deck_id="d", deck_name="d", bracket=3,
+        audit_manifest={"added": ["A"], "removed": ["B"]},
+        verdict=verdict, sim_report={"games": games},
+        measurement_era=era,
+    )
+    return record_iteration(it, db_path=db)
+
+
+@pytest.mark.parametrize("era", [1, 2])
+def test_fp013_gate_excludes_unrecoverable_eras(db, era):
+    """Eras 1-2 are archive-only: era 1's wins are attributed to the
+    wrong deck, era 2's rates aren't comparable across rows. They meet
+    the triple and must still not count."""
+    _era_row(db, era)
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    assert progress["excluded_by_era"] == 1
+    assert progress["relabelable"] == 0
+
+
+def test_fp013_gate_reports_era_3_as_relabelable_not_counted(db):
+    """Era 3's measurement is sound but its verdicts came from the
+    game-count-invariant |margin| >= 4. Not gate-quality as-is, and not
+    lost either — re-scoring the stored sim report promotes it. It must
+    be disclosed rather than silently dropped."""
+    _era_row(db, 3)
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    assert progress["relabelable"] == 1
+    assert progress["excluded_by_era"] == 0
+
+
+def test_fp013_gate_counts_current_era(db):
+    _era_row(db, 4)
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 1
+    assert progress["min_era"] == 4
+    assert progress["relabelable"] == 0
+    assert progress["excluded_by_era"] == 0
+
+
+def test_fp013_gate_unstamped_row_fails_closed(db):
+    """Unknown provenance is not evidence of good provenance.
+
+    A NULL era can't be forced by blanking the column: every
+    ``init_db`` re-runs the idempotent v3 backfill, which re-derives an
+    era from ``created_at``. The rows this actually models are the ones
+    the backfill *cannot* classify — here, a row measured on the
+    2026-07-19 boundary, the mixed-writer day between the margin and
+    decisive-denominator regimes, which ``measurement_era_for``
+    deliberately refuses to guess at."""
+    import sqlite3
+
+    row_id = _era_row(db, 4)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE iterations SET measurement_era = NULL, "
+            "created_at = '2026-07-19T12:00:00Z' WHERE id = ?",
+            (row_id,),
+        )
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    assert progress["excluded_by_era"] == 1
+
+
+def test_fp013_gate_min_era_override_admits_relabelable(db):
+    """An explicit floor lets an analysis opt into era-3 rows once it
+    has re-scored them."""
+    _era_row(db, 3)
+    _era_row(db, 4)
+    progress = _gate_progress(db_path=db, min_era=3)
+    assert progress["count"] == 2
+    assert progress["min_era"] == 3
+    assert progress["relabelable"] == 0
+
+
+def test_fp013_gate_era_floor_does_not_bypass_the_triple(db):
+    """A current-era row still needs the manifest, the decided verdict
+    and the game count — the era floor is an ADDITIONAL gate, not a
+    replacement for the original three."""
+    _era_row(db, 4, games=5)
+    _era_row(db, 4, verdict="pending")
+    progress = _gate_progress(db_path=db)
+    assert progress["count"] == 0
+    # Neither row reached the era check, so neither is reported as an
+    # era exclusion — they failed earlier, for their own reasons.
+    assert progress["excluded_by_era"] == 0
+    assert progress["relabelable"] == 0

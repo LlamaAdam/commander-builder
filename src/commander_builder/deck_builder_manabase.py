@@ -55,6 +55,8 @@ from .staples import (
     BOND_LANDS,
     FETCH_LANDS,
     SHOCK_LANDS,
+    SURVEIL_LANDS,
+    TRIOME_LANDS,
     essential_manabase_for_colors,
     is_basic_land,
     tribal_essential_lands,
@@ -91,6 +93,7 @@ _ANY_COLOR_LANDS: frozenset[str] = frozenset({
 # assembler and the improvement-advisor agree on what each land taps for.
 _TIERED_LANDS: dict[str, frozenset[str]] = {
     **ABU_DUAL_LANDS, **FETCH_LANDS, **SHOCK_LANDS, **BOND_LANDS,
+    **TRIOME_LANDS, **SURVEIL_LANDS,
 }
 
 
@@ -106,14 +109,24 @@ _TIERED_LANDS: dict[str, frozenset[str]] = {
 # to the sane 33-40 band nobody sensibly leaves.
 BASE_LANDS = 38
 _PIVOT_MV = 3.5
-_LAND_CLAMP_LO, _LAND_CLAMP_HI = 33, 40
+# THE healthy land-count band — single source of truth, shared with
+# ``deck_health._LAND_BAND`` (2026-08 reconciliation). Before sharing,
+# this module clamped builds to 33-40 while deck_health graded against
+# 33-38 and docked ~12 points per land past 38 — the app penalized its
+# own 39/40-land builds. The builder owns the land-count model, so the
+# band lives here and the grader imports it (imports flow this way
+# already; no cycle).
+LAND_COUNT_BAND: tuple[int, int] = (33, 40)
+_LAND_CLAMP_LO, _LAND_CLAMP_HI = LAND_COUNT_BAND
 # A published average deck is already community-tuned; trust its land count
 # outright when it falls in a plausible band, in preference to our model.
 _SEED_TRUST_LO, _SEED_TRUST_HI = 33, 42
 
 
 def target_land_count(
-    avg_mana_value: float, seed_land_count: Optional[int] = None,
+    avg_mana_value: float,
+    seed_land_count: Optional[int] = None,
+    mdfc_spell_fronts: int = 0,
 ) -> int:
     """Target land count for a deck with ``avg_mana_value`` nonland curve.
 
@@ -125,12 +138,24 @@ def target_land_count(
     implausible (a sparse fallback/fixture with a handful of lands).
 
     The curve model: ``BASE_LANDS`` (38) shifted by 2 lands per point of MV
-    away from the 3.5 pivot, clamped to 33-40. A 2.5-MV deck → 36; a 4.5-MV
-    deck → 40. Cited above; this is a documented heuristic, not gospel.
+    away from the 3.5 pivot, clamped to ``LAND_COUNT_BAND`` (33-40). A
+    2.5-MV deck → 36; a 4.5-MV deck → 40. Cited above; this is a
+    documented heuristic, not gospel.
+
+    ``mdfc_spell_fronts`` (optional, 2026-08): the number of spell-front
+    MDFC lands (Bala Ged Recovery class) among the deck's nonland slots.
+    Each counts as HALF a land — the same 0.5 weighting
+    ``deck_health._mana_health_signal`` applies when grading — so the
+    modelled count drops by 0.5 per MDFC before the clamp. The seed-trust
+    path ignores it (a community-tuned seed count already reflects its
+    own MDFCs). Default 0 keeps every existing caller unchanged.
     """
     if seed_land_count and _SEED_TRUST_LO <= seed_land_count <= _SEED_TRUST_HI:
         return seed_land_count
-    modelled = round(BASE_LANDS + (avg_mana_value - _PIVOT_MV) * 2)
+    modelled = round(
+        BASE_LANDS + (avg_mana_value - _PIVOT_MV) * 2
+        - 0.5 * max(0, mdfc_spell_fronts)
+    )
     return max(_LAND_CLAMP_LO, min(_LAND_CLAMP_HI, modelled))
 
 

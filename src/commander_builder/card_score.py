@@ -120,10 +120,13 @@ from typing import Callable, Iterable, Optional
 
 from .lift_analysis import MIN_CORPUS_DECKS
 from .staples import (
+    POLITICS_SHIELD_REASON,
     ROLE_SATURATION_THRESHOLDS,
     classify_role_extended,
     is_basic_land,
     is_land,
+    politics_guard_enabled,
+    politics_tags,
     role_target_report,
 )
 
@@ -638,6 +641,7 @@ class DeckContext:
         salt_scores: Optional[dict[str, float]] = None,
         game_changers: Optional[Iterable[str]] = None,
         protected_cards: Optional[Iterable[str]] = None,
+        politics_guard: Optional[bool] = None,
         use_forge: bool = False,
     ) -> None:
         self._resolve = lookup or _default_lookup
@@ -689,6 +693,15 @@ class DeckContext:
                 else protected_from_deck_text(deck_text)
             )
         )
+        # Politics guard (decision C2). Derived from the deck's
+        # ``[metadata] PoliticsGuard=`` line when the caller doesn't state
+        # it, exactly as ``protected_keys`` derives ``Protect=``. Resolved
+        # ONCE here (not per cut candidate) so ``without()``'s children
+        # inherit the answer instead of re-parsing the blob 99 times.
+        self.politics_guard: bool = (
+            bool(politics_guard) if politics_guard is not None
+            else politics_guard_enabled(deck_text)
+        )
         self.use_forge = bool(use_forge)
 
         # Memo slots. A key present with a ``None`` value means
@@ -712,6 +725,7 @@ class DeckContext:
                 if protected_cards is not None
                 else protected_from_deck_text(deck_text)
             ),
+            politics_guard=self.politics_guard,
             use_forge=use_forge,
         )
 
@@ -953,6 +967,19 @@ class DeckContext:
     @property
     def game_changer_count(self) -> int:
         return sum(1 for n in self.deck_cards if self.is_game_changer(n))
+
+    def politics_tags_of(self, name: str) -> tuple[str, ...]:
+        """Politics mechanics on ``name`` (goad / monarch / vote / ...).
+
+        Routes through :meth:`card` — the injected, memoized, never-raising
+        lookup — so this stays on the module's offline contract rather than
+        calling ``staples``' own Scryfall-backed name resolver.
+        """
+        card = self.card(name)
+        if not card:
+            return ()
+        return politics_tags(card.get("oracle_text", "") or "",
+                             card.get("type_line", "") or "")
 
     @property
     def tutor_count(self) -> int:
@@ -1708,13 +1735,36 @@ def score_card(
 def _cut_block_reason(card_name: str, ctx: DeckContext) -> str:
     """Which guard rail (if any) forbids cutting ``card_name``.
 
-    Every rail here already exists somewhere in the codebase; FP-015's
-    contract is that switching cuts from alphabetical to scored must not
-    lose a single one of them.
+    FP-015's contract is that switching cuts from alphabetical to scored
+    must not lose a single rail that already existed in the codebase — so
+    every rail below except one is a restatement of an existing refusal.
+
+    The exception is the POLITICS rail, added 2026-08-17 by decision C2:
+    it is not a deck-arithmetic rule at all but a statement about the
+    measuring instrument, and it is shared with the advisor's own cut
+    paths through ``staples.politics_tags``.
+
+    Reported in priority order — the first rail that fires owns the
+    message, so an explicit user ``Protect=`` is always the reason a user
+    is given for their own lock.
     """
     key = _key(card_name)
     if key in ctx.protected_keys:
         return f"{card_name} is a Protect= line — the user locked it"
+    # Politics rail (decision C2, 2026-08-17). The one rail here that is
+    # NOT about the deck's own arithmetic: it is about the MEASURING
+    # INSTRUMENT. Every cut this module ranks is ultimately validated by
+    # an A/B margin from Forge's AI, which cannot goad, race the monarch,
+    # bargain in a vote or notice a Rhystic tax — so for these cards a
+    # flat margin says nothing about the card and everything about the
+    # sim. Refuse the cut rather than down-rank it, same as every rail
+    # above and below. ``PoliticsGuard=off`` in the deck's ``[metadata]``
+    # turns it off for that one deck.
+    if ctx.politics_guard:
+        tags = ctx.politics_tags_of(card_name)
+        if tags:
+            return (f"{card_name} is a politics card ({'/'.join(tags)}) — "
+                    f"{POLITICS_SHIELD_REASON}")
     if key in ctx.combo_pieces:
         return (f"{card_name} is a piece of a combo the deck already "
                 f"assembles")

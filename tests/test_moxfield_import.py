@@ -1151,6 +1151,33 @@ def test_reimport_preserves_protect_and_stamped_name(tmp_path, monkeypatch):
     assert _re.search(r"^Name=(.+)$", merged, _re.MULTILINE).group(1) == p1.stem
 
 
+def test_reimport_preserves_bracket_unverified_marker(tmp_path, monkeypatch):
+    """A same-id re-import REPLACES the mainboard — the very event the
+    ``BracketUnverified=`` marker (dck_meta, 2026-08-20) exists to flag.
+    If the merge dropped it, "re-import the deck" would silently clear a
+    bracket warning while making the bracket less verified than before."""
+    from commander_builder import dck_meta, moxfield_import as mi
+
+    decks = {"pid-1": _deck_json(name=_UGLY_NAME, pid="pid-1")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    p1.write_text(
+        dck_meta.set_bracket_unverified(p1.read_text(encoding="utf-8"), 3),
+        encoding="utf-8",
+    )
+
+    decks["pid-1"] = _deck_json(
+        name=_UGLY_NAME, pid="pid-1", main_card="Arcane Signet",
+    )
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert p2 == p1
+    merged = p1.read_text(encoding="utf-8")
+    assert "Arcane Signet" in merged  # fresh content landed
+    assert dck_meta.read_bracket_unverified(merged) == 3
+    assert merged.count("BracketUnverified=") == 1
+
+
 def test_reimport_preserves_locally_edited_displayname(tmp_path, monkeypatch):
     """dck_meta's documented contract: user edits to DisplayName= survive
     re-imports. The mechanism is two-part and ORDER-dependent —
@@ -1487,3 +1514,268 @@ def test_write_deck_skip_renames_on_bracket_drift(tmp_path):
     # ...but Name= tracks the renamed stem, and the map points at the file.
     assert _re.search(r"^Name=(.+)$", text, _re.MULTILINE).group(1) == renamed.stem
     assert id_map == {"pid-1": renamed}
+
+
+# ---------------------------------------------------------------------------
+# Archidekt lane (decision C3) — the fallback source for single-deck import
+# ---------------------------------------------------------------------------
+#
+# WHY: every acquisition path in this module rides `api2.moxfield.com`, an
+# UNDOCUMENTED private API — one ToS/CDN change strands imports, harvest,
+# bracket peers and meta-test references simultaneously. Archidekt's API is
+# public, so single-deck import (the one capability a user can't work around
+# by hand) gets a second lane. Deck ids are NOT translatable between the two
+# sites; the user supplies both.
+
+import urllib.error as _urllib_error  # noqa: E402
+
+
+def _archidekt_detail(name="Krenko Goblins", bracket=3, main="Sol Ring"):
+    """Minimal Archidekt detail-JSON payload."""
+    def entry(card_name, categories=()):
+        return {"quantity": 1, "categories": list(categories),
+                "card": {"oracleCard": {"name": card_name},
+                         "edition": {"editioncode": "c21"},
+                         "collectorNumber": "7"}}
+    return {
+        "id": 1234567,
+        "name": name,
+        "edhBracket": bracket,
+        "cards": [entry("Krenko, Mob Boss", ["Commander"]), entry(main)],
+        "categories": [{"name": "Commander", "includedInDeck": True}],
+    }
+
+
+@pytest.fixture
+def archidekt_stub(monkeypatch):
+    """Point ``archidekt_client``'s HTTP seam at an in-memory deck."""
+    from commander_builder import archidekt_client as ac
+    state = {"detail": _archidekt_detail(), "calls": []}
+
+    def fake_get(url):
+        state["calls"].append(url)
+        return state["detail"]
+
+    monkeypatch.setattr(ac, "_http_get_json", fake_get)
+    return state
+
+
+def test_resolve_source_sniffs_the_url_then_honors_an_explicit_choice():
+    from commander_builder import moxfield_import as mi
+
+    assert mi.resolve_source("https://archidekt.com/decks/1/x") == "archidekt"
+    assert mi.resolve_source("https://moxfield.com/decks/abc") == "moxfield"
+    # A bare id stays Moxfield so every existing call site is unchanged...
+    assert mi.resolve_source("1234567") == "moxfield"
+    # ...and an explicit source is how a bare Archidekt number gets in.
+    assert mi.resolve_source("1234567", "archidekt") == "archidekt"
+    assert mi.resolve_source("https://archidekt.com/decks/1",
+                             "moxfield") == "moxfield"
+
+
+def test_resolve_source_rejects_an_unknown_lane():
+    from commander_builder import moxfield_import as mi
+    with pytest.raises(ValueError, match="unknown deck source"):
+        mi.resolve_source("abc", "tappedout")
+
+
+def test_import_deck_from_an_archidekt_url(tmp_path, archidekt_stub):
+    """The whole point of the lane: a user whose Moxfield path is broken
+    has a working way to get their deck into Forge."""
+    from commander_builder import moxfield_import as mi
+
+    path = mi.import_deck("https://archidekt.com/decks/1234567/krenko",
+                          out_dir=tmp_path, is_user=True)
+    assert path.name == "[USER] Krenko Goblins [B3].dck"
+    text = path.read_text(encoding="utf-8")
+    assert "1 Krenko, Mob Boss|C21|7" in text
+    assert "1 Sol Ring|C21|7" in text
+    # Provenance recorded honestly under its OWN key: the web layer's
+    # deck_source / verify_against_source re-fetch `Moxfield=` FROM
+    # Moxfield, so an Archidekt id under that key would produce a
+    # confidently wrong "out of sync" report on every check.
+    assert "Archidekt=1234567" in text
+    assert "Source=archidekt" in text
+    assert "Moxfield=" not in text
+
+
+def test_import_deck_archidekt_source_flag_accepts_a_bare_id(
+    tmp_path, archidekt_stub,
+):
+    from commander_builder import moxfield_import as mi
+    path = mi.import_deck("1234567", out_dir=tmp_path, source="archidekt")
+    assert path.name == "Krenko Goblins [B3].dck"
+
+
+def test_reimport_of_an_archidekt_deck_overwrites_in_place(
+    tmp_path, archidekt_stub,
+):
+    """Same re-pull semantics as Moxfield — the namespaced `archidekt:<id>`
+    source id is what `_moxfield_id_from_text` reads back off disk, so a
+    re-pull refreshes the file instead of minting a '(2)' copy."""
+    from commander_builder import moxfield_import as mi
+
+    p1 = mi.import_deck("https://archidekt.com/decks/1234567/k",
+                        out_dir=tmp_path, is_user=True)
+    archidekt_stub["detail"] = _archidekt_detail(main="Arcane Signet")
+    p2 = mi.import_deck("https://archidekt.com/decks/1234567/k",
+                        out_dir=tmp_path, is_user=True)
+    assert p2 == p1
+    text = p1.read_text(encoding="utf-8")
+    assert "Arcane Signet" in text and "Sol Ring" not in text
+    assert len(list(tmp_path.glob("*.dck"))) == 1
+
+
+def test_source_id_map_namespaces_archidekt_ids(tmp_path, archidekt_stub):
+    from commander_builder import moxfield_import as mi
+    mi.import_deck("1234567", out_dir=tmp_path, source="archidekt",
+                   is_user=True)
+    assert set(mi._existing_moxfield_ids(tmp_path, is_user=True)) == {
+        "archidekt:1234567",
+    }
+
+
+def _http_error(code):
+    import email.message
+    return _urllib_error.HTTPError("u", code, "boom",
+                                   email.message.Message(), None)
+
+
+@pytest.mark.parametrize("exc", [
+    _http_error(503),                      # server-side weather
+    _http_error(403),                      # CDN / ToS block — the C3 case
+    _urllib_error.URLError("dns"),         # network-level failure
+    ValueError("not json"),                # schema drift / HTML error page
+])
+def test_moxfield_failure_falls_back_to_archidekt(tmp_path, archidekt_stub,
+                                                  exc, capsys):
+    """Network / HTTP / parse failures are LANE failures — exactly what
+    the fallback exists for."""
+    from commander_builder import moxfield_import as mi
+
+    def boom(pid):
+        raise exc
+
+    mi_fetch = mi.fetch_deck
+    try:
+        mi.fetch_deck = boom
+        path = mi.import_deck("mox-abc", out_dir=tmp_path, is_user=True,
+                              archidekt="https://archidekt.com/decks/1234567")
+    finally:
+        mi.fetch_deck = mi_fetch
+    assert path.name == "[USER] Krenko Goblins [B3].dck"
+    assert "falling back to the Archidekt lane" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("code", [404, 410])
+def test_genuine_missing_deck_does_not_fall_back(tmp_path, archidekt_stub,
+                                                 code):
+    """A 404 is a WORKING API saying "no such deck". Falling back would
+    silently import a DIFFERENT deck than the user asked for."""
+    from commander_builder import moxfield_import as mi
+    import urllib.error
+
+    def boom(pid):
+        raise _http_error(code)
+
+    mi_fetch = mi.fetch_deck
+    try:
+        mi.fetch_deck = boom
+        with pytest.raises(urllib.error.HTTPError):
+            mi.import_deck("mox-abc", out_dir=tmp_path,
+                           archidekt="https://archidekt.com/decks/1234567")
+    finally:
+        mi.fetch_deck = mi_fetch
+    assert list(tmp_path.glob("*.dck")) == []
+
+
+def test_moxfield_failure_without_a_fallback_names_archidekt(tmp_path,
+                                                             capsys):
+    """No silent failures: when the Moxfield lane dies and no Archidekt
+    URL was supplied, the error names the lane that still works."""
+    from commander_builder import moxfield_import as mi
+    import urllib.error
+
+    def boom(pid):
+        raise urllib.error.URLError("dns")
+
+    mi_fetch = mi.fetch_deck
+    try:
+        mi.fetch_deck = boom
+        with pytest.raises(urllib.error.URLError):
+            mi.import_deck("mox-abc", out_dir=tmp_path)
+    finally:
+        mi.fetch_deck = mi_fetch
+    err = capsys.readouterr().err
+    assert "--source archidekt" in err
+    assert "undocumented" in err
+
+
+def test_bulk_harvest_failure_says_it_is_moxfield_only(tmp_path, monkeypatch,
+                                                      capsys):
+    """Bracket harvest has NO Archidekt equivalent (no like count, and
+    edhBracket is null on most decks). Say so, and name what does."""
+    from commander_builder import moxfield_import as mi
+
+    def dead_search(*a, **kw):
+        raise OSError("moxfield down")
+
+    monkeypatch.setattr(mi, "search_decks", dead_search)
+    monkeypatch.setattr(mi.time, "sleep", lambda s: None)
+    assert mi.harvest_bracket(3, out_dir=tmp_path) == []
+    out = capsys.readouterr().out
+    assert "Moxfield-only" in out
+    assert "SINGLE-DECK import does have one" in out
+
+
+def test_top_likes_search_failure_says_it_is_moxfield_only(monkeypatch,
+                                                          capsys):
+    """Same for the top-likes reference search — and printed
+    unconditionally, not gated on ``verbose``: the caller only ever sees
+    a bare None/[] and would otherwise report 'no decks found'."""
+    from commander_builder import moxfield_import as mi
+
+    monkeypatch.setattr(mi, "lookup_moxfield_card_id", lambda name: "cid")
+
+    def dead(url):
+        raise OSError("moxfield down")
+
+    monkeypatch.setattr(mi, "_http_get_json", dead)
+    assert mi.find_top_liked_deck_for_commander("Krenko, Mob Boss") is None
+    assert mi.find_top_liked_decks_for_commander("Krenko, Mob Boss") == []
+    err = capsys.readouterr().err
+    assert err.count("Moxfield-only") == 2
+
+
+# ---------------------------------------------------------------------------
+# PoliticsGuard= (decision C2) survives a re-import
+# ---------------------------------------------------------------------------
+
+def test_reimport_carries_the_politics_guard_opt_out(tmp_path, monkeypatch):
+    """`PoliticsGuard=off` is a local-only user directive, absent from the
+    Moxfield payload. Without the carry, a re-pull would silently re-enable
+    a guard the user deliberately turned off — and quietly stop proposing
+    the cuts they asked for."""
+    from commander_builder import moxfield_import as mi
+
+    decks = {"pid-1": _deck_json(main_card="Sol Ring")}
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: decks[pid])
+
+    p1 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    p1.write_text(
+        p1.read_text(encoding="utf-8").replace(
+            "Moxfield=pid-1",
+            "Moxfield=pid-1\nProtect=Sol Ring\nPoliticsGuard=off",
+        ),
+        encoding="utf-8",
+    )
+
+    decks["pid-1"] = _deck_json(main_card="Arcane Signet")
+    p2 = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    text = p2.read_text(encoding="utf-8")
+    assert "PoliticsGuard=off" in text
+    assert "Protect=Sol Ring" in text
+    assert text.count("PoliticsGuard=") == 1
+    # And the directive still parses after the round-trip.
+    from commander_builder.staples import politics_guard_enabled
+    assert politics_guard_enabled(text) is False

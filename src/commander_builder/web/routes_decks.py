@@ -31,12 +31,59 @@ from ._helpers import (
     _bracket_from_filename,
     _normalize_pasted_deck,
     _resolve_deck_path,
+    atomic_write_text,
 )
 
 
 _BRACKET_NAMES = {
     1: "Exhibition", 2: "Core", 3: "Upgraded", 4: "Optimized", 5: "cEDH",
 }
+
+
+# ---------------------------------------------------------------------------
+# .dck write primitives (M2 fix, 2026-08) — see the deck_text PUT docstring
+# for the WHY. The atomic writer moved to ``_helpers.atomic_write_text`` on
+# 2026-08-20 when ``routes_dashboard`` became a second (marker-clearing)
+# writer; the shape gate below is still specific to this blueprint, which
+# remains the only route that takes raw user-pasted deck text.
+# ---------------------------------------------------------------------------
+
+def _has_main_section(text: str) -> bool:
+    """True when ``text`` contains a ``[Main]`` section header.
+
+    Header matching mirrors ``dck_utils.iter_section_lines``: the line is
+    stripped and compared case-insensitively against the whole bracket
+    token, so ``[MAIN]`` counts and ``[Maindeck]`` does not. Deliberately
+    checks for the HEADER, not for card lines under it — an intentionally
+    emptied mainboard is a legal (if bad) deck, whereas a body with no
+    ``[Main]`` at all is a partial paste or a wholly different file
+    format, which is what this gate is here to reject.
+    """
+    return any(
+        line.strip().lower() == "[main]" for line in text.splitlines()
+    )
+
+
+def _bracket_tag_unverified(path: Path, text: str) -> bool:
+    """Does ``path``'s ``[B<n>]`` filename tag still lack a measurement?
+
+    True only when the deck carries a ``BracketUnverified=`` marker whose
+    digit MATCHES the bracket the filename currently declares. The match
+    requirement is what honors a retag without a rename route existing:
+    a user who answers the warning with "you're right, it's a B4 deck"
+    renames the file, the stored ``=3`` stops describing anything, and
+    the warning stops — while a marker for the bracket still on the
+    filename keeps flagging for as long as it is there.
+
+    An untagged filename has nothing to be unverified about and is always
+    False, marker or not. See the ``deck_text`` PUT docstring for the
+    lifecycle and ``dck_meta`` for the on-disk format.
+    """
+    declared = _bracket_from_filename(path.name)
+    if declared is None:
+        return False
+    from ..dck_meta import read_bracket_unverified
+    return read_bracket_unverified(text) == declared
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +221,65 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         - GET   → {"deck", "path", "text"} for the file
         - PUT   body {"text": ...} overwrites in place
         - DELETE removes the file
+
+        PUT hardening (M2 fix, 2026-08). This route used to be the ONE
+        deck writer that did a bare ``path.write_text(new_text)``:
+
+        - No ``Name=`` restamp: pasting deck A's text into deck B's
+          editor stored ``Name=A`` under B's filename — the exact
+          filename↔``Name=`` win-attribution invariant ``dck_meta``
+          exists to protect (Forge reports match wins by ``Name=``;
+          every aggregation queries by filename stem). Every other
+          writer (import, build, snapshot, proposer) restamps; now this
+          one does too, via ``dck_meta.rewrite_name(text, path.stem)``.
+          ``rewrite_name`` rather than ``stamp_name_preserving_display``
+          deliberately: an editor PUT edits an EXISTING deck whose
+          identity is its filename — promoting a foreign pasted
+          ``Name=`` into ``DisplayName=`` would relabel deck B with
+          deck A's pretty name in every display surface. A
+          ``DisplayName=`` already in the body passes through untouched.
+        - No shape check: any non-empty string was accepted, so garbage
+          (or a partial paste with no ``[Main]`` section) silently
+          replaced a working deck. Now 400 with a clear message. The
+          frontend always PUTs the full .dck it fetched via GET (see
+          app.js runProposeSwap save path), which always carries
+          ``[Main]`` — legitimate saves are unaffected.
+        - No atomicity: a crash mid-``write_text`` truncated the deck.
+          Now writes go to a temp file in the same directory followed by
+          ``os.replace`` (atomic on POSIX and Windows within one
+          filesystem). The temp name does not end in ``.dck`` so deck
+          enumeration / the stale-file sweep can never see a partial
+          file.
+
+        Additive response field ``bracket_tag_unverified`` (on GET and
+        PUT alike): true while the filename's ``[B<n>]`` bracket tag has
+        no measurement behind it — a hand-edit can silently push a de
+        facto B4 deck around under a ``[B3]`` filename, and re-estimating
+        the bracket is too costly for a synchronous PUT, so the UI gets a
+        hint to offer re-validation instead.
+
+        PERSISTENCE (2026-08-20). This used to be computed fresh per
+        request as "did THIS save change the mainboard?", which made it
+        true for exactly one response: the user clicked "Save changes" a
+        second time without touching anything, the route compared the
+        just-written text against itself, answered false, and the warning
+        disappeared while the tag stayed just as unverified — the
+        pool-poisoning path the hint exists to close, reopened by the
+        most natural next click (Playwright smoke, 2026-08-20). The state
+        now outlives the request in the deck's own ``[metadata]`` block
+        as ``BracketUnverified=<n>`` (see ``dck_meta``), so every later
+        GET/PUT reports it regardless of what that request changed. It is
+        cleared by the flow that actually re-verifies the bracket — the
+        dashboard's ``bracket_estimate`` agreeing with the declared tag
+        (``routes_dashboard._clear_verified_bracket_marker``) — or by the
+        user renaming the file to a different ``[B<n>]``, which makes the
+        stored digit stale by construction.
+
+        The marker is read from the ON-DISK text, not from the submitted
+        body: the editor round-trips the file through a textarea, so a
+        user who deletes the line by hand would otherwise dismiss a
+        safety warning by editing around it. It is re-stamped into the
+        text being written, so it survives the save.
         """
         deck_id = request.args.get("deck")
         explicit = request.args.get("path")
@@ -193,6 +299,9 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 "deck": deck_id,
                 "path": str(path),
                 "text": text,
+                "bracket_tag_unverified": _bracket_tag_unverified(
+                    path, text,
+                ),
             })
 
         if request.method == "PUT":
@@ -206,12 +315,68 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             new_text = payload.get("text") or ""
             if not new_text.strip():
                 return jsonify({"error": "text is empty"}), 400
+            if not _has_main_section(new_text):
+                return jsonify({
+                    "error": (
+                        "deck text has no [Main] section — refusing to "
+                        "overwrite the deck with what looks like a "
+                        "partial paste"
+                    ),
+                }), 400
+
+            from ..dck_meta import rewrite_name
+
+            # THE restamp. Pasted text carries whatever deck's Name= it
+            # was copied from; the file's identity is its filename.
+            new_text = rewrite_name(new_text, path.stem)
+
+            # Bonus hint (additive, never blocks the save): a
+            # bracket-tagged filename whose mainboard just changed may
+            # no longer match its declared bracket. Comparing two
+            # {name: qty} maps is pure string work — no Scryfall, no
+            # bracket re-estimation on the request path. Only pays the
+            # pre-image read when the filename actually carries a tag,
+            # and a read failure degrades to "no hint", never a 500.
+            #
+            # The verdict is the OR of "this save changed the mainboard"
+            # and "a previous save already marked the tag unverified and
+            # nothing has re-verified it since" — the second half is what
+            # survives a no-op re-save. When neither holds we actively
+            # strip any marker still in the text, which is how a marker
+            # left behind by a tag rename (stored digit != current tag)
+            # gets swept.
+            bracket_tag_unverified = False
+            declared = _bracket_from_filename(path.name)
+            if declared is not None:
+                from .. import dck_meta, dck_utils
+                try:
+                    old_text = path.read_text(encoding="utf-8")
+                except OSError:
+                    old_text = None
+                changed = old_text is not None and (
+                    dck_utils.main_card_quantities(old_text)
+                    != dck_utils.main_card_quantities(new_text)
+                )
+                still_marked = (
+                    dck_meta.read_bracket_unverified(old_text) == declared
+                )
+                bracket_tag_unverified = changed or still_marked
+                new_text = (
+                    dck_meta.set_bracket_unverified(new_text, declared)
+                    if bracket_tag_unverified
+                    else dck_meta.clear_bracket_unverified(new_text)
+                )
+
             try:
-                path.write_text(new_text, encoding="utf-8")
+                atomic_write_text(path, new_text)
             except OSError as exc:
                 return jsonify({"error": str(exc)}), 500
-            return jsonify({"deck": deck_id, "path": str(path),
-                            "saved": True})
+            return jsonify({
+                "deck": deck_id,
+                "path": str(path),
+                "saved": True,
+                "bracket_tag_unverified": bracket_tag_unverified,
+            })
 
         # DELETE
         try:

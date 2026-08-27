@@ -1021,3 +1021,110 @@ def test_deck_audit_lookups_are_snapshot_only(tmp_path, monkeypatch):
     assert body["illegal_cards"] == []
     assert body["unverified_cards"] == ["Fastbond"]
     assert any("could not be verified" in w for w in body["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Snapshot staleness (legality/rules freshness, 2026-08)
+#
+# ``lookup_card`` serves disk snapshots forever, so a banning after the
+# snapshot was written is invisible until a refresh. ``validate_deck``
+# therefore reports the age of the OLDEST snapshot backing its verdict
+# and a warning past ``STALE_SNAPSHOT_DAYS``. Purely informational —
+# it must never flip legal/status.
+# ---------------------------------------------------------------------------
+
+import json as _json
+import os as _os
+import time as _time
+
+from commander_builder.deck_legality import (  # noqa: E402
+    STALE_SNAPSHOT_DAYS,
+    snapshot_staleness,
+)
+
+
+def _snapshot_store(monkeypatch, tmp_path, ages_by_name: dict[str, float]):
+    """Point scryfall_client.CACHE_DIR at a tmp store with one snapshot
+    per name, its mtime backdated by the given age in days."""
+    import commander_builder.scryfall_client as sc
+    store = tmp_path / "oracle_snapshots"
+    store.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sc, "CACHE_DIR", store)
+    now = _time.time()
+    for name, age_days in ages_by_name.items():
+        p = store / f"{sc._slug(name)}.json"
+        p.write_text(_json.dumps({"name": name}), encoding="utf-8")
+        stamp = now - age_days * 86400.0
+        _os.utime(p, (stamp, stamp))
+    return store
+
+
+def test_snapshot_staleness_empty_store_is_none_none(monkeypatch, tmp_path):
+    _snapshot_store(monkeypatch, tmp_path, {})
+    assert snapshot_staleness(["Sol Ring", "Forest"]) == (None, None)
+
+
+def test_snapshot_staleness_fresh_store_reports_age_without_warning(
+    monkeypatch, tmp_path,
+):
+    _snapshot_store(monkeypatch, tmp_path, {"Sol Ring": 2.0, "Forest": 5.0})
+    age, warning = snapshot_staleness(["Sol Ring", "Forest"])
+    assert warning is None
+    # Oldest of the two, within stat/rounding slop.
+    assert age == pytest.approx(5.0, abs=0.1)
+
+
+def test_snapshot_staleness_old_store_warns_with_date_and_fix(
+    monkeypatch, tmp_path,
+):
+    _snapshot_store(monkeypatch, tmp_path, {"Sol Ring": 60.0, "Forest": 1.0})
+    age, warning = snapshot_staleness(["Sol Ring", "Forest"])
+    assert age == pytest.approx(60.0, abs=0.1)
+    assert warning is not None
+    assert "60 days old" in warning
+    assert "as of" in warning
+    assert "commander-oracle-refresh" in warning
+
+
+def test_snapshot_staleness_threshold_is_overridable(monkeypatch, tmp_path):
+    _snapshot_store(monkeypatch, tmp_path, {"Sol Ring": 10.0})
+    _age, warning = snapshot_staleness(["Sol Ring"], threshold_days=5.0)
+    assert warning is not None
+    _age, no_warning = snapshot_staleness(["Sol Ring"], threshold_days=20.0)
+    assert no_warning is None
+
+
+def test_validate_deck_carries_staleness_and_it_never_flips_legal(
+    monkeypatch, tmp_path,
+):
+    """A legal deck backed by a stale store stays LEGAL — the warning
+    rides along in data_warning / data_age_days and in to_dict()."""
+    _snapshot_store(monkeypatch, tmp_path, {
+        "Test Commander": 90.0, "Forest": 1.0, "Sol Ring": 1.0,
+    })
+    report = validate_deck(_legal_deck(), lookup=_legal_lookup())
+    assert report.legal is True
+    assert report.status == "legal"
+    assert report.data_age_days == pytest.approx(90.0, abs=0.1)
+    assert report.data_warning is not None
+    assert "commander-oracle-refresh" in report.data_warning
+    body = report.to_dict()
+    assert body["data_age_days"] == report.data_age_days
+    assert body["data_warning"] == report.data_warning
+
+
+def test_validate_deck_staleness_fields_default_none_when_nothing_on_disk(
+    monkeypatch, tmp_path,
+):
+    """Hermetic runs (injected lookup, empty store) get (None, None) —
+    no fabricated age off data that isn't there."""
+    _snapshot_store(monkeypatch, tmp_path, {})
+    report = validate_deck(_legal_deck(), lookup=_legal_lookup())
+    assert report.data_age_days is None
+    assert report.data_warning is None
+    assert report.to_dict()["data_warning"] is None
+
+
+def test_stale_snapshot_days_constant_is_about_a_bnr_window():
+    """Pin the documented default so a silent retune shows up here."""
+    assert STALE_SNAPSHOT_DAYS == 45.0

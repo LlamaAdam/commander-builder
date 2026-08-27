@@ -229,6 +229,7 @@ from ._advisor_heuristic import (  # noqa: E402
 # don't see the move.
 from ._advisor_filters import (  # noqa: E402,F401
     _filter_for_ownership,
+    _filter_for_politics,
     _filter_for_saturation,
     _validate_card_names,
 )
@@ -930,6 +931,11 @@ def _advise_steps(
 
     role_counts = count_deck_roles(main_cards)
     recs, skipped_for_saturation = _filter_for_saturation(recs, role_counts)
+    # Politics guard (decision C2, 2026-08-17). Runs here, at the
+    # orchestrator, so it covers EVERY source's cut recommendations —
+    # the heuristic loop and card_score have their own in-path shields,
+    # but Claude's and bracket-peers' cuts only pass through here.
+    recs, skipped_for_politics = _filter_for_politics(recs, deck_text)
 
     def _safe_ci_lookup(card_name: str) -> bool:
         """Return True iff Scryfall resolves ``card_name`` to a real
@@ -1038,6 +1044,7 @@ def _advise_steps(
         timestamp=datetime.now(timezone.utc).isoformat(),
         fallback_reason=fallback_reason,
         skipped_for_saturation=skipped_for_saturation,
+        skipped_for_politics=skipped_for_politics,
         skipped_for_ownership=skipped_for_ownership,
         bracket_peer_ref_count=bracket_peer_ref_count,
         average_deck=average_deck,

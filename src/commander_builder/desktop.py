@@ -21,8 +21,11 @@ Design notes:
 
 Window chrome (FP-010 slice 3):
 - **App icon** -- ``_icon_path()`` resolves the bundled PNG (next to the
-  package's ``data/`` dir) and is passed to ``webview.create_window``. Falls
-  back to ``None`` (no icon) when the file is absent; never crashes.
+  package's ``data/`` dir) and is passed to ``webview.start()`` as its
+  ``icon=`` kwarg (corrected 2026-08-20, R2-P23: it is NOT a
+  ``create_window`` parameter — passing it there raises TypeError on a real
+  window). Falls back to ``None`` (no icon) when the file is absent; never
+  crashes.
 - **Single-instance guard** -- ``_acquire_instance_lock()`` writes a
   lock-file (``%LOCALAPPDATA%/commander-builder/instance.lock`` on Windows,
   ``~/.commander-builder/instance.lock`` elsewhere) and attempts a
@@ -48,6 +51,11 @@ APP_TITLE = "Commander Builder"
 DEFAULT_HOST = "127.0.0.1"
 _ICON_FILENAME = "commander_builder_icon.png"
 
+#: How long ``launch`` waits for the server to accept a connection before
+#: giving up (see ``wait_until_up``). Named so the failure message and the
+#: probe can never quote different numbers at the user.
+SERVER_START_TIMEOUT_SEC = 15.0
+
 
 # --------------------------------------------------------------------------- #
 # Single-instance guard
@@ -55,6 +63,15 @@ _ICON_FILENAME = "commander_builder_icon.png"
 
 class SingleInstanceError(RuntimeError):
     """Raised when a second instance of the desktop app is detected."""
+
+
+class ServerStartError(RuntimeError):
+    """Raised when the local web server never came up, so no window opened.
+
+    Added 2026-08-20 (R2-P23): ``launch`` used to discard
+    ``wait_until_up``'s boolean and open the window anyway, showing the
+    user a connection-refused page instead of an explanation.
+    """
 
 
 class _InstanceLock:
@@ -123,25 +140,46 @@ def _acquire_instance_lock(lock_path: Optional[Path] = None) -> _InstanceLock:
     are the same file; the locking semantics are:
       Windows: LK_NBLCK on byte 0 raises OSError when another fd holds it.
       POSIX: LOCK_EX|LOCK_NB raises BlockingIOError when already locked.
+
+    OPEN NON-TRUNCATING, STAMP AFTER LOCKING (round-2 review 2026-08-20,
+    R2-P23). The modes here used to be ``"w+b"``/``"w"``, which truncate AT
+    OPEN — so a second instance blanked the FIRST instance's pid before its
+    own lock attempt failed, destroying the one diagnostic a user has when
+    the app says "already running" and no window is visible (a crashed or
+    headless instance whose lock the OS still holds). Append modes never
+    truncate, and the pid is rewritten only once this process owns the lock.
     """
     path = lock_path or _lock_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _stamp_pid(handle, binary: bool) -> None:
+        """Replace the payload with our pid. Called only AFTER locking."""
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()).encode() if binary
+                     else str(os.getpid()))
+        handle.flush()
+
     try:
         if os.name == "nt":
             import msvcrt
-            # Open in binary mode for msvcrt.locking compatibility.
-            fh = open(path, "w+b")  # noqa: WPS515
-            fh.write(str(os.getpid()).encode())
-            fh.flush()
+            # Binary for msvcrt.locking's CRT fd; append so the existing
+            # payload survives a failed attempt.
+            fh = open(path, "a+b")  # noqa: WPS515
+            if fh.seek(0, os.SEEK_END) == 0:
+                # Brand-new (empty) file: give LK_NBLCK a byte to lock.
+                # Safe to write — there is no other instance's payload here.
+                fh.write(b"0")
+                fh.flush()
             fh.seek(0)
             # LK_NBLCK: non-blocking exclusive lock on 1 byte from current pos.
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            _stamp_pid(fh, binary=True)
         else:
             import fcntl  # type: ignore[import]
-            fh = open(path, "w", encoding="ascii")  # noqa: WPS515
+            fh = open(path, "a+", encoding="ascii")  # noqa: WPS515
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fh.write(str(os.getpid()))
-            fh.flush()
+            _stamp_pid(fh, binary=False)
     except (OSError, PermissionError) as exc:
         try:
             fh.close()  # type: ignore[possibly-undefined]
@@ -213,7 +251,9 @@ def find_free_port(host: str = DEFAULT_HOST) -> int:
         return s.getsockname()[1]
 
 
-def wait_until_up(host: str, port: int, timeout: float = 15.0) -> bool:
+def wait_until_up(
+    host: str, port: int, timeout: float = SERVER_START_TIMEOUT_SEC,
+) -> bool:
     """Poll until the server accepts a TCP connection (or timeout). Returns
     True once reachable so the window doesn't open on a blank/refused page."""
     deadline = time.monotonic() + timeout
@@ -294,9 +334,16 @@ def launch(
     wins; otherwise ``config_store.get_deck_dir()`` supplies the persisted
     or platform-default location.
 
+    Raises ``ServerStartError`` when the server never accepts a connection
+    within ``wait_until_up``'s timeout: opening a window onto a refused page
+    is exactly what that helper exists to prevent (corrected 2026-08-20,
+    R2-P23 — its boolean used to be discarded). The server thread and the
+    instance lock are torn down first, so a retry can succeed.
+
     Window chrome:
     - The app icon is resolved via ``_icon_path()`` and passed to
-      ``webview.create_window`` (None = no icon).
+      ``webview.start()`` — NOT to ``create_window``, which raises TypeError
+      on an ``icon=`` kwarg (see the note at the call site).
     - A single-instance lock is acquired before the window opens; a second
       launch raises ``SingleInstanceError`` (injectable via ``_acquire_lock``
       for tests).
@@ -334,7 +381,26 @@ def launch(
     except Exception:  # noqa: BLE001
         pass
 
-    wait_until_up(host, port)
+    # Branch on the readiness probe (R2-P23, 2026-08-20). Before this, the
+    # return value was discarded and the window opened regardless — on a
+    # slow or failed server start the user got a native window showing
+    # ERR_CONNECTION_REFUSED, which reads as "the app is broken" rather than
+    # "the server didn't come up". Tear down in reverse order so a retry
+    # isn't blocked by our own single-instance lock.
+    if not wait_until_up(host, port):
+        if hasattr(server_handle, "shutdown"):
+            try:
+                server_handle.shutdown()
+            except Exception:  # noqa: BLE001 — cleanup must not mask the cause
+                pass
+        instance_lock.close()
+        raise ServerStartError(
+            f"The Commander Builder server did not start on "
+            f"http://{host}:{port}/ within {SERVER_START_TIMEOUT_SEC:.0f}s. "
+            f"Nothing was opened. Check the console output above for a "
+            f"Flask/werkzeug traceback, then retry; if the port is in use "
+            f"by another program, re-run and a free port will be picked."
+        )
     url = f"http://{host}:{port}/"
 
     win = webview.create_window(APP_TITLE, url, width=1280, height=860)
@@ -374,6 +440,13 @@ def main(argv=None) -> int:
     try:
         launch(deck_dir=args.deck_dir)
     except SingleInstanceError as exc:
+        print(f"[desktop] {exc}")
+        return 1
+    except ServerStartError as exc:
+        # 2026-08-20 (R2-P23): a server that never came up is a normal
+        # operational failure, not a bug — report it like the
+        # single-instance case (message + non-zero exit) instead of
+        # dumping a traceback on a double-clicked EXE.
         print(f"[desktop] {exc}")
         return 1
     return 0

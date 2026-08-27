@@ -16,9 +16,20 @@ from-atoms synthesizer: coherence is borrowed from EDHREC's community
 aggregate and the improve loop does the tuning (see FP-014 in
 [docs/future-plans.md](docs/future-plans.md)). It's not a Moxfield clone,
 not a real-time game client. At its core it's still an iteration engine
-where Forge provides ground-truth simulation and an LLM (Claude or local
-Ollama) acts as the analyst that reads sim deltas and decides what to try
-next.
+where Forge provides ground-truth simulation and Claude acts as the
+analyst that reads sim deltas and decides what to try next. A local
+model (Ollama) can be enabled for narrow tagging work — deck archetype
+and card roles, with the oracle text supplied — but it does not produce
+proposals or verdicts; see `local_model.py`.
+
+**What that ground truth is, exactly.** The opponents are bots. A `kept`
+verdict certifies "this version wins more against Forge's AI" — an AI
+that misplays whole card classes and, in our soak runs, grinds roughly a
+quarter of games into turn-cap loops — not "this version is better at
+your table". Politics, threat assessment, deal-making, and who the table
+decides to kill on turn six are outside what the sim can measure at all,
+and they decide plenty of real Commander games. It is a real measurement
+of a real thing; it just isn't your pod.
 
 **Source-of-truth docs:**
 - [STATUS.md](docs/STATUS.md) — current state, open backlog, parked plans
@@ -32,15 +43,46 @@ next.
 git clone <this repo>
 cd commander_builder
 python -m pip install -e ".[dev]"
+commander-init            # guided first-run setup (see below)
 ```
 
-After this, every CLI entry point works without `PYTHONPATH=src`.
+After the install, every CLI entry point works without `PYTHONPATH=src`.
+
+### `commander-init` — guided first run
+
+`commander-init` sequences the first-run pipeline in the order the steps
+actually depend on each other, checking state before each one and
+skipping whatever is already done:
+
+1. **Dependencies** — Forge jar (~120 MB) + a Temurin JRE, via
+   `bootstrap.check_dependencies` / `download_forge` / `ensure_jre`.
+2. **Oracle card store** — one ~150 MB rate-limit-exempt bulk GET
+   (`commander-oracle-refresh --from-bulk --everything`) instead of one
+   Scryfall request per card.
+3. **Decks** — harvest ~60 community decks at your bracket, pull
+   `[PREMADE]` popularity decks, or skip and import your own later.
+4. **Opponent pool** — `commander-curate`, after an explicit cost
+   warning: measured ~35 min (B3) / ~55 min (B5) of JVM time.
+
+```bash
+commander-init --dry-run              # print the plan + current state, run nothing
+commander-init --bracket 3            # interactive; asks before anything expensive
+commander-init --yes --decks harvest  # unattended (authorizes the downloads AND the curation)
+```
+
+It is **resumable and stateless**: each step probes the artifact it
+produces (jar on disk, snapshot count, candidate `.dck` files,
+`_pools/B<n>.json`), so re-running picks up where you stopped. No new
+state file to go stale.
+
+Prefer to do it by hand? Every step is just the standalone command it
+prints — `commander-init` adds ordering, not logic.
 
 For live Forge sims, drop a portable Forge release + JRE into
-`vendor/forge/` and `vendor/jre/` (see `setup/forge/README.md`). The
-system runs without Forge — only modules that hit the JVM
-(`forge_runner`, `pool_curator`, `run_match`, `compare_versions`,
-`iteration_loop`) need it.
+`vendor/forge/` and `vendor/jre/` (see `setup/forge/README.md`), or let
+step 1 above fetch them. The system runs without Forge — only modules
+that hit the JVM (`forge_runner`, `pool_curator`, `run_match`,
+`compare_versions`, `iteration_loop`) need it.
 
 For live LLM analyst, configure `ANTHROPIC_API_KEY` via one of:
 
@@ -86,6 +128,26 @@ The dashboard and audit also surface (ManaFoundry-parity additions):
 
 ## CLI commands
 
+### `commander` — one front door
+
+Every command below is also reachable as a subcommand of `commander`,
+grouped by task area. It is an alias layer, not a migration: the
+hyphenated scripts all still work, and `commander improve ...` runs the
+identical code with identical flags and exit codes as
+`commander-improve ...`.
+
+```bash
+commander                 # the grouped menu: build / import / sim / analyze / web / maintenance
+commander improve --help  # the target command's own --help
+commander init            # guided first-run setup
+```
+
+Use it when you can't remember which of ~30 hyphenated names does the
+thing you want; use the hyphenated scripts when you can (they're shorter,
+and shell completion already knows them).
+
+### The commands themselves
+
 ```bash
 # Build a first-cut deck from scratch: commander + target bracket → a legal
 # exactly-99 (EDHREC-seeded, color-source manabase, then personalized).
@@ -120,6 +182,16 @@ commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --run-sim
 # --mode auto also works on commander-advise and commander-improve.
 commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --mode overhaul
 commander-auto-curate "[USER] My Deck [B3].dck" --bracket 3 --mode auto
+
+# The unattended improve loop: N auto-curate rounds, advancing the base
+# deck only on a REPLICATED 'kept' A/B verdict. Read "The improve loop is
+# a screen, not a background improver" below before running it overnight.
+commander-improve --deck <publicId> --rounds 10
+commander-improve "[USER] My Deck [B3].dck" --rounds 5 --no-replicate
+# --strategy bandit explores individual swaps as bandit arms instead.
+commander-improve --deck <publicId> --rounds 20 --strategy bandit
+# FP-013 gate progress (no deck, no rounds needed)
+commander-improve --health
 
 # Old-vs-new head-to-head A/B sim
 commander-compare \
@@ -171,7 +243,55 @@ commander-doctor
 
 # Status snapshot for cold pickup
 commander-status
+
+# Full menu of everything installed, grouped by task area
+commander
 ```
+
+## The improve loop is a screen, not a background improver
+
+`commander-improve` runs unattended, and on the unattended path a first
+`kept` verdict does not advance the deck on its own: a second
+independent A/B over the same old-vs-new pairing has to say `kept` too
+(`--replicate`, default ON for the round loop, OFF for `--strategy
+bandit`). That gate works, and it costs. Both halves of the trade, in
+the same place, because quoting only the first one sells this as
+something it isn't:
+
+- **False positives.** A truly neutral swap clears one significance test
+  about 1 run in 40 at α = 0.05; two independent runs in the same
+  direction cut the per-advance false-positive rate to **~1 in 1,600**.
+  That matters because the loop *chains* — an unconfirmed lucky split
+  becomes the base every later round is measured against, so the error
+  compounds rather than merely being recorded.
+- **True positives.** At the shipped settings (45 pod games, a
+  20-decisive gate, an exact two-sided binomial at α = 0.05) a genuinely
+  good **+5pp** swap advances with probability **0.13% per round** —
+  about **1.3% over a 10-round overnight run**. The likelihood ratio of
+  an advance rises from 3.0 single-shot to **9.2** replicated.
+
+So **"nothing advanced" is the EXPECTED outcome of an overnight run**,
+including when the curator is proposing genuinely good swaps. That is
+the screen behaving correctly, not a failure and not a stall. When
+something *does* advance, treat it as a rare lead worth investigating
+rather than a proven improvement: at LR ≈ 9.2, advances only become
+majority-true once the curator's true-hit rate clears ~10%, and FP-002
+measured curation net-neutral over 37,120 games.
+
+Buying more power by raising `--sim-games` was considered and declined —
+honest power costs real hours per round, and the Forge sim is positioned
+as a deep-dive instrument for questions worth real game counts, not a
+per-swap arbiter. If you want a swap decided, spend the games on that
+one question deliberately.
+
+**Every cycle that changes a deck is one row in
+`knowledge_log.sqlite`.** Round loops (`--strategy greedy`) write a row
+per round whatever the verdict, via the auto-curate pipeline.
+`--strategy bandit` writes a row per **accepted** pull — a pull is an
+"iteration" exactly when it advances the deck, so measured-but-rejected
+pulls stay in the run's CLI/JSON output and out of the log. Every row
+carries its audit manifest, deck snapshot, sim report and parent link,
+which is what makes `commander-history` / `commander-revert` work.
 
 ## The audit cycle (manual workflow)
 

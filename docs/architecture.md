@@ -21,7 +21,7 @@
 │  Layer 3 — Phase 2: closed-loop iteration                       │
 │    iteration_loop.py        (orchestrator)                      │
 │    analyst.py               (verdict router)                    │
-│    improvement_advisor.py   (orchestrator: routes to 7 sources) │
+│    improvement_advisor.py   (orchestrator: 3 backends + filters) │
 │      ├─ _advisor_models.py  (shared dataclasses)                │
 │      ├─ _advisor_heuristic.py    (EDHREC-based)               │
 │      ├─ _advisor_bracket_peers.py (Moxfield peer refs)        │
@@ -72,7 +72,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 0 — web surface                                          │
 │    web/app.py               (Flask app orchestrator)            │
-│      ├─ _helpers.py         (pure Flask-independent helpers)   │
+│      ├─ _helpers.py         (Flask-independent helpers)        │
 │      ├─ routes_audit.py     (audit + advise endpoints)         │
 │      ├─ routes_sim.py       (propose-swap + iteration CRUD)    │
 │      ├─ routes_decks.py     (deck CRUD + import + GC)          │
@@ -83,8 +83,13 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The arrow is "depends on". Higher layers compose lower ones. Lower
-layers never import higher.
+The arrows read top-to-bottom as "composes"; dependency actually flows
+the other way for the last hop — **Layer 0 (web) sits on top and
+imports layers 1-3**, not the reverse. Known, deliberate exceptions to
+"lower never imports higher": `status.py` and `doctor.py` (Layer 1
+boxes) read `knowledge_log` (Layer 3), and `deck_dashboard.py` reads
+`archetype`/`staples` (Layer 2) — they are reporting surfaces that may
+read any layer. Everything else honors the invariant.
 
 ## Module responsibility table
 
@@ -98,13 +103,17 @@ layers never import higher.
 | `scryfall_client` | Card lookups, disk cache, color identity, forced refresh | Anything beyond card metadata (archetype is its own thing). |
 | `edhrec_client` | EDHREC commander page + average-deck fetch, schema-tolerant `__NEXT_DATA__` walk, retry-with-backoff (5xx/429/URLError, `Retry-After` honored, capped at 30 s) | What to do with the data. Heuristic advisor + meta-test consume. |
 | `staples` | `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`, `classify_role_extended` (canonical), frequency labels, confidence tiers, role saturation thresholds, manabase essentials, tribal essentials | Recommendation logic. Advisors use these. |
-| `archetype` | Heuristic deck-classifier (filename hint → keyword scan → midrange fallback) | LLM escalation. Stubs exist for Claude/Ollama. |
+| `archetype` | Deck-classifier v2: oracle-derived signals (combos+tutors, interaction, stax patterns, tribal, curve) with a filename hint and a midrange default | Proposing changes. The old Claude/Ollama stubs are GONE (pinned by `test_llm_stubs_are_gone`); local tagging now lives in `local_model`. |
+| `deck_judge` / `_deck_judge_prompt` | FP-016 Phase 1: blinded 6-judgment panel (3 per order, deck-keyed agreement, 5-of-panel supermajority), diff-focused intent-anchored prompts, schema-v4 `judge_verdict`/`judge_report` beside the sim verdict | Advancing decks or gating anything — observe-only by contract. Game outcomes: Forge decides which deck is BETTER, only Forge. |
+| `cli` | The `commander` umbrella: 29-subcommand registry (1:1 aliases of every console script), grouped help from each module's own docstring, verbatim argv/exit-code passthrough | Any behavior. It is an alias layer — the hyphenated scripts stay canonical. |
+| `init_cli` | Guided first-run sequencing (deps → oracle prime → decks → pool) with measured cost warnings, `--yes`/`--dry-run`, resumable by probing real artifacts rather than a state file | The steps themselves — it composes `bootstrap`, `oracle_store`, `moxfield_import`, `pool_curator`. |
+| `local_model` | Local-model tier (A4): preflight, schema-first tasks with the evidence supplied, closed-taxonomy validation, degrade-to-deterministic routers, agreement harness | Proposals and verdicts — those stay on Claude. It also owns no taxonomy of its own; it imports `staples`' and `archetype`'s. |
 | `game_changers` | WotC Game Changers list (HTML scrape, 7-day cache, bundled fallback) | Bracket-fitting. The advisor + dashboard consume. |
 | `pool_curator` | Round-robin tournament, candidate ranking, top-6 split with archetype/color diversity, persisted pool JSON | Picking candidates. That's the user / `moxfield_import`. |
 | `run_match` | User deck vs curated pool (or fallback opponents), `MatchupReport` | Improvement decisions. That's the analyst loop. |
 | `compare_versions` | Old-vs-new head-to-head A/B sim; parallel pod dispatch; adaptive early-stop; intra-pod abort; card-level diff | Whether the new version is "better". That's `analyst`. |
 | `snapshot_deck` | File-copy `.dck` to versioned filename; refuse-clobber semantics | What to do with the snapshot. Workflow / iteration_loop owns. |
-| `dck_meta` | The filename↔`Name=` win-attribution invariant: `rewrite_name_to_stem` rewrites `[metadata] Name=` to the filename stem (original kept as `DisplayName=`) in every deck writer that copies/splices an existing `.dck` | Deciding filenames. Callers (snapshot / proposer / meta-test / import) pick the name. |
+| `dck_meta` | The filename↔`Name=` win-attribution invariant: `rewrite_name_to_stem` rewrites `[metadata] Name=` to the filename stem (original kept as `DisplayName=`) in every deck writer that copies/splices an existing `.dck`. Also the filename↔`[B<n>]` half: `read/set/clear_bracket_unverified` maintain the `BracketUnverified=<n>` marker (2026-08-20) that keeps "this declared bracket has no measurement behind it" alive across saves | Deciding filenames. Callers (snapshot / proposer / meta-test / import) pick the name. Deciding when a bracket counts as re-verified — that is `web/routes_dashboard`. |
 | `meta_test` | Pull top-likes Moxfield + EDHREC Average Deck for a commander; compare-versus-references; must-add / consider / off-meta | Acting on the recommendations. The user does. |
 | `improvement_advisor` (orchestrator) | Dispatch to multi-source recommenders; `advise()` entry point; `_advise_steps()` streaming generator; name validation + pricing snapshot | Running the sim. That's `compare_versions`. |
 | `_advisor_models` | `DeckDiagnosis`, `SwapRecommendation`, `AdviceReport`, `AdvicePhase` dataclasses | Serialization schema. JSON mapping is implicit. |
@@ -116,9 +125,9 @@ layers never import higher.
 | `_advisor_role_helpers` | Thin role-classifier wrapper for advisor use | Core classification. That's `staples.classify_role_extended`. |
 | `analyst` | Verdict (`kept` / `reverted` / `neutral`) with confidence + reasoning + lessons | Running the comparison itself. |
 | `_llm_json` | Shared robust JSON extraction for LLM responses: `try_extract_json_object` (fence strip / brace-scan recovery) + `extract_json_object` raising a loud `LLMJsonError` with context + response snippets | Prompting or calling the LLM. Analyst / proposer / curator / advisor call it on the raw reply. |
-| `proposer` (orchestrator) | Router for manual / Claude / Ollama proposers; the `Proposal` dataclass; `auto_propose()` curator pipeline; `apply_proposal_to_deck`; `_extract_curator_json` | Validating proposals. `compare_versions` + `analyst` do. |
+| `proposer` (orchestrator) | Router for manual / Claude proposers; the `Proposal` dataclass; `auto_propose()` curator pipeline; `apply_proposal_to_deck`; `_extract_curator_json` | Validating proposals (`compare_versions` + `analyst` do). Local-model proposing — retired 2026-08-17, see `local_model`. |
 | `_proposer_filters` | Post-response curator filters: `enforce_bracket_caps` (game-changers stripped at B1/B2), `enforce_color_identity` (off-color adds rejected via Scryfall CI), `_load_game_changers` | Recommendation logic. The advisor / curator generate; filters reject. |
-| `_proposer_sim` | Forge A/B sim glue: `_verdict_from_ab` (margin → kept/reverted/neutral), `_ab_to_iteration_fields`, bracket-aware `_pick_filler_decks`, `_run_sim_and_record`, `_log_auto_curate_iteration` | Running the sim itself. `forge_runner` + `compare_versions` do. |
+| `_proposer_sim` | Forge A/B sim glue: `_verdict_from_ab` (binomial-significance verdict → kept/reverted/neutral), `_ab_to_iteration_fields`, bracket-aware `_pick_filler_decks`, `_run_sim_and_record`, `_log_auto_curate_iteration` | Running the sim itself. `forge_runner` + `compare_versions` do. |
 | `_proposer_cli` | `auto_curate_main` (the `commander-auto-curate` console_script) — argparse + end-to-end orchestration of advisor → curator → apply → sim | Pipeline stages themselves; lives here only as a thin wrapper. |
 | `_card_list_refresh` | Hardcoded-list staleness diff helpers (`diff_card_lists`, `parse_mdfc_lands_from_response`, `fetch_mdfc_lands`); used by `scripts/refresh_card_lists.py` | Mutating `deck_health`'s lists. Manual review only. |
 | `consistency` | Opening-hand / mulligan / commander-on-curve math: exact hypergeometric + seeded Monte Carlo (`opening_hand_stats`). Wired 2026-08 into `deck_health`'s additive `consistency` signal → `/api/audit` payload → audit-panel tile | The letter grade. Deliberately display-only — folding it into `compute_health_grade` would silently re-grade every deck. |
@@ -135,11 +144,11 @@ layers never import higher.
 | `deck_builder_personalize` (FP-014.3) | Three net-zero like-for-like nonland-spell passes — lift co-occurrence picks (skips without a ≥10-deck corpus), bracket-steer, owned-collection bias — each preserving exactly-99 / singleton / color-identity | Sourcing, rendering, re-validation. `deck_builder` owns those. |
 | `forge_py_correlation` | Paired-verdict logging (Forge vs forge_py); CSV append; agreement-rate summary | Driving forge_py. Imported lazily; opt-in via env var. |
 | `web/app.py` (orchestrator) | Flask app creation; blueprint registration; `create_app()` entry point; stale file cleanup; deck listing; path resolution | Business logic. Blueprints call into the layers above. |
-| `web/_helpers.py` | Pure Flask-independent helpers (`_apply_swaps_to_dck`, `_normalize_pasted_deck`, `_format_added_line`, etc.); `_BASIC_LANDS` constant | Route-specific logic. Each blueprint uses as needed. |
+| `web/_helpers.py` | Flask-independent helpers (`_apply_swaps_to_dck`, `_normalize_pasted_deck`, `_format_added_line`, etc.); `_BASIC_LANDS` constant; `atomic_write_text`, the crash-safe `.dck` overwrite shared by the two blueprints that write decks | Route-specific logic. Each blueprint uses as needed. |
 | `web/routes_audit.py` | Audit + streaming (`GET /api/audit`, `GET /api/audit/stream`, `GET /api/advise`); wires `improvement_advisor` | Other route groups. Each lives in its own blueprint. |
 | `web/routes_sim.py` | Propose-swap + iteration CRUD (`POST /api/propose_swap`, `POST /api/save_iteration`, `GET /api/iteration/<id>`, comparisons, snapshots) | Other endpoints. Organized by business domain. |
 | `web/routes_decks.py` | Deck CRUD + import/GC (`GET/PUT/DELETE /api/deck_text`, `POST /api/import_deck`, `GET/PUT /api/deck_source`, manabase verification, audit) | Other routes. Grouped by deck lifecycle. |
-| `web/routes_dashboard.py` | Dashboard data (`GET /api/decks`, `/api/dashboard`, `/api/iterations`, `/api/pricing_series`, `/api/verdict_breakdown`) | Audit/sim routes. Dashboard-specific aggregation. |
+| `web/routes_dashboard.py` | Dashboard data (`GET /api/decks`, `/api/dashboard`, `/api/iterations`, `/api/pricing_series`, `/api/verdict_breakdown`); the one write it makes: retiring a deck's `BracketUnverified=` marker when its own bracket estimate agrees with the filename tag | Audit/sim routes. Dashboard-specific aggregation. Setting the marker — that is the `deck_text` PUT. |
 | `web/routes_meta.py` | Meta/utility routes (`GET /`, `/api/health`, `/api/forge_version`, `/api/correlation_summary`, `POST /api/log_error`) | Business routes. Ops + topbar concerns. |
 | `prompts/moxfield_audit_v3.md` | Current LLM proposer (manual paste workflow) + audit_manifest.json writeback JS | Validation. `compare_versions` + `analyst` do. |
 
@@ -355,7 +364,7 @@ web/app.py (orchestrator)
 ├── _list_decks()                       # Enumerate [USER] decks
 └── _resolve_deck_path()                # Validate path against deck_dir
 
-web/_helpers.py (pure, Flask-independent)
+web/_helpers.py (Flask-independent)
 ├── _apply_swaps_to_dck()               # Apply swap manifest to deck text
 ├── _normalize_pasted_deck()            # Canonicalize deck format
 ├── _format_added_line()                # Render added card for output
@@ -436,12 +445,45 @@ in scope across the module boundary after the split.
 | `vendor/forge/userdata/decks/commander/_pools/B<n>_analysis.json` | `pool_curator` | Per-pod `MatchAnalysis` |
 | `vendor/forge/userdata/decks/commander/_matches/*.json` | `run_match` | User-vs-pool `MatchupReports` |
 | `vendor/forge/userdata/decks/commander/_compare/*.json` | `compare_versions` | A/B `ComparisonReports` |
-| `vendor/_js_errors.log` | `web/app.py` | Browser-side error reports via `/api/log_error` |
+| `~/.commander-builder/_js_errors.log` | `web/routes_meta.py` | Browser-side error reports via `/api/log_error` (moved out of `vendor/` 2026-08-16 — telemetry doesn't belong in a vendored tree, and the old path was derived positionally from the deck dir) |
 | `vendor/forge/build.txt` | (bundled) | Forge build timestamp; consumed by `detect_forge_version` |
 | `knowledge_log.sqlite` (repo root, or `COMMANDER_BUILDER_KNOWLEDGE_DB` override) | `knowledge_log` | Iteration history |
 | `.cache/scryfall/*.json` and `C:\dev\mtg_cards\oracle_snapshots\*.json` | `scryfall_client` | Card metadata cache (shared with `forge_py`) |
 | `.cache/edhrec/*.json` | `edhrec_client` | EDHREC page cache (24 h TTL) |
 | `_forge_py_correlation.csv` (repo root) | `forge_py_correlation` | Paired-verdict log (opt-in) |
+
+---
+
+## Environment variables
+
+Every `COMMANDER_BUILDER_*` flag in the codebase, in one place (added
+2026-08-16 — before this, several were documented only in CHANGELOG
+archaeology). Paths win over defaults; feature flags are opt-in unless
+noted.
+
+| Variable | Owner | Effect |
+|----------|-------|--------|
+| `COMMANDER_BUILDER_DECK_DIR` | `dck_utils` / web | Override the Forge deck directory (default `vendor/forge/userdata/decks/commander`) |
+| `COMMANDER_BUILDER_KNOWLEDGE_DB` | `knowledge_log` | Path to the SQLite iteration log (default repo-root `knowledge_log.sqlite`) |
+| `COMMANDER_BUILDER_CONFIG` | `config_store` | Path to `config.json` (default `~/.commander-builder/config.json`) |
+| `COMMANDER_BUILDER_CREDENTIALS` | `_secrets` | Path to the credentials file holding `ANTHROPIC_API_KEY` (default `~/.commander-builder/credentials`) |
+| `COMMANDER_BUILDER_SECRET_KEY` | `web/app.py` | Flask session secret; generated per-run when unset |
+| `COMMANDER_BUILDER_COLLECTION` | `collection` | Path to the owned-cards collection export |
+| `COMMANDER_BUILDER_REPLAY_DIR` | `replay_store` | Where replay-lite game records are written |
+| `COMMANDER_BUILDER_REPLAY_CAP_MB` | `replay_store` | Byte cap for the replay store before eviction |
+| `COMMANDER_BUILDER_KEEP_GAME_LOGS` | `forge_runner` | Keep raw Forge stdout per game (soak debugging; large) |
+| `COMMANDER_BUILDER_LOCK_DIR` | `forge_batch` | Override where per-profile `.commander-builder.lock` files live |
+| `COMMANDER_BUILDER_CARD_SCORE` | `card_score` | Enable the FP-015 CardScore path (default OFF — failed three pre-registered gates) |
+| `COMMANDER_BUILDER_REBUILD_TIER` | `change_budget` | Allow auto-mode to select the 30+30 rebuild tier (default OFF — that 6× cost multiplier is gated on an unvalidated health score; `--mode rebuild` is unaffected) |
+| `COMMANDER_BUILDER_DECK_JUDGE` | `deck_judge` | Enable the observe-only LLM judge panel beside sim verdicts (default OFF — Phase 2's agreement analysis and the pre-registered kill criteria decide whether it ever becomes more) |
+| `COMMANDER_BUILDER_LOCAL_MODEL` | `local_model` | Enable the local-model tier for narrow tagging (default OFF — unmeasured; run the agreement harness first) |
+| `COMMANDER_BUILDER_LOCAL_MODEL_NAME` | `local_model` | Ollama model tag for that tier (default `llama3.2:3b`) |
+| `COMMANDER_BUILDER_LOCAL_MODEL_URL` | `local_model` | Base URL of the Ollama-compatible daemon (default `http://localhost:11434`) |
+| `COMMANDER_BUILDER_CORPUS_NORMS` | `corpus_themes` | Blend mined per-cluster role norms into targets (default OFF — pending A/B) |
+| `COMMANDER_BUILDER_CORRELATE_FORGE_PY` | `forge_py_correlation` | Log paired forge_py↔Forge verdicts to `_forge_py_correlation.csv` |
+| `COMMANDER_BUILDER_FORGEPY_SCREEN` | `forge_py_screen` | Pre-screen candidates with forge_py before spending JVM time |
+| `COMMANDER_BUILDER_LOG_DECISIONS` | `_advisor_logging` | Write advisor decision traces for debugging |
+| `MTG_CARDS_DIR` | `scryfall_client` | Oracle-snapshot directory shared with `forge_py` (defaults to an OS-appropriate path; historically a Windows dev path) |
 
 ---
 
@@ -455,12 +497,41 @@ require changing module boundaries.
 |------|---------|--------------|
 | `improvement_advisor.advise(source=...)` | `"heuristic"` (EDHREC inclusion%/synergy) | `"bracket_peers"` (Moxfield peer rankings), `"claude"` (LLM-synthesized via `_advisor_claude`); each mapped to a different module |
 | `analyst.analyze()` router | `heuristic_verdict` | `claude_verdict` (anthropic SDK; `ANTHROPIC_API_KEY` or BYO-key header), `ollama_verdict` (HTTP POST to `localhost:11434/api/generate`) |
-| `proposer.propose()` router | `manual_propose` (read `audit_manifest.json`) | `claude_propose`, `ollama_propose` |
+| `proposer.propose()` router | `manual_propose` (read `audit_manifest.json`) | `claude_propose` (`ollama_propose` retired 2026-08-17 — a tool-less 3B model could not execute the 706-line browser audit prompt; local models moved to `local_model`'s narrow tasks) |
 | `forge_runner` AI | Forge built-in heuristic AI | Phase 4 (out of scope today): Claude-as-pilot via decision-point hooks |
 | `moxfield_push._api_push` | `NotImplementedError` (WON'T-DO for personal-use scope) | — |
 | `forge_py_correlation` execution | OFF | `COMMANDER_BUILDER_CORRELATE_FORGE_PY=1` opts in to paired-verdict logging |
 
 ---
+
+## Data sources — risk tiers (2026-08-20, decision C3)
+
+Every external source this program depends on, ranked by how likely it
+is to break underneath us and what breaks with it. "Blast radius" is
+what stops working the day the source changes; "fallback" is what the
+code does about it TODAY (not aspirationally).
+
+| Source | Interface | Risk | Blast radius | Fallback today |
+|--------|-----------|------|--------------|----------------|
+| Moxfield | **Undocumented private API** (`api2.moxfield.com`) | **High** — no contract, ToS-gray, CDN/bot-shield changes have broken it before | Single-deck import, bulk bracket harvest, top-likes search, bracket peers, meta-test references — most acquisition at once | Archidekt lane for single-deck import (`import_deck(source=)`); harvest/top-likes have NO fallback and now say so when they fail |
+| EDHREC | JSON twin first (`json.edhrec.com`), HTML `__NEXT_DATA__` scrape second | **Medium** — JSON endpoint is undocumented but stable; the scrape is schema-tolerant and has survived redesigns | Heuristic advisor candidates, average-deck comparisons, theme pages | Two lanes internally (JSON → scrape); 24 h cache absorbs outages; advisor degrades to bracket-peers/manual sources |
+| Scryfall | **Documented public API** + bulk oracle snapshots | **Low** — versioned, documented, explicitly third-party-friendly | Card metadata, color identity, oracle text for every classifier | Disk cache + bulk snapshots mean a total outage only blocks NEW cards; everything cached keeps working offline |
+| Archidekt | **Documented public API** | **Low-Medium** — documented but less battle-tested here; no like-count, bracket usually null | The fallback lane itself; commander-keyed reference decks (partial) | It IS the fallback; if both it and Moxfield are down, single-deck import is paste-from-clipboard (`import_formats`) |
+| WotC Game Changers page | HTML scrape | **Medium** — marketing pages get redesigned without notice | Bracket legality's game-changer list | 7-day cache + bundled snapshot fallback ships in the repo |
+| Forge | Vendored JAR, local | **None** (pinned) — but upgrades change the card corpus | The sim itself; unsupported-card preflight | Version-detected (`detect_forge_version`); corpus mtime keys the sim-coverage cache so an upgrade invalidates it |
+
+Rules of thumb this table encodes:
+
+- Anything that exists ONLY via Moxfield's private API (bulk harvest,
+  top-likes) is accepted as best-effort: failures must name what broke
+  and what still works, never masquerade as "no decks exist."
+- A documented API beats a scrape, and a scrape with a bundled/cached
+  fallback beats a bare scrape. New acquisition features should enter
+  at the lowest-risk tier that can serve them.
+- Caches are the real resilience layer: every source above is cached on
+  disk, so the failure mode is "stale," not "dark" — and staleness is
+  surfaced (legality TTL warnings, `price_data_age_days`, oracle-age
+  warnings in `commander-doctor`).
 
 ## Working principles
 
@@ -655,31 +726,52 @@ independent value before committing to a full sim.
 
 ---
 
-## Where Ollama (or another local LLM) could plug in
+## Where local models plug in — BUILT (`local_model.py`, 2026-08-17)
 
-The audit prompt itself currently runs on Claude — it's a complex
-multi-step workflow with web fetches and structured JSON manipulation.
-Several **simpler tasks** in the broader pipeline are good candidates
-for routing to a local Ollama model to save Claude tokens:
+Owner decision A4. This section used to describe a deferred sketch
+called `llm_router.py`; the tier is now built, and the routing question
+it deferred has been answered with a policy rather than a threshold.
 
-| Task | Complexity | Frequency | Good fit for local? |
-|------|-----------|-----------|---------------------|
-| Archetype classification (one-shot: aggro/midrange/control/combo/stax) | Low | Per-deck, occasional | ✅ Strong fit |
-| Color identity from commander name | Low | Per-deck, occasional | ✅ Strong fit |
-| Card role tagging for sim (regex first, LLM only on ambiguous) | Low | Per-card, batched | ✅ Strong fit |
-| Card-pair synergy hint ("does X synergize with Y") | Medium | Per-swap | ⚠️ Maybe — quality-sensitive |
-| Audit's blind ideal build | High | Per-deck audit | ❌ Stay on Claude |
-| Audit's swap rationale generation | Medium-High | Per-deck audit | ❌ Stay on Claude |
-| Phase 2 analyst verdict | High | Per-iteration | ❌ Stay on Claude |
-| Phase 2 proposer | High | Per-iteration | ❌ Stay on Claude |
+**The policy: local models get tasks where the evidence is SUPPLIED and
+the answer comes from a closed list.** Not "low complexity" — that was
+the wrong axis. What predicts whether a small model succeeds is whether
+it must *recall* Magic (unreliable below frontier scale, and the source
+of invented card names) or merely *read* text it was handed and pick a
+label. Proposal and verdict work stays on Claude — not because it is
+complex, but because it needs judgment over knowledge the model has to
+bring itself.
 
-When we're ready, the natural shape is a thin `llm_router.py` module:
+| Task | Status |
+|------|--------|
+| Card role tagging (oracle text supplied → one of `staples`' roles) | ✅ Built — `local_model` task `role_tag` |
+| Archetype classification (deck signals supplied → one `Archetype`) | ✅ Built — `local_model` task `archetype_tag` |
+| Color identity from commander name | ➖ Not worth a model — already deterministic in `scryfall_client` |
+| Card-pair synergy hint | ⚠️ Open — quality-sensitive, and no deterministic fallback to degrade to |
+| Audit's blind ideal build / swap rationale | ❌ Stays on Claude (policy, not deferral) |
+| Phase 2 analyst verdict / proposer | ❌ Stays on Claude (policy, not deferral) |
 
-```python
-def classify(prompt: str, *, complexity: str = "auto") -> str:
-    # complexity: "low" → Ollama, "high" → Claude API, "auto" → router decides
-    ...
-```
+Shape of the built module:
 
-Decisions about routing thresholds, prompt format, and quality
-fallbacks are deferred until there's concrete cost pressure.
+- **Preflight** checks the daemon *and* that the model is pulled, naming
+  the exact `ollama pull <model>` command. Silent, confusing failure was
+  the original complaint against this path.
+- **Schema-first**: each task owns a short purpose-written prompt, a
+  JSON schema, and its own validation. An answer outside the taxonomy is
+  a malformed response, not data.
+- **Degrade, never fabricate**: every failure returns `None` and the
+  caller falls back to the deterministic classifier. A local answer is
+  never a silent default.
+- **Taxonomies are imported** from `staples` / `archetype`, never copied,
+  so they cannot drift from the classifiers they back up.
+- **An agreement harness** measures the tier against the deterministic
+  classifier. It reports agreement, explicitly not accuracy — whether
+  this tier earns production use is a question for data.
+
+No production call site is wired to it yet, and the flag is off by
+default. That is deliberate: wiring an unmeasured classifier into the
+dashboard would be the same unvalidated-default move this decision was
+reacting against.
+
+Retired at the same time: `proposer.ollama_propose`, which fed all 706
+lines of the browser audit prompt to `llama3.2:3b` and waited 600
+seconds for a full swap manifest.

@@ -101,3 +101,122 @@ def test_default_serve_starts_real_flask_app(tmp_path):
     assert desktop.wait_until_up("127.0.0.1", port, timeout=10.0)
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as r:
         assert r.status == 200
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review 2026-08-20 (R2-P23)
+# ---------------------------------------------------------------------------
+
+def test_launch_refuses_to_open_a_window_on_a_dead_server(monkeypatch):
+    """``wait_until_up``'s boolean is the whole point of the helper.
+
+    It used to be discarded, so a slow/failed server start produced a
+    native window showing ERR_CONNECTION_REFUSED — the exact case the
+    probe exists to prevent. Now: no window, an explanatory error, and a
+    clean teardown."""
+    monkeypatch.setattr(desktop, "wait_until_up", lambda *a, **k: False)
+
+    shutdowns = {"n": 0}
+    releases = {"n": 0}
+
+    class _Handle:
+        def shutdown(self):
+            shutdowns["n"] += 1
+
+    class _Lock:
+        def close(self):
+            releases["n"] += 1
+
+    class FakeWebview:
+        @staticmethod
+        def create_window(*a, **kw):  # pragma: no cover - must not run
+            raise AssertionError("a window was opened onto a dead server")
+
+        @staticmethod
+        def start(**kw):  # pragma: no cover - must not run
+            raise AssertionError("the GUI loop was started anyway")
+
+    with pytest.raises(desktop.ServerStartError) as exc:
+        desktop.launch(
+            deck_dir="C:/decks", host="127.0.0.1", port=5601,
+            webview=FakeWebview,
+            serve=lambda *a, **k: _Handle(),
+            _acquire_lock=lambda: _Lock(),
+        )
+
+    # The message says what failed and that nothing opened.
+    assert "did not start" in str(exc.value)
+    assert "Nothing was opened" in str(exc.value)
+    # Teardown so a retry isn't blocked by our own server/lock.
+    assert shutdowns["n"] == 1
+    assert releases["n"] == 1
+
+
+def test_launch_still_opens_when_the_server_comes_up(monkeypatch):
+    """Guard on the guard: the happy path is unchanged."""
+    monkeypatch.setattr(desktop, "wait_until_up", lambda *a, **k: True)
+    opened = {"n": 0}
+
+    class FakeWebview:
+        @staticmethod
+        def create_window(title, url, **kw):
+            opened["n"] += 1
+
+        @staticmethod
+        def start(**kw):
+            pass
+
+    class _Lock:
+        def close(self):
+            pass
+
+    url = desktop.launch(
+        deck_dir="C:/decks", host="127.0.0.1", port=5602,
+        webview=FakeWebview, serve=lambda *a, **k: None,
+        _acquire_lock=lambda: _Lock(),
+    )
+    assert url == "http://127.0.0.1:5602/" and opened["n"] == 1
+
+
+def test_second_instance_does_not_blank_the_first_ones_pid(tmp_path):
+    """The lock file is opened non-truncating.
+
+    A user who sees "already running" with no visible window needs the
+    holder's pid; the old truncating open destroyed it from the very
+    process that was about to report the failure."""
+    import os
+
+    lock_path = tmp_path / "instance.lock"
+    held = desktop._acquire_instance_lock(lock_path)
+    try:
+        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
+        with pytest.raises(desktop.SingleInstanceError):
+            desktop._acquire_instance_lock(lock_path)
+        # The payload survived the failed attempt.
+        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
+    finally:
+        held.close()
+
+
+def test_lock_pid_is_rewritten_by_the_new_holder(tmp_path):
+    """Non-truncating open must not leave a STALE pid behind either: the
+    process that actually takes the lock stamps its own."""
+    import os
+
+    lock_path = tmp_path / "instance.lock"
+    lock_path.write_text("999999", encoding="ascii")
+    lock = desktop._acquire_instance_lock(lock_path)
+    try:
+        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
+    finally:
+        lock.close()
+
+
+def test_main_reports_a_dead_server_and_exits_nonzero(monkeypatch, capsys):
+    """A double-clicked EXE must get the message, not a traceback."""
+    def _boom(**kw):
+        raise desktop.ServerStartError("server did not start; nothing opened")
+
+    monkeypatch.setattr(desktop, "launch", _boom)
+    assert desktop.main([]) == 1
+    assert "server did not start" in capsys.readouterr().out

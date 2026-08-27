@@ -180,9 +180,19 @@ def _isolate_card_score_flag(monkeypatch):
     flag) gets the identical treatment for the identical reason: the
     suite's baseline is flag-off, and an operator who exported the flag
     must not silently flip every deck-builder test onto the norms path.
+
+    ``COMMANDER_BUILDER_DECK_JUDGE`` (FP-016, 2026-08-20) joins them with
+    a sharper edge: the improve-loop tests drive ``run_improve_loop``
+    with scripted round functions over deck paths that do not exist, and
+    with the flag exported the default judge path would try to open them
+    on every round. The loop swallows that (a judge failure must never
+    sink a round) but the WARN line would land in tests asserting on
+    captured output — a flag-on shell must not change what the suite
+    prints.
     """
     monkeypatch.delenv("COMMANDER_BUILDER_CARD_SCORE", raising=False)
     monkeypatch.delenv("COMMANDER_BUILDER_CORPUS_NORMS", raising=False)
+    monkeypatch.delenv("COMMANDER_BUILDER_DECK_JUDGE", raising=False)
 
 
 @pytest.fixture(autouse=True)

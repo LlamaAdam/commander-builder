@@ -11,12 +11,19 @@ from typing import Any
 import pytest
 
 from commander_builder.compare_versions import ComparisonReport, VersionStats
-from commander_builder.iteration_loop import resolve_deck_id, run_one_iteration
+from commander_builder.iteration_loop import (
+    _materialize_proposed_deck,
+    main as iteration_loop_main,
+    propose_then_iterate,
+    resolve_deck_id,
+    run_one_iteration,
+)
 from commander_builder.knowledge_log import (
     get_iteration,
     iterations_for_deck,
     stats_summary,
 )
+from commander_builder.proposer import ProposerOutput
 
 
 def _write_dck(tmp_path, name: str, body: str):
@@ -148,8 +155,9 @@ def staged_decks(tmp_path, monkeypatch):
 
 
 def test_run_one_iteration_persists_kept_verdict(tmp_path, staged_decks, monkeypatch):
-    """Strong improvement (margin 10) → kept verdict → next_action='continue'."""
-    canned = _make_canned_comparison(old_wins=2, new_wins=12, draws=0, total=14)
+    """Strong improvement (16-4 over 20 decisive, p ~= 0.012 — at the
+    aligned 20-decisive floor) → kept verdict → next_action='continue'."""
+    canned = _make_canned_comparison(old_wins=4, new_wins=16, draws=0, total=20)
     monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
 
     db = tmp_path / "kl.sqlite"
@@ -169,11 +177,11 @@ def test_run_one_iteration_persists_kept_verdict(tmp_path, staged_decks, monkeyp
     assert fetched is not None
     assert fetched.deck_id == "stable-public-id"  # publicId, not filename
     assert fetched.verdict == "kept"
-    assert fetched.margin == 10
+    assert fetched.margin == 12
     # One-convention precision (2026-07-19): all knowledge_log win-rate
     # writers round to 4 places via knowledge_log.decisive_win_rate.
-    assert fetched.win_rate_old == round(2 / 14, 4)
-    assert fetched.win_rate_new == round(12 / 14, 4)
+    assert fetched.win_rate_old == round(4 / 20, 4)
+    assert fetched.win_rate_new == round(16 / 20, 4)
     assert fetched.audit_manifest["added"] == ["NewCard"]
     # Sim report is the full ComparisonReport.to_dict()
     assert fetched.sim_report["winner"] == "new"
@@ -206,7 +214,7 @@ def test_run_one_iteration_win_rates_exclude_filler_wins(tmp_path, staged_decks,
 
 def test_run_one_iteration_persists_reverted_verdict(tmp_path, staged_decks, monkeypatch):
     """Strong regression → reverted → next_action='revert'."""
-    canned = _make_canned_comparison(old_wins=12, new_wins=2, draws=0, total=14)
+    canned = _make_canned_comparison(old_wins=16, new_wins=4, draws=0, total=20)
     monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
 
     db = tmp_path / "kl.sqlite"
@@ -295,6 +303,366 @@ def test_run_one_iteration_writes_deck_snapshot_blob(tmp_path, staged_decks, mon
     assert fetched.deck_snapshot is not None
     assert "NewCard" in fetched.deck_snapshot
     assert "Moxfield=stable-public-id" in fetched.deck_snapshot
+
+
+# --- propose_then_iterate (auto-propose materializes the deck) -------------
+
+@pytest.fixture
+def auto_propose_deck(tmp_path, monkeypatch):
+    """Stage ONLY the v1 deck — auto-propose must materialize v2 itself.
+    The mainboard is a full 99 cards so apply's basic-land padding stays
+    out of the diff under test, and Scryfall lookups are stubbed so the
+    appended add-line stays a plain `1 <name>` (offline, deterministic)."""
+    deck_dir = tmp_path / "decks" / "commander"
+    deck_dir.mkdir(parents=True)
+
+    v1 = deck_dir / "[USER] Test Deck v1 [B3].dck"
+    v1.write_text("\n".join([
+        "[metadata]",
+        "Name=[USER] Test Deck v1 [B3]",
+        "Moxfield=stable-public-id",
+        "[Commander]",
+        "1 Test Commander",
+        "[Main]",
+        "1 Sol Ring",
+        "1 OldCard",
+        "97 Forest",
+    ]) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr("commander_builder.iteration_loop.DECK_DIR", deck_dir)
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, cache=True: None,
+    )
+    return {"deck_dir": deck_dir, "v1": v1.name,
+            "v2": "[USER] Test Deck v2 [B3].dck"}
+
+
+def _main_card_names(text: str) -> set:
+    """Card names in [Main], edition tails stripped — enough to diff the
+    two on-disk versions against the recorded manifest."""
+    names = set()
+    in_main = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_main = s.lower() == "[main]"
+            continue
+        if in_main and s:
+            _, _, name = s.partition(" ")
+            names.add(name.split("|")[0].strip())
+    return names
+
+
+def test_propose_then_iterate_materializes_proposed_deck(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """THE BUG (2026-08-13): propose_then_iterate never applied the LLM
+    proposal to disk — it proposed against the v2 path (which had to
+    pre-exist) and then simmed the two PRE-EXISTING files, so the
+    recorded manifest and the simmed diff were unrelated, poisoning the
+    knowledge log. Auto-propose must (a) propose against the OLD deck,
+    (b) materialize the v2 deck FROM the proposal, and (c) persist a
+    manifest that matches the on-disk diff."""
+    seen = {}
+
+    def _fake_propose(input_, config):
+        seen["deck_path"] = input_.deck_path
+        return ProposerOutput(
+            added=["NewCard"], removed=["OldCard"],
+            rationale="swap the dud", source="claude",
+        )
+
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose", _fake_propose,
+    )
+    canned = _make_canned_comparison(old_wins=4, new_wins=16, draws=0, total=20)
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare", lambda **kw: canned,
+    )
+
+    old_path = auto_propose_deck["deck_dir"] / auto_propose_deck["v1"]
+    new_path = auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]
+    db = tmp_path / "kl.sqlite"
+    result = propose_then_iterate(
+        deck_filename=auto_propose_deck["v1"],
+        new_deck_filename=auto_propose_deck["v2"],
+        bracket=3,
+        db_path=db,
+    )
+
+    # (a) The proposer audited the OLD deck, not the then-nonexistent v2.
+    assert seen["deck_path"] == old_path
+
+    # (b) The proposed deck was materialized on disk, Name= restamped to
+    # its own stem (the dck_meta invariant Forge's match log depends on).
+    assert new_path.exists()
+    new_text = new_path.read_text(encoding="utf-8")
+    assert "NewCard" in new_text
+    assert "OldCard" not in new_text
+    assert "Name=[USER] Test Deck v2 [B3]" in new_text
+
+    # (c) The persisted manifest IS the on-disk diff.
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    old_names = _main_card_names(old_path.read_text(encoding="utf-8"))
+    new_names = _main_card_names(new_text)
+    assert set(fetched.audit_manifest["added"]) == new_names - old_names == {"NewCard"}
+    assert set(fetched.audit_manifest["removed"]) == old_names - new_names == {"OldCard"}
+    # The LLM's full intent survives alongside what landed.
+    assert fetched.audit_manifest["requested_adds"] == ["NewCard"]
+    assert fetched.audit_manifest["requested_cuts"] == ["OldCard"]
+    assert result.verdict.label == "kept"
+
+
+def test_propose_then_iterate_refuses_pre_existing_new_file(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """A pre-existing --new file is exactly the poisoned-log setup the
+    fix closes: fail fast, and BEFORE the proposer runs so no LLM spend
+    is wasted on a run that can't land."""
+    (auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]).write_text(
+        "[Main]\n1 Stale\n", encoding="utf-8",
+    )
+
+    def _no_propose(*a, **kw):
+        raise AssertionError("propose() must not run when --new already exists")
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose", _no_propose,
+    )
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        propose_then_iterate(
+            deck_filename=auto_propose_deck["v1"],
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=tmp_path / "kl.sqlite",
+        )
+
+
+def test_propose_then_iterate_requires_old_deck(tmp_path, auto_propose_deck):
+    with pytest.raises(FileNotFoundError, match="old deck not found"):
+        propose_then_iterate(
+            deck_filename="[USER] Ghost [B3].dck",
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=tmp_path / "kl.sqlite",
+        )
+
+
+def test_main_auto_propose_fails_fast_when_new_exists(
+    auto_propose_deck, capsys,
+):
+    """CLI wrapper: --auto-propose with a pre-existing --new file exits 2
+    with an actionable ERROR line instead of silently comparing the two
+    pre-existing files (or dumping a traceback)."""
+    (auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]).write_text(
+        "[Main]\n1 Stale\n", encoding="utf-8",
+    )
+    rc = iteration_loop_main([
+        "--old", auto_propose_deck["v1"],
+        "--new", auto_propose_deck["v2"],
+        "--bracket", "3",
+        "--auto-propose",
+    ])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "ERROR" in out
+    assert "already exists" in out
+
+
+def test_propose_then_iterate_refuses_when_every_pair_is_dropped(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """L3: apply-time validation can drop EVERY proposed pair (a cut
+    naming a card that isn't in the decklist takes its paired add down
+    with it). The materialized v2 is then content-identical to v1, and
+    simming it burns 10+ Forge games comparing a deck against itself
+    and writes a pure-noise row into the knowledge log. Refuse BEFORE
+    compare(), and delete the just-written file so the next run doesn't
+    trip the pre-existing-file guard on our own leftover."""
+    def _fake_propose(input_, config):
+        # "GhostCard" is not in the [Main] list → unmatched cut → the
+        # NewCard/GhostCard PAIR is dropped, leaving nothing applied.
+        return ProposerOutput(
+            added=["NewCard"], removed=["GhostCard"],
+            rationale="swap a card that isn't there", source="claude",
+        )
+
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose", _fake_propose,
+    )
+
+    def _no_compare(**kw):
+        raise AssertionError("compare() must not run on a no-op swap")
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare", _no_compare,
+    )
+
+    new_path = auto_propose_deck["deck_dir"] / auto_propose_deck["v2"]
+    with pytest.raises(RuntimeError) as excinfo:
+        propose_then_iterate(
+            deck_filename=auto_propose_deck["v1"],
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=tmp_path / "kl.sqlite",
+        )
+
+    msg = str(excinfo.value)
+    # Actionable: names the requested pair AND why it didn't survive.
+    assert "no proposed swap survived" in msg
+    assert "GhostCard" in msg
+    assert "NewCard" in msg
+    # The half-written artifact is gone — a re-run must not hit the
+    # FileExistsError guard on a file THIS call created.
+    assert not new_path.exists()
+
+
+def test_propose_then_iterate_no_op_swap_logs_nothing(
+    tmp_path, auto_propose_deck, monkeypatch,
+):
+    """The point of the guard is the knowledge log: a refused run must
+    leave zero rows behind (a noise row is worse than no row — it
+    dilutes every win-rate summary computed over the deck)."""
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose",
+        lambda input_, config: ProposerOutput(
+            added=["NewCard"], removed=["GhostCard"],
+            rationale="no-op", source="claude",
+        ),
+    )
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: _make_canned_comparison(
+            old_wins=4, new_wins=16, draws=0, total=20,
+        ),
+    )
+    db = tmp_path / "kl.sqlite"
+    with pytest.raises(RuntimeError):
+        propose_then_iterate(
+            deck_filename=auto_propose_deck["v1"],
+            new_deck_filename=auto_propose_deck["v2"],
+            bracket=3,
+            db_path=db,
+        )
+    assert iterations_for_deck("stable-public-id", db_path=db) == []
+
+
+def test_main_auto_propose_exits_2_when_every_pair_is_dropped(
+    auto_propose_deck, monkeypatch, capsys,
+):
+    """CLI wrapper: the no-op-swap guard exits 2 with an ERROR line,
+    same clean-exit treatment as the pre-existing-file guard — not a
+    traceback."""
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.propose",
+        lambda input_, config: ProposerOutput(
+            added=["NewCard"], removed=["GhostCard"],
+            rationale="no-op", source="claude",
+        ),
+    )
+    monkeypatch.setattr(
+        "commander_builder.iteration_loop.compare",
+        lambda **kw: (_ for _ in ()).throw(
+            AssertionError("compare() must not run"),
+        ),
+    )
+    rc = iteration_loop_main([
+        "--old", auto_propose_deck["v1"],
+        "--new", auto_propose_deck["v2"],
+        "--bracket", "3",
+        "--auto-propose",
+    ])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "ERROR" in out
+    assert "no proposed swap survived" in out
+
+
+# --- _materialize_proposed_deck: manifest ↔ on-disk-diff invariant ---------
+
+def test_materialize_records_padding_in_manifest(tmp_path, monkeypatch):
+    """L2: the applier pads a SHORT source deck with basic lands so
+    Forge will load it. Those basics are part of the on-disk diff the
+    sim measures, so the persisted manifest has to carry them — without
+    ``padded_count`` / ``padded_breakdown`` the manifest silently
+    under-describes the deck that was actually simmed."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, cache=True: None,
+    )
+    old_path = _write_dck(tmp_path, "[USER] Short v1 [B3].dck", "\n".join([
+        "[metadata]",
+        "Name=[USER] Short v1 [B3]",
+        "[Commander]",
+        "1 Test Commander",
+        "[Main]",
+        "1 OldCard",
+        "40 Forest",
+    ]) + "\n")
+    new_path = tmp_path / "[USER] Short v2 [B3].dck"
+    manifest = {
+        "added": ["NewCard"], "removed": ["OldCard"],
+        "rationale": "swap", "source": "claude",
+    }
+    _materialize_proposed_deck(old_path, new_path, manifest)
+
+    # 1 OldCard + 40 Forest = 41 main; the swap keeps 40 + adds 1 = 41,
+    # so 58 basics are synthesized to reach the 99-card target.
+    assert manifest["padded_count"] == 58
+    assert manifest["padded_breakdown"] == {"Forest": 58}
+    # And the padding is REAL — the manifest number matches the file
+    # (the padder appends its own line rather than merging counts).
+    new_text = new_path.read_text(encoding="utf-8")
+    forests = sum(
+        int(line.split(" ", 1)[0])
+        for line in new_text.splitlines()
+        if line.strip().endswith("Forest")
+    )
+    assert forests == 40 + manifest["padded_count"] == 98
+
+
+def test_materialize_records_pair_drops_in_manifest(tmp_path, monkeypatch):
+    """Same invariant from the other side: pairs the applier refused
+    are recorded under the SAME key names ``_proposer_sim`` uses (the
+    other writer of this manifest shape), so knowledge-log consumers
+    read one schema regardless of which path produced the row."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, cache=True: None,
+    )
+    old_path = _write_dck(tmp_path, "[USER] Drop v1 [B3].dck", "\n".join([
+        "[metadata]",
+        "Name=[USER] Drop v1 [B3]",
+        "[Commander]",
+        "1 Test Commander",
+        "[Main]",
+        "1 OldCard",
+        "98 Forest",
+    ]) + "\n")
+    new_path = tmp_path / "[USER] Drop v2 [B3].dck"
+    manifest = {
+        "added": ["NewCard"], "removed": ["GhostCard"],
+        "rationale": "swap", "source": "claude",
+    }
+    _materialize_proposed_deck(old_path, new_path, manifest)
+
+    assert manifest["added"] == []
+    assert manifest["removed"] == []
+    assert manifest["dropped_unmatched_cut"] == [
+        {"cut": "GhostCard", "add": "NewCard"},
+    ]
+    # Every reason bucket _proposer_sim persists is present (empty is a
+    # fact, absent is a hole a consumer has to guess at).
+    for key in (
+        "dropped_for_bracket", "dropped_for_protection",
+        "dropped_for_color_identity", "dropped_for_balance",
+        "dropped_duplicate_add", "dropped_commander_add",
+        "padded_count", "padded_breakdown",
+    ):
+        assert key in manifest
+    # Intent is preserved alongside what landed.
+    assert manifest["requested_adds"] == ["NewCard"]
+    assert manifest["requested_cuts"] == ["GhostCard"]
 
 
 def test_run_one_iteration_refuses_verdict_on_zero_attributed_games(

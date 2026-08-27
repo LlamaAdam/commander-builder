@@ -18,8 +18,17 @@ deserve a dedicated module:
    now we keep an independent local copy because the two projects share
    no code.
 
-Both functions are pure (no I/O, no network) and idempotent. Tests can
-exercise them with synthetic ``oracle_text`` strings.
+3. **Politics tagging** (2026-08-17, decision C2) — goad / monarch / vote /
+   tempting offer / Rhystic-tax / pillow-fort detection. Same oracle-text
+   shape as role classification, but it answers a different question: not
+   "what does this card do for the deck" but "can the Forge AI that the A/B
+   loop measures against value this card at all". See
+   ``_POLITICS_PATTERNS``.
+
+The classifiers are pure (no I/O, no network) and idempotent. Tests can
+exercise them with synthetic ``oracle_text`` strings; the name-keyed
+wrappers (``count_deck_roles``, ``is_politics_card_name``) resolve through
+Scryfall and take an injectable lookup instead.
 """
 
 from __future__ import annotations
@@ -164,6 +173,49 @@ SHOCK_LANDS: dict[str, frozenset[str]] = {
     "hallowed fountain": frozenset({"U", "W"}),
 }
 
+# Ikoria (2020) + New Capenna (2022) triomes — the 10 three-color lands
+# carrying three basic land types plus cycling. They enter tapped, but
+# they're fetchable (typed), fix THREE colors at once, and cycle away in
+# the late game — the modern default for 3+ color manabases. Tiered
+# BELOW the untapped duals (ABU / fetch / shock / bond) but above any
+# generic tapland. The 3-of-3 color containment check in
+# ``essential_manabase_for_colors`` naturally gates these to 3+ color
+# identities — a two-color deck can never contain a triome's identity.
+TRIOME_LANDS: dict[str, frozenset[str]] = {
+    # Ikoria: Lair of Behemoths (allied wedges).
+    "indatha triome": frozenset({"W", "B", "G"}),
+    "ketria triome": frozenset({"G", "U", "R"}),
+    "raugrin triome": frozenset({"U", "R", "W"}),
+    "savai triome": frozenset({"R", "W", "B"}),
+    "zagoth triome": frozenset({"B", "G", "U"}),
+    # Streets of New Capenna (shards).
+    "jetmir's garden": frozenset({"R", "G", "W"}),
+    "raffine's tower": frozenset({"W", "U", "B"}),
+    "spara's headquarters": frozenset({"G", "W", "U"}),
+    "xander's lounge": frozenset({"U", "B", "R"}),
+    "ziatora's proving ground": frozenset({"B", "R", "G"}),
+}
+
+# Murders at Karlov Manor (2024) surveil lands — the 10 two-color duals
+# with both basic land types plus "surveil 1" on entry. Taplands, but
+# fetchable (typed search finds them) and the surveil trigger is real
+# card selection, which makes them the TOP budget-tier dual for any
+# two-color pair ($2-8 each). Kept in budget mode alongside shocks and
+# bonds; in full mode they tier below every untapped dual and below the
+# triomes (three colors fixed beats two when both enter tapped).
+SURVEIL_LANDS: dict[str, frozenset[str]] = {
+    "commercial district": frozenset({"R", "G"}),
+    "elegant parlor": frozenset({"R", "W"}),
+    "hedge maze": frozenset({"G", "U"}),
+    "lush portico": frozenset({"G", "W"}),
+    "meticulous archive": frozenset({"W", "U"}),
+    "raucous theater": frozenset({"B", "R"}),
+    "shadowy backstreet": frozenset({"W", "B"}),
+    "thundering falls": frozenset({"U", "R"}),
+    "undercity sewers": frozenset({"U", "B"}),
+    "underground mortuary": frozenset({"B", "G"}),
+}
+
 
 def utility_fixing_lands(color_identity) -> list[str]:
     """Universal-fixer lands worth slotting in 3+ color decks.
@@ -194,13 +246,17 @@ def essential_manabase_for_colors(
 
     ``color_identity`` is a set / iterable of WUBRG letters
     (case-insensitive). Includes ABU duals, fetch lands, bond lands,
-    shock lands, and (for 3+ color decks) universal utility fixers.
-    A 2-color land is included only when BOTH of its colors are
-    inside the deck's identity — a mono-red deck won't see Stomping
-    Ground (RG) because the G slot is wasted.
+    shock lands, triomes (3+ color identities only — the containment
+    check gates them naturally), surveil duals, and (for 3+ color
+    decks) universal utility fixers. A multi-color land is included
+    only when ALL of its colors are inside the deck's identity — a
+    mono-red deck won't see Stomping Ground (RG) because the G slot
+    is wasted.
 
     ``budget=True`` strips the $200+ ABU duals AND the $25-60 fetch
-    lands — leaving shock lands ($10-30), bond lands ($5-20), and
+    lands — leaving shock lands ($10-30), bond lands ($5-20),
+    triomes ($3-15), surveil duals ($2-8, the top budget-tier dual:
+    basic-typed so they fetch, plus real card selection), and
     utility fixers ($5-30) as the realistic budget manabase. Use
     when the user opted out of the most expensive cards via the
     audit panel's budget toggle.
@@ -209,8 +265,11 @@ def essential_manabase_for_colors(
     can still surface colorless utility lands (Cavern of Souls,
     Strip Mine, etc.) separately via tribal / utility helpers.
 
-    Order: duals → fetches → shocks → bond lands → universal fixers
-    (when 3+ colors). Within each tier, alphabetical. Budget mode
+    Order: duals → fetches → shocks → bond lands → triomes →
+    surveil duals → universal fixers (when 3+ colors). The untapped
+    tiers outrank the tapped ones (triomes / surveil); triomes
+    outrank surveil duals because three fixed colors beat two when
+    both enter tapped. Within each tier, alphabetical. Budget mode
     skips the first two tiers but preserves order within the rest.
     """
     if not color_identity:
@@ -220,10 +279,11 @@ def essential_manabase_for_colors(
     tiers: tuple[dict[str, frozenset[str]], ...]
     if budget:
         # Drop ABU duals + fetches — the two expensive tiers. Shocks,
-        # bonds, and utility fixers stay.
-        tiers = (SHOCK_LANDS, BOND_LANDS)
+        # bonds, triomes, surveil duals, and utility fixers stay.
+        tiers = (SHOCK_LANDS, BOND_LANDS, TRIOME_LANDS, SURVEIL_LANDS)
     else:
-        tiers = (ABU_DUAL_LANDS, FETCH_LANDS, SHOCK_LANDS, BOND_LANDS)
+        tiers = (ABU_DUAL_LANDS, FETCH_LANDS, SHOCK_LANDS, BOND_LANDS,
+                 TRIOME_LANDS, SURVEIL_LANDS)
 
     out: list[str] = []
     for source in tiers:
@@ -598,6 +658,19 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         ),
         (r"(?:put|return)[^.]+land card[^.]+(?:onto the battlefield|to the battlefield)", None, 80),
         (r"create a treasure token", None, 40),
+        # Plural / variable Treasure production — "create two Treasure
+        # tokens" (Big Score), "create X Treasure tokens" (Dockside
+        # Extortionist), "create that many Treasure tokens" (Old
+        # Gnawbone). Round-2 evergreen audit 2026-08-16: the singular
+        # pattern above only matched "create a treasure token", so every
+        # multi-Treasure producer was invisible to the ramp-role count.
+        # Cards whose draw clause outranks this (Big Score's "Draw two
+        # cards", score 70 > 40) still classify as draw — intended.
+        (
+            r"create (?:two|three|four|five|six|seven|eight|nine|ten|"
+            r"x|that many|a number of) treasure tokens",
+            None, 40,
+        ),
     ]),
     ("draw", [
         (r"draw (?:a card|two cards|three cards|\d cards|x cards|cards equal)", None, 70),
@@ -611,6 +684,24 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"investigate", None, 40),
         (r"scry \d+", None, 30),
         (r"\bcantrip", None, 60),
+        # Impulse draw — "Exile the top [two/three/X] card(s) of your
+        # library. [Until end of turn / Until the end of your next
+        # turn,] you may play ..." (Light Up the Stage, Wrenn's
+        # Resolve, Prosper's end-step trigger). Round-2 evergreen audit
+        # 2026-08-16: no pattern saw exile-to-play card advantage at
+        # all. The window is ``[^\n]{0,60}`` — crossing the sentence
+        # break but never a paragraph break — so the "exile the top"
+        # clause and the "you may play/cast" permission must sit in the
+        # SAME ability. Cascade reminder text can't false-positive:
+        # its wording is "exile cards from the top of your library",
+        # which never matches "exile the top", and its "you may cast
+        # it" lives in the same reminder either way (pinned by the
+        # Bloodbraid Elf fixture test).
+        (
+            r"exile the top (?:\w+ )?cards? of your library"
+            r"[^\n]{0,60}?you may (?:play|cast)",
+            None, 60,
+        ),
     ]),
     ("removal", [
         (r"destroy target", None, 70),
@@ -619,6 +710,35 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"target creature gets -\d+/-\d+", None, 40),
         (r"deals \d+ damage to (?:any target|target)", None, 50),
         (r"counter target spell", None, 65),
+        # Restricted counterspells — Negate ("counter target
+        # noncreature spell"), Dovin's Veto, Swan Song ("counter target
+        # enchantment, instant, or sorcery spell"), Spell Pierce
+        # ("... noncreature spell unless its controller pays {2}").
+        # Round-2 evergreen audit 2026-08-16: the pattern above
+        # required "spell" IMMEDIATELY after "target", so every
+        # restricted counter fell through to "other". ``[^.\n]{0,60}``
+        # keeps the qualifier list inside one sentence; ``\bspell\b``
+        # keeps ability counters (Stifle's "counter target activated
+        # or triggered ability") out — those never say "spell".
+        (r"counter target [^.\n]{0,60}?\bspell\b", None, 65),
+        # Fight ("Target creature you control fights target creature
+        # you don't control" — Prey Upon class) and bite ("deals damage
+        # equal to its power to target creature" — Ram Through class).
+        # Round-2 evergreen audit 2026-08-16: both classified "other".
+        # Prey Upon's reminder text ("Each deals damage equal to its
+        # power to the other.") matches neither pattern on its own —
+        # "the other" is not "target creature".
+        (r"fights? (?:up to \w+ )?(?:another )?target creature", None, 50),
+        (r"deals damage equal to its power to target creature", None, 50),
+        # Edicts — Diabolic Edict ("Target player sacrifices a
+        # creature"), Soul Shatter ("Each opponent sacrifices a
+        # creature or planeswalker ..."). Round-2 evergreen audit
+        # 2026-08-16. Anchored on "(each|target) (opponent|player)" so
+        # your-own-sacrifice costs ("Sacrifice a creature: Add
+        # {C}{C}.") and aristocrats triggers ("Whenever you sacrifice
+        # a creature") never match — same guard interaction.py's edict
+        # pattern uses.
+        (r"(?:each|target) (?:opponent|player) sacrifices? a creature", None, 65),
     ]),
     ("wipe", [
         (r"destroy all (?:creatures|nonland|nonland permanents|permanents)", None, 90),
@@ -633,6 +753,22 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"exile all (?:creatures|permanents)", None, 90),
         (r"return all .* to (?:its|their) owners' hands", None, 80),
         (r"deals \d+ damage to each (?:creature|player)", None, 75),
+        # X-damage sweeps — Earthquake ("deals X damage to each
+        # creature without flying and each player") / Chain Reaction
+        # class. Round-2 evergreen audit 2026-08-16: the digit pattern
+        # above requires literal digits, so every X-wipe classified
+        # "other". Oracle text arrives lowercased, so the X is a
+        # literal "x". Targeted X burn ("deals X damage to target
+        # creature") stays out — the pattern is anchored on "to each".
+        (r"deals x damage to each (?:creature|player)", None, 75),
+        # "deals damage equal to ... to each ... creature" — Widespread
+        # Brutality class (the Army "deals damage equal to its power to
+        # each non-Army creature"). Same-sentence window mirrors the
+        # restricted-counterspell discipline; the trailing ``creature``
+        # anchor keeps "to each opponent" finisher text (Torment of
+        # Hailfire class) in the finisher bucket where it already
+        # lives.
+        (r"deals damage equal to [^.\n]{0,60}to each [^.\n]{0,25}creature", None, 75),
         # "Destroy each <typed> creature" / "destroy each <subtype>" —
         # In Garruk's Wake, Dusk // Dawn, etc. The "each <typed>"
         # idiom is modern templating for board-scoped removal.
@@ -679,6 +815,50 @@ _ROLE_PATTERNS: list[tuple[str, list[tuple[str, str | None, int]]]] = [
         (r"protection from", None, 60),
         (r"shroud", None, 50),
         (r"can't be the target of", None, 50),
+        # Ward, but only where the card GRANTS it — "equipped creature
+        # has ward {2}", "creatures you control gain ward {1}".
+        #
+        # Round-2 evergreen audit 2026-08-16 added ward (the keyword
+        # postdates the original table); the first cut matched the bare
+        # keyword, which swept in every creature that merely HAS ward
+        # (Miirym, Phyrexian Fleshgorger). That is the wrong reading for
+        # THIS taxonomy: the ``protection`` role feeds a ROLE_TARGETS
+        # quota that exists to ensure a deck can protect its commander
+        # and key permanents. A Dragon with ward {2} protects nothing
+        # but itself, and counting it would satisfy the quota with
+        # bodies — suppressing the advisor's genuine protection
+        # recommendations (Swiftfoot Boots and friends). Intrinsic ward
+        # is resilience on a threat; granted ward is a protection slot.
+        #
+        # The cost marker (``{`` or em-dash) is still required after the
+        # keyword, so card-name mentions ("Ward of Bones") never match,
+        # and ``\b``-anchoring blocks "toward"/"reward".
+        (r"(?:have|has|gains?)\s+ward\s*(?:\{|—)", None, 50),
+        # Phasing — "phases out" / "phase out" (Teferi's Protection,
+        # Slip Out the Back, Guardian of Faith). Round-2 review 2026-08-20
+        # (R2-P11): the 2026-08-16 evergreen sweep added ward but not the
+        # two protection families printed since: phasing and shield
+        # counters. A phased-out permanent is treated as though it doesn't
+        # exist, which is the strongest form of "answer the removal spell
+        # on the stack" the game has — functionally the hexproof/
+        # indestructible slot, and decks leaning on it were reading as
+        # protection-deficient and being offered redundant
+        # Swiftfoot-Boots-class adds against a full quota.
+        #
+        # ``phases?`` covers both the singular ("target creature you
+        # control phases out") and the plural-subject form ("all
+        # permanents you control phase out"). ``\b`` on both sides keeps
+        # it off "phase" as a noun in unrelated text.
+        (r"\bphases? out\b", None, 50),
+        # Shield counters — the DMU-era damage/destruction shield.
+        # Deliberately the ``put ... on`` (GRANTING) form only, for the
+        # same reason intrinsic ward is excluded above: a creature that
+        # merely "enters with a shield counter on it" protects nothing
+        # but itself and would satisfy the ROLE_TARGETS protection quota
+        # with a body. The "enters with N shield counters" templating
+        # uses no "put", so that form falls through to threat as intended.
+        (r"\bputs? (?:a|an|one|two|three|four|x|\d+) shield counters? on\b",
+         None, 50),
     ]),
     ("tutor", [
         (r"search your library for a (?:card|creature|artifact|enchantment|instant|sorcery|planeswalker|legendary)", None, 80),
@@ -830,6 +1010,237 @@ def classify_role(oracle_text: str, type_line: str = "") -> str:
     if best_role == "other" and has_creature_type:
         return "threat"
     return best_role
+
+
+# --- Politics detection (the sim-invisible multiplayer axis) --------------
+#
+# ADDED 2026-08-17 (decision C2). Forge's AI does not negotiate, does not
+# reason about who the archenemy is, and does not model an opponent's
+# incentive to pay a tax. Every mechanic below therefore reads as a no-op
+# or near-no-op to the sim: goad redirects an attack the AI would likely
+# have made anyway, the monarch's card-draw race is played out mechanically
+# with no threat assessment, a vote among AI seats is decided by a table
+# that never bargains, and a Rhystic tax the AI reflexively pays costs it
+# nothing it knows how to miss. The A/B loop in ``compare_versions``
+# measures margin against exactly that AI, so it will "empirically"
+# recommend cutting the cards that define the multiplayer format. The
+# margin is not evidence against these cards; it is evidence that the
+# instrument can't see them.
+#
+# This table is the detector. Its consumers (the advisor cut loop, the
+# advisor filters, ``card_score``'s cut rails) use it to SHIELD, never to
+# promote — a politics card is not scored higher anywhere, it is only
+# exempted from margin-driven cuts. Add recommendations are untouched.
+#
+# Patterns match ORACLE TEXT case-insensitively and are deliberately
+# anchored on the printed rules templating rather than on card names, so a
+# new printing of an existing mechanic is covered on day one.
+
+#: Oracle-pattern table: ``(tag, compiled_pattern)``. Table order is the
+#: order :func:`politics_tags` reports matches in.
+_POLITICS_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    # Goad — the keyword and its inflections, ``\b`` on both sides so a
+    # longer word that merely CONTAINS the letters can't match. The goad
+    # reminder text ("attacks each combat if able and attacks a player
+    # other than you if able") always ships alongside the keyword, so
+    # there is no separate pattern for it: matching that reminder shape
+    # independently would false-positive on plain "attacks each combat if
+    # able" curses (Curse of the Nightly Hunt), which are goad-adjacent
+    # but are not the goad keyword.
+    ("goad", re.compile(r"\bgoad(?:s|ed|ing)?\b", re.IGNORECASE)),
+    # The monarch — every monarch card carries the reminder text, whose
+    # last sentence is "...its controller becomes the monarch", so one
+    # pattern covers the whole mechanic. The hate side never says
+    # "becomes", hence the second pattern.
+    ("monarch", re.compile(r"\bbecomes? the monarch\b", re.IGNORECASE)),
+    ("monarch", re.compile(r"\bcan't become the monarch\b", re.IGNORECASE)),
+    # Voting — the two named mechanics plus the bare verb. The leading
+    # ``\b`` is what keeps "devotion" / "devoted" out (the letters are
+    # preceded by a word character there, so the boundary fails), and the
+    # explicit inflection list keeps it off "voter"-shaped coinages.
+    ("vote", re.compile(r"\bwill of the council\b", re.IGNORECASE)),
+    ("vote", re.compile(r"\bcouncil's dilemma\b", re.IGNORECASE)),
+    ("vote", re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)),
+    # Tempting offer — named mechanic, one pattern.
+    ("tempting_offer", re.compile(r"\btempting offer\b", re.IGNORECASE)),
+    # Rhystic-style taxes (Rhystic Study, Mystic Remora). The load-bearing
+    # half is WHO pays: "unless that player pays" is always an OPPONENT
+    # being handed a decision. Deliberately NOT matched: "unless you pay"
+    # (your own upkeep cost — cumulative upkeep, Braid of Fire) and
+    # "unless its controller pays" (Spell Pierce and the rest of the
+    # soft-counter family, which the AI plays perfectly well as ordinary
+    # interaction). Both are pinned by tests.
+    ("tax", re.compile(r"\bunless that player pays\b", re.IGNORECASE)),
+    # The PUNISHER form of the same tax, which carries no "unless" at all:
+    # "that player may pay {2}. If the player doesn't, you create a
+    # Treasure token." Round-2 review 2026-08-20 (R2-P10) found that
+    # Smothering Tithe — the card the comment above used to name as a
+    # covered example — matched nothing, because modern templating splits
+    # the offer and the consequence across a SENTENCE BREAK instead of
+    # joining them with "unless". Same politics content as Rhystic Study
+    # (an opponent is handed a pay-or-concede decision the AI can't
+    # value), so it earns the same ``tax`` tag.
+    #
+    # The window therefore has to cross exactly one period: ``[^.]{0,40}``
+    # spans the cost ("{2}", "3 life"), ``\.?\s*`` eats the sentence
+    # break, and the consequence clause must be the NEGATIVE branch
+    # ("doesn't"/"don't"). The positive branch ("If the player does,
+    # untap that creature" — Dance of the Dead's upkeep option) is an
+    # ordinary optional cost, not a tax, and is pinned as a real-oracle
+    # negative in test_staples.py. Subject alternation covers the
+    # each-opponent siblings (Protection Racket-style upkeep punishers).
+    ("tax", re.compile(
+        r"\b(?:that player|that opponent|each opponent) may pay\b"
+        r"[^.]{0,40}\.?\s*\bif (?:the player|that player|they) "
+        r"(?:doesn't|don't)\b",
+        re.IGNORECASE)),
+    #
+    # SCOPED OUT, deliberately: the initiative ("takes the initiative" /
+    # Undercity). It is the same sim-invisible class as the monarch — a
+    # contested crown whose defense depends on table threat assessment
+    # Forge's AI does not perform — and a one-line pattern
+    # (``\btakes? the initiative\b``) would cover it. It is NOT added here
+    # because every pattern in this table is pinned by a card whose oracle
+    # text the repo can check, and this session had no Scryfall access
+    # (see the provenance note in tests/fixtures/real_oracles.py), so the
+    # initiative pattern would ship unpinned — precisely the synthetic-
+    # fixture failure mode the real-oracle discipline exists to prevent.
+    # Recorded as a known gap, not as coverage: initiative cards remain
+    # cuttable by the margin loop until a session with network can add
+    # the pattern together with a real fixture (an Undercity card plus a
+    # "can't take the initiative" hate card, mirroring the monarch pair).
+    # Deterrent / pillow-fort (Propaganda, Ghostly Prison, Norn's Annex).
+    # The attack-tax clause can carry a rider between "you" and "unless"
+    # ("...you or planeswalkers you control unless..."), so the window is
+    # bounded by ``[^.]`` — it may cross that rider but never a sentence
+    # break, which would otherwise let two unrelated clauses match as one.
+    ("deterrent", re.compile(r"can't attack you\b[^.]{0,80}?\bunless\b",
+                             re.IGNORECASE)),
+]
+
+#: The user-visible annotation the shield attaches wherever it fires.
+#: One sentence, one source of truth: the advisor's skip records, the
+#: ``card_score`` cut-block reason and any UI pill must all say the same
+#: thing, because they are all reporting the same refusal.
+POLITICS_SHIELD_REASON: str = (
+    "sim-invisible: Forge's AI cannot value goad/monarch/tax effects, "
+    "so the A/B margin is not evidence against this card"
+)
+
+#: ``[metadata]`` directive that turns the guard off for ONE deck.
+#: Follows the ``Protect=`` precedent (see
+#: ``web/_helpers.read_protected_cards``): a plain ``Key=Value`` line in
+#: the deck file's ``[metadata]`` block, which Forge ignores and which
+#: therefore travels with the deck across imports and version bumps.
+#: Spelled as a POSITIVE switch (``PoliticsGuard=off``) rather than
+#: ``NoPoliticsGuard=`` on purpose — a negated boolean makes the
+#: explicit-enable case ("NoPoliticsGuard=false") unreadable.
+POLITICS_GUARD_META_KEY: str = "PoliticsGuard"
+
+#: Values that read as "off". Anything else — a missing line, an empty
+#: value, a typo — leaves the guard ON, because the failure mode of a
+#: mis-parsed opt-out must be "the card survives", not "the sim quietly
+#: cut your monarch package".
+_POLITICS_GUARD_OFF_VALUES: frozenset[str] = frozenset({
+    "off", "false", "no", "0", "none", "disabled",
+})
+
+
+def politics_tags(oracle_text: str, type_line: str = "") -> tuple[str, ...]:
+    """Which politics mechanics ``oracle_text`` uses, in table order.
+
+    Returns a deduplicated tuple drawn from ``goad``, ``monarch``,
+    ``vote``, ``tempting_offer``, ``tax``, ``deterrent`` — empty when the
+    card isn't a politics card.
+
+    ``type_line`` is accepted for signature parity with ``classify_role``
+    / ``detect_tribal_type`` (callers hold the pair and shouldn't have to
+    remember which classifier wants which half) but is NOT consulted:
+    every mechanic here is a rules-text mechanic, and none of them has a
+    type or subtype that identifies it.
+    """
+    text = oracle_text or ""
+    if not text:
+        return ()
+    out: list[str] = []
+    for tag, pattern in _POLITICS_PATTERNS:
+        if tag in out:
+            continue
+        if pattern.search(text):
+            out.append(tag)
+    return tuple(out)
+
+
+def is_politics_card(oracle_text: str, type_line: str = "") -> bool:
+    """True iff the card uses a mechanic Forge's AI can't value.
+
+    The predicate every cut path gates on. See ``_POLITICS_PATTERNS`` for
+    what counts and why.
+    """
+    return bool(politics_tags(oracle_text, type_line))
+
+
+def politics_tags_for_name(card_name: str, lookup=None) -> tuple[str, ...]:
+    """Name-keyed :func:`politics_tags`: resolve the card, then classify.
+
+    ``lookup`` is the same injectable Scryfall-shaped ``name -> dict``
+    seam ``card_score`` uses, so an offline caller (or a cache-only one
+    like the advisor's ``_cached_scryfall``) never touches the network.
+    Defaults to this module's ``lookup_card``, matching how
+    ``count_deck_roles`` resolves names.
+
+    An unresolvable name has NO politics tags: the shield has to be
+    positively earned, or a Scryfall outage would freeze every cut the
+    advisor could otherwise propose. Never raises — the callers are
+    ranking loops, and one bad name must not take down a whole audit.
+    """
+    resolve = lookup if lookup is not None else lookup_card
+    try:
+        card = resolve(card_name)
+    except Exception:  # noqa: BLE001 — a blip must not block cut ranking
+        return ()
+    if not card:
+        return ()
+    return politics_tags(card.get("oracle_text", "") or "",
+                         card.get("type_line", "") or "")
+
+
+def is_politics_card_name(card_name: str, lookup=None) -> bool:
+    """Boolean form of :func:`politics_tags_for_name`, for gate-style
+    callers that don't need to report WHICH mechanic fired."""
+    return bool(politics_tags_for_name(card_name, lookup))
+
+
+def politics_guard_enabled(deck_text: str) -> bool:
+    """Is the politics guard active for this deck?
+
+    ON by default (decision C2: the guard protects a category the sim
+    cannot judge, so opting IN would leave every un-annotated deck
+    exposed). One deck turns it off with a ``[metadata]`` line::
+
+        [metadata]
+        Name=My Monarch Deck
+        PoliticsGuard=off
+
+    Only the ``[metadata]`` block is consulted and the key is
+    case-insensitive — the same two rules ``read_protected_cards``
+    enforces, so a user who already learned the ``Protect=`` syntax
+    doesn't have to learn a second one.
+    """
+    in_metadata = False
+    for raw in (deck_text or "").splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_metadata = s.lower() == "[metadata]"
+            continue
+        if not in_metadata or "=" not in s:
+            continue
+        key, _, value = s.partition("=")
+        if key.strip().lower() != POLITICS_GUARD_META_KEY.lower():
+            continue
+        if value.strip().lower() in _POLITICS_GUARD_OFF_VALUES:
+            return False
+    return True
 
 
 # --- Frequency labels (for "in N of M references") -----------------------

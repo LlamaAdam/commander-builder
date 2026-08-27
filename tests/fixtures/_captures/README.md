@@ -1,0 +1,1 @@
+Scratch landing zone for raw API responses fetched by `.github/workflows/fetch-archidekt-capture.yml` (commit a deck id to `request.txt` to trigger a capture; the sandbox has no egress) — captures are raw material only: hand-trim one into a checked-in fixture with provenance, then delete it, as was done on 2026-08-20 for `tests/fixtures/archidekt_deck_shape.json`.

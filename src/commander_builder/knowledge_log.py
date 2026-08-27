@@ -16,13 +16,15 @@ Schema rationale:
     audit_version   prompt version that generated this iteration (e.g. "v3")
     audit_manifest  JSON blob: {added: [...], removed: [...], rationale: "..."}
     sim_report      JSON blob: ComparisonReport (or MatchupReport) full body
-    verdict         "kept" | "reverted" | "neutral" | "pending"
+    verdict         "kept" | "reverted" | "neutral" | "inconclusive" | "pending"
     verdict_notes   free-text reasoning from the analyst (Phase 2)
     win_rate_old    float, 0-1, NULL if not measured
     win_rate_new    float, 0-1, NULL if not measured
     margin          int, new_wins - old_wins
     created_at      ISO timestamp
     deck_snapshot   .dck text content (full deck preserved for reproducibility)
+    measurement_era small int naming which measurement convention produced
+                    this row's numbers (see MEASUREMENT_ERAS); NULL = unknown
 
 Win-rate convention (2026-07-20): ``win_rate_old`` / ``win_rate_new`` are
 wins / HEAD-TO-HEAD DECISIVE games, where decisive = wins_old + wins_new —
@@ -32,7 +34,9 @@ unattributed games, and filler-won pod games are all excluded; see
 fabricated 0.0.
 
 Convention history — cross-run analyses that pool these columns must
-bucket rows by write date:
+bucket rows by ``measurement_era`` (2026-08-17; before that column
+existed, by write date and id, which is what the backfill below
+mechanizes):
 
   * Before 2026-07-19 the three writers used three different denominators
     (all-games-including-draws, decisive-only, per-version-games).
@@ -47,6 +51,26 @@ bucket rows by write date:
     as one convention.
   * From 2026-07-20 all writers use head-to-head decisive
     (wins_old + wins_new), the denominator every verdict gate counts.
+
+Verdict vocabulary — what each label CLAIMS (see
+``_proposer_sim._verdict_from_ab`` for the arithmetic):
+
+  * ``kept`` / ``reverted`` — the split is statistically significant in
+    that direction (era 4; era 3's came from ``|margin| >= 4``).
+  * ``neutral`` — measured at a trustworthy sample size, no significant
+    difference.
+  * ``inconclusive`` — measured, but the evidence does not support a
+    decision: fewer than ``MIN_DECISIVE_GAMES_FOR_VERDICT`` decisive
+    games, OR (2026-08-20, decision R2-D3) a completed run whose
+    REQUIRED confirming run could not RUN at all. A row can only carry
+    ``pending`` when no sim of its own completed, so a finished
+    ``sim_report`` beside a ``pending`` verdict is a contradiction; the
+    replication writer used to produce exactly that. The distinction the
+    label preserves: ``inconclusive`` means "we measured and still can't
+    say", ``pending`` means "nothing has been measured yet".
+  * ``pending`` — this row's sim did not complete (status 'skipped' /
+    'failed'), or has not been run yet. The initial state of a row the
+    curator writes before the sim.
 
 `deck_snapshot` keeps a copy of the .dck text so we can rebuild any historical
 state without depending on Moxfield not deleting the deck. The blobs are small
@@ -149,7 +173,194 @@ def canonical_content_hash(row: dict, exclude: frozenset = frozenset()) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-SCHEMA_VERSION = 2
+# ---------------------------------------------------------------------------
+# Measurement eras (2026-08-17)
+# ---------------------------------------------------------------------------
+# This log spans three mutually incompatible measurement conventions and,
+# until now, nothing on a row said which one produced its numbers. Pooling
+# them is not "noisy data", it is comparing different quantities: an era-1
+# margin was attributed to the wrong deck, an era-2 win rate has a
+# denominator up to ~2x an era-3 one, and an era-3 'kept' means
+# |margin| >= 4 where an era-4 'kept' means a significant binomial test.
+# Every new row now carries its era; historical rows are backfilled where
+# the boundary is KNOWN and left NULL where it isn't.
+#
+#: era -> what changed. The value stored in ``iterations.measurement_era``.
+MEASUREMENT_ERAS: dict[int, str] = {
+    1: (
+        "pre-seat-attribution (…2026-05-21, local ids < 314). A/B wins "
+        "were credited by deck NAME, and A/B decks routinely share a "
+        "Name=, so wins funnelled to one side (e8777b6). margin, "
+        "win_rate_* and verdict are all measurement artifacts — archive "
+        "only, never training data."
+    ),
+    2: (
+        "seat-attributed, mixed win-rate denominators (2026-05-23 … "
+        "2026-07-18; rows dated 2026-05-21/22 join this era only when "
+        "id >= 314 breaks the tie, since the seat fix landed mid-session "
+        "— see _SEAT_FIX_START/_SETTLED). Wins are correctly attributed, but the three "
+        "writers used three different denominators "
+        "(all-games-including-draws / decisive-only / per-version-games), "
+        "so win_rate_old and win_rate_new are not comparable across rows. "
+        "margin and verdict are usable; the rates are not."
+    ),
+    3: (
+        "head-to-head decisive denominator, margin-threshold verdicts "
+        "(2026-07-20 … 2026-08-13). Every writer computes win rates over "
+        "wins_old + wins_new (``decisive_win_rate``), so the rates pool "
+        "cleanly. Verdicts do NOT: kept/reverted came from a "
+        "game-count-invariant |margin| >= 4, which labels ~half of "
+        "NEUTRAL swaps confidently at 20 decisive games."
+    ),
+    4: (
+        "significance-based verdicts (2026-08-14 …). Same decisive "
+        "denominator as era 3, plus kept/reverted now requires an exact "
+        "two-sided binomial test vs p=0.5 at alpha 0.05 over >= 20 "
+        "decisive head-to-head games; everything else is 'inconclusive'. "
+        "Rates AND verdicts pool cleanly."
+    ),
+}
+
+#: Stamped on every row written from now on.
+CURRENT_MEASUREMENT_ERA = 4
+
+#: Lowest era whose ``win_rate_old`` / ``win_rate_new`` may be pooled or
+#: differenced with a current row's. Era 3 is where every writer landed on
+#: the head-to-head decisive denominator (see MEASUREMENT_ERAS[3]) — below
+#: it a "win rate" is a different quantity (era 2's denominators vary by
+#: writer, era 1's wins are attributed to the wrong deck), so a trajectory
+#: baselined on one is a subtraction of unlike units, not a measurement.
+#: 2026-08-20: added because report.py's trajectory was doing exactly that.
+MIN_COMPARABLE_RATE_ERA = 3
+
+#: Lowest era whose ``verdict`` may be pooled with a current row's. Era 4
+#: is where kept/reverted started meaning "statistically significant"
+#: instead of "|margin| >= 4" — an era-3 'kept' and an era-4 'kept' are
+#: different claims, so verdict tallies have to name the era they counted.
+#: 2026-08-20: added for verdict_breakdown_for_deck's era split.
+MIN_COMPARABLE_VERDICT_ERA = 4
+
+#: Key under which a sim_report carries the verdict parameters that
+#: produced its row's verdict (see ``verdict_provenance``).
+SIM_REPORT_VERDICT_PARAMS_KEY = "verdict_params"
+
+#: Key under which a sim_report carries a confirming (replication) run's
+#: own split — structured, not prose (see ``update_iteration_sim``).
+SIM_REPORT_REPLICATION_KEY = "replication"
+
+
+def verdict_provenance(
+    *,
+    margin: int,
+    alpha: float,
+    min_decisive: int,
+    rule: str = "binomial_two_sided_p < alpha over >= min_decisive decisive",
+) -> dict:
+    """The verdict parameters a writer actually used, for its sim_report.
+
+    2026-08-20. ``measurement_era`` says which *convention* labeled a
+    row, but era 4 has a tunable inside it: ``--sim-margin`` is a
+    minimum-effect pre-filter, so a run with ``--sim-margin 15`` calls a
+    significant 27-13 'neutral' while the default (1) calls it 'kept'.
+    Both rows are stamped era 4 and pool as if the label meant one thing.
+    Until now the only record of the margin used was a free-text note.
+
+    Storing the triple makes a row auditable on its own terms: a
+    re-scoring pass or a pooled analysis can see what bar this verdict
+    actually cleared without knowing which code version (or which CLI
+    flags) wrote it. A plain dict inside sim_report rather than a column
+    because this is verdict *provenance*, not a queryable measurement,
+    and sim_report is already the row's "everything the sim knew" blob.
+    """
+    return {
+        "margin": int(margin),
+        "alpha": float(alpha),
+        "min_decisive": int(min_decisive),
+        "rule": rule,
+    }
+
+# Era boundaries. Dates are the ISO prefixes of ``created_at``; the id
+# boundary is the one recorded in STATUS.md for THIS repo's log.
+PRE_SEAT_ATTRIBUTION_MAX_ID = 314   # ids < 314 are era 1 (STATUS.md, e8777b6)
+_SEAT_FIX_START = "2026-05-21"      # fix landed over the 2026-05-21/22 session
+_SEAT_FIX_SETTLED = "2026-05-23"    # first date that is unambiguously post-fix
+_DECISIVE_MIXED_START = "2026-07-19"  # writers unified, denominators still mixed
+_DECISIVE_SETTLED = "2026-07-20"    # every writer on head-to-head decisive
+_SIGNIFICANCE_START = "2026-08-14"  # significance-based verdicts land
+
+
+def measurement_era_for(
+    created_at: Optional[str],
+    iteration_id: Optional[int] = None,
+    *,
+    significance_start: str = _SIGNIFICANCE_START,
+) -> Optional[int]:
+    """Which ``MEASUREMENT_ERAS`` key a row belongs to, or None if unknown.
+
+    Two signals, and ``created_at`` DECIDES:
+
+      * ``created_at`` — the ISO timestamp, compared against the era
+        boundaries above as strings (ISO-8601 sorts chronologically, so
+        ``>=`` on the raw string is a date compare).
+      * ``iteration_id`` — only a tie-breaker, for the one window a
+        date can't resolve (the fix landed mid-session on 2026-05-21/22)
+        and for rows with no usable timestamp at all. STATUS.md pins the
+        pre-fix boundary at ``id < 314``, but ids are MACHINE-LOCAL: on
+        the owner's log they're chronological and agree with the dates,
+        while a fresh database (or an imported row) restarts at 1. That
+        is why the date leads — letting ``id < 314`` fire first labeled
+        every low-id row in a brand-new database as a 2026-era
+        measurement artifact.
+
+    Returns None — "unknown", stored as NULL — rather than guessing, in
+    the three cases where the honest answer is that we cannot tell:
+    a missing/unparseable timestamp with no id to fall back on; a row
+    written during the 2026-05-21/22 fix session with no id to
+    disambiguate; and a row written in the 2026-07-19 → 2026-07-20
+    window, which is a MIXED population by writer (compare-shaped
+    writers counted filler-won games, AB-shaped writers didn't) and
+    therefore has no single era.
+
+    ``significance_start`` (2026-08-20, decision R2-D5) overrides the
+    era-3/4 boundary date FOR ONE CALL. It exists so
+    ``scripts/backfill_web_margins.py --era-boundary-report`` can show
+    the owner what a shifted boundary WOULD reclassify without a second
+    copy of this function's rules — the era-3/4 cut is the one boundary
+    that is a bare date while 05-21/22 and 07-19 get the NULL-not-guess
+    treatment, because the 08-14 fixes were commits, not midnight
+    cutovers (R2-P13). Callers that write rows must never pass it: the
+    stored stamp always comes from the module constant, so a report can
+    never leak into the data.
+    """
+    stamp = created_at.strip() if isinstance(created_at, str) else ""
+    if not stamp:
+        # No date. The id boundary is all that's left, and it can only
+        # ever establish era 1 — "id >= 314" means "not era 1", not
+        # "era 2" (that needs a date).
+        if (
+            iteration_id is not None
+            and iteration_id < PRE_SEAT_ATTRIBUTION_MAX_ID
+        ):
+            return 1
+        return None
+    if stamp >= significance_start:
+        return 4
+    if stamp >= _DECISIVE_SETTLED:
+        return 3
+    if stamp >= _DECISIVE_MIXED_START:
+        return None  # the mixed window — see the docstring
+    if stamp >= _SEAT_FIX_SETTLED:
+        return 2
+    if stamp >= _SEAT_FIX_START:
+        # Inside the fix session: the id is the only disambiguator, and
+        # without one there is nothing to disambiguate with.
+        if iteration_id is None:
+            return None
+        return 1 if iteration_id < PRE_SEAT_ATTRIBUTION_MAX_ID else 2
+    return 1
+
+
+SCHEMA_VERSION = 4
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -173,6 +384,9 @@ CREATE TABLE IF NOT EXISTS iterations (
     created_at      TEXT NOT NULL,
     deck_snapshot   TEXT,            -- .dck file contents
     milestone       TEXT,            -- v2 (#012): user-chosen tag (e.g. "baseline", "PR-ready")
+    measurement_era INTEGER,         -- v3: MEASUREMENT_ERAS key, NULL = unknown/mixed
+    judge_verdict   TEXT,            -- v4 (FP-016): LLM panel opinion, NULL = judge did not run
+    judge_report    TEXT,            -- v4: JSON JudgeReport
     FOREIGN KEY (parent_id) REFERENCES iterations(id)
 );
 
@@ -207,6 +421,92 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3 migration: add ``measurement_era`` and backfill it.
+
+    Same check-then-add shape as ``_migrate_to_v2`` (pragma_table_info
+    guard, ``IF NOT EXISTS`` index) so re-running init_db is a no-op.
+
+    The backfill classifies rows through ``measurement_era_for``, the
+    SAME function the insert path stamps with — one boundary
+    definition, not two that can drift. It touches ONLY rows whose era
+    is still NULL, and only sets a value where the era is KNOWN:
+    unclassifiable rows (no timestamp, the 2026-05-21/22 fix session,
+    the 2026-07-19/20 mixed-denominator window) keep NULL, which reads
+    as "unknown" and not as a fourth era. No other column is read or
+    written — this migration must never touch the numbers whose
+    provenance it is describing.
+
+    Because unknown rows stay NULL, the scan re-runs on every init_db.
+    That is deliberate (it is how a hand-inserted or imported legacy
+    row eventually gets classified) and cheap at this log's scale
+    (hundreds of rows); ``idx_iterations_measurement_era`` — plain, not
+    partial, unlike the milestone index — serves both this ``IS NULL``
+    lookup and the era-filtered analysis queries the column exists for.
+    """
+    cur = conn.execute("PRAGMA table_info(iterations)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "measurement_era" not in cols:
+        conn.execute(
+            "ALTER TABLE iterations ADD COLUMN measurement_era INTEGER"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_iterations_measurement_era "
+        "ON iterations(measurement_era)"
+    )
+    cur = conn.execute(
+        "SELECT id, created_at FROM iterations WHERE measurement_era IS NULL"
+    )
+    updates: list[tuple[int, int]] = []
+    for row in cur.fetchall():
+        era = measurement_era_for(row["created_at"], row["id"])
+        if era is not None:
+            updates.append((era, row["id"]))
+    if updates:
+        conn.executemany(
+            "UPDATE iterations SET measurement_era = ? WHERE id = ?", updates,
+        )
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v3 → v4 migration: add the FP-016 ``judge_verdict`` /
+    ``judge_report`` columns.
+
+    Same check-then-add shape as ``_migrate_to_v2`` / ``_migrate_to_v3``
+    (pragma_table_info guard, ``IF NOT EXISTS`` index) so re-running
+    init_db is a no-op on a database that already has them.
+
+    NO BACKFILL, and that is the point. ``measurement_era`` could be
+    derived from a row's own timestamp; a judge verdict cannot be derived
+    from anything — it exists only if a panel actually ran. Every
+    historical row therefore keeps NULL in both columns, which reads as
+    "the judge did not run here" and never as a fourth opinion. The
+    Phase 2 agreement script (``scripts/judge_agreement.py``) joins on
+    rows that carry BOTH verdicts, so a fabricated backfill would poison
+    the exact table this column exists to produce.
+
+    The columns sit BESIDE ``verdict`` / ``sim_report``, never instead of
+    them (FP-016 §6): Phase 1 is observe-only, so nothing that reads the
+    sim verdict changes behavior because these columns appeared.
+
+    The index is PARTIAL (``WHERE judge_verdict IS NOT NULL``), following
+    the ``milestone`` precedent rather than ``measurement_era``'s plain
+    index: judged rows are the rare case here — the flag is off by
+    default — and the only query that wants them is "the rows carrying
+    both verdicts".
+    """
+    cur = conn.execute("PRAGMA table_info(iterations)")
+    cols = {row["name"] for row in cur.fetchall()}
+    if "judge_verdict" not in cols:
+        conn.execute("ALTER TABLE iterations ADD COLUMN judge_verdict TEXT")
+    if "judge_report" not in cols:
+        conn.execute("ALTER TABLE iterations ADD COLUMN judge_report TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_iterations_judge_verdict "
+        "ON iterations(judge_verdict) WHERE judge_verdict IS NOT NULL"
+    )
+
+
 @dataclass
 class Iteration:
     """One row of the iteration history. Fields default to None so callers can
@@ -226,13 +526,34 @@ class Iteration:
     created_at: Optional[str] = None
     deck_snapshot: Optional[str] = None
     milestone: Optional[str] = None  # v2: user-chosen tag (#012)
+    # v3: which measurement convention produced this row's numbers.
+    # Left None by callers; ``to_row`` derives it from created_at so
+    # every writer stamps it without having to know it exists.
+    measurement_era: Optional[int] = None
+    # v4 (FP-016): the LLM panel's OPINION, stored beside the sim verdict
+    # and never in place of it. Both stay None unless the judge actually
+    # ran on this pairing — there is no default and no backfill, because
+    # "the judge did not run" and "the judge had no opinion" are different
+    # facts and only NULL says the first one.
+    judge_verdict: Optional[str] = None
+    judge_report: Optional[dict] = None
     id: Optional[int] = None  # Set after insert.
 
     def to_row(self) -> dict:
         d = asdict(self)
         d["audit_manifest"] = json.dumps(self.audit_manifest) if self.audit_manifest is not None else None
         d["sim_report"] = json.dumps(self.sim_report) if self.sim_report is not None else None
+        d["judge_report"] = json.dumps(self.judge_report) if self.judge_report is not None else None
         d["created_at"] = self.created_at or datetime.now(timezone.utc).isoformat()
+        # Derive the era from the row's OWN timestamp rather than
+        # hardcoding CURRENT_MEASUREMENT_ERA: a live write stamps now ->
+        # the current era, while a backdated row (an import of an older
+        # export, a merge_soak fold) is classified by when it was
+        # actually measured. An era the caller set explicitly wins; None
+        # means "you work it out", and an unclassifiable timestamp
+        # stays None (NULL) rather than being rounded to an era.
+        if d.get("measurement_era") is None:
+            d["measurement_era"] = measurement_era_for(d["created_at"])
         d.pop("id", None)
         return d
 
@@ -262,6 +583,22 @@ class Iteration:
             # so legacy databases don't break read paths.
             milestone=(
                 row["milestone"] if "milestone" in row.keys() else None
+            ),
+            # Same legacy guard as milestone: schema v3 added this
+            # column, so a Row from a database the migration hasn't
+            # touched yet has no such key.
+            measurement_era=(
+                row["measurement_era"]
+                if "measurement_era" in row.keys() else None
+            ),
+            # Same legacy guard again for the schema v4 pair (FP-016).
+            judge_verdict=(
+                row["judge_verdict"] if "judge_verdict" in row.keys() else None
+            ),
+            judge_report=(
+                json.loads(row["judge_report"])
+                if "judge_report" in row.keys() and row["judge_report"]
+                else None
             ),
         )
 
@@ -302,6 +639,12 @@ def init_db(db_path: Optional[Path] = None) -> None:
                databases; existing tables already match).
       v1 → v2: add ``milestone`` column + partial index
                (``_migrate_to_v2``, AGENT_BACKLOG #012).
+      v2 → v3: add ``measurement_era`` column + index, and backfill
+               historical rows from their id/created_at where the era
+               is known (``_migrate_to_v3``, 2026-08-17).
+      v3 → v4: add ``judge_verdict`` / ``judge_report`` + partial index
+               for the FP-016 LLM deck judge. No backfill — see
+               ``_migrate_to_v4`` (2026-08-20).
     """
     with _connect(_resolve_db_path(db_path)) as conn:
         # Per-statement execute, NOT executescript(): executescript()
@@ -316,6 +659,8 @@ def init_db(db_path: Optional[Path] = None) -> None:
         # so calling them on a fresh DB just adds the v2 column +
         # index that aren't in the base _SCHEMA_SQL.
         _migrate_to_v2(conn)
+        _migrate_to_v3(conn)
+        _migrate_to_v4(conn)
         cur = conn.execute("SELECT version FROM schema_version")
         row = cur.fetchone()
         if row is None:
@@ -391,6 +736,52 @@ def update_verdict(
         )
 
 
+def update_iteration_judge(
+    iteration_id: int,
+    judge_verdict: str,
+    judge_report: Optional[dict] = None,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Record the FP-016 LLM panel's opinion BESIDE the sim verdict.
+
+    Deliberately a separate writer from ``update_verdict`` /
+    ``update_iteration_sim``, and deliberately incapable of touching
+    ``verdict``: Phase 1 is observe-only, so the structural guarantee that
+    the judge cannot overwrite the empirical column is worth more than the
+    convenience of one shared function. The SET clause names only the two
+    v4 columns; there is no code path here that could widen it by
+    accident.
+
+    ``judge_verdict`` reuses the existing vocabulary verbatim
+    (kept / reverted / neutral / inconclusive — no ``pending``, because a
+    panel that did not run leaves NULL rather than claiming a state).
+    Orientation is the pairing's: ``kept`` means deck B, the candidate,
+    is the better-BUILT one — which is emphatically not a claim that it
+    wins more games. See ``deck_judge.OPINION_CAVEAT``.
+
+    Fail-quiet on an unknown ``iteration_id``, matching
+    ``update_verdict`` / ``set_milestone``: the caller is the improve
+    loop's round path, and a judge write must never sink a round.
+    """
+    if judge_verdict not in {"kept", "reverted", "neutral", "inconclusive"}:
+        raise ValueError(
+            f"judge_verdict must be one of kept/reverted/neutral/"
+            f"inconclusive, got {judge_verdict!r}"
+        )
+    db_path = _resolve_db_path(db_path)
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE iterations SET judge_verdict = ?, judge_report = ? "
+            "WHERE id = ?",
+            (
+                judge_verdict,
+                json.dumps(judge_report) if judge_report is not None else None,
+                iteration_id,
+            ),
+        )
+
+
 def update_iteration_sim(
     iteration_id: int,
     verdict: str,
@@ -400,6 +791,8 @@ def update_iteration_sim(
     margin: Optional[int] = None,
     notes: Optional[str] = None,
     db_path: Optional[Path] = None,
+    notes_append: bool = False,
+    sim_report_merge: Optional[dict] = None,
 ) -> None:
     """Fold the A/B-sim outcome into a pending iteration row.
 
@@ -417,36 +810,91 @@ def update_iteration_sim(
     produced. ``None`` values preserve the existing column value
     (SQLite COALESCE-style update; we just skip those fields in
     the SET clause).
+
+    Second-writer semantics (2026-08-20)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    ``notes`` and ``sim_report`` REPLACE by default, which is right for
+    the first writer (the sim that produced the row) and wrong for a
+    second one. improve.py's replication writer is a second writer: it
+    was destroying run 1's "A/B sim: old won X, new won Y (N games,
+    margin=M)" note by passing a fresh string, so a confirmed row's only
+    surviving record of what run 1 measured was the sim_report blob.
+
+      * ``notes_append=True`` -- read the row's current ``verdict_notes``
+        and append this call's ``notes`` on a new line instead of
+        overwriting. A NULL/blank existing note degrades to a plain set.
+      * ``sim_report_merge`` -- shallow top-level merge into the row's
+        EXISTING sim_report (or into ``sim_report`` when that is also
+        passed), so a second writer can add a key
+        (``SIM_REPORT_REPLICATION_KEY``, ``SIM_REPORT_VERDICT_PARAMS_KEY``)
+        without clobbering the measured record it is annotating. A row
+        with no sim_report yet gets the merge dict as its sim_report.
+
+    Both read-modify-write inside the same connection as the UPDATE, so
+    the row never lands half-written (the same reason this function
+    exists at all).
     """
     if verdict not in {"kept", "reverted", "neutral", "inconclusive", "pending"}:
         raise ValueError(
             f"verdict must be one of kept/reverted/neutral/inconclusive/pending, "
             f"got {verdict!r}"
         )
-    set_clauses = ["verdict = ?"]
-    params: list = [verdict]
-    if notes is not None:
-        set_clauses.append("verdict_notes = ?")
-        params.append(notes)
-    if sim_report is not None:
-        set_clauses.append("sim_report = ?")
-        params.append(json.dumps(sim_report))
-    if win_rate_old is not None:
-        set_clauses.append("win_rate_old = ?")
-        params.append(float(win_rate_old))
-    if win_rate_new is not None:
-        set_clauses.append("win_rate_new = ?")
-        params.append(float(win_rate_new))
-    if margin is not None:
-        set_clauses.append("margin = ?")
-        params.append(int(margin))
-    params.append(iteration_id)
-    sql = (
-        f"UPDATE iterations SET {', '.join(set_clauses)} "
-        f"WHERE id = ?"
-    )
-    with _connect(_resolve_db_path(db_path)) as conn:
-        conn.execute(sql, params)
+    db_path = _resolve_db_path(db_path)
+    with _connect(db_path) as conn:
+        # Read-modify-write for the append/merge modes happens on THIS
+        # connection, so the SELECT and the UPDATE share one transaction
+        # and the row can't be half-written -- the same reason this
+        # function writes every sim field in one statement.
+        existing: Optional[sqlite3.Row] = None
+        if notes_append or sim_report_merge is not None:
+            cur = conn.execute(
+                "SELECT verdict_notes, sim_report FROM iterations WHERE id = ?",
+                (iteration_id,),
+            )
+            existing = cur.fetchone()
+        if notes is not None and notes_append and existing is not None:
+            prior = (existing["verdict_notes"] or "").strip()
+            if prior:
+                notes = f"{prior}\n{notes}"
+        if sim_report_merge is not None:
+            base_report = sim_report
+            if (
+                base_report is None
+                and existing is not None
+                and existing["sim_report"]
+            ):
+                try:
+                    base_report = json.loads(existing["sim_report"])
+                except (TypeError, ValueError):
+                    # A corrupt blob is not worth losing the merge over,
+                    # but it is also not ours to silently reinterpret --
+                    # start from the merge dict alone.
+                    base_report = None
+            merged = dict(base_report) if isinstance(base_report, dict) else {}
+            merged.update(sim_report_merge)
+            sim_report = merged
+        set_clauses = ["verdict = ?"]
+        params: list = [verdict]
+        if notes is not None:
+            set_clauses.append("verdict_notes = ?")
+            params.append(notes)
+        if sim_report is not None:
+            set_clauses.append("sim_report = ?")
+            params.append(json.dumps(sim_report))
+        if win_rate_old is not None:
+            set_clauses.append("win_rate_old = ?")
+            params.append(float(win_rate_old))
+        if win_rate_new is not None:
+            set_clauses.append("win_rate_new = ?")
+            params.append(float(win_rate_new))
+        if margin is not None:
+            set_clauses.append("margin = ?")
+            params.append(int(margin))
+        params.append(iteration_id)
+        conn.execute(
+            f"UPDATE iterations SET {', '.join(set_clauses)} WHERE id = ?",
+            params,
+        )
 
 
 def get_iteration(iteration_id: int, db_path: Optional[Path] = None) -> Optional[Iteration]:
@@ -590,12 +1038,31 @@ def stats_summary(db_path: Optional[Path] = None) -> dict:
 FP013_GATE_TARGET = 1000
 FP013_MIN_GAMES = 40
 
+#: Measurement-era floor for training rows (2026-08-17). The fine-tune
+#: learns the VERDICT, so the era that matters is the one that produced
+#: the LABEL, not the one that produced the raw counts. Era 4 is the
+#: first whose kept/reverted comes from the significance test; era 3's
+#: came from a game-count-invariant ``|margin| >= 4`` that labels ~half
+#: of neutral swaps confidently at 20 decisive games (see
+#: MEASUREMENT_ERAS[3]). Training on those teaches the model to be
+#: confident exactly where the evidence isn't.
+FP013_MIN_TRAINING_ERA = 4
+
+#: Era 3 is not lost, just mislabelled: its measurement is sound (same
+#: decisive denominator as era 4), so a row can be recovered by
+#: re-scoring its stored ``sim_report`` with the current significance
+#: test. Reported separately so the backlog is visible rather than
+#: silently discarded. Eras 1-2 are NOT recoverable — era 1's wins are
+#: attributed to the wrong deck, era 2's rates aren't comparable.
+FP013_RELABELABLE_ERA = 3
+
 
 def fp013_gate_progress(
     db_path: Optional[Path] = None,
     *,
     min_games: int = FP013_MIN_GAMES,
     target: int = FP013_GATE_TARGET,
+    min_era: int = FP013_MIN_TRAINING_ERA,
 ) -> dict:
     """Count high-confidence curator iterations toward the FP-013 gate.
 
@@ -606,17 +1073,41 @@ def fp013_gate_progress(
     the count as ``games``; compare_versions' ComparisonReport as
     ``total_games``). Soak rows live outside this DB and never count —
     they are labels without the question they answered.
+
+    Since 2026-08-17 the row must ALSO come from measurement era
+    ``min_era`` or later. The triple's shape was never the whole
+    question: a pre-e8777b6 row can carry a manifest, a verdict and a
+    60-game sim report and still be worthless, because its wins were
+    credited to the wrong deck. Counting those toward a training gate
+    reports readiness the data doesn't have. An unstamped row (era
+    NULL) fails closed — unknown provenance is not evidence of good
+    provenance, and every row written from now on carries a stamp.
+
+    The returned dict discloses what the floor removed rather than
+    quietly shrinking the number:
+
+    ``relabelable``
+        Rows that meet the triple and come from era
+        ``FP013_RELABELABLE_ERA``, whose measurement is sound but whose
+        verdict came from the old margin threshold. Re-scoring their
+        stored ``sim_report`` with the current significance test
+        promotes them; they are a backlog, not a loss.
+    ``excluded_by_era``
+        Rows that meet the triple but whose labels are unrecoverable
+        (eras 1-2) or unknown (NULL).
     """
     db_path = _resolve_db_path(db_path)
     init_db(db_path)
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT sim_report FROM iterations "
+            "SELECT sim_report, measurement_era FROM iterations "
             "WHERE audit_manifest IS NOT NULL "
             "AND verdict IN ('kept', 'reverted', 'neutral') "
             "AND sim_report IS NOT NULL"
         ).fetchall()
     count = 0
+    relabelable = 0
+    excluded_by_era = 0
     for row in rows:
         try:
             report = json.loads(row["sim_report"])
@@ -625,12 +1116,22 @@ def fp013_gate_progress(
         if not isinstance(report, dict):
             continue
         games = report.get("games") or report.get("total_games") or 0
-        if isinstance(games, (int, float)) and games >= min_games:
+        if not (isinstance(games, (int, float)) and games >= min_games):
+            continue
+        era = row["measurement_era"]
+        if isinstance(era, int) and era >= min_era:
             count += 1
+        elif era == FP013_RELABELABLE_ERA:
+            relabelable += 1
+        else:
+            excluded_by_era += 1
     return {
         "count": count,
         "target": target,
         "min_games": min_games,
+        "min_era": min_era,
+        "relabelable": relabelable,
+        "excluded_by_era": excluded_by_era,
         "pct": round(100.0 * count / target, 1) if target else 0.0,
     }
 
@@ -685,37 +1186,66 @@ def pricing_series_for_deck(
 def verdict_breakdown_for_deck(
     deck_id: str, db_path: Optional[Path] = None,
 ) -> dict:
-    """Per-audit-version verdict counts for one deck.
+    """Per-audit-version verdict counts for one deck, split by era.
 
-    Returns ``{audit_version: {kept, reverted, neutral, pending, total}}``.
-    Rows with NULL ``audit_version`` bucket under ``"unknown"`` so the
-    report doesn't crash on legacy / partial saves. Every bucket is
-    zero-padded across all four verdict labels so the UI can index
-    directly without guarding against KeyError.
+    Returns ``{audit_version: {kept, reverted, neutral, inconclusive,
+    pending, total, by_era: {<era>: {...same six...}}}}``. Rows with NULL
+    ``audit_version`` bucket under ``"unknown"`` so the report doesn't
+    crash on legacy / partial saves. Every bucket is zero-padded across
+    all five verdict labels so the UI can index directly without guarding
+    against KeyError.
 
     Backlog #6: once a deck has ≥5 iterations the UI shows "kept 4/5
     v3 swaps, 2/3 v4 swaps" so the user can spot which audit prompt
     (or advisor source) is producing landings vs. reverts.
+
+    Era split (2026-08-20)
+    ~~~~~~~~~~~~~~~~~~~~~~
+    This function used to SELECT verdict alone and pool every row, which
+    is the one thing this module's schema docstring forbids: an era-1
+    'kept' is a seat-attribution artifact, an era-3 'kept' means
+    |margin| >= 4, and an era-4 'kept' means a significant binomial test
+    (see MEASUREMENT_ERAS). Counting them in one pile invents a "kept
+    rate" out of three incompatible labels.
+
+    The flat per-version totals are KEPT as-is for back-compat (the
+    dashboard's existing pills index them directly) and ``by_era`` is
+    added beside them, keyed by the era as a string with ``"unknown"``
+    for NULL. Consumers that want a comparable number read
+    ``by_era[str(MIN_COMPARABLE_VERDICT_ERA)]``; consumers that want the
+    old pooled number can still have it, now with the evidence that it
+    is pooled sitting next to it.
     """
     db_path = _resolve_db_path(db_path)
     init_db(db_path)
-    out: dict[str, dict[str, int]] = {}
+
+    def _empty() -> dict:
+        return {
+            "kept": 0, "reverted": 0, "neutral": 0,
+            "inconclusive": 0, "pending": 0, "total": 0,
+        }
+
+    out: dict[str, dict] = {}
     with _connect(db_path) as conn:
         cur = conn.execute(
-            "SELECT audit_version, verdict FROM iterations "
+            "SELECT audit_version, verdict, measurement_era FROM iterations "
             "WHERE deck_id = ?",
             (deck_id,),
         )
         for row in cur.fetchall():
             key = row["audit_version"] or "unknown"
-            bucket = out.setdefault(key, {
-                "kept": 0, "reverted": 0, "neutral": 0,
-                "inconclusive": 0, "pending": 0, "total": 0,
-            })
+            bucket = out.setdefault(key, {**_empty(), "by_era": {}})
+            era_key = (
+                str(row["measurement_era"])
+                if row["measurement_era"] is not None else "unknown"
+            )
+            era_bucket = bucket["by_era"].setdefault(era_key, _empty())
             verdict = row["verdict"] or "pending"
-            if verdict in bucket:
+            if verdict in era_bucket:
                 bucket[verdict] += 1
+                era_bucket[verdict] += 1
             bucket["total"] += 1
+            era_bucket["total"] += 1
     return out
 
 

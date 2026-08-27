@@ -530,6 +530,34 @@ def test_list_bracket_candidates_excludes_control_and_user_keeps_ref(tmp_path):
     ]
 
 
+def test_ref_is_a_candidate_but_never_a_filler(tmp_path):
+    """The 2026-08-17 policy, pinned across both modules that implement
+    it: a [REF] deck is pool-CANDIDATE eligible (candidacy ends in a
+    published ranking, so a popular deck is signal the operator reads)
+    and filler-INELIGIBLE (a filler seat is never ranked; its strength
+    silently sets the A/B baseline, so popularity bias goes unseen)."""
+    import random as _rnd
+
+    import commander_builder.pool_curator as pc
+    from commander_builder._proposer_sim import _pick_filler_decks
+
+    for name in [
+        "Alpha Deck [B3].dck",
+        "Beta Deck [B3].dck",
+        "[REF] mox Community Build [B3].dck",
+    ]:
+        (tmp_path / name).write_text("[Main]\n1 Forest\n", encoding="utf-8")
+
+    assert "[REF] mox Community Build [B3].dck" in pc._list_bracket_candidates(
+        3, deck_dir=tmp_path,
+    )
+    fillers = _pick_filler_decks(
+        tmp_path, exclude_paths=[], count=2, target_bracket=3,
+        rng=_rnd.Random(7),
+    )
+    assert sorted(fillers) == ["Alpha Deck [B3].dck", "Beta Deck [B3].dck"]
+
+
 def test_main_returns_distinct_exit_code_on_insufficient_survivors(monkeypatch):
     """CLI convention: 0 = success, 2 = not enough decks on disk,
     3 = preflight rejected the pool. No traceback."""
@@ -545,3 +573,243 @@ def test_main_returns_distinct_exit_code_on_insufficient_survivors(monkeypatch):
 
     monkeypatch.setattr(pc, "curate_bracket", _raise)
     assert pc.main(["--bracket", "3"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Wilson-bound ranking + the suspected_inflated demotion
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+from commander_builder.pool_curator import (  # noqa: E402
+    WILSON_RANK_BAND,
+    _default_classifier,
+    _slice_violates,
+    wilson_lower_bound,
+)
+
+
+def test_wilson_lower_bound_zero_games_is_zero():
+    """No evidence ranks last, never first."""
+    assert wilson_lower_bound(0, 0) == 0.0
+
+
+def test_wilson_lower_bound_is_below_the_raw_rate():
+    """It is the rate DISCOUNTED by the uncertainty in it, so it can never
+    exceed the rate itself."""
+    for wins, games in [(1, 2), (3, 3), (5, 10), (20, 30), (0, 8)]:
+        assert wilson_lower_bound(wins, games) <= wins / games
+
+
+def test_wilson_lower_bound_penalizes_small_samples():
+    """Same 100% win rate, different sample sizes: more games, more
+    confidence, higher bound."""
+    assert (
+        wilson_lower_bound(2, 2)
+        < wilson_lower_bound(5, 5)
+        < wilson_lower_bound(20, 20)
+    )
+
+
+def test_wilson_lower_bound_preserves_order_within_one_sample_size():
+    """Monotonic in wins for fixed games — so where the old raw-win-rate
+    sort was already right (equal game counts), the ranking is unchanged."""
+    bounds = [wilson_lower_bound(k, 12) for k in range(13)]
+    assert bounds == sorted(bounds)
+
+
+def test_wilson_ranking_flips_an_order_raw_win_rate_would_not():
+    """THE BUG. ``schedule_pods`` does not hand every candidate the same
+    number of completed games (forced pod size 4, timed-out pods, decks
+    whose Match-Result name fails to map), so raw win rates are not
+    comparable across the field: 3-1 in a single salvaged pod outranked
+    14-10 across six. One is a coin flip, the other is a measurement.
+
+    Neither deck here is suspected_inflated (0.75 is not > 0.75), so the
+    flip is the Wilson bound alone."""
+    lucky = _candidate("Lucky", wins=3, played=4)      # 0.750 raw
+    proven = _candidate("Proven", wins=14, played=24)  # 0.583 raw
+    assert lucky.win_rate > proven.win_rate
+    assert not lucky.suspected_inflated
+    assert not proven.suspected_inflated
+
+    by_raw = sorted([lucky, proven], key=lambda s: s.win_rate, reverse=True)
+    assert [s.filename for s in by_raw] == ["Lucky [B3].dck", "Proven [B3].dck"]
+
+    by_wilson = sorted([lucky, proven], key=lambda s: s.rank_key)
+    assert [s.filename for s in by_wilson] == [
+        "Proven [B3].dck", "Lucky [B3].dck",
+    ]
+
+
+def test_rank_key_demotes_suspected_inflated_at_an_equal_wilson_bound():
+    """The tag finally does something. 7-2 (flagged, bound 0.4526) and
+    20-12 (clean, bound 0.4525) are the same measurement; the clean deck
+    takes the pool seat.
+
+    Note the flagged deck's bound is very slightly HIGHER — without the
+    demotion it would rank first on the exact value."""
+    flagged = _candidate("Flagged", wins=7, played=9)    # 0.778 raw -> tagged
+    clean = _candidate("Clean", wins=20, played=32)      # 0.625 raw -> clean
+    assert flagged.suspected_inflated is True
+    assert clean.suspected_inflated is False
+    assert flagged.wilson_score > clean.wilson_score
+    assert round(flagged.wilson_score, WILSON_RANK_BAND) == round(
+        clean.wilson_score, WILSON_RANK_BAND
+    ), "precondition: the two bounds must be indistinguishable"
+
+    ranked = sorted([flagged, clean], key=lambda s: s.rank_key)
+    assert [s.filename for s in ranked] == [
+        "Clean [B3].dck", "Flagged [B3].dck",
+    ]
+
+
+def test_inflation_demotion_never_overrides_a_real_wilson_gap():
+    """Demotion applies only at an indistinguishable bound. A flagged deck
+    that is genuinely, measurably better still ranks first — the tag is a
+    suspicion, not a penalty."""
+    flagged = _candidate("Flagged", wins=28, played=32)  # 0.875 raw, tagged
+    clean = _candidate("Clean", wins=8, played=32)       # 0.250 raw, clean
+    assert flagged.suspected_inflated is True
+    assert round(flagged.wilson_score, WILSON_RANK_BAND) != round(
+        clean.wilson_score, WILSON_RANK_BAND
+    )
+    ranked = sorted([flagged, clean], key=lambda s: s.rank_key)
+    assert ranked[0].filename == "Flagged [B3].dck"
+
+
+def test_rank_key_is_deterministic_for_identical_records():
+    """The old ``sort(key=win_rate, reverse=True)`` left ties in dict-
+    insertion order; two identical records now break by filename."""
+    a = _candidate("Bravo", wins=5, played=10)
+    b = _candidate("Alpha", wins=5, played=10)
+    assert [s.filename for s in sorted([a, b], key=lambda s: s.rank_key)] == [
+        "Alpha [B3].dck", "Bravo [B3].dck",
+    ]
+
+
+def test_to_dict_persists_the_wilson_score_alongside_the_inflated_tag():
+    """The ranking key is serialized so a post-mortem can see WHY a deck
+    placed where it did — and the suspected_inflated tag still rides along
+    for the operator."""
+    inflated = _candidate("Inflated", wins=7, played=9)
+    normal = _candidate("Normal", wins=20, played=32)
+    pool = CuratedPool(bracket=3, created_at="x", scores=[inflated, normal])
+    d = pool.to_dict()
+    assert d["scores"][0]["suspected_inflated"] is True
+    assert d["scores"][1]["suspected_inflated"] is False
+    assert d["scores"][0]["wilson_score"] == pytest.approx(
+        wilson_lower_bound(7, 9)
+    )
+    assert d["scores"][1]["wilson_score"] == pytest.approx(
+        wilson_lower_bound(20, 32)
+    )
+
+
+def test_curate_bracket_ranks_survivors_by_the_wilson_bound(
+    tmp_path, monkeypatch,
+):
+    """End-to-end through the real pipeline: the seat-1-takes-all fake
+    runner gives every deck the same record, so this pins that the new
+    sort still produces a full, well-formed pool (and doesn't blow up on
+    the property-backed key)."""
+    candidates = [f"c{i:02d} [B3].dck" for i in range(8)]
+    runner = _FakeRunner()
+    pool = _curate(candidates, runner, tmp_path, monkeypatch)
+    assert len(pool.scores) == 6
+    keys = [s.rank_key for s in pool.scores]
+    assert keys == sorted(keys), "top6 must be emitted in rank order"
+
+
+# ---------------------------------------------------------------------------
+# Pool diversity actually rearranges once labels differ
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def offline_archetype(monkeypatch):
+    """No Scryfall snapshots — classification runs on the filename rung
+    and the card-NAME scan alone. Keeps this file independent of the
+    oracle fixtures (those live in tests/test_archetype.py)."""
+    from commander_builder import archetype
+    monkeypatch.setattr(archetype, "_cached_scryfall", lambda name: None)
+
+
+def _write_deck(tmp_path, filename: str) -> str:
+    (tmp_path / filename).write_text(
+        "[Commander]\n1 Test Commander\n[Main]\n1 Sol Ring\n1 Forest\n",
+        encoding="utf-8",
+    )
+    return filename
+
+
+def test_diversity_search_rearranges_when_real_labels_differ(
+    tmp_path, monkeypatch, offline_archetype, capsys,
+):
+    """The downstream half of the archetype v2 fix.
+
+    ``_slice_violates`` treats same-archetype slice-mates as a violation.
+    With six genuinely different labels the default 1/3/5 vs 2/4/6 split
+    still collides (ranks 1 and 3 are both combo), the bounded swap search
+    finds an arrangement that doesn't, and NO warn is printed. Labels come
+    from the real ``_default_classifier`` — not hand-set strings — so this
+    breaks if the classifier stops discriminating."""
+    import commander_builder.pool_curator as pc
+    monkeypatch.setattr(pc, "DECK_DIR", tmp_path)
+
+    ranked_files = [
+        _write_deck(tmp_path, "Storm Combo [B3].dck"),      # combo
+        _write_deck(tmp_path, "Stax Lockdown [B3].dck"),    # stax
+        _write_deck(tmp_path, "Hulk Pile [B3].dck"),        # combo (collides)
+        _write_deck(tmp_path, "Draw-Go Control [B3].dck"),  # control
+        _write_deck(tmp_path, "Goblin Tribal [B3].dck"),    # aggro
+        _write_deck(tmp_path, "Quiet Pile [B3].dck"),       # midrange
+    ]
+    top6 = [
+        CandidateScore(
+            filename=f, games_played=10, wins=10 - i,
+            archetype=_default_classifier(tmp_path / f),
+        )
+        for i, f in enumerate(ranked_files)
+    ]
+    assert [c.archetype for c in top6] == [
+        "combo", "stax", "combo", "control", "aggro", "midrange",
+    ]
+
+    a, b = _split_into_slices(top6)
+    assert "WARN" not in capsys.readouterr().out
+
+    by_name = {c.filename: c for c in top6}
+    slice_a = [by_name[f] for f in a]
+    slice_b = [by_name[f] for f in b]
+    assert not _slice_violates(slice_a)
+    assert not _slice_violates(slice_b)
+    # The default rotation put both combo decks in slice A; the search had
+    # to move one of them.
+    assert a != [ranked_files[0], ranked_files[2], ranked_files[4]]
+
+
+def test_uniform_labels_reproduce_the_v1_warn_and_ship_default(
+    tmp_path, monkeypatch, offline_archetype, capsys,
+):
+    """The failure v2 exists to end, pinned as a contrast: when every deck
+    classifies the same (what v1 did to ~70-85% of real decks), every
+    arrangement violates, the search exhausts, and the curator ships a
+    violating default with a WARN — archetype diversity is a no-op."""
+    import commander_builder.pool_curator as pc
+    monkeypatch.setattr(pc, "DECK_DIR", tmp_path)
+
+    ranked_files = [
+        _write_deck(tmp_path, f"Quiet Pile {i} [B3].dck") for i in range(6)
+    ]
+    top6 = [
+        CandidateScore(
+            filename=f, games_played=10, wins=10 - i,
+            archetype=_default_classifier(tmp_path / f),
+        )
+        for i, f in enumerate(ranked_files)
+    ]
+    assert {c.archetype for c in top6} == {"midrange"}
+
+    a, b = _split_into_slices(top6)
+    assert "WARN" in capsys.readouterr().out
+    assert a == [ranked_files[0], ranked_files[2], ranked_files[4]]
