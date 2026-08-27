@@ -28,7 +28,7 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - name: Fetch deck JSON
@@ -40,96 +40,174 @@ jobs:
           if [ ! -f tests/fixtures/_captures/request.txt ]; then
             echo "request.txt absent (consumed) -- nothing to fetch"; exit 0
           fi
-          # Three request forms (third added 2026-08-27 for FP-018.4):
+          # Three request forms (third reworked 2026-08-27 for FP-018.4
+          # batch 2, owner-directed):
           #   <deck id>            -- fetch that deck
           #   commander:<name>     -- search decks by commander via the
-          #                           documented v3 search endpoint (the
-          #                           in-repo client already uses it) and
-          #                           fetch the most-viewed public hit.
-          #                           Exists so the R2-P18 MDFC gap can be
-          #                           closed without knowing a deck id: a
-          #                           modal_dfc COMMANDER (e.g. a Kaldheim
-          #                           god) guarantees an MDFC entry.
-          #   mode: primer-batch   -- FP-018.4 corpus harvest: for EVERY
-          #                           commander: line, walk the top
-          #                           most-viewed public hits and keep the
-          #                           first deck whose description renders
-          #                           (Quill Delta -> text) to >= 200
-          #                           chars. One run, many captures.
-          #                           Unlike the R2-P18 shape captures,
-          #                           these are trimmed IN-RUNNER: the
-          #                           corpus payload is the primer, so the
-          #                           description string is kept
-          #                           byte-verbatim but the card list is
-          #                           reduced to name/qty/categories/
-          #                           layout -- committing a dozen full
-          #                           ~0.5MB deck JSONs would live in git
-          #                           history forever after the consume
+          #                           documented v3 search endpoint and
+          #                           fetch the most-viewed public hit
+          #                           (exists so the R2-P18 MDFC gap
+          #                           could close without a known id).
+          #   mode: primer-batch   -- FP-018.4 corpus harvest: walk the
+          #                           TOP-RANKED public commander decks
+          #                           on BOTH Archidekt and Moxfield and
+          #                           keep the first `per-site:` (default
+          #                           25) whose description renders to
+          #                           >= 200 chars, subject to:
+          #                           - most-liked ordering where the API
+          #                             has it (Moxfield). Archidekt's
+          #                             API exposes NO like count
+          #                             (archidekt_client.py pins this),
+          #                             so views stay its proxy;
+          #                           - exact-duplicate lists rejected
+          #                             (fingerprint over sorted card
+          #                             names, shared across sites);
+          #                           - at most TWO decks per commander
+          #                             across the whole batch -- a third
+          #                             is skipped and the walk continues
+          #                             down the ranking (owner call,
+          #                             2026-08-27);
+          #                           - card-link embeds count toward
+          #                             primer length (batch-1 finding:
+          #                             card mentions are non-string
+          #                             Delta inserts).
+          #                           Captures are trimmed IN-RUNNER
+          #                           (description byte-verbatim, card
+          #                           list reduced) so a 50-deck harvest
+          #                           does not bake raw JSON megabytes
+          #                           into history after the consume
           #                           step deletes them.
           # Number parsing: FIRST number, not all digits concatenated -- a
           # retry marker like '24864897 retry-1' must not become 248648971
           # (exactly what happened on attempt 2).
           if grep -q '^mode: *primer-batch' tests/fixtures/_captures/request.txt; then
             python3 - <<'PYBATCH'
-          import json, time, urllib.parse, urllib.request
+          import hashlib, json, time, urllib.error, urllib.parse, urllib.request
 
           # Project UA: a bot-ish UA from a datacenter IP gets a
-          # Cloudflare 403 (learned 2026-08-20); this string is
-          # archidekt_client.USER_AGENT, which live probes succeed with.
+          # Cloudflare 403 (learned 2026-08-20); this string is the
+          # UA both in-repo clients ship and live probes succeed with.
           UA = "commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)"
+          KEEP_PER_SITE = 25
+          CAP_PER_COMMANDER = 2
+          MIN_PRIMER_CHARS = 200
+          PAGE_SIZE = 50
+          MAX_PAGES = 12
 
-          def get_json(url):
+          for line in open("tests/fixtures/_captures/request.txt"):
+              if line.startswith("per-site:"):
+                  KEEP_PER_SITE = int(line.split(":", 1)[1].strip())
+
+          def get_json(url, retry_429=True):
               req = urllib.request.Request(url, headers={
                   "Accept": "application/json", "User-Agent": UA})
-              with urllib.request.urlopen(req, timeout=60) as resp:
-                  raw = resp.read()
-              return json.loads(raw)
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as resp:
+                      return json.loads(resp.read())
+              except urllib.error.HTTPError as e:
+                  if e.code == 429 and retry_429:
+                      time.sleep(5)
+                      return get_json(url, retry_429=False)
+                  raise
 
           def delta_text(desc):
-              # Archidekt's description is a Quill Delta JSON STRING
-              # ({"ops": [{"insert": ...}]}), not prose -- pinned by the
-              # hazel_primer.md capture (2026-08-20). Non-Delta text
-              # passes through verbatim; non-string inserts (embeds)
-              # contribute nothing.
+              # Archidekt descriptions are Quill Delta JSON strings.
+              # Card mentions are {"insert": {"card-link": name}} embeds
+              # (batch-1 finding) -- they render as the card name, and a
+              # renderer that drops them loses every card the primer
+              # names. Image embeds render as nothing. Non-Delta text
+              # passes through verbatim.
               try:
                   ops = json.loads(desc).get("ops") or []
-                  return "".join(op.get("insert") for op in ops
-                                 if isinstance(op.get("insert"), str))
               except Exception:
                   return desc or ""
+              out = []
+              for op in ops:
+                  ins = op.get("insert")
+                  if isinstance(ins, str):
+                      out.append(ins)
+                  elif isinstance(ins, dict) and isinstance(ins.get("card-link"), str):
+                      out.append(ins["card-link"])
+              return "".join(out)
 
-          names = []
-          for line in open("tests/fixtures/_captures/request.txt"):
-              if line.startswith("commander:"):
-                  names.append(line.split(":", 1)[1].strip())
+          seen_fp = {}          # fingerprint -> "site:id" first holder
+          cmdr_counts = {}      # commander tuple -> kept count
+          stats = {s: {"kept": 0, "dup": 0, "cap": 0, "thin": 0,
+                       "nocmdr": 0, "err": 0}
+                   for s in ("archidekt", "moxfield")}
 
-          captured, missed = [], []
-          for name in names:
-              url = ("https://archidekt.com/api/decks/v3/?commanderName="
-                     + urllib.parse.quote(name)
-                     + "&orderBy=-viewCount&pageSize=10")
+          def consider(site, label, commanders, card_names, text_len, save):
+              s = stats[site]
+              if not commanders:
+                  s["nocmdr"] += 1
+                  return
+              if text_len < MIN_PRIMER_CHARS:
+                  s["thin"] += 1
+                  return
+              fp = hashlib.sha256(
+                  "\n".join(sorted(card_names)).encode()).hexdigest()
+              if fp in seen_fp:
+                  s["dup"] += 1
+                  print(f"  dup-list skip: {label} == {seen_fp[fp]}")
+                  return
+              ckey = tuple(sorted(c.lower() for c in commanders))
+              if cmdr_counts.get(ckey, 0) >= CAP_PER_COMMANDER:
+                  s["cap"] += 1
+                  print(f"  commander-cap skip ({'/'.join(commanders)}): {label}")
+                  return
+              seen_fp[fp] = label
+              cmdr_counts[ckey] = cmdr_counts.get(ckey, 0) + 1
+              save()
+              s["kept"] += 1
+              print(f"kept {label} ({'/'.join(commanders)}, primer {text_len} chars)")
+
+          def dump(path, obj):
+              with open(path, "w") as f:
+                  json.dump(obj, f, indent=1)
+
+          # ---------------- Archidekt (views: no like count in its API) --
+          print(f"== Archidekt: top-viewed walk, keep {KEEP_PER_SITE} ==")
+          page, rank = 1, 0
+          while stats["archidekt"]["kept"] < KEEP_PER_SITE and page <= MAX_PAGES:
+              url = ("https://archidekt.com/api/decks/v3/?orderBy=-viewCount"
+                     f"&pageSize={PAGE_SIZE}&page={page}")
               try:
                   hits = get_json(url).get("results") or []
               except Exception as e:
-                  print(f"search failed for {name!r}: {e}")
-                  missed.append(name)
-                  continue
-              hits = [h for h in hits if not h.get("private")]
-              found = None
-              for h in hits[:5]:
-                  did = h["id"]
+                  print(f"archidekt search page {page} failed: {e}")
+                  break
+              if not hits:
+                  break
+              for h in hits:
+                  if stats["archidekt"]["kept"] >= KEEP_PER_SIZE if False else stats["archidekt"]["kept"] >= KEEP_PER_SITE:
+                      break
+                  if h.get("private"):
+                      continue
+                  rank += 1
+                  did = h.get("id")
                   try:
                       deck = get_json(f"https://archidekt.com/api/decks/{did}/")
                   except Exception as e:
-                      print(f"  fetch failed for deck {did}: {e}")
-                      time.sleep(1)
+                      stats["archidekt"]["err"] += 1
+                      print(f"  fetch failed for archidekt {did}: {e}")
+                      time.sleep(0.4)
                       continue
+                  cards = deck.get("cards") or []
+                  def _oc(c):
+                      return (c.get("card") or {}).get("oracleCard") or {}
+                  names = [_oc(c).get("name") for c in cards if _oc(c).get("name")]
+                  commanders = [_oc(c).get("name") for c in cards
+                                if "Commander" in (c.get("categories") or [])
+                                and _oc(c).get("name")]
                   text = delta_text(deck.get("description") or "")
-                  if len(text) >= 200:
-                      trimmed = {
+
+                  def save(deck=deck, did=did, rank=rank, cards=cards):
+                      dump(f"tests/fixtures/_captures/primer_corpus_arch_{did}.json", {
                           "_provenance": {
+                              "site": "archidekt",
                               "source": f"https://archidekt.com/api/decks/{did}/",
-                              "requested_commander": name,
+                              "rank": rank,
+                              "ordering": "-viewCount (the API exposes no like count)",
                               "note": ("trimmed in-runner for the FP-018.4 "
                                        "primer corpus; description is the "
                                        "verbatim API string"),
@@ -137,39 +215,108 @@ jobs:
                           "id": deck.get("id"),
                           "name": deck.get("name"),
                           "viewCount": deck.get("viewCount"),
-                          "format": deck.get("format"),
                           "description": deck.get("description"),
                           "cards": [
-                              {
-                                  "quantity": c.get("quantity"),
-                                  "categories": c.get("categories"),
-                                  "name": ((c.get("card") or {})
-                                           .get("oracleCard") or {}).get("name"),
-                                  "layout": ((c.get("card") or {})
-                                             .get("oracleCard") or {}).get("layout"),
-                              }
-                              for c in deck.get("cards") or []
+                              {"quantity": c.get("quantity"),
+                               "categories": c.get("categories"),
+                               "name": _oc(c).get("name"),
+                               "layout": _oc(c).get("layout")}
+                              for c in cards
                           ],
-                      }
-                      out = f"tests/fixtures/_captures/primer_corpus_{did}.json"
-                      with open(out, "w") as f:
-                          json.dump(trimmed, f, indent=1)
-                      print(f"kept deck {did} for {name!r} "
-                            f"(primer {len(text)} chars)")
-                      found = did
-                      break
-                  print(f"  deck {did}: primer too thin "
-                        f"({len(text)} chars) -- next hit")
-                  time.sleep(1)
-              if found is None:
-                  print(f"no primer-bearing public deck for {name!r}")
-                  missed.append(name)
+                      })
+                  consider("archidekt", f"archidekt:{did}", commanders,
+                           names, len(text), save)
+                  time.sleep(0.4)
+              page += 1
               time.sleep(1)
 
-          print(f"captured {len(captured) or len(names) - len(missed)}"
-                f"/{len(names)}; missed: {missed or 'none'}")
-          if len(missed) == len(names):
-              raise SystemExit("zero captures -- failing loudly")
+          # ---------------- Moxfield (likes: real like ordering) ---------
+          # Endpoint + params mirror moxfield_import.py (the in-repo
+          # client): api2 search with fmt=commander, sortColumn/sortType
+          # likes, then v3/decks/all/<publicId> for the full deck. Be
+          # polite: 1s between deck fetches (FETCH_SLEEP_SEC precedent).
+          print(f"== Moxfield: top-liked walk, keep {KEEP_PER_SITE} ==")
+          page, rank = 1, 0
+          while stats["moxfield"]["kept"] < KEEP_PER_SITE and page <= MAX_PAGES:
+              params = {
+                  "pageNumber": str(page), "pageSize": str(PAGE_SIZE),
+                  "sortColumn": "likes", "sortType": "likes",
+                  "sortDirection": "descending", "fmt": "commander",
+              }
+              url = ("https://api2.moxfield.com/v2/decks/search?"
+                     + urllib.parse.urlencode(params))
+              try:
+                  entries = get_json(url).get("data") or []
+              except Exception as e:
+                  print(f"moxfield search page {page} failed: {e}")
+                  break
+              if not entries:
+                  break
+              for e in entries:
+                  if stats["moxfield"]["kept"] >= KEEP_PER_SITE:
+                      break
+                  rank += 1
+                  pid = e.get("publicId") or e.get("id")
+                  if not pid:
+                      continue
+                  try:
+                      deck = get_json(f"https://api2.moxfield.com/v3/decks/all/{pid}")
+                  except Exception as exc:
+                      stats["moxfield"]["err"] += 1
+                      print(f"  fetch failed for moxfield {pid}: {exc}")
+                      time.sleep(1)
+                      continue
+                  boards = deck.get("boards") or {}
+                  def _bnames(bname, boards=boards):
+                      vals = (boards.get(bname) or {}).get("cards", {}) or {}
+                      out = []
+                      for v in vals.values():
+                          nm = (v.get("card") or {}).get("name") or v.get("name")
+                          if nm:
+                              out.append(nm)
+                      return out
+                  commanders = _bnames("commanders")
+                  names = _bnames("mainboard")
+                  desc = deck.get("description") or ""
+                  like_count = e.get("likeCount")
+                  if like_count is None:
+                      like_count = deck.get("likeCount")
+
+                  def save(deck=deck, e=e, pid=pid, rank=rank,
+                           commanders=commanders, names=names,
+                           desc=desc, like_count=like_count):
+                      dump(f"tests/fixtures/_captures/primer_corpus_mox_{pid}.json", {
+                          "_provenance": {
+                              "site": "moxfield",
+                              "source": f"https://api2.moxfield.com/v3/decks/all/{pid}",
+                              "rank": rank,
+                              "ordering": "likes descending",
+                              "note": ("trimmed in-runner for the FP-018.4 "
+                                       "primer corpus; description is the "
+                                       "verbatim API string (markdown, NOT "
+                                       "Quill Delta -- site shapes differ)"),
+                          },
+                          "publicId": pid,
+                          "name": deck.get("name"),
+                          "likeCount": like_count,
+                          "description": desc,
+                          "commanders": commanders,
+                          "mainboard": names,
+                      })
+                  consider("moxfield", f"moxfield:{pid}", commanders,
+                           names, len(desc), save)
+                  time.sleep(1)
+              page += 1
+              time.sleep(1)
+
+          print("== summary ==")
+          for site, s in stats.items():
+              print(f"{site}: kept={s['kept']}/{KEEP_PER_SITE} "
+                    f"dup={s['dup']} commander-cap={s['cap']} "
+                    f"thin-primer={s['thin']} no-commander={s['nocmdr']} "
+                    f"fetch-err={s['err']}")
+          if all(s["kept"] == 0 for s in stats.values()):
+              raise SystemExit("zero captures on both sites -- failing loudly")
           PYBATCH
             exit 0
           fi
