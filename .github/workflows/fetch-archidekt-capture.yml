@@ -40,11 +40,44 @@ jobs:
           if [ ! -f tests/fixtures/_captures/request.txt ]; then
             echo "request.txt absent (consumed) -- nothing to fetch"; exit 0
           fi
-          # First NUMBER in the file, not all digits concatenated -- a
-          # retry marker like '24864897 retry-1' must not become
-          # 248648971 (which is exactly what happened on attempt 2).
-          DECK_ID="$(grep -oE '[0-9]+' tests/fixtures/_captures/request.txt | head -1)"
-          if [ -z "$DECK_ID" ]; then echo "request.txt must contain a numeric deck id"; exit 1; fi
+          # Two request forms (2026-08-27):
+          #   <deck id>            -- fetch that deck
+          #   commander:<name>     -- search decks by commander via the
+          #                           documented v3 search endpoint (the
+          #                           in-repo client already uses it) and
+          #                           fetch the most-viewed public hit.
+          #                           Exists so the R2-P18 MDFC gap can be
+          #                           closed without knowing a deck id: a
+          #                           modal_dfc COMMANDER (e.g. a Kaldheim
+          #                           god) guarantees an MDFC entry.
+          # Number parsing: FIRST number, not all digits concatenated -- a
+          # retry marker like '24864897 retry-1' must not become 248648971
+          # (exactly what happened on attempt 2).
+          UA="commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)"
+          if grep -q '^commander:' tests/fixtures/_captures/request.txt; then
+            CNAME="$(grep '^commander:' tests/fixtures/_captures/request.txt | head -1 | cut -d: -f2- | sed 's/^ *//')"
+            echo "searching decks for commander: $CNAME"
+            DECK_ID="$(python3 - "$CNAME" <<'PYSEARCH'
+          import json, sys, urllib.parse, urllib.request
+          name = sys.argv[1]
+          url = ("https://archidekt.com/api/decks/v3/?commanderName="
+                 + urllib.parse.quote(name) + "&orderBy=-viewCount&pageSize=10")
+          req = urllib.request.Request(url, headers={
+              "Accept": "application/json",
+              "User-Agent": "commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)",
+          })
+          data = json.load(urllib.request.urlopen(req, timeout=60))
+          hits = data.get("results") or []
+          for h in hits:
+              if not h.get("private"):
+                  print(h["id"]); break
+          PYSEARCH
+          )"
+            if [ -z "$DECK_ID" ]; then echo "no public deck found for commander '$CNAME'"; exit 1; fi
+          else
+            DECK_ID="$(grep -oE '[0-9]+' tests/fixtures/_captures/request.txt | head -1)"
+          fi
+          if [ -z "$DECK_ID" ]; then echo "request.txt must contain a numeric deck id or commander:<name>"; exit 1; fi
           echo "deck id: $DECK_ID"
           # First attempt (2026-08-20) 403'd: Cloudflare rejects a
           # bot-ish UA from a datacenter IP. Use the PROJECT UA string
