@@ -11,14 +11,37 @@ Verdict taxonomy:
   "reverted"  — sim shows regression; old version restored
   "neutral"   — within noise threshold; user decides
 
-The analyst itself is just a function. It can be implemented three ways:
+The analyst itself is just a function. It has two live implementations and
+one retired one:
 
   1. Heuristic-only (no LLM)        — `heuristic_verdict()` below
   2. Claude API (high quality)       — `claude_verdict()` (live;
      falls back to NotImplementedError if anthropic SDK or
      ANTHROPIC_API_KEY missing — router degrades to heuristic)
-  3. Local Ollama (cost saving)      — `ollama_verdict()` (live;
-     falls back to NotImplementedError if Ollama isn't reachable)
+  3. Local Ollama (cost saving)      — `ollama_verdict()` RETIRED
+     (decision A4, retired here 2026-08-27; `ollama_propose` was
+     retired the same way on 2026-08-17). See `ollama_verdict` below
+     and `local_model.py` for what local models are used for now.
+
+WHY THE LOCAL VERDICT RUNG IS GONE (2026-08-27)
+===============================================
+Two independent reasons, either sufficient:
+
+  * **It was unreachable.** `AnalystConfig.use_ollama` defaults to False
+    and nothing in `src/` ever set it. The only production construction
+    is `analyze()`'s own `config or AnalystConfig()`; `iteration_loop`
+    threads an `analyst_config` through but every caller in the repo
+    leaves it None. It was dead code in exactly the shape
+    `proposer.ollama_propose` was.
+  * **It is the wrong task for the tier.** Decision A4 draws the line at
+    narrow classification with the evidence SUPPLIED and a closed
+    taxonomy. A verdict is the opposite: it weighs a swap manifest
+    against a statistical sim summary and writes transferable lessons —
+    open-ended synthesis a 3B local model cannot do, and one where a
+    plausible-sounding wrong answer is written straight into the
+    knowledge log as if it were measurement. Verdict work stays on
+    Claude (or on the deterministic `heuristic_verdict`, which is the
+    default and is honest about its own uncertainty).
 
 The default `analyze()` runs the heuristic and falls back to higher-quality
 sources only when the heuristic is uncertain. This keeps the loop running
@@ -139,8 +162,18 @@ class AnalystConfig:
     # auto-curate path correctly called 'inconclusive'.
     min_decisive_games: int = MIN_DECISIVE_GAMES_FOR_VERDICT
     use_claude: bool = False           # Set True when ANTHROPIC_API_KEY is wired.
-    use_ollama: bool = False           # Set True when local model is running.
+    #: RETIRED (decision A4, 2026-08-27) — same shape as
+    #: ``ProposerConfig.use_ollama``. Accepted so existing callers and
+    #: pickled/serialized configs still construct, but the verdict rung it
+    #: used to select is gone: ``analyze()`` now prints
+    #: ``OLLAMA_VERDICT_RETIRED_NOTE`` and continues down the ladder.
+    #: Local models do narrow, oracle-supplied classification in
+    #: ``local_model.py``; they do not render verdicts.
+    use_ollama: bool = False
     claude_model: str = "claude-sonnet-4-5"
+    #: RETIRED alongside ``use_ollama``. The live local-model endpoint
+    #: config lives in ``local_model.LocalModelConfig`` /
+    #: ``COMMANDER_BUILDER_LOCAL_MODEL_NAME`` / ``..._URL``.
     ollama_model: str = "llama3.2:3b"
     ollama_url: str = "http://localhost:11434/api/generate"
 
@@ -150,9 +183,11 @@ class AnalystConfig:
 def analyze(input_: AnalystInput, config: Optional[AnalystConfig] = None) -> Verdict:
     """Route an analyst request through the configured ladder.
 
-    The router prefers cheaper sources and only escalates when the heuristic
-    can't render confidently. Override `config.use_claude` / `use_ollama` once
-    those backends are wired."""
+    Order: heuristic -> Claude (if enabled) -> heuristic. (The Ollama rung
+    was retired by decision A4; `use_ollama=True` now only prints a note —
+    see below.) The router prefers cheaper sources and only escalates when
+    the heuristic can't render confidently. Override `config.use_claude`
+    once that backend is wired."""
     config = config or AnalystConfig()
 
     heuristic = heuristic_verdict(input_, config)
@@ -160,11 +195,11 @@ def analyze(input_: AnalystInput, config: Optional[AnalystConfig] = None) -> Ver
     if heuristic.confidence >= 0.75:
         return heuristic
 
-    # Heuristic is uncertain; try the configured LLM backends in order.
+    # Heuristic is uncertain; try the configured LLM backend.
     #
     # Two distinct failure modes, handled differently ON PURPOSE:
     #
-    #   NotImplementedError  — backend not wired (no key / SDK / daemon).
+    #   NotImplementedError  — backend not wired (no key / SDK).
     #                          Expected in many configs; quiet fall-through.
     #   any other Exception  — backend IS wired but the call failed:
     #                          unparseable/truncated model output
@@ -176,17 +211,20 @@ def analyze(input_: AnalystInput, config: Optional[AnalystConfig] = None) -> Ver
     #                          to the heuristic verdict so the pipeline
     #                          keeps moving on empirical data.
     if config.use_ollama:
-        try:
-            return ollama_verdict(input_, config)
-        except NotImplementedError:
-            pass  # Fall through to Claude or back to heuristic.
-        except Exception as exc:  # noqa: BLE001 — see contract above
-            print(
-                f"WARNING: ollama_verdict failed "
-                f"({type(exc).__name__}: {exc}); "
-                f"falling back to claude/heuristic verdict.",
-                flush=True,
-            )
+        # RETIRED (A4, 2026-08-27): no call is made — not even to check
+        # the daemon.
+        #
+        # NOTE THE SHAPE, it is the whole point: this rung is deliberately
+        # NOT `try: ollama_verdict(...) except NotImplementedError: pass`.
+        # The retired stub raises NotImplementedError, and the ladder's
+        # NotImplementedError arm is a QUIET fall-through by contract
+        # ("backend not wired" is the expected state in most configs). So
+        # leaving the call in place would have swallowed the retirement
+        # note whole and reproduced exactly the silent degrade the
+        # retirement exists to remove: the operator sets `use_ollama=True`,
+        # nothing happens, nothing says why. Print instead, then continue
+        # down the ladder.
+        print(f"WARNING: {OLLAMA_VERDICT_RETIRED_NOTE}", flush=True)
     if config.use_claude:
         try:
             return claude_verdict(input_, config)
@@ -374,13 +412,18 @@ def _safe_confidence(value: object) -> float:
 
 
 def _summarize_h2h(sim: dict) -> dict:
-    """Build the shared head-to-head core of the LLM-facing sim summary.
+    """Build the head-to-head core of the LLM-facing sim summary.
+
+    "Shared" as of 2026-08-14, when ``claude_verdict`` and the (now
+    retired, 2026-08-27) ollama path both fed from it; ``claude_verdict``
+    is the only caller left, and the function stays factored out because
+    the tests that pin the signed-margin contract call it through that
+    one path.
 
     2026-08-14 fix: the old summaries forwarded ``sim['margin']`` —
     ``ComparisonReport.margin`` is ``abs(new - old)``, so a model reading
     "margin: 6" on a 6-game REGRESSION would write confidently wrong
-    lessons; the ollama summary also omitted the winner. The core now
-    carries the SIGNED margin (new_wins - old_wins, computed from the win
+    lessons. The core now carries the SIGNED margin (new_wins - old_wins, computed from the win
     counts rather than trusted from the report), the winner (derived the
     same way when the report doesn't say), draws, and h2h_decisive
     (old_wins + new_wins — the head-to-head sample size the verdict
@@ -480,66 +523,69 @@ def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     )
 
 
-# --- Ollama backend --------------------------------------------------------
+# --- Ollama backend: RETIRED (decision A4, 2026-08-27) ---------------------
+
+#: Printed verbatim by ``analyze()`` when a caller still sets
+#: ``use_ollama=True``, and carried in ``ollama_verdict``'s exception.
+#: Names the replacement AND the reason, because "this setting does
+#: nothing now" is useless without both. Mirrors
+#: ``proposer.OLLAMA_PROPOSE_RETIRED_NOTE`` (2026-08-17) deliberately:
+#: one retirement, one wording, so an operator who has met one of these
+#: notes recognises the other.
+OLLAMA_VERDICT_RETIRED_NOTE = (
+    "AnalystConfig.use_ollama is retired (decision A4): rendering an "
+    "iteration verdict is open-ended synthesis over a sim summary, not "
+    "the narrow supplied-evidence classification a small local model can "
+    "do — and a plausible-sounding wrong verdict is written straight into "
+    "the knowledge log as if it were a measurement. Verdict work stays on "
+    "Claude (or on the deterministic heuristic_verdict, which is the "
+    "default); local models now handle narrow, oracle-supplied "
+    "classification (card role tagging, deck archetype tagging) via "
+    "commander_builder.local_model — opt in with "
+    "COMMANDER_BUILDER_LOCAL_MODEL=1. Continuing down the verdict ladder."
+)
+
 
 def ollama_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
-    """Render a verdict via a local Ollama model.
+    """RETIRED. Always raises ``NotImplementedError``.
 
-    POSTs to the local Ollama HTTP API (`http://localhost:11434/api/generate`
-    by default). Free at runtime — no API tokens — but quality depends on
-    which model is pulled. Default `llama3.2:3b` is small and fast; for
-    higher-fidelity verdicts use a larger model in `config.ollama_model`.
+    WHAT THIS USED TO DO, AND WHY IT COULD NOT WORK
+    ==============================================
+    It POSTed ``_CLAUDE_VERDICT_SYSTEM`` — a prompt written for Claude,
+    asking for a statistically literate read of a head-to-head binomial
+    split plus "transferable observations another iteration could learn
+    from" — to a tool-less local ``llama3.2:3b``, and wrote whatever came
+    back into ``Verdict.lessons``. Decision A4 draws the local tier's line
+    at ONE card / ONE label with the evidence supplied and a closed
+    taxonomy that can be validated offline. A verdict is on the far side
+    of that line: the label space is closed (kept/reverted/neutral) but
+    the ``reasoning`` and ``lessons`` are free text nobody validates, and
+    they persist into ``knowledge_log`` where Phase 3 would later mine
+    them. A confident fabricated lesson is worse than no lesson.
 
-    Falls back to NotImplementedError if the daemon isn't reachable; router
-    degrades to the heuristic. Connection failure shows up as a
-    ConnectionError or URLError on the urlopen call."""
-    import urllib.error
-    import urllib.request
+    It also never ran. ``AnalystConfig.use_ollama`` defaults to False and
+    nothing in ``src/`` ever set it — ``analyze()``'s own
+    ``config or AnalystConfig()`` is the only production construction, and
+    the ``analyst_config`` parameter ``iteration_loop`` threads through is
+    left None by every caller in the repo. Dead code promising something a
+    3B model cannot deliver: the same shape ``proposer.ollama_propose``
+    was retired for on 2026-08-17.
 
-    sim = input_.sim_report
-    # Same signed-margin/winner/draws/decisive core as claude_verdict —
-    # see _summarize_h2h for why the ABSOLUTE report margin is never
-    # forwarded to a model.
-    summary = _summarize_h2h(sim)
-    instruction = (
-        _CLAUDE_VERDICT_SYSTEM
-        + "\n\nDeck swap to evaluate:\n"
-        + json.dumps({
-            "deck_name": input_.deck_name,
-            "bracket": input_.bracket,
-            "audit_manifest": input_.audit_manifest,
-            "sim_summary": summary,
-        }, indent=2)
-    )
-    body = json.dumps({
-        "model": config.ollama_model,
-        "prompt": instruction,
-        "stream": False,
-        "format": "json",  # Ollama's "force JSON output" mode
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        config.ollama_url, data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            payload = json.loads(resp.read())
-    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
-        raise NotImplementedError(
-            f"Ollama daemon not reachable at {config.ollama_url}: {exc}"
-        ) from exc
+    KEPT AS A LOUD STUB rather than deleted, because ``use_ollama`` /
+    ``ollama_model`` / ``ollama_url`` survive in ``AnalystConfig`` for
+    construction back-compat and this function is imported by name (tests,
+    and any out-of-tree caller). An ``ImportError`` would say nothing;
+    this says where local models went.
 
-    text = payload.get("response", "")
-    if not text:
-        raise NotImplementedError("ollama_verdict: empty response from daemon")
-    parsed = _parse_verdict_payload(text, "ollama_verdict")
-    label = parsed.get("label", "neutral")
-    if label not in {"kept", "reverted", "neutral"}:
-        label = "neutral"
-    return Verdict(
-        label=label,
-        confidence=_safe_confidence(parsed.get("confidence", 0.5)),
-        reasoning=str(parsed.get("reasoning", "")),
-        lessons=list(parsed.get("lessons", []) or []),
-        source="ollama",
-    )
+    NOT CALLED BY ``analyze()``. The router prints
+    ``OLLAMA_VERDICT_RETIRED_NOTE`` and moves on instead of calling this,
+    precisely because the ladder's ``except NotImplementedError: pass``
+    arm would swallow this exception silently — see the comment at that
+    rung.
+
+    WHERE LOCAL MODELS WENT: ``local_model.py`` — narrow tasks where the
+    oracle text is SUPPLIED in the prompt and the answer is one member of
+    an existing closed taxonomy, each with a deterministic fallback that
+    already ships. Proposal and verdict work stays on Claude.
+    """
+    raise NotImplementedError(OLLAMA_VERDICT_RETIRED_NOTE)

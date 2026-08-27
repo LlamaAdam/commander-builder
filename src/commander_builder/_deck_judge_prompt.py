@@ -41,6 +41,16 @@ A judge call runs inside the improve loop's round path; it must never hang
 on a network round-trip per card, and it must never be the reason a round
 takes an extra ten minutes. An unresolvable card degrades the prompt
 honestly (see above) rather than blocking.
+
+ALSO HERE: SWAP-DIRECTION LABELING (2026-08-27)
+===============================================
+:func:`classify_swap_direction` labels a pairing's changed-card sets
+staple-ward vs intent-ward. It is not prompt text and the judge never sees
+it — it is the input FP-016 §7's G3 kill criterion was pre-registered
+against and nothing produced, so ``scripts/judge_agreement.py`` could only
+print G3 as NOT COMPUTED. It lives beside :func:`changed_cards` (which it
+consumes) rather than in ``deck_judge``; the long WHY is on the section
+banner above the function.
 """
 from __future__ import annotations
 
@@ -205,6 +215,279 @@ def changed_cards(
     only_b = [n for n in dict.fromkeys(b_names) if n not in a_set]
     shared = [n for n in dict.fromkeys(a_names) if n in b_set]
     return only_a, only_b, shared
+
+
+# ---------------------------------------------------------------------------
+# Swap-direction labeling — FP-016 G3's missing input (added 2026-08-27)
+# ---------------------------------------------------------------------------
+#
+# G3 ("consensus bias") was pre-registered as: does the judge's preference
+# track generic inclusion rate more strongly than deck-specific fit,
+# "tested by scoring swaps that are staple-ward vs. intent-ward". Nothing
+# produced that label, so ``scripts/judge_agreement.py`` printed G3 as NOT
+# COMPUTED — honest, but a gate that can never run is not a gate.
+#
+# The label has to be attached HERE, at judge time, for one reason: it is
+# the only moment the pairing's changed-card sets, the resolved oracle text
+# and the learned intent are all in hand at once. Reconstructing it later
+# from a knowledge_log row would mean re-reading two .dck snapshots and
+# re-learning intent for every historical row — and would silently label
+# old rows with a NEWER intent than the panel actually judged against,
+# which is the one thing that would make the G3 number meaningless.
+#
+# It lives in THIS module rather than in ``deck_judge`` because it consumes
+# ``changed_cards`` (defined right above) and ``staples`` (already used by
+# ``_role_tagged_names``, with the same lazy-import convention), and
+# because deck_judge.py is near the repo's 800-line ceiling. It is not
+# prompt text, and it is deliberately NOT shown to the judge: a panel told
+# "this swap is staple-ward" would be answering a leading question, and G3
+# would then measure the label rather than the bias.
+
+#: A bucket must hold this share of the classifiable added cards before the
+#: swap gets a direction. 0.60 = "predominantly", not "at all": a 3-card
+#: swap containing one Sol Ring is not a staple-ward swap.
+#:
+#: PRE-REGISTERED 2026-08-27, and still before any results exist — the
+#: judge flag is default-off and the knowledge log holds zero paired rows,
+#: so this number cannot have been tuned to a result. Changing it once
+#: pairings land is moving the goalposts; ``tests/test_deck_judge.py``
+#: pins it for that reason.
+SWAP_LABEL_DOMINANCE = 0.60
+
+#: Below this many resolvable added cards the shares are noise (a 1-card
+#: swap is 0% or 100% and nothing in between), so the pairing is labeled
+#: ``unknown`` and G3 skips it rather than counting a coin flip.
+SWAP_LABEL_MIN_CARDS = 2
+
+#: The direction vocabulary. ``unknown`` is a real answer and the common
+#: one on day zero — no intent supplied, too few cards, or nothing
+#: resolvable. It must never be collapsed into ``neither``: "we could not
+#: label this swap" and "this swap is neither staple-ward nor intent-ward"
+#: are different facts, and only the second one is evidence.
+SWAP_DIRECTIONS: tuple[str, ...] = (
+    "staple_ward", "intent_ward", "mixed", "neither", "unknown",
+)
+
+
+def _generic_staple_names() -> frozenset[str]:
+    """Case-folded names that count as "generically included" for G3.
+
+    Two shipped lists, unioned, because G3's target is EDHREC-inclusion
+    bias and each covers a different half of it:
+
+    * ``staples.UNIVERSAL_STAPLES_LC`` — "well over 50% of ALL decks
+      regardless of commander". Sol Ring, Arcane Signet, Command Tower.
+    * the Commander Brackets Game Changers list — the high-power cards
+      every list that CAN play them does. FP-016 §7's own example of the
+      failure ("if it just recommends Rhystic Study to everyone") is on
+      this list and on neither of the others, so omitting it would leave
+      the gate blind to the exact case it was written for.
+
+    Read through ``game_changers.offline_game_changers`` — this runs on
+    the judge's cache-only-always path and must not open a socket. A
+    missing/untrusted cache degrades to the bundled list, which is a
+    slightly stale label rather than a stalled round.
+
+    Basic lands are NOT here: they are in every deck by construction, but
+    a swap that adds a Forest is a manabase edit, not a consensus signal.
+    """
+    from .game_changers import offline_game_changers
+    from .staples import UNIVERSAL_STAPLES_LC
+
+    names = set(UNIVERSAL_STAPLES_LC)
+    names.update(c.casefold() for c in offline_game_changers())
+    return frozenset(names)
+
+
+def _matches_intent(name: str, card: dict, intent) -> bool:
+    """Does this one card pull toward the deck's DECLARED intent?
+
+    Three signals, any one sufficient, each read off an attribute
+    ``intent.Intent`` actually carries — no new taxonomy invented for the
+    label, because a taxonomy only this function understands could not be
+    checked against anything:
+
+    1. **Theme.** A slug the card's oracle matches is in ``intent.themes``.
+       Uses ``staples.card_theme_slugs``, the per-card half of the same
+       ``_THEME_PATTERNS`` that produced ``intent.themes`` in the first
+       place — so "on theme" and "the deck has this theme" agree by
+       construction.
+    2. **Tribe.** ``intent.tribal_type`` appears in the card's type line or
+       oracle text (Goblin lord, changeling, "Goblins you control").
+    3. **Declared win route.** The card is literally one of
+       ``intent.key_wincons``. Rare in an ADDED set, but exact when it
+       fires and free to check.
+
+    Deliberately NOT a signal: colour identity. Every legal card in the
+    deck matches it, so it would label every swap intent-ward.
+    """
+    themes = {str(t).casefold() for t in (getattr(intent, "themes", None) or [])}
+    oracle = (card.get("oracle_text") or "")
+    type_line = (card.get("type_line") or "")
+
+    if themes:
+        from .staples import card_theme_slugs
+        if {s.casefold() for s in card_theme_slugs(oracle)} & themes:
+            return True
+
+    tribe = (getattr(intent, "tribal_type", None) or "").strip().casefold()
+    if tribe and (tribe in type_line.casefold() or tribe in oracle.casefold()):
+        return True
+
+    wincons = {
+        str(w).casefold() for w in (getattr(intent, "key_wincons", None) or [])
+    }
+    return name.casefold() in wincons
+
+
+def _bucket_cards(
+    names: list[str],
+    intent,
+    lookup: Callable[[str], Optional[dict]],
+) -> dict[str, int]:
+    """Sort card names into the four G3 buckets plus ``unresolved``.
+
+    Buckets are mutually exclusive by explicit precedence so the shares
+    sum to 1 and no card is double-counted:
+
+      ``both``       — generic staple AND an intent match (Rhystic Study in
+                       a spellslinger deck). Evidence for NEITHER side, and
+                       counted separately rather than assigned to one, so a
+                       swap full of these reads as ``mixed`` instead of
+                       being silently credited to whichever test ran first.
+      ``staple``     — generic only.
+      ``intent``     — intent only.
+      ``neither``    — an ordinary card that is neither. The most common
+                       bucket in a real swap, and the honest default.
+      ``unresolved`` — no oracle text AND not on a name list, so it cannot
+                       be tested for intent fit. Excluded from the shares
+                       entirely (never quietly folded into ``neither``:
+                       that would read "we tested it and it was plain"
+                       when we did not test it at all).
+
+    Staple membership is a NAME test, so an unresolvable card can still be
+    labeled a staple; intent fit needs the oracle text, so it cannot.
+    """
+    generic = _generic_staple_names()
+    counts = {"staple": 0, "intent": 0, "both": 0, "neither": 0, "unresolved": 0}
+    for name in names:
+        card = lookup(name) or {}
+        resolved = bool(card.get("oracle_text") or card.get("type_line"))
+        is_staple = name.casefold() in generic
+        if not resolved and not is_staple:
+            counts["unresolved"] += 1
+            continue
+        fits_intent = (
+            _matches_intent(name, card, intent)
+            if (intent is not None and resolved) else False
+        )
+        if is_staple and fits_intent:
+            counts["both"] += 1
+        elif is_staple:
+            counts["staple"] += 1
+        elif fits_intent:
+            counts["intent"] += 1
+        else:
+            counts["neither"] += 1
+    return counts
+
+
+def classify_swap_direction(
+    deck_a_text: str,
+    deck_b_text: str,
+    *,
+    intent=None,
+    lookup: Optional[Callable[[str], Optional[dict]]] = None,
+) -> dict:
+    """Label the pairing's swap ``staple_ward`` / ``intent_ward`` /
+    ``mixed`` / ``neither`` / ``unknown``, with the counts behind it.
+
+    ORIENTATION. The label is computed on what the swap ADDS — the cards
+    in deck B and not in deck A — because that is the direction a swap
+    points. Deck A is the incumbent and deck B the candidate everywhere in
+    this feature (see ``deck_judge.judge_pairing``), and a ``kept`` verdict
+    means the panel preferred B, so "did the judge approve staple-ward
+    swaps more than intent-ward ones" is a question about the added set.
+    The removed set is bucketed too and returned under ``removed`` — it is
+    the natural next refinement (a swap that CUTS the theme is staple-ward
+    in effect) and recording it now costs one extra dict, but it does NOT
+    drive the label, because folding two directions into one word before
+    anyone has looked at a single pairing would be guessing.
+
+    NO INTENT, NO LABEL. When ``intent`` is None the intent-fit test can
+    never fire, so every swap would come back ``staple_ward`` or
+    ``neither`` — a fabricated result pointing at exactly the bias G3
+    tests for. Those pairings are ``unknown`` and G3 skips them.
+
+    Returns a plain dict (JSON-serializable, stored verbatim in
+    ``JudgeReport.swap_label`` and thus in the ``judge_report`` column)::
+
+        {"direction": ..., "reason": ..., "threshold": 0.6,
+         "added": {...counts...}, "removed": {...counts...},
+         "added_classifiable": int,
+         "staple_share": float|None, "intent_share": float|None}
+    """
+    lookup = lookup or _lookup_cache_only
+    _only_a, only_b, _shared = changed_cards(deck_a_text, deck_b_text)
+
+    added = _bucket_cards(only_b, intent, lookup)
+    removed = _bucket_cards(_only_a, intent, lookup)
+    classifiable = (
+        added["staple"] + added["intent"] + added["both"] + added["neither"]
+    )
+    label = {
+        "threshold": SWAP_LABEL_DOMINANCE,
+        "min_cards": SWAP_LABEL_MIN_CARDS,
+        "added": added,
+        "removed": removed,
+        "added_classifiable": classifiable,
+        "staple_share": None,
+        "intent_share": None,
+    }
+
+    if intent is None:
+        return {**label, "direction": "unknown",
+                "reason": "no intent supplied; intent-fit cannot be tested"}
+    if classifiable < SWAP_LABEL_MIN_CARDS:
+        return {**label, "direction": "unknown",
+                "reason": (
+                    f"only {classifiable} classifiable added card(s) "
+                    f"(need {SWAP_LABEL_MIN_CARDS}); "
+                    f"{added['unresolved']} unresolved"
+                )}
+
+    staple_share = added["staple"] / classifiable
+    intent_share = added["intent"] / classifiable
+    label["staple_share"] = staple_share
+    label["intent_share"] = intent_share
+
+    if staple_share >= SWAP_LABEL_DOMINANCE and staple_share > intent_share:
+        direction, reason = "staple_ward", (
+            f"{staple_share:.0%} of classifiable added cards are generic "
+            f"staples / game changers with no intent fit"
+        )
+    elif intent_share >= SWAP_LABEL_DOMINANCE and intent_share > staple_share:
+        direction, reason = "intent_ward", (
+            f"{intent_share:.0%} of classifiable added cards match the "
+            f"deck's declared themes / tribe / win route"
+        )
+    elif added["staple"] and added["intent"]:
+        direction, reason = "mixed", (
+            f"{added['staple']} staple-ward and {added['intent']} "
+            f"intent-ward added card(s); neither reaches "
+            f"{SWAP_LABEL_DOMINANCE:.0%}"
+        )
+    elif added["both"] and not (added["staple"] or added["intent"]):
+        direction, reason = "mixed", (
+            f"{added['both']} added card(s) are both generic staples and "
+            f"an intent match — evidence for neither side"
+        )
+    else:
+        direction, reason = "neither", (
+            f"neither share reaches {SWAP_LABEL_DOMINANCE:.0%} "
+            f"(staple {staple_share:.0%}, intent {intent_share:.0%})"
+        )
+    return {**label, "direction": direction, "reason": reason}
 
 
 def _oracle_block(names: list[str], lookup: Callable[[str], Optional[dict]]) -> str:

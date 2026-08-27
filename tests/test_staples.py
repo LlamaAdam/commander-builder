@@ -1529,3 +1529,44 @@ def test_politics_shield_reason_is_the_project_voice():
     assert "sim-invisible" in POLITICS_SHIELD_REASON
     assert "A/B margin is not evidence against this card" in (
         POLITICS_SHIELD_REASON)
+
+
+# --- card_theme_slugs (added 2026-08-27) -----------------------------------
+#
+# The per-card half of `detect_themes`, factored out for the deck judge's
+# swap-direction labeling. The property that matters is that the two cannot
+# disagree: "this card is on-theme" and "this deck has that theme" are read
+# off the same `_THEME_PATTERNS` by construction.
+
+def test_card_theme_slugs_matches_a_single_card():
+    from commander_builder.staples import card_theme_slugs
+    assert "tokens" in card_theme_slugs(
+        "Create a 1/1 green Squirrel creature token."
+    )
+    assert "spellslinger" in card_theme_slugs(
+        "Whenever you cast an instant or sorcery spell, draw a card."
+    )
+
+
+def test_card_theme_slugs_ignores_deck_level_thresholds():
+    """No single card can clear a min-count of 8, which is exactly why the
+    deck-level function could not answer this question."""
+    from commander_builder.staples import card_theme_slugs, detect_themes
+    oracle = "Create a 1/1 green Squirrel creature token."
+    assert card_theme_slugs(oracle) == {"tokens"}
+    assert detect_themes([("One Card", oracle)]) == []
+
+
+def test_card_theme_slugs_empty_text_matches_nothing():
+    from commander_builder.staples import card_theme_slugs
+    assert card_theme_slugs("") == set()
+    assert card_theme_slugs(None) == set()
+
+
+def test_card_theme_slugs_agrees_with_detect_themes():
+    """The anti-drift property. A deck of N identical on-theme cards must
+    report exactly the themes each card reports, once the threshold is met."""
+    from commander_builder.staples import card_theme_slugs, detect_themes
+    oracle = "Create a 1/1 green Squirrel creature token."
+    deck = [(f"Card {i}", oracle) for i in range(12)]
+    assert set(detect_themes(deck)) == card_theme_slugs(oracle)

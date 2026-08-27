@@ -928,3 +928,327 @@ def test_phase_1_anchors_on_learned_intent_not_the_written_primer(pairing):
     assert "themes: sacrifice, tokens" in user
     # No slice of the owner's written primer reaches the prompt today.
     assert "Precon" not in user and "cryptolith rite" not in user.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Swap-direction labeling — G3's missing input (added 2026-08-27)
+# --------------------------------------------------------------------------- #
+#
+# These pin the LABEL, not the gate; the gate that reads it lives in
+# tests/test_judge_agreement.py. The two properties that matter here are
+# that the label is conservative (``unknown`` whenever it cannot honestly
+# decide) and that the judge never sees it.
+
+from commander_builder._deck_judge_prompt import (  # noqa: E402
+    SWAP_LABEL_DOMINANCE,
+    SWAP_LABEL_MIN_CARDS,
+    classify_swap_direction,
+)
+
+_TOKENS_ORACLE = "Create a 1/1 green Squirrel creature token."
+_SPELLS_ORACLE = "Whenever you cast an instant or sorcery spell, draw a card."
+_PLAIN_ORACLE = "Flying. When this creature dies, you gain 1 life."
+
+
+def _squirrel_intent(**over):
+    from commander_builder.intent import Intent
+    kwargs = dict(archetype="midrange", themes=["tokens"],
+                  key_wincons=[], tribal_type=None)
+    kwargs.update(over)
+    return Intent(**kwargs)
+
+
+def _swap(added: list, removed=("Old Card",), oracles=None):
+    """Label a synthetic swap: ``added`` goes into deck B, ``removed``
+    into deck A, on top of a shared remainder."""
+    a_text = _deck("A", _SHARED + list(removed))
+    b_text = _deck("B", _SHARED + list(added))
+    table = oracles or {}
+    return a_text, b_text, table.get
+
+
+def test_swap_is_staple_ward_when_the_adds_are_generic(tmp_path):
+    a_text, b_text, lookup = _swap(
+        ["Sol Ring", "Arcane Signet", "Command Tower"],
+        oracles={"Sol Ring": {"type_line": "Artifact",
+                              "oracle_text": "{T}: Add {C}{C}."}},
+    )
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["direction"] == "staple_ward"
+    assert label["added"]["staple"] == 3
+    assert label["staple_share"] == 1.0
+
+
+def test_game_changers_count_as_staple_ward(tmp_path):
+    """FP-016 §7's own example of the failure is 'it just recommends
+    Rhystic Study to everyone'. Rhystic Study is on the Game Changers list
+    and on no other list this repo ships, so a labeling built only on
+    UNIVERSAL_STAPLES_LC would be blind to the exact case G3 exists for."""
+    a_text, b_text, lookup = _swap(
+        ["Rhystic Study", "Smothering Tithe"],
+        oracles={
+            "Rhystic Study": {
+                "type_line": "Enchantment",
+                "oracle_text": "Whenever an opponent casts a spell, you may "
+                               "draw a card unless that player pays {1}.",
+            },
+        },
+    )
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["direction"] == "staple_ward"
+
+
+def test_swap_is_intent_ward_when_the_adds_match_the_themes():
+    a_text, b_text, lookup = _swap(
+        ["Squirrel Nest", "Chatter of the Squirrel"],
+        oracles={
+            "Squirrel Nest": {"type_line": "Enchantment",
+                              "oracle_text": _TOKENS_ORACLE},
+            "Chatter of the Squirrel": {"type_line": "Sorcery",
+                                        "oracle_text": _TOKENS_ORACLE},
+        },
+    )
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(themes=["tokens"]),
+        lookup=lookup,
+    )
+    assert label["direction"] == "intent_ward"
+    assert label["added"]["intent"] == 2
+
+
+def test_tribal_type_is_an_intent_signal():
+    a_text, b_text, lookup = _swap(
+        ["Squirrel Lord", "Acorn Catapult"],
+        oracles={
+            "Squirrel Lord": {"type_line": "Creature — Squirrel",
+                              "oracle_text": "Other Squirrels get +1/+1."},
+            "Acorn Catapult": {"type_line": "Artifact",
+                               "oracle_text": "Create a Squirrel token."},
+        },
+    )
+    label = classify_swap_direction(
+        a_text, b_text,
+        intent=_squirrel_intent(themes=[], tribal_type="Squirrel"),
+        lookup=lookup,
+    )
+    assert label["direction"] == "intent_ward"
+
+
+def test_a_card_that_is_both_is_evidence_for_neither():
+    """Rhystic Study in a spellslinger deck is a generic staple AND an
+    intent match. Crediting it to whichever test ran first would let the
+    implementation order decide the label."""
+    a_text, b_text, lookup = _swap(
+        ["Rhystic Study", "Mystical Tutor"],
+        oracles={
+            "Rhystic Study": {"type_line": "Enchantment",
+                              "oracle_text": _SPELLS_ORACLE},
+            "Mystical Tutor": {"type_line": "Instant",
+                               "oracle_text": _SPELLS_ORACLE},
+        },
+    )
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(themes=["spellslinger"]),
+        lookup=lookup,
+    )
+    assert label["added"]["both"] == 2
+    assert label["added"]["staple"] == 0
+    assert label["added"]["intent"] == 0
+    assert label["direction"] == "mixed"
+
+
+def test_an_ordinary_swap_is_neither_not_intent_ward():
+    """The common case, and the one that would poison G3 if it were
+    quietly rounded into an arm."""
+    a_text, b_text, lookup = _swap(
+        ["Plain Bird", "Plain Bear"],
+        oracles={
+            "Plain Bird": {"type_line": "Creature — Bird",
+                           "oracle_text": _PLAIN_ORACLE},
+            "Plain Bear": {"type_line": "Creature — Bear",
+                           "oracle_text": _PLAIN_ORACLE},
+        },
+    )
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["direction"] == "neither"
+    assert label["added"]["neither"] == 2
+
+
+def test_a_split_swap_is_mixed():
+    a_text, b_text, lookup = _swap(
+        ["Sol Ring", "Squirrel Nest"],
+        oracles={
+            "Squirrel Nest": {"type_line": "Enchantment",
+                              "oracle_text": _TOKENS_ORACLE},
+        },
+    )
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["direction"] == "mixed"
+    assert label["added"]["staple"] == 1 and label["added"]["intent"] == 1
+
+
+def test_no_intent_means_no_label_not_staple_ward():
+    """Without an intent the intent-fit test can never fire, so every swap
+    would come back staple-ward or neither — a fabricated result pointing
+    at exactly the bias G3 tests for."""
+    a_text, b_text, lookup = _swap(["Sol Ring", "Arcane Signet"])
+    label = classify_swap_direction(a_text, b_text, intent=None, lookup=lookup)
+    assert label["direction"] == "unknown"
+    assert "no intent" in label["reason"]
+    assert label["staple_share"] is None
+
+
+def test_a_single_card_swap_is_unknown_not_a_100_percent_share():
+    a_text, b_text, lookup = _swap(["Sol Ring"])
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["direction"] == "unknown"
+    assert str(SWAP_LABEL_MIN_CARDS) in label["reason"]
+
+
+def test_unresolvable_cards_are_excluded_not_called_plain():
+    """'We could not test it' must not read as 'we tested it and it was
+    ordinary' — the second would be evidence, the first is not."""
+    a_text, b_text, lookup = _swap(["Ghost Card One", "Ghost Card Two"])
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["added"]["unresolved"] == 2
+    assert label["added"]["neither"] == 0
+    assert label["direction"] == "unknown"
+
+
+def test_a_named_staple_still_labels_without_oracle_text():
+    """Staple membership is a NAME test; intent fit needs the text. So an
+    unresolvable Sol Ring is still a staple, while an unresolvable unknown
+    card is not testable at all."""
+    a_text, b_text, lookup = _swap(["Sol Ring", "Arcane Signet"])
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["added"]["staple"] == 2
+    assert label["direction"] == "staple_ward"
+
+
+def test_the_removed_set_is_recorded_but_does_not_drive_the_label():
+    """Recorded for the natural next refinement (a swap that CUTS the theme
+    is staple-ward in effect); deliberately not folded into the word before
+    anyone has looked at a pairing."""
+    a_text, b_text, lookup = _swap(
+        ["Plain Bird", "Plain Bear"],
+        removed=["Sol Ring", "Arcane Signet"],
+        oracles={
+            "Plain Bird": {"type_line": "Creature — Bird",
+                           "oracle_text": _PLAIN_ORACLE},
+            "Plain Bear": {"type_line": "Creature — Bear",
+                           "oracle_text": _PLAIN_ORACLE},
+        },
+    )
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["removed"]["staple"] == 2
+    assert label["direction"] == "neither"
+
+
+def test_dominance_threshold_is_pinned():
+    """Pre-registered 2026-08-27, before any pairings existed. Retuning it
+    once data lands is moving the goalposts."""
+    assert SWAP_LABEL_DOMINANCE == 0.60
+    assert SWAP_LABEL_MIN_CARDS == 2
+
+
+def test_labeling_makes_no_network_call(monkeypatch):
+    """It runs on the judge's cache-only-always path, inside the improve
+    loop's round. The Game Changers list must come from the offline
+    accessor, never from the live scrape."""
+    def explode(*a, **kw):
+        raise AssertionError("swap-direction labeling opened a socket")
+    monkeypatch.setattr("urllib.request.urlopen", explode)
+
+    a_text, b_text, lookup = _swap(["Sol Ring", "Arcane Signet"])
+    label = classify_swap_direction(
+        a_text, b_text, intent=_squirrel_intent(), lookup=lookup,
+    )
+    assert label["direction"] == "staple_ward"
+
+
+# --- the label on the report ----------------------------------------------
+
+def test_report_carries_the_swap_direction(pairing):
+    a, b = pairing
+    fn = _scripted([_answer("B")] * 6)
+    report = judge_pairing(a, b, intent=_squirrel_intent(),
+                           judge_fn=fn, lookup=_no_lookup)
+    assert report.swap_direction in {
+        "staple_ward", "intent_ward", "mixed", "neither", "unknown",
+    }
+    assert report.swap_label["direction"] == report.swap_direction
+    # And it survives the trip through the judge_report column.
+    assert json.loads(json.dumps(report.to_dict()))["swap_direction"] == \
+        report.swap_direction
+
+
+def test_report_without_intent_is_unlabeled(pairing):
+    a, b = pairing
+    fn = _scripted([_answer("B")] * 6)
+    report = judge_pairing(a, b, judge_fn=fn, lookup=_no_lookup)
+    assert report.swap_direction == "unknown"
+
+
+def test_the_judge_is_never_shown_the_label(pairing):
+    """A panel told 'this swap is staple-ward' would be answering a leading
+    question, and G3 would then measure the label rather than the bias."""
+    a, b = pairing
+    fn = _scripted([_answer("B")] * 6)
+    judge_pairing(a, b, intent=_squirrel_intent(),
+                  judge_fn=fn, lookup=_no_lookup)
+    for system, user, _model in fn.calls:
+        for banned in ("staple_ward", "intent_ward", "staple-ward",
+                       "intent-ward", "swap_direction"):
+            assert banned not in system
+            assert banned not in user
+
+
+def test_a_labeling_failure_does_not_sink_a_panel_that_ran(pairing, monkeypatch):
+    """Six judgments have already been spent by the time labeling runs. A
+    bad lookup is not a reason to lose them — the pairing just falls out of
+    G3's population."""
+    def boom(*a, **kw):
+        raise RuntimeError("oracle store on fire")
+    monkeypatch.setattr(
+        "commander_builder.deck_judge.classify_swap_direction", boom,
+    )
+    a, b = pairing
+    # Deck B in both orders (so: no order flip, a real ``kept``).
+    fn = _scripted([_answer("B")] * 3 + [_answer("A")] * 3)
+    report = judge_pairing(a, b, intent=_squirrel_intent(),
+                           judge_fn=fn, lookup=_no_lookup)
+    assert report.verdict == "kept"          # the panel still counted
+    assert report.swap_direction == "unknown"
+    assert any("G3 population" in n for n in report.notes)
+
+
+def test_cli_prints_the_swap_direction_with_its_reason(monkeypatch, capsys,
+                                                       pairing):
+    """Never a bare word: the classifier is a heuristic over two name lists
+    and a theme matcher, and a reader who cannot see why cannot audit it."""
+    from commander_builder.deck_judge import render_report
+
+    a, b = pairing
+    fn = _scripted([_answer("B")] * 6)
+    report = judge_pairing(a, b, intent=_squirrel_intent(),
+                           judge_fn=fn, lookup=_no_lookup)
+    text = render_report(report, a, b)
+    assert "swap direction:" in text
+    assert report.swap_direction in text
+    assert report.swap_label["reason"] in text
