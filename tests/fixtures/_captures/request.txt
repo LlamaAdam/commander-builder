@@ -1,2 +1,5 @@
+commander:Esika, God of the Tree // The Prismatic Bridge
+commander:Valki, God of Lies // Tibalt, Cosmic Impostor
+commander:Birgi, God of Storytelling // Harnfel, Horn of Bounty
 commander:Esika, God of the Tree
-# MDFC capture for R2-P18 (Kaldheim gods are modal_dfc)
+# MDFC capture retry: Archidekt likely indexes the full DFC name

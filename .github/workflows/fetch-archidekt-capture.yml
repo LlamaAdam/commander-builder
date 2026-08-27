@@ -55,9 +55,16 @@ jobs:
           # (exactly what happened on attempt 2).
           UA="commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)"
           if grep -q '^commander:' tests/fixtures/_captures/request.txt; then
-            CNAME="$(grep '^commander:' tests/fixtures/_captures/request.txt | head -1 | cut -d: -f2- | sed 's/^ *//')"
-            echo "searching decks for commander: $CNAME"
-            DECK_ID="$(python3 - "$CNAME" <<'PYSEARCH'
+            # Try EVERY commander: line until one search hits — MDFC
+            # commanders may be indexed under the full 'Front // Back'
+            # name (the plain front-face search for Esika returned zero
+            # results on 2026-08-27), and guessing the index form wrong
+            # must not fail the whole capture.
+            DECK_ID=""
+            while IFS= read -r CNAME; do
+              [ -z "$CNAME" ] && continue
+              echo "searching decks for commander: $CNAME"
+              DECK_ID="$(python3 - "$CNAME" <<'PYSEARCH'
           import json, sys, urllib.parse, urllib.request
           name = sys.argv[1]
           url = ("https://archidekt.com/api/decks/v3/?commanderName="
@@ -73,7 +80,10 @@ jobs:
                   print(h["id"]); break
           PYSEARCH
           )"
-            if [ -z "$DECK_ID" ]; then echo "no public deck found for commander '$CNAME'"; exit 1; fi
+              if [ -n "$DECK_ID" ]; then echo "hit: deck $DECK_ID for '$CNAME'"; break; fi
+              echo "  no public deck for '$CNAME' — trying next"
+            done < <(grep '^commander:' tests/fixtures/_captures/request.txt | cut -d: -f2- | sed 's/^ *//')
+            if [ -z "$DECK_ID" ]; then echo "no public deck found for ANY requested commander"; exit 1; fi
           else
             DECK_ID="$(grep -oE '[0-9]+' tests/fixtures/_captures/request.txt | head -1)"
           fi
