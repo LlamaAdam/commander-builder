@@ -179,7 +179,7 @@ jobs:
               if not hits:
                   break
               for h in hits:
-                  if stats["archidekt"]["kept"] >= KEEP_PER_SIZE if False else stats["archidekt"]["kept"] >= KEEP_PER_SITE:
+                  if stats["archidekt"]["kept"] >= KEEP_PER_SITE:
                       break
                   if h.get("private"):
                       continue
