@@ -12,6 +12,45 @@ def _fat_jar(forge_dir, version):
     return p
 
 
+def _forge_archive_bytes(*, unsafe_member=None):
+    """Small stand-in for Forge's current flat installer tarball."""
+    import io
+    import tarfile
+
+    members = {
+        "forge-gui-desktop-2.0.14-jar-with-dependencies.jar": b"PK\x03\x04",
+        "res/cardsfolder/cardsfolder.zip": b"cards",
+        "forge.profile.properties.example": b"userDir=\ncacheDir=\n",
+    }
+    if unsafe_member:
+        members[unsafe_member] = b"must not escape"
+
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:bz2") as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return archive.getvalue()
+
+
+def _forge_archive_release(archive_bytes, *, digest=None):
+    import hashlib
+
+    checksum = digest or hashlib.sha256(archive_bytes).hexdigest()
+    return {"assets": [
+        {
+            "name": "forge-installer-2.0.14.jar",
+            "browser_download_url": "https://example/installer.jar",
+        },
+        {
+            "name": "forge-installer-2.0.14.tar.bz2",
+            "browser_download_url": "https://example/forge.tar.bz2",
+            "digest": f"sha256:{checksum}",
+        },
+    ]}
+
+
 # --------------------------------------------------------------------------- #
 # check_dependencies
 # --------------------------------------------------------------------------- #
@@ -103,6 +142,81 @@ def test_download_forge_raises_when_no_asset(tmp_path):
             _get_release=lambda: {"assets": []},
             _download=lambda url, dest: None,
         )
+
+
+def test_download_forge_installs_current_release_archive(tmp_path):
+    forge = tmp_path / "forge"
+    archive = _forge_archive_bytes()
+    release = _forge_archive_release(archive)
+    downloaded = {}
+
+    def fake_download(url, dest):
+        downloaded["url"] = url
+        dest.write_bytes(archive)
+
+    jar = bootstrap.download_forge(
+        forge_dir=forge,
+        _get_release=lambda: release,
+        _download=fake_download,
+    )
+
+    assert downloaded["url"] == "https://example/forge.tar.bz2"
+    assert jar == forge / "forge-gui-desktop-2.0.14-jar-with-dependencies.jar"
+    assert jar.read_bytes() == _PK_BYTES
+    assert (forge / "res" / "cardsfolder" / "cardsfolder.zip").read_bytes() == b"cards"
+    profile = (forge / "forge.profile.properties").read_text(encoding="utf-8")
+    assert "userDir=./userdata" in profile
+    assert "cacheDir=./userdata/cache" in profile
+    assert "decksDir=./userdata/decks" in profile
+    assert not list(forge.glob("*.tar.bz2"))
+
+
+def test_download_forge_archive_rejects_digest_mismatch_without_installing(tmp_path):
+    forge = tmp_path / "forge"
+    archive = _forge_archive_bytes()
+    release = _forge_archive_release(archive, digest="0" * 64)
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        bootstrap.download_forge(
+            forge_dir=forge,
+            _get_release=lambda: release,
+            _download=lambda url, dest: dest.write_bytes(archive),
+        )
+
+    assert not list(forge.glob("*.jar"))
+    assert not (forge / "forge.profile.properties").exists()
+
+
+def test_download_forge_archive_rejects_unsafe_member_without_installing(tmp_path):
+    forge = tmp_path / "forge"
+    archive = _forge_archive_bytes(unsafe_member="../outside.txt")
+    release = _forge_archive_release(archive)
+
+    with pytest.raises(RuntimeError, match="unsafe tar member"):
+        bootstrap.download_forge(
+            forge_dir=forge,
+            _get_release=lambda: release,
+            _download=lambda url, dest: dest.write_bytes(archive),
+        )
+
+    assert not (tmp_path / "outside.txt").exists()
+    assert not list(forge.glob("*.jar"))
+
+
+def test_download_forge_archive_preserves_existing_profile(tmp_path):
+    forge = tmp_path / "forge"
+    forge.mkdir()
+    profile = forge / "forge.profile.properties"
+    profile.write_text("userDir=C:/custom/forge-data\n", encoding="utf-8")
+    archive = _forge_archive_bytes()
+
+    bootstrap.download_forge(
+        forge_dir=forge,
+        _get_release=lambda: _forge_archive_release(archive),
+        _download=lambda url, dest: dest.write_bytes(archive),
+    )
+
+    assert profile.read_text(encoding="utf-8") == "userDir=C:/custom/forge-data\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +369,23 @@ def test_ensure_tar_members_within_rejects_escaping_symlink(tmp_path):
     dest.mkdir()
     with tarfile.open(archive, "r:gz") as tf:
         with pytest.raises(RuntimeError, match="link target"):
+            bootstrap._ensure_tar_members_within(tf, dest)
+
+
+def test_ensure_tar_members_within_rejects_special_member_type(tmp_path):
+    """The Python 3.10/3.11 fallback must not extract devices or FIFOs."""
+    import tarfile
+
+    archive = tmp_path / "forge.tar.bz2"
+    with tarfile.open(archive, "w:bz2") as tf:
+        info = tarfile.TarInfo("blocking-pipe")
+        info.type = tarfile.FIFOTYPE
+        tf.addfile(info)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    with tarfile.open(archive, "r:bz2") as tf:
+        with pytest.raises(RuntimeError, match="unsafe tar member type"):
             bootstrap._ensure_tar_members_within(tf, dest)
 
 

@@ -6,6 +6,19 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-28 — Forge downloader compatibility
+
+#### Fixed
+
+- The first-run Forge downloader now supports the official
+  `forge-installer-*.tar.bz2` release format used by current Forge versions,
+  while retaining compatibility with releases that publish a standalone
+  desktop fat JAR.
+- Forge archives are checksum-verified before extraction, extracted through a
+  traversal-safe temporary staging directory, and installed with the bundled
+  resources the simulator needs. A local profile is created only when absent,
+  so an existing user's Forge paths and preferences are preserved.
+
 ### 2026-08-27 — Windows single-instance diagnostics
 
 #### Fixed
