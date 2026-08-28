@@ -362,7 +362,7 @@ def _facts(entries, lookup, commander_keys: Optional[set[str]] = None) -> dict:
             for face in (card.get("type_line") or "").split("//"):
                 if "creature" not in face.lower():
                     continue
-                for part in re.split(r"[—-]", face, 1)[1:]:
+                for part in re.split(r"[—-]", face, maxsplit=1)[1:]:
                     for subtype in part.split():
                         if subtype[:1].isupper():
                             subtypes.add(subtype)

@@ -644,12 +644,17 @@ def test_never_raises_on_weird_decks(weird):
     assert isinstance(r["reasons"], list)
 
 
-def test_small_lists_are_low_confidence():
+def test_small_lists_are_low_confidence(monkeypatch, tmp_path):
     """< 20 distinct cards can never be high-confidence, even when a
     hard floor fired (a 3-card paste with a combo is still a guess)."""
+    _warm_snapshot_cache(monkeypatch, tmp_path, {
+        "Mikaeus, the Unhallowed": 6.0, "Triskelion": 6.0,
+    })
     r = estimate_bracket(_deck("Mikaeus, the Unhallowed", "Triskelion",
                                lands=1, filler=0))
-    assert r["floor"] == 4
+    # Mikaeus (MV 6) + Triskelion (MV 6) is the canonical late-game
+    # two-card combo, so the current bracket policy floors it at B3.
+    assert r["floor"] == 3
     assert r["confidence"] == "low"
 
 

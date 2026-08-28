@@ -6,6 +6,20 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-27 — Windows single-instance diagnostics
+
+#### Fixed
+
+- The desktop instance guard now locks a byte beyond the PID payload on
+  Windows.  A running instance's PID therefore remains readable while the
+  native `msvcrt` lock is held, and a second launch includes that PID in its
+  actionable error instead of only saying that another instance exists.
+- CI now runs the focused desktop and deck-directory tests on
+  `windows-latest`; the prior Ubuntu-only test matrix could not exercise the
+  native byte-range locking behavior used by the packaged application.
+- Umbrella CLI help now uses console-safe ASCII arrows so `commander --help`
+  renders on Windows systems whose default encoding is CP-1252.
+
 ### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
 
 #### Added

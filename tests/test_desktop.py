@@ -190,8 +190,9 @@ def test_second_instance_does_not_blank_the_first_ones_pid(tmp_path):
     held = desktop._acquire_instance_lock(lock_path)
     try:
         assert lock_path.read_text(encoding="ascii") == str(os.getpid())
-        with pytest.raises(desktop.SingleInstanceError):
+        with pytest.raises(desktop.SingleInstanceError) as exc_info:
             desktop._acquire_instance_lock(lock_path)
+        assert f"PID {os.getpid()}" in str(exc_info.value)
         # The payload survived the failed attempt.
         assert lock_path.read_text(encoding="ascii") == str(os.getpid())
     finally:

@@ -892,8 +892,24 @@ class _FakeCardsLoader:
         return None
 
 
+@pytest.fixture
+def empty_forge_corpus(tmp_path, monkeypatch):
+    """Keep corpus-availability tests independent of a local Forge install."""
+    from commander_builder.web import routes_dashboard
+
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.VENDOR_FORGE",
+        tmp_path / "missing-forge",
+    )
+    routes_dashboard._reset_corpus_cache()
+    try:
+        yield
+    finally:
+        routes_dashboard._reset_corpus_cache()
+
+
 def test_dashboard_sim_coverage_flags_forge_unsupported_cards(
-    client, monkeypatch,
+    client, monkeypatch, empty_forge_corpus,
 ):
     """Both dashboard payloads carry an additive ``sim_coverage`` key
     naming the cards the vendored Forge corpus has no script for — the
@@ -913,7 +929,9 @@ def test_dashboard_sim_coverage_flags_forge_unsupported_cards(
         assert cov["unsupported_names"] == ["Cultivate"], url
 
 
-def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client):
+def test_dashboard_sim_coverage_unavailable_without_forge_corpus(
+    client, empty_forge_corpus,
+):
     """No vendor/forge (this test checkout) is "couldn't check", NOT
     "all supported": available=False with empty fields, and the
     dashboard renders normally."""
@@ -929,7 +947,7 @@ def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client):
 
 
 def test_dashboard_sim_coverage_probe_failure_is_not_fatal(
-    client, monkeypatch,
+    client, monkeypatch, empty_forge_corpus,
 ):
     """A blown-up corpus probe degrades to the unavailable shape — the
     dashboard must render regardless (same fail-quiet contract as the
@@ -1065,7 +1083,7 @@ def test_dashboard_corpus_cache_invalidates_when_forge_corpus_changes(
 
 
 def test_dashboard_sim_coverage_still_fail_quiet_with_memoized_loader(
-    client, monkeypatch,
+    client, monkeypatch, empty_forge_corpus,
 ):
     """The memo must not turn a corpus failure into a 500: with no
     vendored corpus the loader lookup still raises and the payload keeps
@@ -2547,11 +2565,12 @@ def test_deck_text_put_preserves_file_mode(client, deck_dir):
     not silently become owner-only on every edit."""
     target = deck_dir / "Alpha.dck"
     target.chmod(0o644)
+    original_mode = target.stat().st_mode & 0o777
     resp = client.put("/api/deck_text?deck=Alpha", json={
         "text": "[metadata]\nName=Alpha\n\n[Main]\n1 Forest\n",
     })
     assert resp.status_code == 200
-    assert target.stat().st_mode & 0o777 == 0o644
+    assert target.stat().st_mode & 0o777 == original_mode
 
 
 def test_deck_text_put_flags_bracket_tag_unverified_on_main_change(

@@ -807,7 +807,7 @@ def _write_pin_deck(tmp_path: Path) -> Path:
 
 
 def _stub_probes(monkeypatch):
-    """Freeze the three network/data probes build_dashboard fans out to,
+    """Freeze the network/data probes build_dashboard fans out to,
     so the pinned payload is a function of the deck file alone."""
     monkeypatch.setattr(
         "commander_builder.game_changers.load_game_changers",
@@ -820,6 +820,10 @@ def _stub_probes(monkeypatch):
     monkeypatch.setattr(
         "commander_builder.bracket_estimator.estimate_bracket",
         lambda *a, **kw: {"estimate": 3, "pinned": True},
+    )
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard._classify_archetype_path",
+        lambda *a, **kw: "midrange",
     )
 
 

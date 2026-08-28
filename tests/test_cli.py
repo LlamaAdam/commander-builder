@@ -197,6 +197,10 @@ def test_help_lists_every_subcommand_with_a_summary(capsys):
         assert cmd.summary in out
 
 
+def test_help_is_encodable_by_the_default_windows_console():
+    cli.render_help().encode("cp1252")
+
+
 def test_unknown_subcommand_lists_valid_ones(capsys):
     rc = cli.main(["improove", "--rounds", "3"])
     assert rc == 2
