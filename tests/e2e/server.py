@@ -73,21 +73,30 @@ DECKS = {
     # Deck-editor subject WITHOUT a bracket tag -> plain "Saved." path,
     # and the Name= restamp subject.
     "[USER] Smoke Charlie": "Test Cmdr",
+    # Plain-list/CSV imports cannot identify a commander. This fixture
+    # exercises the dashboard repair flow that moves an existing mainboard
+    # card into a newly-created [Commander] section.
+    "[USER] Commanderless Import [B3]": None,
     # Verdict-breakdown subjects.
     "[USER] Era Mix [B3]": "Test Cmdr",
     "[USER] Era Pure [B3]": "Test Cmdr",
 }
 
 
-def _deck_body(stem: str, commander: str, forests: int = 60) -> str:
+def _deck_body(stem: str, commander: str | None, forests: int = 60) -> str:
     """A minimally valid .dck: metadata + commander + a 99-card main."""
-    cultivates = 99 - forests
+    main_target = 99 if commander else 100
+    cultivates = main_target - forests - (1 if commander is None else 0)
+    commander_block = (
+        f"[Commander]\n1 {commander}\n\n" if commander else ""
+    )
+    candidate = "1 Dragon Candidate|TST|1\n" if commander is None else ""
     return (
         "[metadata]\n"
         f"Name={stem}\n\n"
-        "[Commander]\n"
-        f"1 {commander}\n\n"
+        f"{commander_block}"
         "[Main]\n"
+        f"{candidate}"
         f"{forests} Forest\n"
         f"{cultivates} Cultivate\n"
     )
@@ -353,6 +362,16 @@ def main() -> int:
     from commander_builder.web.app import create_app
 
     app = create_app(deck_dir=deck_dir, knowledge_db=db_path)
+
+    @app.post("/api/e2e/reset_commanderless")
+    def reset_commanderless():
+        """Restore the mutable commander fixture before every retry/test."""
+        stem = "[USER] Commanderless Import [B3]"
+        (deck_dir / f"{stem}.dck").write_text(
+            _deck_body(stem, None), encoding="utf-8",
+        )
+        return {"ok": True}
+
     print(
         f"[e2e] serving http://{args.host}:{args.port} "
         f"(state={state})",

@@ -892,8 +892,24 @@ class _FakeCardsLoader:
         return None
 
 
+@pytest.fixture
+def empty_forge_corpus(tmp_path, monkeypatch):
+    """Keep corpus-availability tests independent of a local Forge install."""
+    from commander_builder.web import routes_dashboard
+
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.VENDOR_FORGE",
+        tmp_path / "missing-forge",
+    )
+    routes_dashboard._reset_corpus_cache()
+    try:
+        yield
+    finally:
+        routes_dashboard._reset_corpus_cache()
+
+
 def test_dashboard_sim_coverage_flags_forge_unsupported_cards(
-    client, monkeypatch,
+    client, monkeypatch, empty_forge_corpus,
 ):
     """Both dashboard payloads carry an additive ``sim_coverage`` key
     naming the cards the vendored Forge corpus has no script for — the
@@ -913,7 +929,9 @@ def test_dashboard_sim_coverage_flags_forge_unsupported_cards(
         assert cov["unsupported_names"] == ["Cultivate"], url
 
 
-def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client):
+def test_dashboard_sim_coverage_unavailable_without_forge_corpus(
+    client, empty_forge_corpus,
+):
     """No vendor/forge (this test checkout) is "couldn't check", NOT
     "all supported": available=False with empty fields, and the
     dashboard renders normally."""
@@ -929,7 +947,7 @@ def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client):
 
 
 def test_dashboard_sim_coverage_probe_failure_is_not_fatal(
-    client, monkeypatch,
+    client, monkeypatch, empty_forge_corpus,
 ):
     """A blown-up corpus probe degrades to the unavailable shape — the
     dashboard must render regardless (same fail-quiet contract as the
@@ -1065,7 +1083,7 @@ def test_dashboard_corpus_cache_invalidates_when_forge_corpus_changes(
 
 
 def test_dashboard_sim_coverage_still_fail_quiet_with_memoized_loader(
-    client, monkeypatch,
+    client, monkeypatch, empty_forge_corpus,
 ):
     """The memo must not turn a corpus failure into a 500: with no
     vendored corpus the loader lookup still raises and the payload keeps
@@ -1680,6 +1698,189 @@ def test_deck_text_returns_dck_blob(client):
 def test_deck_text_404_on_missing_deck(client):
     resp = client.get("/api/deck_text?deck=Ghost")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /api/deck_commander (repair / replace an imported deck's commander)
+# ---------------------------------------------------------------------------
+
+def test_deck_commander_get_lists_current_and_mainboard_candidates(
+    client, deck_dir,
+):
+    path = deck_dir / "Alpha.dck"
+    path.write_text(
+        "[metadata]\nName=Alpha\n\n"
+        "[Commander]\n1 Old Dragon|OLD|7\n\n"
+        "[Main]\n1 New Dragon+|NEW|42\n2 Forest\n1 New Dragon|ALT|9\n",
+        encoding="utf-8",
+    )
+
+    resp = client.get("/api/deck_commander?deck=Alpha")
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {
+        "deck": "Alpha",
+        "commanders": ["Old Dragon"],
+        "candidates": ["Forest", "New Dragon"],
+    }
+
+
+def test_deck_commander_put_repairs_missing_section_and_preserves_printing(
+    client, deck_dir,
+):
+    path = deck_dir / "Alpha.dck"
+    before = (
+        "[metadata]\nName=Alpha\n\n"
+        "[Main]\n"
+        "1 The Ur-Dragon+|PF25|15\n"
+        "1 Sol Ring|C21|263\n"
+        "98 Forest\n"
+    )
+    path.write_text(before, encoding="utf-8")
+
+    resp = client.put(
+        "/api/deck_commander?deck=Alpha",
+        json={"commander": "The Ur-Dragon"},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["commander"] == "The Ur-Dragon"
+    assert body["previous_commanders"] == []
+    assert body["bracket_tag_unverified"] is False
+    after = path.read_text(encoding="utf-8")
+    assert "[Commander]\n1 The Ur-Dragon+|PF25|15\n" in after
+    assert "[Main]\n1 Sol Ring|C21|263\n98 Forest\n" in after
+    assert after.count("The Ur-Dragon") == 1
+    from commander_builder.dck_utils import (
+        count_commander_cards, count_main_cards,
+    )
+    assert count_commander_cards(after) + count_main_cards(after) == 100
+
+
+def test_deck_commander_put_swaps_single_commander_without_changing_total(
+    client, deck_dir,
+):
+    path = deck_dir / "Alpha.dck"
+    path.write_text(
+        "[metadata]\nName=Alpha\n\n"
+        "[Commander]\n1 Old Dragon+|OLD|7\n\n"
+        "[Main]\n1 New Dragon|NEW|42\n98 Forest\n",
+        encoding="utf-8",
+    )
+
+    resp = client.put(
+        "/api/deck_commander?deck=Alpha",
+        json={"commander": "new dragon"},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["previous_commanders"] == ["Old Dragon"]
+    after = path.read_text(encoding="utf-8")
+    assert "[Commander]\n1 New Dragon|NEW|42\n" in after
+    assert "[Main]\n1 Old Dragon+|OLD|7\n98 Forest\n" in after
+    assert after.count("New Dragon") == 1
+    assert after.count("Old Dragon") == 1
+    from commander_builder.dck_utils import (
+        count_commander_cards, count_main_cards,
+    )
+    assert count_commander_cards(after) + count_main_cards(after) == 100
+
+
+def test_deck_commander_put_rejects_card_not_in_main_without_writing(
+    client, deck_dir,
+):
+    path = deck_dir / "Alpha.dck"
+    before = path.read_text(encoding="utf-8")
+
+    resp = client.put(
+        "/api/deck_commander?deck=Alpha",
+        json={"commander": "Not In This Deck"},
+    )
+
+    assert resp.status_code == 400
+    assert "main deck" in resp.get_json()["error"]
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_deck_commander_put_refuses_partner_deck_without_writing(
+    client, deck_dir,
+):
+    path = deck_dir / "Alpha.dck"
+    before = (
+        "[metadata]\nName=Alpha\n\n"
+        "[Commander]\n1 Partner One\n1 Partner Two\n\n"
+        "[Main]\n1 Replacement\n97 Forest\n"
+    )
+    path.write_text(before, encoding="utf-8")
+
+    resp = client.put(
+        "/api/deck_commander?deck=Alpha",
+        json={"commander": "Replacement"},
+    )
+
+    assert resp.status_code == 409
+    assert "partner" in resp.get_json()["error"].lower()
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("duplicate_section", ["Commander", "Main"])
+def test_deck_commander_put_rejects_duplicate_sections_without_writing(
+    client, deck_dir, duplicate_section,
+):
+    path = deck_dir / "Alpha.dck"
+    if duplicate_section == "Commander":
+        before = (
+            "[metadata]\nName=Alpha\n\n"
+            "[Commander]\n\n"
+            "[Main]\n1 Replacement\n98 Forest\n\n"
+            "[Commander]\n1 Existing Dragon\n"
+        )
+    else:
+        before = (
+            "[metadata]\nName=Alpha\n\n"
+            "[Commander]\n1 Existing Dragon\n\n"
+            "[Main]\n1 Replacement\n98 Forest\n\n"
+            "[Main]\n"
+        )
+    path.write_text(before, encoding="utf-8")
+
+    resp = client.put(
+        "/api/deck_commander?deck=Alpha",
+        json={"commander": "Replacement"},
+    )
+
+    assert resp.status_code == 400
+    assert f"multiple [{duplicate_section}]" in resp.get_json()["error"]
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("commander_line", "candidate_line", "expected_error"),
+    [
+        ("1 Existing Dragon", "0 Replacement", "positive quantity"),
+        ("0 Existing Dragon", "1 Replacement", "positive quantity"),
+    ],
+)
+def test_deck_commander_put_rejects_nonpositive_quantities_without_writing(
+    client, deck_dir, commander_line, candidate_line, expected_error,
+):
+    path = deck_dir / "Alpha.dck"
+    before = (
+        "[metadata]\nName=Alpha\n\n"
+        f"[Commander]\n{commander_line}\n\n"
+        f"[Main]\n{candidate_line}\n99 Forest\n"
+    )
+    path.write_text(before, encoding="utf-8")
+
+    resp = client.put(
+        "/api/deck_commander?deck=Alpha",
+        json={"commander": "Replacement"},
+    )
+
+    assert resp.status_code == 400
+    assert expected_error in resp.get_json()["error"]
+    assert path.read_text(encoding="utf-8") == before
 
 
 def _stub_compare(
@@ -2547,11 +2748,12 @@ def test_deck_text_put_preserves_file_mode(client, deck_dir):
     not silently become owner-only on every edit."""
     target = deck_dir / "Alpha.dck"
     target.chmod(0o644)
+    original_mode = target.stat().st_mode & 0o777
     resp = client.put("/api/deck_text?deck=Alpha", json={
         "text": "[metadata]\nName=Alpha\n\n[Main]\n1 Forest\n",
     })
     assert resp.status_code == 200
-    assert target.stat().st_mode & 0o777 == 0o644
+    assert target.stat().st_mode & 0o777 == original_mode
 
 
 def test_deck_text_put_flags_bracket_tag_unverified_on_main_change(

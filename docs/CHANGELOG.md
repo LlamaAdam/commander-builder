@@ -6,6 +6,45 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-28 — Commander selection for imported decks
+
+#### Added
+
+- The selected-deck dashboard now has a **Change commander** action. It lists
+  cards already in the main deck and can repair plain-list or CSV imports that
+  arrived without a `[Commander]` section.
+- Commander changes preserve Forge printing and foil suffixes, move an existing
+  single commander back into the main deck, keep total card quantity unchanged,
+  and write atomically. Partner decks and cards outside the deck are rejected
+  rather than guessed at.
+
+### 2026-08-28 — Forge downloader compatibility
+
+#### Fixed
+
+- The first-run Forge downloader now supports the official
+  `forge-installer-*.tar.bz2` release format used by current Forge versions,
+  while retaining compatibility with releases that publish a standalone
+  desktop fat JAR.
+- Forge archives are checksum-verified before extraction, extracted through a
+  traversal-safe temporary staging directory, and installed with the bundled
+  resources the simulator needs. A local profile is created only when absent,
+  so an existing user's Forge paths and preferences are preserved.
+
+### 2026-08-27 — Windows single-instance diagnostics
+
+#### Fixed
+
+- The desktop instance guard now locks a byte beyond the PID payload on
+  Windows.  A running instance's PID therefore remains readable while the
+  native `msvcrt` lock is held, and a second launch includes that PID in its
+  actionable error instead of only saying that another instance exists.
+- CI now runs the focused desktop and deck-directory tests on
+  `windows-latest`; the prior Ubuntu-only test matrix could not exercise the
+  native byte-range locking behavior used by the packaged application.
+- Umbrella CLI help now uses console-safe ASCII arrows so `commander --help`
+  renders on Windows systems whose default encoding is CP-1252.
+
 ### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
 
 #### Added

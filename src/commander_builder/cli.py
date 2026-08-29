@@ -107,9 +107,9 @@ COMMANDS: tuple[Command, ...] = (
     Command("compare", "commander-compare", "compare_versions:main", "sim",
             "Head-to-head A/B sim of two deck versions at the same table."),
     Command("iterate", "commander-iterate", "iteration_loop:main", "sim",
-            "One iteration cycle: snapshot → apply manifest → sim → verdict → log."),
+            "One iteration cycle: snapshot -> apply manifest -> sim -> verdict -> log."),
     Command("auto-curate", "commander-auto-curate", "proposer:auto_curate_main", "sim",
-            "Advisor → Claude curator → apply → optional A/B sim, in one go."),
+            "Advisor -> Claude curator -> apply -> optional A/B sim, in one go."),
     Command("improve", "commander-improve", "improve:improve_main", "sim",
             "Greedy improve loop: a round advances only on a `kept` A/B verdict."),
     # -- analyze ----------------------------------------------------------
@@ -138,7 +138,7 @@ COMMANDS: tuple[Command, ...] = (
             "Run Commander Builder as a native desktop window."),
     # -- maintenance ------------------------------------------------------
     Command("init", "commander-init", "init_cli:main", "maintenance",
-            "Guided first-run setup: dependencies → oracle cache → decks → pool."),
+            "Guided first-run setup: dependencies -> oracle cache -> decks -> pool."),
     Command("builder-bootstrap", "commander-builder-bootstrap", "bootstrap:main",
             "maintenance",
             "Check / fetch the external dependencies (Forge jar, JRE, mtg_cards)."),

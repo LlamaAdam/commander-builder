@@ -56,6 +56,11 @@ _ICON_FILENAME = "commander_builder_icon.png"
 #: probe can never quote different numbers at the user.
 SERVER_START_TIMEOUT_SEC = 15.0
 
+#: Windows byte-range lock position.  The PID payload occupies the start of
+#: the file, so the lock lives beyond it and remains readable by a second
+#: process while the first instance is running.
+_WINDOWS_LOCK_OFFSET = 64
+
 
 # --------------------------------------------------------------------------- #
 # Single-instance guard
@@ -77,17 +82,19 @@ class ServerStartError(RuntimeError):
 class _InstanceLock:
     """Holds an open lock-file; released on close() or context exit."""
 
-    def __init__(self, path: Path, fh):  # fh: open file handle
+    def __init__(self, path: Path, fh, lock_offset: int = 0):
+        # fh: open file handle
         self._path = path
         self._fh = fh
+        self._lock_offset = lock_offset
 
     def close(self):
         try:
             if os.name == "nt":
                 import msvcrt
-                # Seek to byte 0 before unlocking (must match the locked offset).
+                # Unlock the same byte acquired by _acquire_instance_lock.
                 try:
-                    self._fh.seek(0)
+                    self._fh.seek(self._lock_offset)
                 except Exception:  # noqa: BLE001
                     pass
                 msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
@@ -138,7 +145,7 @@ def _acquire_instance_lock(lock_path: Optional[Path] = None) -> _InstanceLock:
     Implementation note: Windows ``msvcrt.locking`` requires a C-runtime file
     descriptor opened in binary mode. POSIX uses ``fcntl.flock``. Both paths
     are the same file; the locking semantics are:
-      Windows: LK_NBLCK on byte 0 raises OSError when another fd holds it.
+      Windows: LK_NBLCK on byte 64 raises OSError when another fd holds it.
       POSIX: LOCK_EX|LOCK_NB raises BlockingIOError when already locked.
 
     OPEN NON-TRUNCATING, STAMP AFTER LOCKING (round-2 review 2026-08-20,
@@ -160,18 +167,36 @@ def _acquire_instance_lock(lock_path: Optional[Path] = None) -> _InstanceLock:
                      else str(os.getpid()))
         handle.flush()
 
+    def _read_holder_pid(handle=None) -> Optional[str]:
+        """Best-effort read of the existing lock holder's numeric pid."""
+        value = None
+        if handle is not None:
+            try:
+                handle.seek(0)
+                raw = handle.read(_WINDOWS_LOCK_OFFSET)
+                value = raw.decode("ascii") if isinstance(raw, bytes) else raw
+            except (OSError, UnicodeError):
+                # A failed msvcrt.locking call can leave that CRT handle
+                # unreadable.  The PID region itself is deliberately unlocked,
+                # so a fresh handle remains a valid diagnostic fallback.
+                pass
+        if value is None:
+            try:
+                value = path.read_text(encoding="ascii")
+            except (OSError, UnicodeError):
+                return None
+        value = value.strip()
+        return value if value.isdigit() else None
+
+    lock_offset = 0
     try:
         if os.name == "nt":
             import msvcrt
             # Binary for msvcrt.locking's CRT fd; append so the existing
             # payload survives a failed attempt.
             fh = open(path, "a+b")  # noqa: WPS515
-            if fh.seek(0, os.SEEK_END) == 0:
-                # Brand-new (empty) file: give LK_NBLCK a byte to lock.
-                # Safe to write — there is no other instance's payload here.
-                fh.write(b"0")
-                fh.flush()
-            fh.seek(0)
+            lock_offset = _WINDOWS_LOCK_OFFSET
+            fh.seek(lock_offset)
             # LK_NBLCK: non-blocking exclusive lock on 1 byte from current pos.
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             _stamp_pid(fh, binary=True)
@@ -181,15 +206,17 @@ def _acquire_instance_lock(lock_path: Optional[Path] = None) -> _InstanceLock:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             _stamp_pid(fh, binary=False)
     except (OSError, PermissionError) as exc:
+        holder_pid = _read_holder_pid(locals().get("fh"))
         try:
             fh.close()  # type: ignore[possibly-undefined]
         except Exception:  # noqa: BLE001
             pass
+        holder = f" (PID {holder_pid})" if holder_pid else ""
         raise SingleInstanceError(
-            "Commander Builder is already running. "
+            f"Commander Builder is already running{holder}. "
             "Only one instance can be open at a time."
         ) from exc
-    return _InstanceLock(path, fh)
+    return _InstanceLock(path, fh, lock_offset)
 
 
 # --------------------------------------------------------------------------- #

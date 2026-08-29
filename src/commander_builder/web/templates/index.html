@@ -326,6 +326,34 @@
     </div>
   </div>
 
+  <!-- Commander repair / replacement modal. Candidate cards come from the
+       selected deck's [Main] section, so a plain-list or CSV import can be
+       fixed without asking the user to edit Forge's .dck syntax. -->
+  <div class="modal-backdrop" id="commander-modal" hidden>
+    <div class="modal commander-form" role="dialog" aria-modal="true"
+         aria-labelledby="commander-title">
+      <header>
+        <h2 id="commander-title">Change commander</h2>
+        <button class="modal-close" data-close="commander-modal"
+                aria-label="Close">&times;</button>
+      </header>
+      <p class="muted">
+        Choose a card already in this deck. The current commander will move
+        back into the main deck, so the total card count stays unchanged.
+      </p>
+      <label for="commander-select">Commander</label>
+      <select id="commander-select" aria-describedby="commander-status"></select>
+      <div class="hero-actions">
+        <button type="button" class="primary" id="commander-save">
+          Save commander
+        </button>
+        <button type="button" data-close="commander-modal">Cancel</button>
+      </div>
+      <div id="commander-status" class="muted" role="status"
+           aria-live="polite"></div>
+    </div>
+  </div>
+
   <!-- Game Changers / Illegal alert modal (single shared modal) -->
   <div class="modal-backdrop" id="alert-modal" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="alert-title">

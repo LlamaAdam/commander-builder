@@ -420,6 +420,10 @@ function showModal(id) {
 function hideModal(id) {
   const bd = typeof id === "string" ? document.getElementById(id) : id;
   if (!bd || bd.hidden) return;
+  if (bd.id === "commander-modal") {
+    _commanderEditGeneration += 1;
+    _commanderEditDeckId = null;
+  }
   const hadFocus = bd.contains(document.activeElement);
   bd.hidden = true;
   const rf = bd._returnFocus;
@@ -465,6 +469,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 let _activeDeckId = null;
+let _commanderEditDeckId = null;
+let _commanderEditGeneration = 0;
 // AbortController for the currently in-flight audit stream. Reset on
 // every loadAdvise() call so switching decks / re-running the audit
 // cancels the previous Claude call instead of letting the stream
@@ -574,6 +580,102 @@ async function selectDeck(deckId, li, opts) {
   } finally {
     const badge = document.getElementById("_soft-refresh-badge");
     if (badge) badge.remove();
+  }
+}
+
+async function openCommanderModal() {
+  if (!_activeDeckId) return;
+  const deckId = _activeDeckId;
+  const generation = ++_commanderEditGeneration;
+  _commanderEditDeckId = deckId;
+  const select = $("commander-select");
+  const save = $("commander-save");
+  const status = $("commander-status");
+  select.textContent = "";
+  select.disabled = true;
+  save.disabled = true;
+  status.className = "muted";
+  status.textContent = "Loading cards from this deck…";
+  showModal("commander-modal");
+  try {
+    const body = await fetchJSON(
+      `/api/deck_commander?deck=${encodeURIComponent(deckId)}`,
+    );
+    if (
+      _commanderEditGeneration !== generation
+      || _commanderEditDeckId !== deckId
+    ) return;
+    if ((body.commanders || []).length > 1) {
+      status.textContent =
+        "Partner decks must be changed with Edit deck so the pair stays intact.";
+      return;
+    }
+    for (const name of body.candidates || []) {
+      select.appendChild(el("option", { value: name }, name));
+    }
+    if (!select.options.length) {
+      status.textContent = "This deck has no main-deck cards to choose from.";
+      return;
+    }
+    select.disabled = false;
+    save.disabled = false;
+    status.textContent = (body.commanders || []).length
+      ? `Current commander: ${body.commanders[0]}`
+      : "No commander is set. Choose one below.";
+    select.focus();
+  } catch (e) {
+    if (
+      _commanderEditGeneration !== generation
+      || _commanderEditDeckId !== deckId
+    ) return;
+    status.textContent = `Could not load commander choices: ${e.message}`;
+  }
+}
+
+async function saveCommander() {
+  const deckId = _commanderEditDeckId;
+  const generation = _commanderEditGeneration;
+  const select = $("commander-select");
+  const save = $("commander-save");
+  const status = $("commander-status");
+  if (!deckId || !select.value) return;
+  save.disabled = true;
+  select.disabled = true;
+  status.className = "muted";
+  status.textContent = "Saving commander…";
+  try {
+    const response = await fetch(
+      `/api/deck_commander?deck=${encodeURIComponent(deckId)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commander: select.value }),
+      },
+    );
+    const body = await response.json().catch(() => ({}));
+    if (
+      _commanderEditGeneration !== generation
+      || _commanderEditDeckId !== deckId
+    ) return;
+    if (!response.ok) {
+      throw new Error(body.error || `save failed (${response.status})`);
+    }
+    status.textContent = `Commander changed to ${body.commander}.`;
+    hideModal("commander-modal");
+    if (_activeDeckId === deckId) {
+      const li = document.querySelector(
+        `.deck-list li[data-id="${cssEscape(deckId)}"]`,
+      );
+      await selectDeck(deckId, li, { soft: true });
+    }
+  } catch (e) {
+    if (
+      _commanderEditGeneration !== generation
+      || _commanderEditDeckId !== deckId
+    ) return;
+    status.textContent = `Could not change commander: ${e.message}`;
+    save.disabled = false;
+    select.disabled = false;
   }
 }
 
@@ -2667,6 +2769,10 @@ function renderDashboard(data, iterations) {
   editBtn.addEventListener("click", () => openProposeModal({ saveOnly: true }));
   actions.appendChild(editBtn);
 
+  const commanderBtn = el("button", {}, "Change commander");
+  commanderBtn.addEventListener("click", openCommanderModal);
+  actions.appendChild(commanderBtn);
+
   const copyBtn = el("button", {}, "Copy to Moxfield");
   copyBtn.addEventListener("click", copyToMoxfield);
   actions.appendChild(copyBtn);
@@ -4356,6 +4462,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (closeBtn) closeBtn.addEventListener("click", closeProposeModal);
   const runBtn = $("propose-run");
   if (runBtn) runBtn.addEventListener("click", runProposeSwap);
+  const commanderSave = $("commander-save");
+  if (commanderSave) commanderSave.addEventListener("click", saveCommander);
 
   // Live time hint: recompute the ETA whenever the game count or mode
   // changes (radios are static markup, so bind once here).
@@ -4389,7 +4497,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // ESC closes any open modal (and the mobile drawer).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      ["propose-modal", "new-deck-modal", "alert-modal"].forEach(hideModal);
+      [
+        "propose-modal", "new-deck-modal", "commander-modal", "alert-modal",
+      ].forEach(hideModal);
       closeDrawer();
     }
   });

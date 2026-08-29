@@ -7,11 +7,11 @@ name: tests
 # (a flaky color-identity test + missing flask extra) wasn't caught
 # until master was already broken.
 #
-# Matrix Python 3.10/3.11/3.12 on ubuntu-latest. The suite is OS-
-# agnostic by design (the few Windows-only edge cases — cp1252,
-# deck-path doubling — are covered by cross-platform tests that
-# exercise both encodings explicitly). Ubuntu is faster + cheaper +
-# avoids the Windows-runner JS-action deprecation warnings.
+# Matrix Python 3.10/3.11/3.12 on ubuntu-latest, plus one focused Windows
+# desktop lane. Most of the suite is OS-agnostic; the native single-instance
+# guard uses msvcrt byte-range locking and must execute on Windows to cover
+# its real read/write semantics. Keeping that lane focused avoids paying the
+# Windows-runner cost for thousands of otherwise portable tests.
 #
 # Spec lives in docs/AGENT_BACKLOG.md item #005.
 
@@ -77,6 +77,27 @@ jobs:
       - name: Run pytest (full lane, includes --run-slow)
         run: |
           python -m pytest --run-slow --no-header -q --tb=short
+
+  windows-desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install desktop test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[desktop,test]"
+
+      - name: Run Windows desktop tests
+        run: |
+          python -m pytest tests/test_desktop.py tests/test_deck_dir_picker.py tests/test_window_chrome.py --no-header -q --tb=short
 
   secret-scan:
     # Full-tree secret sweep. The pre-commit hook only protects

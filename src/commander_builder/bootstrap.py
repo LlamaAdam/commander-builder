@@ -11,9 +11,9 @@ disk and may be absent on first launch:
     via `scryfall_client`; reported but not bulk-downloaded here.
 
 This module is import-safe with no heavy deps. ``check_dependencies()`` is
-pure detection (fully testable); ``download_forge()`` streams the latest
-release JAR (HTTP injectable for tests). Wired into the desktop launcher so
-a first-run user gets a clear "what's missing + how to get it" message
+pure detection (fully testable); ``download_forge()`` installs the latest
+release package (HTTP injectable for tests). Wired into the desktop launcher
+so a first-run user gets a clear "what's missing + how to get it" message
 instead of silent per-request Forge errors.
 """
 from __future__ import annotations
@@ -173,6 +173,32 @@ def _pick_forge_jar_asset(release: dict) -> Optional[dict]:
     return max(candidates, key=_ver)
 
 
+def _pick_forge_archive_asset(release: dict) -> Optional[dict]:
+    """Pick Forge's current desktop installer archive release asset.
+
+    Forge releases since 2.0.14 package the desktop fat JAR and its required
+    resources inside ``forge-installer-<version>.tar.bz2`` instead of
+    publishing the fat JAR as a standalone asset.
+    """
+    assets = release.get("assets") or []
+    candidates = [
+        asset for asset in assets
+        if isinstance(asset, dict)
+        and (asset.get("name") or "").startswith("forge-installer-")
+        and (asset.get("name") or "").endswith(".tar.bz2")
+    ]
+    if not candidates:
+        return None
+
+    import re
+
+    def _ver(asset: dict) -> tuple:
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", asset.get("name", ""))
+        return tuple(int(group) for group in match.groups()) if match else (0, 0, 0)
+
+    return max(candidates, key=_ver)
+
+
 def _pick_jre_asset(release: dict, system: str, machine: str) -> Optional[dict]:
     """From an Adoptium/Temurin GitHub release payload, pick the JRE archive
     asset matching the caller's platform.
@@ -224,11 +250,13 @@ def download_forge(
     _get_release: Optional[Callable[[], dict]] = None,
     _download: Optional[Callable[[str, Path], None]] = None,
 ) -> Path:
-    """Download the latest Forge desktop fat-jar into ``forge_dir``.
+    """Install the latest Forge desktop release into ``forge_dir``.
 
-    Returns the written jar path. ``_get_release`` / ``_download`` are
+    Older releases published the desktop fat JAR directly; newer releases
+    publish a ``forge-installer-*.tar.bz2`` containing the JAR and required
+    resources. Direct JARs remain preferred for backward compatibility.
+    Returns the installed JAR path. ``_get_release`` / ``_download`` are
     injectable for tests; defaults hit the GitHub API + stream the asset.
-    Raises RuntimeError when no suitable asset is found.
     """
     from .forge_runner import VENDOR_FORGE
     forge_dir = forge_dir or VENDOR_FORGE
@@ -236,15 +264,98 @@ def download_forge(
     download = _download or _stream_to_file
 
     release = get_release()
-    asset = _pick_forge_jar_asset(release)
-    if asset is None:
+    jar_asset = _pick_forge_jar_asset(release)
+    if jar_asset is not None:
+        forge_dir.mkdir(parents=True, exist_ok=True)
+        dest = forge_dir / jar_asset["name"]
+        download(jar_asset["browser_download_url"], dest)
+        _verify_asset_checksum(release, jar_asset, dest, download)
+        return dest
+
+    archive_asset = _pick_forge_archive_asset(release)
+    if archive_asset is None:
         raise RuntimeError(
-            "no forge-gui-desktop fat jar found in the latest GitHub release")
-    forge_dir.mkdir(parents=True, exist_ok=True)
-    dest = forge_dir / asset["name"]
-    download(asset["browser_download_url"], dest)
-    _verify_asset_checksum(release, asset, dest, download)
-    return dest
+            "no forge-gui-desktop fat jar or forge-installer archive found "
+            "in the latest GitHub release"
+        )
+    return _download_and_install_forge_archive(
+        release, archive_asset, forge_dir, download
+    )
+
+
+def _download_and_install_forge_archive(
+    release: dict,
+    asset: dict,
+    forge_dir: Path,
+    download: Callable[[str, Path], None],
+) -> Path:
+    """Verify and safely install one Forge ``.tar.bz2`` release asset."""
+    import shutil
+    import tarfile
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="commander-builder-forge-") as tmp:
+        workspace = Path(tmp)
+        archive = workspace / asset["name"]
+        staging = workspace / "staging"
+        staging.mkdir()
+
+        download(asset["browser_download_url"], archive)
+        _verify_asset_checksum(release, asset, archive, download)
+
+        try:
+            with tarfile.open(archive, "r:bz2") as tf:
+                # Always run our guard so Python 3.10-3.12 produce the same
+                # clear error for traversal and escaping link targets.
+                _ensure_tar_members_within(tf, staging)
+                try:
+                    tf.extractall(staging, filter="data")
+                except TypeError:  # Python < 3.12: no filter= argument.
+                    tf.extractall(staging)
+        except tarfile.TarError as exc:
+            raise RuntimeError(
+                f"invalid Forge installer archive {asset['name']!r}: {exc}"
+            ) from exc
+
+        entries = list(staging.iterdir())
+        source = (
+            entries[0]
+            if len(entries) == 1 and entries[0].is_dir()
+            else staging
+        )
+        extracted_jar = _find_forge_jar(source)
+        if extracted_jar is None:
+            raise RuntimeError(
+                f"Forge installer archive {asset['name']!r} contained no "
+                "desktop fat jar"
+            )
+
+        forge_dir.mkdir(parents=True, exist_ok=True)
+        for child in source.iterdir():
+            target = forge_dir / child.name
+            if child.name == "forge.profile.properties" and target.exists():
+                continue
+            if child.is_dir():
+                shutil.copytree(child, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(child, target)
+
+        _ensure_forge_profile(forge_dir)
+        return forge_dir / extracted_jar.name
+
+
+def _ensure_forge_profile(forge_dir: Path) -> Path:
+    """Create a project-local Forge profile without overwriting user data."""
+    profile = forge_dir / "forge.profile.properties"
+    if not profile.exists():
+        profile.write_text(
+            "# Commander Builder managed defaults\n"
+            "userDir=./userdata\n"
+            "cacheDir=./userdata/cache\n"
+            "decksDir=./userdata/decks\n",
+            encoding="utf-8",
+        )
+    return profile
 
 
 def download_jre(
@@ -394,6 +505,15 @@ def _ensure_tar_members_within(tf, dest: Path) -> None:
     """
     dest_resolved = dest.resolve()
     for member in tf.getmembers():
+        if not (
+            member.isfile()
+            or member.isdir()
+            or member.issym()
+            or member.islnk()
+        ):
+            raise RuntimeError(
+                f"unsafe tar member type: {member.name!r}"
+            )
         target = (dest / member.name).resolve()
         if not target.is_relative_to(dest_resolved):
             raise RuntimeError(
@@ -548,8 +668,7 @@ def _fetch_latest_release() -> dict:
 
 
 def _stream_to_file(url: str, dest: Path) -> None:
-    """Stream ``url`` to ``dest`` (atomic via .part rename). The Forge jar
-    is ~120 MB so we copy in chunks rather than read() it all into memory."""
+    """Stream ``url`` to ``dest`` atomically without buffering it in memory."""
     import shutil
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -569,7 +688,8 @@ def main(argv=None) -> int:
                     help="report dependency status and exit (default if no "
                          "other action given).")
     ap.add_argument("--download-forge", action="store_true",
-                    help="download the latest Forge desktop jar.")
+                    help="download and install the latest Forge desktop "
+                         "release.")
     ap.add_argument("--download-jre", action="store_true",
                     help="download a Temurin JRE 17 archive for the current "
                          "platform into vendor/jre/.")
@@ -585,14 +705,14 @@ def main(argv=None) -> int:
     rc = 0
 
     if args.download_forge:
-        print("Downloading the latest Forge desktop jar...")
+        print("Downloading and installing the latest Forge desktop release...")
         try:
             jar = download_forge()
         except Exception as exc:  # noqa: BLE001
             print(f"  failed: {type(exc).__name__}: {exc}")
             rc = 1
         else:
-            print(f"  saved: {jar}")
+            print(f"  installed: {jar}")
 
     if args.download_jre:
         print("Downloading Temurin JRE 17 archive...")
