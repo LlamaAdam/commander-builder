@@ -176,3 +176,97 @@ def test_deck_health_signal_degrades_on_error(monkeypatch):
     monkeypatch.setattr("commander_builder.staples.count_deck_roles", boom)
     sig = deck_health._role_targets_signal("[Main]\n1 Sol Ring\n")
     assert sig == {"roles": {}, "under_built": []}
+
+
+# ---------------------------------------------------------------------------
+# FP-019.3 -- context-sensitive quotas (primer heuristics §3/§4)
+# ---------------------------------------------------------------------------
+
+from commander_builder.staples import (  # noqa: E402
+    contextual_role_targets,
+    infer_commander_role,
+)
+
+
+def test_contextual_targets_default_equals_flat_table():
+    assert contextual_role_targets() == ROLE_TARGETS
+
+
+def test_contextual_targets_aggro_reshapes_edgar_style():
+    # Edgar spec (§4): 15 CA + 12 interaction, rocks out of the deck.
+    t = contextual_role_targets(archetype="aggro")
+    assert t["draw"] > ROLE_TARGETS["draw"]
+    assert t["removal"] > ROLE_TARGETS["removal"]
+    assert t["ramp"] < ROLE_TARGETS["ramp"]
+
+
+def test_contextual_targets_bracket_raises_interaction_floor():
+    b3 = contextual_role_targets(bracket=3)
+    b5 = contextual_role_targets(bracket=5)
+    assert b3 == ROLE_TARGETS  # mid bracket: no delta
+    assert b5["removal"] > ROLE_TARGETS["removal"]
+    assert b5["protection"] > ROLE_TARGETS["protection"]
+
+
+def test_contextual_targets_avg_mv_moves_ramp_both_ways():
+    low = contextual_role_targets(avg_mv=2.4)
+    high = contextual_role_targets(avg_mv=4.6)
+    assert low["ramp"] < ROLE_TARGETS["ramp"]    # "lands don't cost 2 mana"
+    assert high["ramp"] > ROLE_TARGETS["ramp"]   # Ur-Dragon oversize ramp
+
+
+def test_contextual_targets_commander_role_engine():
+    t = contextual_role_targets(commander_role="resolve_engine")
+    assert t["ramp"] > ROLE_TARGETS["ramp"]
+    assert t["protection"] > ROLE_TARGETS["protection"]
+
+
+def test_contextual_targets_unknown_context_is_noop_and_clamped():
+    assert contextual_role_targets(archetype="jazz-fusion") == ROLE_TARGETS
+    assert contextual_role_targets(commander_role="dj") == ROLE_TARGETS
+    stacked = contextual_role_targets(
+        archetype="aggro", commander_role="trigger_multiplier", avg_mv=2.0)
+    assert all(v >= 0 for v in stacked.values())
+
+
+def test_role_target_report_accepts_context(monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.staples.count_deck_roles", lambda names: {})
+    flat = role_target_report(["Sol Ring"])
+    ctx = role_target_report(["Sol Ring"], context={"archetype": "aggro"})
+    assert flat["roles"]["draw"]["target"] == ROLE_TARGETS["draw"]
+    assert ctx["roles"]["draw"]["base_target"] > ROLE_TARGETS["draw"]
+    assert ctx["roles"]["draw"]["context_delta"] > 0
+    # shape stays a superset of the flat report's keys
+    assert set(flat["roles"]["draw"]) <= set(ctx["roles"]["draw"])
+
+
+def test_role_target_report_context_none_is_byte_identical(monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.staples.count_deck_roles", lambda names: {"ramp": 4})
+    assert role_target_report(["x"]) == role_target_report(["x"], context=None)
+
+
+def test_infer_commander_role_cost_cheater():
+    krrik = ("Once during each of your turns, you may pay 2 life rather "
+             "than pay the mana cost for a black spell you cast.")
+    assert infer_commander_role(krrik, "Legendary Creature", 3.0) \
+        == "cost_cheater"
+
+
+def test_infer_commander_role_trigger_multiplier():
+    winota = ("Whenever a non-Human creature you control attacks, look at "
+              "the top six cards of your library.")
+    assert infer_commander_role(winota, "Legendary Creature", 4.0) \
+        == "trigger_multiplier"
+
+
+def test_infer_commander_role_resolve_engine_by_weight():
+    ghalta = "Trample"
+    assert infer_commander_role(ghalta, "Legendary Creature", 12.0) \
+        == "resolve_engine"
+
+
+def test_infer_commander_role_none_when_unsure():
+    assert infer_commander_role("Vigilance", "Legendary Creature", 3.0) is None
+    assert infer_commander_role("", "", None) is None

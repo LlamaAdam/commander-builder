@@ -1560,13 +1560,143 @@ def commander_role_credits(commander_names) -> dict[str, int]:
     return dict(out)
 
 
-def role_target_report(card_names, commander_names=None) -> dict:
+# --- FP-019.3: context-sensitive quotas (primer heuristics §3/§4) -----------
+#
+# The primers show ROLE_TARGETS' flat numbers are really a FUNCTION of
+# the deck's shape: Edgar's aggro spec runs 15 CA + 12 interaction with
+# mana rocks banned outright; Gishath-class "resolve the commander"
+# decks oversize ramp AND protection; Winota-class trigger multipliers
+# trade ramp speed for payoff density; and the interaction floor rises
+# with bracket (Henzie's cEDH honesty: 13–23 instant-speed pieces is the
+# bar). One documented delta table is the whole tuning surface; every
+# delta cites the primer that derived it. Unknown context values are a
+# NO-OP, never an error — a caller guessing an archetype label must
+# degrade to the flat table, not crash the audit.
+QUOTA_CONTEXT_ADJUSTMENTS: dict[str, dict] = {
+    "archetype": {
+        # Edgar spec (§4): 15 CA + 3 tutors, 12+ interaction, Sol Ring
+        # the only rock in a 40-land deck.
+        "aggro": {"draw": 5, "removal": 4, "ramp": -4},
+        # Winota structure (§4): 8–10 DEDICATED interaction; bodies that
+        # trigger the commander beat rocks that ramp toward her.
+        "trigger_density": {"removal": 2, "ramp": -2},
+    },
+    "commander_role": {
+        # §3 "engine you must resolve" (Gishath, Ghalta, Teval): oversize
+        # ramp AND protection; land the commander on a target turn.
+        "resolve_engine": {"ramp": 3, "protection": 2},
+        # §3 "trigger multiplier" (Winota, Isshin, Edgar): payoff density
+        # math beats commander-landing speed.
+        "trigger_multiplier": {"ramp": -2},
+        # Remaining §3 roles carry no quota delta today: the enabler /
+        # value-engine / cheater / toolbox consequences are card-FILTER
+        # rules (FP-019.4), not count rules — and the commander-credit
+        # system already absorbs "the commander fills the role".
+        "cost_cheater": {},
+        "enabler": {},
+        "value_engine": {},
+        "toolbox": {},
+    },
+    "bracket": {
+        # §4/§9: the interaction floor rises with bracket; sorcery-speed
+        # creature "interaction" stops counting at the top tables.
+        4: {"removal": 2, "protection": 1},
+        5: {"removal": 5, "protection": 2},
+    },
+}
+
+#: §5 dork/rock math ("lands don't cost 2 mana to play" — Edgar): a deck
+#: whose average mana value sits below 3 wants lands over rocks, so its
+#: ramp quota drops; a top-heavy deck (Ur-Dragon class, §4 "Mana
+#: Advantage first") wants MORE than the flat 10.
+AVG_MV_RAMP_ADJUSTMENTS: tuple = (
+    (3.0, {"ramp": -2}),   # avg MV below 3
+    (4.5, {}),             # 3.0–4.5: the flat table's home range
+    (float("inf"), {"ramp": 2}),  # above 4.5
+)
+
+
+def contextual_role_targets(
+    archetype: Optional[str] = None,
+    commander_role: Optional[str] = None,
+    avg_mv: Optional[float] = None,
+    bracket: Optional[int] = None,
+) -> dict[str, int]:
+    """ROLE_TARGETS adjusted for deck context (FP-019.3).
+
+    Sums the applicable ``QUOTA_CONTEXT_ADJUSTMENTS`` deltas onto the
+    flat table and clamps every target at 0. With no arguments (or only
+    unknown labels) this IS ``ROLE_TARGETS`` — the flat table stays the
+    single source of truth and this function is a view over it.
+    """
+    targets = dict(ROLE_TARGETS)
+
+    def _apply(delta: Optional[dict]) -> None:
+        for role, d in (delta or {}).items():
+            if role in targets:
+                targets[role] = max(0, targets[role] + d)
+
+    _apply(QUOTA_CONTEXT_ADJUSTMENTS["archetype"].get(archetype))
+    _apply(QUOTA_CONTEXT_ADJUSTMENTS["commander_role"].get(commander_role))
+    if bracket is not None:
+        _apply(QUOTA_CONTEXT_ADJUSTMENTS["bracket"].get(bracket))
+    if avg_mv is not None:
+        for ceiling, delta in AVG_MV_RAMP_ADJUSTMENTS:
+            if avg_mv < ceiling:
+                _apply(delta)
+                break
+    return targets
+
+
+# Conservative pattern set for :func:`infer_commander_role`. Only the §3
+# roles a regex can actually recognize from oracle text; everything
+# ambiguous stays None (an unsure classifier must not steer quotas).
+_COST_CHEATER_RE = re.compile(
+    r"without paying (?:its|their) mana cost|rather than pay"
+    r"|cost \{?\d+\}? less", re.I)
+_TRIGGER_MULTIPLIER_RE = re.compile(
+    r"whenever [^.]{0,80}attacks?\b[^.]{0,80}(?:look at|reveal)", re.I)
+
+#: A commander at or above this mana value is an "engine you must
+#: resolve" (§3): the game plan IS landing it, so ramp + protection
+#: quotas rise. Gishath (8) and Ghalta (12) anchor the class; 6 is the
+#: point where a commander stops being castable off a normal curve.
+RESOLVE_ENGINE_MV = 6.0
+
+
+def infer_commander_role(
+    oracle_text: str, type_line: str = "",
+    mana_value: Optional[float] = None,
+) -> Optional[str]:
+    """Best-effort §3 commander-role classification, or None when unsure.
+
+    Deliberately CONSERVATIVE: only three of the six §3 roles have an
+    oracle-text signature a regex can trust (cost cheaters' "rather than
+    pay" / "cost less", trigger multipliers' attack-reveal shape, and
+    the resolve-engine class by raw mana value). A None steers nothing —
+    ``contextual_role_targets`` treats it as no context, which is the
+    honest reading of "could not classify".
+    """
+    text = oracle_text or ""
+    if not text and mana_value is None:
+        return None
+    if _COST_CHEATER_RE.search(text):
+        return "cost_cheater"
+    if _TRIGGER_MULTIPLIER_RE.search(text):
+        return "trigger_multiplier"
+    if mana_value is not None and mana_value >= RESOLVE_ENGINE_MV:
+        return "resolve_engine"
+    return None
+
+
+def role_target_report(card_names, commander_names=None, *,
+                       context: Optional[dict] = None) -> dict:
     """Compare a deck's role counts against ROLE_TARGETS.
 
     Returns ``{"roles": {role: {count, target, base_target,
     commander_credit, deficit}}, "under_built": [role, …]}``.
     ``target`` is the EFFECTIVE target after commander credit,
-    ``base_target`` the unmodified ``ROLE_TARGETS`` entry, ``deficit`` is
+    ``base_target`` the pre-credit target, ``deficit`` is
     ``max(0, target - count)``, and ``under_built`` lists roles below
     target, worst-deficit first. The audit surfaces this so a deck light
     on (say) ramp or removal gets a "needs more X" nudge — the
@@ -1581,14 +1711,28 @@ def role_target_report(card_names, commander_names=None) -> dict:
     pre-2026-07 behavior exactly (full targets, zero credit), which is
     what every caller that only has a card-name list still gets.
 
+    ``context`` (FP-019.3, keyword-only) is an optional dict with any of
+    ``archetype`` / ``commander_role`` / ``avg_mv`` / ``bracket`` —
+    passed through :func:`contextual_role_targets` so the quota sheet
+    fits the deck's shape. When supplied, ``base_target`` is the
+    CONTEXTUAL pre-credit target and each role gains a ``context_delta``
+    key (contextual minus flat) so consumers can show why the number
+    moved. ``context=None`` is byte-identical to the pre-019.3 report.
+
     The ``finisher`` count sums the base ``finisher`` bucket and the
     extended ``win_condition`` bucket; see ROLE_TARGETS' comment for why
     those two labels share one target.
     """
     counts = count_deck_roles(card_names)
     credits = commander_role_credits(commander_names)
+    base_table = ROLE_TARGETS if context is None else contextual_role_targets(
+        archetype=context.get("archetype"),
+        commander_role=context.get("commander_role"),
+        avg_mv=context.get("avg_mv"),
+        bracket=context.get("bracket"),
+    )
     roles: dict[str, dict] = {}
-    for role, base_target in ROLE_TARGETS.items():
+    for role, base_target in base_table.items():
         count = int(counts.get(role, 0))
         if role == "finisher":
             count += int(counts.get("win_condition", 0))
@@ -1598,6 +1742,8 @@ def role_target_report(card_names, commander_names=None) -> dict:
                        "base_target": base_target,
                        "commander_credit": credit,
                        "deficit": max(0, target - count)}
+        if context is not None:
+            roles[role]["context_delta"] = base_target - ROLE_TARGETS[role]
     under = sorted((r for r, v in roles.items() if v["deficit"] > 0),
                    key=lambda r: roles[r]["deficit"], reverse=True)
     return {"roles": roles, "under_built": under}
