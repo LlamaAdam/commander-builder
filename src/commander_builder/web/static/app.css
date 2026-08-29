@@ -604,6 +604,17 @@ textarea::placeholder {
   resize: vertical;
 }
 
+.commander-form select {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 10px;
+  font-size: 14px;
+}
+
 .propose-controls {
   display: flex;
   align-items: center;

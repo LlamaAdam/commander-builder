@@ -1,9 +1,10 @@
 """Deck-editing + deck-info routes for the web layer.
 
-Seven routes live here, all centered on reading/writing .dck
+Eight routes live here, all centered on reading/writing .dck
 files and answering questions about deck contents:
 
 - ``/api/deck_text``               (GET / PUT / DELETE)
+- ``/api/deck_commander``          (GET / PUT — repair or replace commander)
 - ``/api/import_deck``             (POST — Moxfield URL or paste)
 - ``/api/deck_source``             (GET / PUT — Moxfield= metadata)
 - ``/api/verify_against_source``   (GET — diff vs. live Moxfield)
@@ -84,6 +85,167 @@ def _bracket_tag_unverified(path: Path, text: str) -> bool:
         return False
     from ..dck_meta import read_bracket_unverified
     return read_bracket_unverified(text) == declared
+
+
+class _CommanderChangeError(ValueError):
+    """A user-correctable commander change that must not touch the file."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _section_body_span(
+    lines: list[str], section: str,
+) -> Optional[tuple[int, int, int]]:
+    """Return ``(header, body_start, body_end)`` for a .dck section."""
+    wanted = f"[{section.casefold()}]"
+    headers = [
+        idx for idx, line in enumerate(lines)
+        if line.strip().casefold() == wanted
+    ]
+    if len(headers) > 1:
+        raise _CommanderChangeError(
+            f"deck text has multiple [{section}] sections"
+        )
+    for header in headers:
+        body_end = len(lines)
+        for idx in range(header + 1, len(lines)):
+            stripped = lines[idx].strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                body_end = idx
+                break
+        return header, header + 1, body_end
+    return None
+
+
+def _commander_summary(text: str) -> tuple[list[str], list[str]]:
+    """Return current commanders and unique mainboard candidate names."""
+    from ..dck_utils import main_card_names, section_card_names
+
+    commanders = section_card_names(text, "Commander")
+    by_key: dict[str, str] = {}
+    for name in main_card_names(text):
+        by_key.setdefault(name.casefold(), name)
+    candidates = sorted(by_key.values(), key=str.casefold)
+    return commanders, candidates
+
+
+def _change_commander_text(
+    text: str, requested: str,
+) -> tuple[str, str, list[str]]:
+    """Move one mainboard card into the command zone without changing size.
+
+    Exact Forge printing/foil suffixes move with both cards. A current single
+    commander moves back to the front of ``[Main]``; a missing ``[Commander]``
+    section is created immediately before ``[Main]``. Partner decks are left
+    to the full deck editor because silently choosing which partner to replace
+    would corrupt the pair.
+    """
+    from ..dck_utils import (
+        CARD_LINE_RE,
+        count_commander_cards,
+        count_main_cards,
+        parse_card_line,
+    )
+
+    requested = requested.strip()
+    if not requested:
+        raise _CommanderChangeError("commander is required")
+
+    lines = text.splitlines()
+    main_span = _section_body_span(lines, "Main")
+    if main_span is None:
+        raise _CommanderChangeError("deck text has no [Main] section")
+    commander_span = _section_body_span(lines, "Commander")
+
+    main_header, main_start, main_end = main_span
+    main_body = list(lines[main_start:main_end])
+    match_index = None
+    match = None
+    for idx, line in enumerate(main_body):
+        parsed = parse_card_line(line)
+        if parsed and parsed[1].casefold() == requested.casefold():
+            match_index = idx
+            match = CARD_LINE_RE.match(line.strip())
+            break
+    if match_index is None or match is None:
+        raise _CommanderChangeError(
+            f"{requested!r} is not a card in this deck's main deck"
+        )
+
+    previous_lines: list[str] = []
+    previous_names: list[str] = []
+    commander_body: list[str] = []
+    commander_replacement = None
+    if commander_span is not None:
+        _header, commander_start, commander_end = commander_span
+        original_body = list(lines[commander_start:commander_end])
+        commander_rows: list[int] = []
+        for idx, line in enumerate(original_body):
+            parsed = parse_card_line(line)
+            if parsed is not None:
+                if parsed[0] <= 0:
+                    raise _CommanderChangeError(
+                        "commander cards must have a positive quantity"
+                    )
+                commander_rows.append(idx)
+                previous_lines.append(line)
+                previous_names.append(parsed[1])
+        if len(commander_rows) > 1 or count_commander_cards(text) > 1:
+            raise _CommanderChangeError(
+                "partner decks must be changed in the full deck editor",
+                status=409,
+            )
+        row_set = set(commander_rows)
+        commander_body = [
+            line for idx, line in enumerate(original_body)
+            if idx not in row_set
+        ]
+        commander_replacement = (
+            commander_start, commander_end, commander_body
+        )
+
+    qty = int(match.group(1))
+    if qty <= 0:
+        raise _CommanderChangeError(
+            "the selected commander must have a positive quantity"
+        )
+    canonical_name = match.group(2).strip()
+    printing_tail = match.group(3) or ""
+    chosen_line = f"1 {canonical_name}{printing_tail}"
+    if qty == 1:
+        del main_body[match_index]
+    else:
+        main_body[match_index] = (
+            f"{qty - 1} {canonical_name}{printing_tail}"
+        )
+    if previous_lines:
+        main_body[0:0] = previous_lines
+
+    replacements = [(main_start, main_end, main_body)]
+    if commander_replacement is not None:
+        start, end, remaining = commander_replacement
+        replacements.append((start, end, [chosen_line, *remaining]))
+    for start, end, body in sorted(replacements, reverse=True):
+        lines[start:end] = body
+
+    if commander_span is None:
+        lines[main_header:main_header] = [
+            "[Commander]", chosen_line, "",
+        ]
+
+    changed = "\n".join(lines)
+    if text.endswith(("\n", "\r")):
+        changed += "\n"
+
+    total_before = count_main_cards(text) + count_commander_cards(text)
+    total_after = count_main_cards(changed) + count_commander_cards(changed)
+    if total_after != total_before:  # pragma: no cover - invariant guard
+        raise RuntimeError(
+            "commander change altered the deck's total card quantity"
+        )
+    return changed, canonical_name, previous_names
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +546,62 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify({"deck": deck_id, "deleted": True})
+
+    @bp.route("/api/deck_commander", methods=["GET", "PUT"])
+    def deck_commander():
+        """List commander choices or move one mainboard card to command."""
+        deck_id = request.args.get("deck")
+        explicit = request.args.get("path")
+        path = _resolve_deck_path(deck_dir, deck_id, explicit)
+        if path is None:
+            return jsonify({
+                "error": "deck not found",
+                "deck": deck_id,
+                "path": explicit,
+            }), 404
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
+
+        commanders, candidates = _commander_summary(text)
+        if request.method == "GET":
+            return jsonify({
+                "deck": deck_id,
+                "commanders": commanders,
+                "candidates": candidates,
+            })
+
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return jsonify({"error": "expected JSON body"}), 400
+        requested = payload.get("commander")
+        if not isinstance(requested, str):
+            return jsonify({"error": "commander is required"}), 400
+        try:
+            changed, commander, previous = _change_commander_text(
+                text, requested,
+            )
+        except _CommanderChangeError as exc:
+            return jsonify({"error": str(exc)}), exc.status
+
+        bracket_tag_unverified = False
+        declared = _bracket_from_filename(path.name)
+        if declared is not None:
+            from ..dck_meta import set_bracket_unverified
+            changed = set_bracket_unverified(changed, declared)
+            bracket_tag_unverified = True
+        try:
+            atomic_write_text(path, changed)
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({
+            "deck": deck_id,
+            "commander": commander,
+            "previous_commanders": previous,
+            "saved": True,
+            "bracket_tag_unverified": bracket_tag_unverified,
+        })
 
     @bp.route("/api/import_deck", methods=["POST"])
     def import_deck():

@@ -6,6 +6,18 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-08-28 — Commander selection for imported decks
+
+#### Added
+
+- The selected-deck dashboard now has a **Change commander** action. It lists
+  cards already in the main deck and can repair plain-list or CSV imports that
+  arrived without a `[Commander]` section.
+- Commander changes preserve Forge printing and foil suffixes, move an existing
+  single commander back into the main deck, keep total card quantity unchanged,
+  and write atomically. Partner decks and cards outside the deck are rejected
+  rather than guessed at.
+
 ### 2026-08-28 — Forge downloader compatibility
 
 #### Fixed

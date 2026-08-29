@@ -21,6 +21,7 @@ const DECKS = {
   // disk, so a spec that raises it must not reuse another spec's deck.
   editorTagged2: "[USER] Smoke Delta [B3]",
   editorPlain: "[USER] Smoke Charlie",
+  commanderless: "[USER] Commanderless Import [B3]",
   eraMix: "[USER] Era Mix [B3]",
   eraPure: "[USER] Era Pure [B3]",
 };
