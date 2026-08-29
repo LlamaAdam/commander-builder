@@ -1,0 +1,4588 @@
+{
+ "meta": {
+  "generated": "2026-08-29",
+  "source_files": [
+   "moxfield_primer_harvest.json",
+   "archidekt_primer_harvest.json"
+  ],
+  "deck_count": 40,
+  "trust_notes": "Card names in win_lines/key_cards were cross-checked against each deck's exact mainboard (case-insensitive; DFC front faces matched). verified=false usually means the card is a commander, an obsolete/maybeboard piece the primer discusses, or a suggested upgrade not in the current 99 - treat those names as unverified per the harvest README.",
+  "schema": {
+   "gameplan": "1-2 sentence strategy summary",
+   "construction": "named deckbuilding rules/quotas stated by the author",
+   "mulligan": "keep/mull criteria as stated",
+   "sequencing": "play-pattern and priority/stack rules",
+   "win_lines": "explicit card sets with requirements; verified[] aligns with cards[]",
+   "budget_swaps": "out->in with the author's reason (function-preserving)",
+   "heuristics": "encodable, generalizable rules extracted for commander-builder"
+  }
+ },
+ "decks": [
+  {
+   "id": "mox--hell-s-bells",
+   "commanders": [
+    "Erinis, Gloom Stalker",
+    "Street Urchin"
+   ],
+   "color_identity": "RG",
+   "archetype": "lands-sacrifice / landfall tokens",
+   "bracket": "3",
+   "gameplan": "Erinis self-ramps by recurring fetch lands on attack; hit a land drop every turn, convert steady triple-landfall into cheap tokens ('ammo'), sacrifice everything to Street Urchin for damage, and finish with land-recursion loops.",
+   "construction": {
+    "token_rule": "Magic number is 3: land drop + Erinis fetch recursion + fetch resolution = 3 landfall triggers/turn. Any repeatable landfall token generator at MV<=3 is playable; one-shot token spells must also cantrip, ramp, or mill.",
+    "cost_rule": "Value each token 'bullet' at ~1 mana to fire (Urchin); token producers priced accordingly.",
+    "tapped_lands": "Tapped utility lands (Valakut, Field of the Dead, bouncelands) are deliberately kept; Spelunking fixes the drawback rather than cutting them.",
+    "haste": "Haste enablers make removing Erinis nearly pointless (she re-ramps immediately)."
+   },
+   "mulligan": {
+    "keep": [
+     "Land drops secured; deck claims missing a land drop 'will frankly never happen' with mill + lands-from-graveyard support"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Play a land every turn without exception",
+    "Attack with Erinis to recur a fetch each combat",
+    "Prefer mill engines and play-lands-from-graveyard effects to keep fuel flowing"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Kodama of the East Tree",
+      "Gruul Turf"
+     ],
+     "needs": "Both on battlefield; stack triggers so Gruul Turf bounces itself, Kodama returns it",
+     "note": "Repeatable landfall loop",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Six",
+      "Aftermath Analyst",
+      "Gruul Turf"
+     ],
+     "needs": "Six in play, Analyst (or World Shaper) in yard via retrace, sac via Street Urchin; Wasteland Gruul Turf first if already in play",
+     "note": "Mass land recursion, usually once per turn unless Spelunking",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Six",
+      "World Shaper",
+      "Gruul Turf"
+     ],
+     "needs": "Same as above with World Shaper",
+     "note": "Redundant copy of the loop",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Glacial Crevasses",
+      "Snow-Covered Mountain",
+      "Valakut, the Molten Pinnacle"
+     ],
+     "needs": "Mountains to sacrifice repeatedly",
+     "note": "Valakut damage engine",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Tapped-land speed (mitigated by Spelunking)",
+    "Commander removal without haste backup"
+   ],
+   "key_cards": [
+    {
+     "card": "Erinis, Gloom Stalker",
+     "in_mainboard": false
+    },
+    {
+     "card": "Street Urchin",
+     "in_mainboard": false
+    },
+    {
+     "card": "Gruul Turf",
+     "in_mainboard": true
+    },
+    {
+     "card": "Spelunking",
+     "in_mainboard": true
+    },
+    {
+     "card": "Six",
+     "in_mainboard": true
+    },
+    {
+     "card": "Shadowspear",
+     "in_mainboard": true
+    },
+    {
+     "card": "Dryad of the Ilysian Grove",
+     "in_mainboard": true
+    },
+    {
+     "card": "Vesuva",
+     "in_mainboard": true
+    },
+    {
+     "card": "Thespian's Stage",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Derive a per-turn trigger baseline from the commander (here 3 landfall/turn) and gate every payoff's MV against it.",
+    "Land drops are the hardest-to-interact resource: 'playing lands can't be stopped' \u2014 build wincons on them.",
+    "Keep synergy-critical tapped lands and buy the fix (Spelunking) instead of cutting them.",
+    "Deathtouch (Shadowspear) upgrades a 1-damage sac pinger into repeatable removal."
+   ],
+   "name": "Hell's Bells",
+   "url": "https://moxfield.com/decks/ti7aVfo4c0S1JfbY5kdVTw",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--cabal-a-faster-k-rrik-storm-cedh-w-prime",
+   "commanders": [
+    "K'rrik, Son of Yawgmoth"
+   ],
+   "color_identity": "B",
+   "archetype": "cEDH turbo storm",
+   "bracket": "cEDH",
+   "gameplan": "Use K'rrik to pay life instead of black pips, chaining rituals and tutors into T1-2 win attempts while every card still carries standalone value.",
+   "construction": {
+    "curve": "Minimize average MV and especially the GENERIC portion of costs (K'rrik only discounts black pips).",
+    "density": "Max density of rituals, tutors, and cheap interaction; 'every card must provide value on its own'.",
+    "tutor_inflation": "Cost reduction upgrades mediocre tutors: Diabolic Tutor plays like a second Demonic Tutor under K'rrik."
+   },
+   "mulligan": {
+    "keep": [
+     "Hands enabling explosive T1-2 sequences"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Slam win attempts 'out of nowhere' \u2014 speed over setup"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "K'rrik, Son of Yawgmoth"
+     ],
+     "needs": "Life total as mana + storm chain",
+     "note": "Layered combo chains rather than a single named combo; wins through stax via cost cheating",
+     "verified": [
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Heavy mental math / intricate lines",
+    "Life total is a real resource"
+   ],
+   "key_cards": [
+    {
+     "card": "K'rrik, Son of Yawgmoth",
+     "in_mainboard": false
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "A cost-reduction commander re-prices the whole card pool: re-evaluate 'bad' cards (4-mana tutors) under the discount.",
+    "When a commander discounts only colored pips, sort candidates by generic-mana content, not total MV."
+   ],
+   "name": "[Cabal] A Faster K'rrik Storm \ud83d\ude08\u26a1\ufe0f (cEDH w/ Primer)",
+   "url": "https://moxfield.com/decks/HYT9YcG0bEK1UMvmEEXtTA",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--dan-vega-s-mega-money-quiz",
+   "commanders": [
+    "Etali, Primal Conqueror // Etali, Primal Sickness"
+   ],
+   "color_identity": "RG",
+   "archetype": "turbo cheat-Etali combo",
+   "bracket": "high power",
+   "gameplan": "Ritual out Etali T1-2, copy it with red clone spells, cast opponents' tutors and mana off the exiles, then close with Food Chain loops.",
+   "construction": {
+    "decision_tables": "Primer is literally a flip-decision table: what to do when Etali reveals Intuition, Tainted Pact, Eldritch Evolution, An Offer, Deflecting Swat, Worldly Tutor, X-cost creature tutors, Birgi."
+   },
+   "mulligan": {
+    "keep": [
+     "Does it cast Etali on turn 1 or 2? KEEP"
+    ],
+    "mull": [
+     "Anything else \u2014 'mulligan very aggressively; a lot of hands only need 3 cards to cast Etali'"
+    ]
+   },
+   "sequencing": [
+    "Set up the instant-speed-proof line (Birgi + Eternal Witness + strived Twinflame + Lightning Bolt) BEFORE an opponent's upkeep if they represent a response"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Food Chain",
+      "Squee, the Immortal",
+      "Etali, Primal Conqueror // Etali, Primal Sickness"
+     ],
+     "needs": "Exile Etali to Food Chain repeatedly for infinite casts",
+     "note": "Exiles all opponents' libraries",
+     "verified": [
+      true,
+      true,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Dualcaster Mage",
+      "Twinflame"
+     ],
+     "needs": "Red clone on stack, Dualcaster in response copying it targeting itself",
+     "note": "Infinite hasty 2/2s; Molten Duplication/Heat Shimmer are the redundant clones",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Birgi, God of Storytelling // Harnfel, Horn of Bounty",
+      "Eternal Witness",
+      "Twinflame",
+      "Lightning Bolt",
+      "Food Chain"
+     ],
+     "needs": "Loop Bolt via strived Twinflame copies of Eternal Witness with Birgi mana",
+     "note": "Deterministic kill that beats instant-speed win threats",
+     "verified": [
+      true,
+      true,
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Drannith Magistrate (answer: Fury/Pyrokinesis/Bolt)",
+    "Vexing Bauble (Nature's Claim)",
+    "Mindbreak Trap (Red/Pyroblast)",
+    "Rhystic/Remora (push through when tapped out)",
+    "Silence ('you're f***ed, pass the turn')"
+   ],
+   "key_cards": [
+    {
+     "card": "Etali, Primal Conqueror // Etali, Primal Sickness",
+     "in_mainboard": false
+    },
+    {
+     "card": "Food Chain",
+     "in_mainboard": true
+    },
+    {
+     "card": "Squee, the Immortal",
+     "in_mainboard": true
+    },
+    {
+     "card": "Twinflame",
+     "in_mainboard": true
+    },
+    {
+     "card": "Dualcaster Mage",
+     "in_mainboard": true
+    },
+    {
+     "card": "Birgi, God of Storytelling // Harnfel, Horn of Bounty",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "One-question mulligans work for all-in decks: define the single enabling condition and mull everything else.",
+    "Write per-card contingency tables for random-reveal engines; name your hate cards and their pre-assigned answers.",
+    "Sequence your win to survive the opponent's last window (build the loop before their upkeep)."
+   ],
+   "name": "DAN VEGA'S MEGA MONEY QUIZ ",
+   "url": "https://moxfield.com/decks/hUBG6mmH-kWfIJN9zXLuMw",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--turbo-fool-toodeep",
+   "commanders": [
+    "Flubs, the Fool"
+   ],
+   "color_identity": "URG",
+   "archetype": "cEDH hellbent storm (zero interaction by design)",
+   "bracket": "cEDH (anti-meta)",
+   "gameplan": "Go hellbent immediately, convert every cast into a loot via Flubs, and close with Breach/Food Chain/Curio/Earthcraft storm loops.",
+   "construction": {
+    "philosophy": "Every spell is proactive; zero reactive slots on purpose. Cards must pay for Flubs, pay for themselves (trigger Flubs), improve triggers, or win."
+   },
+   "mulligan": {
+    "keep": [
+     "Mulligan FOR an early Flubs; 'cowards wait to cast Flubs'"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Begin turns with 0 cards in hand, or end with an even count so the draw step makes it odd \u2014 every card then replaces itself off Flubs",
+    "Land Eruth ASAP"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Underworld Breach",
+      "Brain Freeze",
+      "Lion's Eye Diamond"
+     ],
+     "needs": "Escape Freeze with LED/Lotus Petal; Eruth or Flubs removal prevents self-deck",
+     "note": "Mill opponents then Wheel of Fortune",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Food Chain",
+      "Squee, the Immortal"
+     ],
+     "needs": "Exile Flubs to avoid decking",
+     "note": "Infinite creature mana + storm",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Cloudstone Curio",
+      "Cloud of Faeries",
+      "Gaea's Cradle"
+     ],
+     "needs": "Bounce loops with 0-cost creatures; Wild Growth/Utopia Sprawl net mana",
+     "note": "",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Earthcraft",
+      "Shrieking Drake"
+     ],
+     "needs": "Tap Island in response to Drake trigger",
+     "note": "Infinite storm + self-mill",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Displacer Kitten",
+      "Timeless Witness",
+      "Lotus Petal",
+      "Lion's Eye Diamond"
+     ],
+     "needs": "",
+     "note": "Infinite mana and storm",
+     "verified": [
+      true,
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "None acknowledged \u2014 deliberately ignores disruption and matchups"
+   ],
+   "key_cards": [
+    {
+     "card": "Eruth, Tormented Prophet",
+     "in_mainboard": true
+    },
+    {
+     "card": "Underworld Breach",
+     "in_mainboard": true
+    },
+    {
+     "card": "Food Chain",
+     "in_mainboard": true
+    },
+    {
+     "card": "Shifting Woodland",
+     "in_mainboard": true
+    },
+    {
+     "card": "Gaea's Cradle",
+     "in_mainboard": true
+    },
+    {
+     "card": "Crookshank Kobolds",
+     "in_mainboard": true
+    },
+    {
+     "card": "Cloudstone Curio",
+     "in_mainboard": true
+    },
+    {
+     "card": "Earthcraft",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Hand-parity as a resource: engineer hand counts so replacement triggers always fire (even/odd bookkeeping).",
+    "A deck can trade its entire interaction budget for velocity if its engine makes every card self-replacing.",
+    "Include self-deck protection (Eruth / bounce of commander) as a structural requirement of loot-storm engines."
+   ],
+   "name": "Turbo Fool [TOODEEP]",
+   "url": "https://moxfield.com/decks/JgnfXot2GUWxikaVUDDeDg",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--krark-sakashima-storm-toodeep",
+   "commanders": [
+    "Krark, the Thumbless",
+    "Sakashima of a Thousand Faces"
+   ],
+   "color_identity": "UR",
+   "archetype": "cEDH coin-flip storm/control pivot",
+   "bracket": "cEDH",
+   "gameplan": "Stack Krark triggers so every instant/sorcery effectively has Buyback, pivot between storming (T3-5 wins) and control.",
+   "construction": {
+    "math": "P(copy AND return a spell) = 1 - 2/2^n for n Krark triggers; 2 triggers = 50% buyback \u2014 get to 2+ ASAP (Sakashima, Harmonic Prodigy, Veyran).",
+    "core_flex": "Author tags essential vs flex slots directly in-list; community annual summit list maintained.",
+    "philosophy_cut": "Rhystic Study excluded on principle (homogenizes cEDH); if you must, cut a 1-MV draw spell for it."
+   },
+   "mulligan": {
+    "keep": [
+     "A hand with a clear plan to win, tuned to opponents' decks"
+    ],
+    "mull": [
+     "Rule of thumb: 'you can draw your way to mana but you can't mana your way to draw'"
+    ]
+   },
+   "sequencing": [
+    "Cantrips that grant haste target Veyran/Storm-Kiln/Prodigy/Scoundrel",
+    "Borne Upon a Wind + APNAP: storm on the turn AFTER yours so your triggers resolve before opponents' Rhystic triggers",
+    "When copying with Krark you may retarget: Pact of Negation never forced to counter 2 spells"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Jeska's Will"
+     ],
+     "needs": "1+ Krark trigger; win a flip and recast repeatedly",
+     "note": "One-card win condition under triggers",
+     "verified": [
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Underworld Breach",
+      "Brain Freeze",
+      "Lion's Eye Diamond"
+     ],
+     "needs": "Standard Breach loop",
+     "note": "",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Dualcaster Mage",
+      "Molten Duplication"
+     ],
+     "needs": "Copy the clone targeting Dualcaster",
+     "note": "Infinite hasty tokens",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Return the Favor"
+     ],
+     "needs": "Copy RTF with a copy of RTF",
+     "note": "Infinite Magecraft",
+     "verified": [
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Faerie Mastermind",
+      "Submerge"
+     ],
+     "needs": "Enough mana; Submerge own creatures to dodge empty-library draw",
+     "note": "Deck opponents out",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Variance by design (sold as a feature: 'roguelike cEDH')"
+   ],
+   "key_cards": [
+    {
+     "card": "Jeska's Will",
+     "in_mainboard": true
+    },
+    {
+     "card": "Tavern Scoundrel",
+     "in_mainboard": true
+    },
+    {
+     "card": "Archmage Emeritus",
+     "in_mainboard": true
+    },
+    {
+     "card": "Harmonic Prodigy",
+     "in_mainboard": true
+    },
+    {
+     "card": "Treasonous Ogre",
+     "in_mainboard": true
+    },
+    {
+     "card": "Sakashima of a Thousand Faces",
+     "in_mainboard": false
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Publish overperformer lists from tracked game data (1,000 games logged) \u2014 evidence over vibes.",
+    "Trigger-count thresholds convert variance decks into math decks: state the formula, play to n>=2.",
+    "APNAP ordering is exploitable: proactive storm right after your turn beats trigger-tax engines."
+   ],
+   "name": "Krark Sakashima Storm [TOODEEP]",
+   "url": "https://moxfield.com/decks/G-RUVy_CMUWzXlhJknIzZg",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--the-50-hyper-budget-gitrog-primer",
+   "commanders": [
+    "The Gitrog Monster"
+   ],
+   "color_identity": "BG",
+   "archetype": "budget dredge combo",
+   "bracket": "budget cEDH-lite ($50)",
+   "gameplan": "Dakmor Salvage dredge loops with Gitrog convert discards into the whole library, then infinite life -> infinite mana -> lethal spell loops.",
+   "construction": {
+    "upgrade_design": "Upgrade path targets the $250 list: 'most cards we upgrade to won't get cut later' \u2014 buy pieces that survive further upgrades first. Fetchlands are the #1 lands add (untapped + Gitrog draw)."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Stack (don't resolve) draw triggers near empty library to avoid drawing Gaea's Blessing accidentally",
+    "Phase 1 draws -> Phase 2 Brownscale infinite life -> Phase 3 ritual loops for mana/spells"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Dakmor Salvage",
+      "The Gitrog Monster",
+      "Elvish Spirit Guide"
+     ],
+     "needs": "Discard outlet; 5-case dredge state machine; Gaea's Blessing shuffles",
+     "note": "Draw the library (nondeterministic, not shortcuttable)",
+     "verified": [
+      true,
+      false,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Golgari Brownscale",
+      "Noxious Revival",
+      "Gaea's Blessing",
+      "Grave-Shell Scarab"
+     ],
+     "needs": "Loop Brownscale dredges for +2 life each; hold 4 draw triggers",
+     "note": "Infinite life enables Noxious Revival reuse",
+     "verified": [
+      true,
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Dark Ritual",
+      "Ebony Charm"
+     ],
+     "needs": "Infinite life from phase 2; loop any black spell",
+     "note": "Kill via Ebony Charm drain; Lotus Petal loop removes B requirement",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Non-shortcuttable core loop (tournament logistics)",
+    "Dakmor exile (Riftsweeper insurance)"
+   ],
+   "key_cards": [
+    {
+     "card": "Dakmor Salvage",
+     "in_mainboard": true
+    },
+    {
+     "card": "The Gitrog Monster",
+     "in_mainboard": false
+    },
+    {
+     "card": "Gaea's Blessing",
+     "in_mainboard": true
+    },
+    {
+     "card": "Golgari Brownscale",
+     "in_mainboard": true
+    },
+    {
+     "card": "Noxious Revival",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Grave-Shell Scarab",
+     "in": "Kozilek, Butcher of Truth",
+     "reason": "Titan makes loops 'simpler and safer' \u2014 easier, not stronger; best single upgrade"
+    },
+    {
+     "out": "Harrow",
+     "in": "Lotus Petal",
+     "reason": "Petal loops for infinite any-color mana"
+    },
+    {
+     "out": "Viridescent Bog",
+     "in": "Twilight Mire",
+     "reason": "Enables instant-speed infinite green"
+    },
+    {
+     "out": "Feed the Swarm",
+     "in": "Cabal Ritual",
+     "reason": "Loopable ramp + Dark Ritual redundancy/insurance"
+    },
+    {
+     "out": "Unearth",
+     "in": "Culling the Weak",
+     "reason": "Ramp used in higher-budget loops"
+    },
+    {
+     "out": "Suffocating Fumes",
+     "in": "Rain of Filth",
+     "reason": "Combo-turn mana + extra draws"
+    },
+    {
+     "out": "Nylea's Intervention",
+     "in": "Green Sun's Zenith",
+     "reason": "Strict tutor upgrade"
+    },
+    {
+     "out": "Edge of Autumn",
+     "in": "Entomb",
+     "reason": "Direct combo tutor"
+    }
+   ],
+   "heuristics": [
+    "Write combos as explicit state machines (enumerate all mill outcomes and the response to each).",
+    "Distinguish upgrades that make a deck EASIER from ones that make it STRONGER; sell them separately.",
+    "Budget swaps should preserve loop-function first (Petal for Harrow) and card quality second."
+   ],
+   "name": "The $50 Hyper Budget Gitrog Primer",
+   "url": "https://moxfield.com/decks/VRMqj1czLkOKpOKurvGl7Q",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--kefka-budget-competitive-high-power",
+   "commanders": [
+    "Kefka, Court Mage // Kefka, Ruler of Ruin"
+   ],
+   "color_identity": "UBR",
+   "archetype": "$100 value-engine combo/interaction",
+   "bracket": "4 / budget-competitive",
+   "gameplan": "Maximize Kefka triggers (each = pseudo Syphon Mind + hand info), control with 20+ cheap counters/removal, win through layered interwoven combos that mostly work without the commander.",
+   "construction": {
+    "filter": "Every card must (1) ramp Kefka out fast, (2) maximize Kefka triggers, (3) win or tutor for a win, or (4) interact \u2014 otherwise it's not in the deck.",
+    "ramp_plan": "Turn-3 Kefka via T1 ramp + T2 ramp, OR any single 2-mana generator (Generator Servant = T3 Kefka WITH haste = 2 triggers).",
+    "combo_design": "Rejected best-in-slot 2-card combos for interwoven multi-card webs sharing pieces; wincons function without commander (rare at $100)."
+   },
+   "mulligan": {
+    "keep": [
+     "2-3 lands + T1 ramp + T2 ramp",
+     "2-3 lands + a 2-mana generator"
+    ],
+    "mull": [
+     "Anything missing the T1-T2 ramp chain; 0-3 aggressive mulligans are budgeted into the plan"
+    ]
+   },
+   "sequencing": [
+    "Consider holding Kefka past T3 to cast him with protection up \u2014 feel out which situation you're in",
+    "Flicker Kefka in response to targeted removal (protection + everyone discards + you draw)"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Hoarding Broodlord",
+      "Saw in Half",
+      "Burnt Offering",
+      "Pinnacle Monk",
+      "Lightning Bolt"
+     ],
+     "needs": "Convoke/reanimate Broodlord; tutor chain into Saw loop; Final Parting is a pseudo 1-card line",
+     "note": "Premier combo; generates infinite mana then loops Bolt",
+     "verified": [
+      true,
+      true,
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Rionya, Fire Dancer",
+      "Combat Celebrant"
+     ],
+     "needs": "Both in play; summoning sickness irrelevant",
+     "note": "Infinite combats; make 2 CC copies if a first-striker blocks",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Dualcaster Mage",
+      "Electroduplicate"
+     ],
+     "needs": "Clone spell on stack, Dualcaster in response",
+     "note": "Infinite hasty 2/2s; + Mayhem Devil = burn on end step",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Dualcaster Mage",
+      "Ghostly Flicker",
+      "Kefka, Court Mage // Kefka, Ruler of Ruin"
+     ],
+     "needs": "",
+     "note": "Infinite any-color mana, then flicker Kefka to strip hands and tutor",
+     "verified": [
+      true,
+      true,
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Not a turbo deck \u2014 wants longer games"
+   ],
+   "key_cards": [
+    {
+     "card": "Kefka, Court Mage // Kefka, Ruler of Ruin",
+     "in_mainboard": false
+    },
+    {
+     "card": "Hoarding Broodlord",
+     "in_mainboard": true
+    },
+    {
+     "card": "Saw in Half",
+     "in_mainboard": true
+    },
+    {
+     "card": "Dualcaster Mage",
+     "in_mainboard": true
+    },
+    {
+     "card": "Generator Servant",
+     "in_mainboard": true
+    },
+    {
+     "card": "Mayhem Devil",
+     "in_mainboard": true
+    },
+    {
+     "card": "Waste Not",
+     "in_mainboard": false
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Publish the inclusion filter as 3-4 criteria; every slot must satisfy one \u2014 makes cuts objective.",
+    "Opponent discard decisions leak hand information; count the intel as part of the card's value.",
+    "At tight budgets, prefer combo WEBS (shared pieces) over isolated best-in-slot pairs.",
+    "Value flicker effects as triple-duty: protection + trigger + tempo."
+   ],
+   "name": "Kefka budget Competitive High Power",
+   "url": "https://moxfield.com/decks/sbt8qFFKA0KMHWn8h9pUeg",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--winota-ultra-budget-15-turn-3-2-win-poss",
+   "commanders": [
+    "Winota, Joiner of Forces"
+   ],
+   "color_identity": "RW",
+   "archetype": "$15 ultra-budget aggro",
+   "bracket": "3 (fine into low 4)",
+   "gameplan": "Cheap non-humans into on-curve Winota; first trigger wave finds token-makers (Lena), second wave finds damage multipliers (Marauders/Blade Historian) for a T5 kill on the first player.",
+   "construction": {
+    "quotas": "25-28 non-humans curved at 1-3 MV (4+ must be exceptional; 3-drops need abilities or multiple attackers). 23-26 humans (curve barely matters \u2014 ideally never cast, but low drops still playable). 35-37 lands (non-cEDH). 8-10 dedicated interaction (creature-slot interaction like Cathar Commando counts but isn't sufficient). 2-3 free 'fun' slots.",
+    "ramp": "Anti-ramp stance: developing non-human bodies beats reaching Winota faster \u2014 the trigger count when she lands matters more than the turn count.",
+    "human_count": "Run ~24 humans: 82% hit per trigger (hypergeo 99/24/6/1); post-shuffle depletion is mild at 24 (82->75% after 5 hits) but brutal at 17 (69->57%).",
+    "shuffle_rule": "Never shuffling preserves odds (bottomed cards leave the pool). Decide searches (Ranger-Captain) by: triggers already hit, whether the fetched body matters, and which humans you know are bottomed."
+   },
+   "mulligan": {
+    "keep": [
+     "Acceleration + early non-human threats"
+    ],
+    "mull": [
+     "Hands that don't 'explode'; slower stax-heavy keeps only if they curve into Winota"
+    ]
+   },
+   "sequencing": [
+    "Stack pump triggers FIRST so they resolve AFTER Winota's (new bodies get the pump)",
+    "Announce every combat step; resolve Winota triggers right after declare-attackers so ETB stax (Magus/Thalia/Prelate) lands without a priority window",
+    "Never overextend past ~5 triggers: sandbag vs wipes (1 trigger after a wipe >> 0)",
+    "MAKE THEM HAVE IT: cast Winota into open mana rather than pass",
+    "Check own-stax nonbos before deploying (Phyrexian Censor vs Kiki plan; Magus of the Moon starving your own white)"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Lena, Selfless Champion",
+      "Evangel of Heliod",
+      "Goldnight Commander",
+      "Angrath's Marauders",
+      "Blade Historian"
+     ],
+     "needs": "2 waves of triggers",
+     "note": "Token wave then multiplier wave; T2-3 kills documented as ceiling demos",
+     "verified": [
+      true,
+      true,
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Folds to targeted removal / wipes ('the higher the power level, the more likely someone just removes Winota')",
+    "Not enough efficient interaction above bracket 4"
+   ],
+   "key_cards": [
+    {
+     "card": "Winota, Joiner of Forces",
+     "in_mainboard": false
+    },
+    {
+     "card": "Lena, Selfless Champion",
+     "in_mainboard": true
+    },
+    {
+     "card": "Blade Historian",
+     "in_mainboard": true
+    },
+    {
+     "card": "Angrath's Marauders",
+     "in_mainboard": true
+    },
+    {
+     "card": "Goldnight Commander",
+     "in_mainboard": true
+    },
+    {
+     "card": "Geist-Honored Monk",
+     "in_mainboard": true
+    },
+    {
+     "card": "Sol Ring",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Hypergeometric calculator is a deckbuilding AND in-game tool: population 99, successes = humans, sample 6 per trigger.",
+    "Trap-card tests: does it produce value on the SAME turn cycle it costs you? (Anim Pakal/Oltec fail by 2-3 turns.)",
+    "Upgrade order for fragile aggro: resilience first (protection creatures/free spells), then better evasion, then stax.",
+    "Vehicles are wipe-resilient non-human bodies; a 4-power commander crews them."
+   ],
+   "name": "Winota Ultra Budget ($15 - Turn 3/(2) win possible)",
+   "url": "https://moxfield.com/decks/FQ2llEVF2k6oMUoXVA16XA",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--winota-snowball-stax",
+   "commanders": [
+    "Winota, Joiner of Forces"
+   ],
+   "color_identity": "RW",
+   "archetype": "cEDH stax-aggro hybrid",
+   "bracket": "cEDH",
+   "gameplan": "Winota converts attacks into card + mana advantage in Boros; lay asymmetric stax early, then win 1-2 turns after she resolves via tutored Kiki-style human combos.",
+   "construction": {
+    "why_hybrid": "Damage wincons can't be relied on in cEDH and can't outrace turbo combo \u2014 so stax the early game, finish with a compact combo.",
+    "no_cast_tech": "Winota puts creatures in without casting and without a priority window: Grand Abolisher, Magus of the Moon, Sanctum Prelate (names # as it enters), Drannith, Thalia, Canonist all land 'live'.",
+    "creature_stax_rule": "Non-creature stax is minimized; if a stax effect exists in creature form, play that form (need trigger density).",
+    "castability_rule": "'I want the ability to cast every creature in the 99 realistically' \u2014 cut uncastables (Angrath's Marauders here).",
+    "nonbo": "Cannot run Cursed Totem (kills own combos)."
+   },
+   "mulligan": {
+    "keep": [
+     "Acceleration + early non-human threats; stax-heavy keeps only if they curve into Winota AND lock all opponents equally"
+    ],
+    "mull": [
+     "Aggressively \u2014 snowball decks die to stalled momentum"
+    ]
+   },
+   "sequencing": [
+    "T1-2 ramp/cheap non-humans; T3-4 Winota + lock",
+    "Winota doesn't need to attack herself \u2014 haste enablers are irrelevant to the core plan"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Kiki-Jiki, Mirror Breaker",
+      "Zealous Conscripts"
+     ],
+     "needs": "",
+     "note": "Infinite hasty conscripts",
+     "verified": [
+      false,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Kiki-Jiki, Mirror Breaker",
+      "Combat Celebrant"
+     ],
+     "needs": "Pre-combat Kiki copy, exert for extra combats",
+     "note": "",
+     "verified": [
+      false,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Rionya, Fire Dancer",
+      "Combat Celebrant"
+     ],
+     "needs": "",
+     "note": "Human-only combo \u2014 both hit off Winota",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Moggcatcher",
+      "Imperial Recruiter",
+      "Recruiter of the Guard",
+      "Thalia's Lancers"
+     ],
+     "needs": "Hit tutors off triggers",
+     "note": "Toolbox layer: 95% of recruiter activations get Kiki",
+     "verified": [
+      false,
+      false,
+      false,
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Toxic Deluge (indestructible doesn't help)",
+    "Well-timed Winota removal",
+    "Stax mis-timing gifts the game to the third player"
+   ],
+   "key_cards": [
+    {
+     "card": "Winota, Joiner of Forces",
+     "in_mainboard": false
+    },
+    {
+     "card": "Kiki-Jiki, Mirror Breaker",
+     "in_mainboard": false
+    },
+    {
+     "card": "Combat Celebrant",
+     "in_mainboard": true
+    },
+    {
+     "card": "Zealous Conscripts",
+     "in_mainboard": false
+    },
+    {
+     "card": "Magus of the Moon",
+     "in_mainboard": true
+    },
+    {
+     "card": "Drannith Magistrate",
+     "in_mainboard": true
+    },
+    {
+     "card": "Sanctum Prelate",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ragavan, Nimble Pilferer",
+     "in_mainboard": true
+    },
+    {
+     "card": "Esper Sentinel",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "ETB-cheat commanders weaponize 'as enters' stax \u2014 no response window is a deck-defining tech line.",
+    "Changelog wisdom: 2-mana rocks that can't tap for value alone are the worst slots; creature-typed mana (Myr) > Talismans when types matter; Top is too slow under your own taxes; 'scarier than effective' cards (Serra Ascendant) get cut; free removal that dodges your own taxes (Solitude) > taxed removal (Pyroblast).",
+    "Holding up mana every turn contradicts a proactive snowball plan \u2014 cut hold-up cards (Trickery, Flamescroll).",
+    "Matchup ledger: taxes+pressure beat Naus; Magus beats greedy piles; manlands/resilient bodies vs board control; stax mirrors are free wins (they can't beat your card advantage)."
+   ],
+   "name": "Winota: Snowball Stax",
+   "url": "https://moxfield.com/decks/j-0aJlxuOUm9FnKRvJcfZw",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--how-to-train-ur-dragon-primer",
+   "commanders": [
+    "The Ur-Dragon"
+   ],
+   "color_identity": "WUBRG",
+   "archetype": "5c dragon kindred (no infinite combos, minimal tutors)",
+   "bracket": "high-power casual",
+   "gameplan": "Ramp T1-3, deploy dragons in bursts T4+, multiply force with haste/damage doublers and library->battlefield effects, win through commander-trigger snowballs.",
+   "construction": {
+    "kindred_quota": "25-30 kindred creatures ideal; expensive tribes stay under 30 dragons.",
+    "categories": "Five categories in priority order: Mana Advantage > Card Advantage > Force Multipliers > Protection > Removal.",
+    "lands": "<=3 tapped lands total (triomes only); 10 fetches + 10 duals; hub-and-spoke triomes (Savai hub -> Zagoth/Ketria spokes = Domain); max rainbow lands; support lands earn slots (Cavern protection, Boseiju removal, Arena of Glory haste).",
+    "generality_principle": "The more general a mana-advantage card, the better: Birds > Wild Growth; Temur Battlecrier > Dragonspeaker Shaman; Gwenna > Urza's Incubator. Ramp > cost reduction (reduction nets less and doesn't fix).",
+    "dork_preference": "Dorks > other ramp: earlier acceleration, better fixing, more efficiency for the removal risk. 3 mana on T2 beats 4 mana on T3 by ~a full turn.",
+    "card_advantage_mix": "Split incremental draw between CAST triggers (Beanstalk \u2014 pays even when countered) and ETB triggers (Kiora/Ascendancy \u2014 pay on tokens); run both.",
+    "bsm": "Board State Multipliers (library->battlefield: Majestic Genesis, Imoti, Vortex, Ur trigger) = card advantage + mana advantage + force multiplier simultaneously; they answer the 7-mana-threat vs 3-mana-removal tempo problem.",
+    "tutor_stance": "Density of threats > burning cards for cards: Demonic OK (net 0), Vampiric-style MV1 tutors net -1 card \u2014 excluded."
+   },
+   "mulligan": {
+    "keep": [
+     "T1 ramp is the most powerful thing an opener can contain",
+     "A plan to cast something before turn 3"
+    ],
+    "mull": [
+     "Hands whose first spell lands T3+ \u2014 'you are moving too slowly'"
+    ]
+   },
+   "sequencing": [
+    "Expect archenemy treatment; do NOT overextend into wipes (hold the second board)",
+    "Take opponents down one at a time (except Z&O-style multi-hit payoffs)",
+    "Lead with the sneaky enabler (Imoti) over the obvious threat (Dromoka) to set up burst turns",
+    "Crux of Fate: often correct to wipe your OWN dorks to clear a big board, keeping dragons"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Ancient Gold Dragon",
+      "Dragon Tempest"
+     ],
+     "needs": "Combat hit; d10 tokens enter together",
+     "note": "10 tokens = 10x11 damage split across targets",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Dracogenesis",
+      "Tiamat"
+     ],
+     "needs": "",
+     "note": "Free-cast chain 'can win immediately'",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Miirym, Sentinel Wyrm",
+      "Marang River Regent // Coil and Catch",
+      "Dracogenesis"
+     ],
+     "needs": "",
+     "note": "Goes infinite (acknowledged exception)",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Targeted removal, wraths, mass bounce, pillowfort (Glacial Chasm/Ghostly Prison), stax (Humility), go-wide token aggro"
+   ],
+   "key_cards": [
+    {
+     "card": "Dragon Tempest",
+     "in_mainboard": true
+    },
+    {
+     "card": "Sylvia Brightspear",
+     "in_mainboard": true
+    },
+    {
+     "card": "Miirym, Sentinel Wyrm",
+     "in_mainboard": true
+    },
+    {
+     "card": "Zurgo and Ojutai",
+     "in_mainboard": true
+    },
+    {
+     "card": "Old Gnawbone",
+     "in_mainboard": true
+    },
+    {
+     "card": "Selvala, Heart of the Wilds",
+     "in_mainboard": true
+    },
+    {
+     "card": "Temur Battlecrier",
+     "in_mainboard": true
+    },
+    {
+     "card": "Scourge of Valkas",
+     "in_mainboard": true
+    },
+    {
+     "card": "Terror of the Peaks",
+     "in_mainboard": true
+    },
+    {
+     "card": "Hellkite Courser",
+     "in_mainboard": true
+    },
+    {
+     "card": "Lathliss, Dragon Queen",
+     "in_mainboard": true
+    },
+    {
+     "card": "Roaming Throne",
+     "in_mainboard": true
+    },
+    {
+     "card": "Tiamat",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "(any budget)",
+     "in": "PROXY",
+     "reason": "First recommendation is proxying"
+    },
+    {
+     "out": "nonland upgrades",
+     "in": "lands first",
+     "reason": "Buy order: fetches+targets > triomes/untapped duals > verge/M10 complements; THEN expensive ramp/draw (Old Gnawbone, The One Ring); expensive dragons LAST"
+    }
+   ],
+   "heuristics": [
+    "Tiamat 'stock pile' balances categories: Miirym + Courser + OGB/Klauth + DL Kolaghan + Z&O/Silver \u2014 a tutor package is a portfolio, not five best cards.",
+    "Sylvia > Atarka for double strike: droppable mid-combat off the trigger, works on defense, curves under dragons at 3 \u2014 evaluate anthems on deployability and defense, not ceiling.",
+    "Dislike list with reasons is as valuable as the include list (Incubator helps opponents; Sneak Attack is card disadvantage without reanimation; Scion gets no Eminence discount)."
+   ],
+   "name": "How to Train Ur-Dragon [Primer!]",
+   "url": "https://moxfield.com/decks/oTndvxb8bkqLPK_kANUrkA",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--marchesa-d-amati-first-of-her-name-queen",
+   "commanders": [
+    "Queen Marchesa"
+   ],
+   "color_identity": "WBR",
+   "archetype": "budget aikido / political control",
+   "bracket": "scales up to ~7; too slow vs cEDH",
+   "gameplan": "Let opponents build their threats, redirect them into each other, then win with THEIR resources via a Sunforger toolbox.",
+   "construction": {
+    "aikido_rule": "When giving opponents resources, NEVER give the same player draw AND ramp.",
+    "toolbox": "Sunforger package maps one card to each threat class: survive-the-win (Angel's Grace), beats-indestructible removal (Anguished Unmaking/Path/StP/Chaos Warp), reflectors (Deflecting Palm/Comeuppance/Backlash), copiers (Reverberate/Display of Power), anti-tutor (Hide//Seek), surprise Mardu counters (Mana Tithe/Lapse/Tibalt's Trickery), Mistveil Plains recursion.",
+    "endgame_matchups": "Creature swarm -> Rakdos Charm/Mob Rule/Inkshield; one big creature -> Backlash/Delirium/Brash Taunter; X-spell or Aetherflux -> Deflecting Palm/Comeuppance/Selfless Squire+Rogue's Passage."
+   },
+   "mulligan": {
+    "keep": [
+     "Access to ALL colors",
+     "Some draw and ideally a pillowfort piece"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Early: threat-assess at commander reveal, pillowfort, political draw (Flumph/Cut a Deal/Humble Defector/Breena)",
+    "Mid: incite combat (Kardur, Duelist's Heritage, Gisela, pass the Monarch), remove the player most dangerous TO YOU; weaponize a leader via Scheming Symmetry/Secret Rendezvous",
+    "Late: Sunforger online, unattach in response to protect it"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Sunforger",
+      "Mistveil Plains"
+     ],
+     "needs": "Recur toolbox pieces once per turn",
+     "note": "Win with opponents' own momentum",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Aristocrats/lifeloss (nothing to reflect)",
+    "Mill",
+    "Fast infinite combo"
+   ],
+   "key_cards": [
+    {
+     "card": "Queen Marchesa",
+     "in_mainboard": false
+    },
+    {
+     "card": "Sunforger",
+     "in_mainboard": true
+    },
+    {
+     "card": "Mistveil Plains",
+     "in_mainboard": true
+    },
+    {
+     "card": "Deflecting Palm",
+     "in_mainboard": true
+    },
+    {
+     "card": "Comeuppance",
+     "in_mainboard": true
+    },
+    {
+     "card": "Brash Taunter",
+     "in_mainboard": true
+    },
+    {
+     "card": "Selfless Squire",
+     "in_mainboard": true
+    },
+    {
+     "card": "Breena, the Demagogue",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Reactive scaling decks are power-level safe: they mirror the table's strength (weak vs weak, strong vs strong) up to a speed ceiling.",
+    "Toolbox design = enumerate threat classes first, then one answer per class + a recursion engine.",
+    "2026 tune-up template: lower curve, more draw, more ramp, efficiency swaps 'while staying on theme'."
+   ],
+   "name": "\ud83d\udc51-Marchesa d'Amati, First of her Name: Queens Gambit\u265f\ufe0f (Aikido & Political Control) | Budget EDH\ud83d\udcb8",
+   "url": "https://moxfield.com/decks/zJ0qPOnI2UqykOwmeIUixg",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--warrior-queen-cedh-najeela",
+   "commanders": [
+    "Najeela, the Blade-Blossom"
+   ],
+   "color_identity": "WUBRG",
+   "archetype": "cEDH midrange/tempo",
+   "bracket": "cEDH",
+   "gameplan": "'Protect the Queen': raw power over synergy \u2014 stick Najeela T1-2, interact to protect, win via WUBRG-per-combat loops or pivot to Thoracle/Breach backups (~50% of wins).",
+   "construction": {
+    "philosophy": "Card quality, efficiency, relevance; deck is redundant good stuff so risky tutors are affordable.",
+    "wincon_math": "Minimum requirements computed per piece \u2014 Derevi worst case: 1 attacking warrior + 3 extra mana, then 4 triggers + 1 mana, then infinite (4 total). Rank: Derevi > (Nature's Will for earliest wins) > Grim Hireling > Druid's Repository.",
+    "forbidden_tutors": "Tainted Pact/Demonic Consultation: <1/10 self-kill risk is worth instant-speed Demonic Tutors when the deck is redundant; they also enable the 1-slot Thoracle backup.",
+    "naus_rule": "Ad Nauseam earned its slot only once payoffs (Thoracle/Breach/Dockside) stopped depending on Najeela surviving."
+   },
+   "mulligan": {
+    "keep": [
+     "Ramp + tutor + engine (Rhystic) + recursion = model hand",
+     "Value hands with T1 engine or T2 Najeela into interactive pods"
+    ],
+    "mull": [
+     "TRAP: ritual-powered T1 Najeela with no permanent ramp behind it \u2014 'goes nowhere fast'",
+     "Track mulligans already taken; a decent 6 beats a blind 5"
+    ]
+   },
+   "sequencing": [
+    "Activate Najeela after her attack trigger resolves (new warriors get haste/untap)",
+    "Derevi trigger-stacking on one permanent: activate abilities BETWEEN triggers to float mana (must act in combat damage step)",
+    "Lifelink activations: wait until after blocks for max info \u2014 last window before damage (damage doesn't use the stack)",
+    "Vs forced-draw (Esper Sentinel/Archivist) resolve Silence/Abolisher before Thoracle, or sac them to Neoform/Evolution"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Najeela, the Blade-Blossom",
+      "Derevi, Empyrial Tactician"
+     ],
+     "needs": "5 combat-damage triggers or iterate with extra mana",
+     "note": "Strongest piece: 2-mana effective cost, taps blockers, breaks stax parity",
+     "verified": [
+      false,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Najeela, the Blade-Blossom",
+      "Grim Hireling"
+     ],
+     "needs": "3 opponents connected = 6 treasures per combat; average >=5/combat",
+     "note": "",
+     "verified": [
+      false,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Thassa's Oracle",
+      "Demonic Consultation"
+     ],
+     "needs": "",
+     "note": "1-slot backup immune to Najeela answers",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Thassa's Oracle",
+      "Tainted Pact"
+     ],
+     "needs": "",
+     "note": "",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Underworld Breach",
+      "Brain Freeze",
+      "Lion's Eye Diamond"
+     ],
+     "needs": "",
+     "note": "Naus follow-up plan",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Cursed Totem, Linvala, Blood Moon (only real stax problems \u2014 answers included)",
+    "Board wipes vs the token plan (mitigated by Oracle pivot)"
+   ],
+   "key_cards": [
+    {
+     "card": "Najeela, the Blade-Blossom",
+     "in_mainboard": false
+    },
+    {
+     "card": "Derevi, Empyrial Tactician",
+     "in_mainboard": true
+    },
+    {
+     "card": "Thassa's Oracle",
+     "in_mainboard": true
+    },
+    {
+     "card": "Demonic Consultation",
+     "in_mainboard": true
+    },
+    {
+     "card": "Tainted Pact",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ad Nauseam",
+     "in_mainboard": true
+    },
+    {
+     "card": "Dockside Extortionist",
+     "in_mainboard": false
+    },
+    {
+     "card": "Underworld Breach",
+     "in_mainboard": true
+    },
+    {
+     "card": "Neoform",
+     "in_mainboard": false
+    },
+    {
+     "card": "Final Fortune",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "fetches/shocks",
+     "in": "pain/horizon/check lands",
+     "reason": "$1000 and $500 versions maintained; cut lands first, keep cards that survive upgrades"
+    }
+   ],
+   "heuristics": [
+    "Compute minimum-win requirements per wincon piece BEFORE slotting it (Cryptolith Rite fails: needs ~10 warriors).",
+    "Exponential clocks are wincons: 6 unanswered activations = 138 damage (4/10/20/38/72/138) \u2014 finite activations can beat comboing.",
+    "Sword of Feast and Famine test: 'easier to have 3 attackers + spare mana than 5 lands' \u2014 cost realism in cEDH.",
+    "Layer a stack-only backup wincon (Oracle) for exactly 1 slot when your primary dies to board interaction."
+   ],
+   "name": " \ud83c\udf38 Warrior Queen [cEDH Najeela] \ud83c\udf38",
+   "url": "https://moxfield.com/decks/jT8Y9X4tlUmeNZ2AjkD1Vg",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--henzie-high-power-noncedh",
+   "commanders": [
+    "Henzie \"Toolbox\" Torre"
+   ],
+   "color_identity": "BRG",
+   "archetype": "blitz ETB-value + reanimation",
+   "bracket": "high power (explicitly not cEDH)",
+   "gameplan": "T2 Henzie off 13 dorks, blitz a 4+ MV ETB creature every turn from T3, double the value with death payoffs, rebuy the best bodies with reanimation, win on accumulated tempo.",
+   "construction": {
+    "color_sources": "Benchmark method: cEDH Yuriko runs 23 blue sources = 95% on-curve \u2014 copy the target. Henzie needs 18+ sources of EACH of B/R/G for T2-3; per-card checks: Braids (BBB T3) 28 B sources, Atsushi 25 R, Mikaeus/Kogla 26-28 B, Junji (T5) 23 \u2014 skew fixing toward your heaviest pip color (his list is only 15% red symbols).",
+    "enablers": "13 T1 dorks (Yuriko standard): 63.9% in opener, 87% after free mull, 95.3% at 6 \u2014 'as long as you're willing to mull, you get there'. 23 sources of green for T1 dorks = 85% (Modern 3-color benchmark).",
+    "fetches": "9 fetches optimal IF you own OG duals (+shocks, +<=2 tapped fetchables); with shocks-only, 6-7. Tapped fetchable count vs consistency: 4 in deck = 26% opener contamination, 1 = 7% (Modern proactive decks run exactly 1 surveil land). Basics: 3F/2S/2M sized to worst-case blitz fetching.",
+    "blitz_quota": "~28 blitz targets (chart-tuned for a fresh target every turn T3-6); too many = no room for interaction/synergy, too few starves Feldon/Pod/Drivnod.",
+    "reanimation_quota": "16 pieces = guaranteed 1-2 by T6; 13 still fine \u2014 convert surplus into interaction.",
+    "variance_framework": "Define 'success' per card, count REAL targets, compute, compare to a personal threshold: Gamekeeper 70% @28/40 real targets (wants 34) -> cut; Apex Devastator likely 1 real hit @28/66 (wants 37) -> cut; Lurking Predators wants 40; casual builds with fewer dorks legitimately clear these bars.",
+    "drivnod_rule": "Drivnod needs 11-12 dies-trigger payoffs besides Henzie or he's a 5-mana Skullclamp.",
+    "tortoise_vs_shaper": "Total-fail = P(no land milled) x P(no fetch in yard): World Shaper 12.8% fail -> cut; Blossoming Tortoise (extra attack trigger) 3.4% -> keep.",
+    "wipe_doctrine": "Copy cEDH stax selection logic: play wipes that don't touch YOUR plan \u2014 wipes on bodies (Balefire, Massacre Wurm, Incinerator, Primaris Eliminator) and Living Death/Bringer over Blasphemous Act/Toxic Deluge. Break parity.",
+    "deathrite_meta_math": "Own 7 fetches = 41% T1; multiply everyone's fail rates: 4 players x ~7 fetches = 88% success. Slam dunk at avg 5+ fetches/deck; suspect at 4 (~30% fail)."
+   },
+   "mulligan": {
+    "keep": [
+     "Accelerant + a blitz creature castable T3",
+     "Bloom Tender + a T3 companion for Henzie"
+    ],
+    "mull": [
+     "'THE FIRST ONE IS FREE \u2014 take the mull'; T2 Henzie 'almost no matter what'; hands whose blitz starts T4"
+    ]
+   },
+   "sequencing": [
+    "Dork > Ragavan ALWAYS: dorks enable PRE-combat blitz; Ragavan's treasure arrives post-combat and misses attack triggers/land drops",
+    "5-mana non-blitzables must be insane (Korvold/Cauldron/Ziatora fail; Mikaeus passes)",
+    "No other 3-drops: 'El Torre is a jealous commander' (Selvala pushes Henzie to T4)",
+    "Living Death boards: APNAP \u2014 your triggers stack first, resolve last"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Kiki-Jiki, Mirror Breaker",
+      "Zealous Conscripts"
+     ],
+     "needs": "",
+     "note": "Optional package",
+     "verified": [
+      false,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Buried Alive",
+      "Phyrexian Delver",
+      "Kiki-Jiki, Mirror Breaker",
+      "Zealous Conscripts"
+     ],
+     "needs": "Any reanimation spell",
+     "note": "",
+     "verified": [
+      false,
+      true,
+      false,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Mikaeus, the Unhallowed",
+      "Triskelion"
+     ],
+     "needs": "",
+     "note": "",
+     "verified": [
+      true,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Dockside Extortionist",
+      "Temur Sabertooth"
+     ],
+     "needs": "4+ opposing artifacts/enchantments",
+     "note": "",
+     "verified": [
+      false,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Yawgmoth, Thran Physician",
+      "Gray Merchant of Asphodel",
+      "Mikaeus, the Unhallowed"
+     ],
+     "needs": "Undying loop, 2nd non-Human body",
+     "note": "",
+     "verified": [
+      false,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Protean Hulk",
+      "Phyrexian Delver",
+      "Viscera Seer",
+      "Mikaeus, the Unhallowed",
+      "Walking Ballista"
+     ],
+     "needs": "Free sac outlet (Henzie counts) or Greater Good",
+     "note": "Hulk lines 1-3; Melira/Redcap variant exists",
+     "verified": [
+      true,
+      true,
+      true,
+      true,
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "cEDH speed/interaction gap (avg-CMC too high to double-spell; Gruul-adjacent interaction poverty)",
+    "Authority of the Consuls-type taxes",
+    "Combo players in 'casual' pods"
+   ],
+   "key_cards": [
+    {
+     "card": "Henzie \"Toolbox\" Torre",
+     "in_mainboard": false
+    },
+    {
+     "card": "Skullclamp",
+     "in_mainboard": true
+    },
+    {
+     "card": "Braids, Arisen Nightmare",
+     "in_mainboard": false
+    },
+    {
+     "card": "Mikaeus, the Unhallowed",
+     "in_mainboard": true
+    },
+    {
+     "card": "Feldon of the Third Path",
+     "in_mainboard": false
+    },
+    {
+     "card": "Chainer, Nightmare Adept",
+     "in_mainboard": true
+    },
+    {
+     "card": "Living Death",
+     "in_mainboard": true
+    },
+    {
+     "card": "Incarnation Technique",
+     "in_mainboard": true
+    },
+    {
+     "card": "Greater Good",
+     "in_mainboard": true
+    },
+    {
+     "card": "Birthing Ritual",
+     "in_mainboard": true
+    },
+    {
+     "card": "Solemn Simulacrum",
+     "in_mainboard": false
+    },
+    {
+     "card": "Seedguide Ash",
+     "in_mainboard": true
+    },
+    {
+     "card": "Massacre Wurm",
+     "in_mainboard": true
+    },
+    {
+     "card": "Etali, Primal Conqueror // Etali, Primal Sickness",
+     "in_mainboard": true
+    },
+    {
+     "card": "Archon of Cruelty",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Chupacabra-tier removal",
+     "in": "Flametongue Kavu / Inferno Titan / Alpha Deathclaw",
+     "reason": "Explicit budget-tier picks flagged in card notes"
+    }
+   ],
+   "heuristics": [
+    "Benchmark-transplant method: find a proven deck with the same curve requirement and copy its consistency numbers (Yuriko's 13 enablers / 23 sources / 85-95% targets).",
+    "'Doubt conventional wisdom unless you can verify it with reason and experiment' \u2014 Blasphemous Act is anti-synergy here.",
+    "Deathreap Ritual nonbo: blitz deaths happen AT the end step, missing 'before end step' checks \u2014 read trigger timing.",
+    "Protection Racket teardown: opponents bin your best cards and learn your deck \u2014 never let opponents choose your draws.",
+    "Card-neutral engines beat capped ones: Morbid Opportunist (1/turn, 3 MV) loses to Braids/Grim Haruspex."
+   ],
+   "name": "Henzie - High Power (NonCedh) ",
+   "url": "https://moxfield.com/decks/GnqlEhG3IUysVv3ub5EEEQ",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--edgar-markov-aggro",
+   "commanders": [
+    "Edgar Markov"
+   ],
+   "color_identity": "WBR",
+   "archetype": "vampire go-wide aggro + drain",
+   "bracket": "3 (Ancient Tomb & Teferi's Protection cut to stay there)",
+   "gameplan": "Curve out MV1-2 vampires with eminence tokens, refuel with 15+ card advantage slots, clear paths with asymmetric mass disruption, close with anthems/Akroma's Will or the 25-35%-of-games drain combo.",
+   "construction": {
+    "quotas": "35+ vampires; avg MV < 3; 40 lands (85.27% to hit the 3rd land drop; 38 -> 81.90%); Sol Ring only (no other rocks: 'lands don't cost 2 mana to play' and the deck doesn't ramp to 5+); 15 card-advantage slots + 3 tutors (92% to find draw by T5); 12+ interaction; 18-20 MV1-2 vampires (MV2 is the sweet spot); 8+ damage enhancers; 7+ enablers; 4 combo pieces.",
+    "flood_mitigation": "High land counts flood \u2014 accept it and mitigate with MDFCs, channel lands, and ability lands (Castle Locthwain, Minas Tirith, Silent Clearing) instead of cutting lands.",
+    "color_ladder": "Color requirements mapped by turn (T1 B/W, T2 BB/WW/BR..., T3 1BB...) drive the 40-land floor.",
+    "nonvamp_rule": "Non-vampires must be best-in-class in exactly one function: card advantage / efficient spot removal / asymmetric mass disruption / enhancer / enabler / combo / tutor / flood mitigation. Explicit reject list (Phyrexian Altar, Smothering Tithe, Anointed Procession).",
+    "mv_gates": "Vampires MV3+ must be CA, enhancer, enabler, or combo; MV6+ banned (commander tops the curve).",
+    "convoke_accounting": "Count convoke cards at ~half MV for curve math (Lethal Scheme/Markov Baron cast for BB).",
+    "aristocrats_boundary": "NOT an aristocrats deck: that archetype needs outlet+fodder+payoff with the commander supplying one; Edgar only supplies fodder \u2014 build Elenda instead.",
+    "protection": "Phasing > indestructible (beats exile and bounce)."
+   },
+   "mulligan": {
+    "keep": [
+     "3 lands + card advantage + 3 plays for turns 1-4"
+    ],
+    "mull": [
+     "0-1 or 5+ lands",
+     "No card advantage or tutor",
+     "No 1-2 drops"
+    ]
+   },
+   "sequencing": [
+    "T1-3: pick prey (who can't you beat late? who combos?), land a draw engine (tutor for Necropotence if needed), start the army",
+    "T4-6: keep attacking, consider slow-rolling to hold interaction",
+    "T7+: finish one player at a time; fear sweepers; don't overplay the hand",
+    "Tutor table: early->CA engine; threats->Olivia's Wrath/Everything Comes to Dust; need damage->Shared Animosity; blockers->Cover of Darkness; finisher->Akroma's Will; combo half->other half"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Vito, Thorn of the Dusk Rose",
+      "Exquisite Blood"
+     ],
+     "needs": "",
+     "note": "Classic drain loop",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Vito, Thorn of the Dusk Rose",
+      "Bloodthirsty Conqueror"
+     ],
+     "needs": "",
+     "note": "Redundant pairing: 2x2 pieces + 3 tutors = combo live in 25-35% of games",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Marauding Blight-Priest",
+      "Exquisite Blood"
+     ],
+     "needs": "",
+     "note": "",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Shared Animosity",
+      "Akroma's Will"
+     ],
+     "needs": "Wide board",
+     "note": "Primary combat kill",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Sweepers",
+    "Combo/stax-heavy metas (deck is built to beat 'fair' combat tables)"
+   ],
+   "key_cards": [
+    {
+     "card": "Edgar Markov",
+     "in_mainboard": false
+    },
+    {
+     "card": "Shared Animosity",
+     "in_mainboard": true
+    },
+    {
+     "card": "Necropotence",
+     "in_mainboard": true
+    },
+    {
+     "card": "Skullclamp",
+     "in_mainboard": true
+    },
+    {
+     "card": "Cover of Darkness",
+     "in_mainboard": true
+    },
+    {
+     "card": "Olivia's Wrath",
+     "in_mainboard": true
+    },
+    {
+     "card": "Everything Comes to Dust",
+     "in_mainboard": true
+    },
+    {
+     "card": "Akroma's Will",
+     "in_mainboard": true
+    },
+    {
+     "card": "Bloodline Keeper // Lord of Lineage",
+     "in_mainboard": true
+    },
+    {
+     "card": "Captivating Vampire",
+     "in_mainboard": true
+    },
+    {
+     "card": "Three Tree City",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Teferi's Protection",
+     "in": "Etchings of the Chosen / Clever Concealment",
+     "reason": "Bracket + budget protection alternatives listed"
+    }
+   ],
+   "heuristics": [
+    "Design EDH aggro like a 60-card midrange deck: curve-first, 40 lands, no rocks, probability targets for every quota.",
+    "Publish the math: 92% draw-by-T5 and 85% third-land-drop are the deck's two load-bearing numbers.",
+    "Offensive interaction doctrine: MV1-2 spot removal + MV4+ ASYMMETRIC sweepers; 'reset and rebuild faster' never favors the aggro player; sorcery speed is fine when you use all mana every turn.",
+    "The _flex tag: mark first-cut slots so iteration has a defined entry point.",
+    "Give combo availability as a % of games, not a promise."
+   ],
+   "name": "Edgar Markov Aggro",
+   "url": "https://moxfield.com/decks/Vv7rGWqkHkaAa8U5o0H1qQ",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--primer-skemfar-s-blade-lathril-edh",
+   "commanders": [
+    "Lathril, Blade of the Elves"
+   ],
+   "color_identity": "BG",
+   "archetype": "elfball + light voltron + Staff nuke",
+   "bracket": "4 (high-power casual; generic tutors deliberately excluded)",
+   "gameplan": "Flood elves and elf-ramp, chip with an evasive Lathril for token waves, drain with her tap ability, and finish with Overrun effects \u2014 Staff of Domination is the break-glass combo.",
+   "construction": {
+    "packages": "Ramp 23 / Draw 17 / Removal-Interaction 15 / Finishers 7 \u2014 every package enumerated with roles.",
+    "early_ramp_rule": "Land ramp > dorks EARLY: 'if you have Priest of Titania and Farseek, cast the Farseek' \u2014 dork-basket openings die to wipes.",
+    "tutor_lever": "No Demonic-style tutors = the bracket lever; the near-cEDH upgrade is simply Staff + black tutor suite + Umbral Mantle redundancy.",
+    "evasion_stack": "Menace + Alpha Authority ('no more than one blocker') = unblockable; Shizo fear; Elvish Champion + Yavimaya = forestwalk vs everyone."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Mid game: do NOT overextend; hold rebuild cards vs wipes",
+    "Tutor priorities by state: engine (High Perfect Morcant) vs draw (Beast Whisperer/Leaf-Crowned) vs instant refill (Regal Force)",
+    "Lathril timing is flexible: turbo her for tokens or hold for Priest-of-Titania payoffs \u2014 deck functions without her",
+    "Combo etiquette: leave 1-2 cards in library; DON'T cast mandatory-draw creatures (Beast Whisperer, Regal Force) while drawing the deck"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Staff of Domination",
+      "Priest of Titania"
+     ],
+     "needs": "Dork producing 5+; untap dork (3) + untap Staff (1) nets 1 each loop",
+     "note": "Then infinite draw/life; Archdruid/Channeler/Circle of Dreams/Marwyn are redundant dorks",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Imperious Perfect",
+      "Staff of Domination",
+      "Lightning Greaves",
+      "Skemfar Shadowsage"
+     ],
+     "needs": "Infinite mana; move Greaves, untap Perfect with Staff",
+     "note": "Infinite tokens -> Shadowsage ETB kills without combat",
+     "verified": [
+      true,
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Finale of Devastation",
+      "Craterhoof Behemoth"
+     ],
+     "needs": "Infinite or large mana",
+     "note": "Plan B; Finale pumps even with empty library (no tutor required to resolve)",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Quest for Renewal",
+      "Lathril, Blade of the Elves"
+     ],
+     "needs": "10+ other elves; untap each turn",
+     "note": "40 damage per table rotation",
+     "verified": [
+      true,
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Board wipes (Heroic Intervention/Ezuri regeneration as insurance)",
+    "Most popular Golgari commander = telegraphed"
+   ],
+   "key_cards": [
+    {
+     "card": "Lathril, Blade of the Elves",
+     "in_mainboard": false
+    },
+    {
+     "card": "Staff of Domination",
+     "in_mainboard": true
+    },
+    {
+     "card": "Priest of Titania",
+     "in_mainboard": true
+    },
+    {
+     "card": "Elvish Archdruid",
+     "in_mainboard": true
+    },
+    {
+     "card": "Craterhoof Behemoth",
+     "in_mainboard": true
+    },
+    {
+     "card": "Finale of Devastation",
+     "in_mainboard": true
+    },
+    {
+     "card": "Quest for Renewal",
+     "in_mainboard": true
+    },
+    {
+     "card": "Alpha Authority",
+     "in_mainboard": true
+    },
+    {
+     "card": "Skemfar Shadowsage",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ohran Frostfang",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Craterhoof Behemoth",
+     "in": "Kamahl, Heart of Krosa / End-Raze Forerunners",
+     "reason": "Overrun function preserved"
+    },
+    {
+     "out": "Finale of Devastation",
+     "in": "Overwhelming Stampede",
+     "reason": "Same role"
+    },
+    {
+     "out": "Toxic Deluge",
+     "in": "Dead of Winter / Crippling Fear",
+     "reason": ""
+    },
+    {
+     "out": "Heroic Intervention",
+     "in": "Golgari Charm / Nature's Claim",
+     "reason": ""
+    },
+    {
+     "out": "Emerald Medallion",
+     "in": "Herald's Horn / Rhonas's Monument",
+     "reason": ""
+    },
+    {
+     "out": "expensive duals",
+     "in": "tapped Golgari duals",
+     "reason": "Biggest savings live in the mana base"
+    }
+   ],
+   "heuristics": [
+    "Changelog lessons: Skullclamp dies to your own lords (toughness pushed past 1); Coat of Arms is symmetric + a logistical nightmare; Parallel Lives needs token PRODUCERS not token counts (Zopandrel doubled Lathril's power = same tokens + more); mandatory symmetric effects (Ruthless Winnower) tax you too; Damnation cut because 'this deck hardly cares about opponents' boards'.",
+    "Tutor density is THE power dial: same 99, tutors in = near-cEDH, tutors out = high-casual variance.",
+    "During library-drawing combos, treat mandatory draw triggers as hazards and keep a 1-2 card library buffer."
+   ],
+   "name": "[Primer] Skemfar's Blade - Lathril EDH",
+   "url": "https://moxfield.com/decks/f5l2rjA140CvZ8URNaAgxw",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--collaborative-gitrog-primer",
+   "commanders": [
+    "The Gitrog Monster"
+   ],
+   "color_identity": "BG",
+   "archetype": "cEDH dredge combo (community-maintained)",
+   "bracket": "cEDH",
+   "gameplan": "Resolve Gitrog fast, assemble Dakmor + discard outlet + shuffler, draw the library, then loop rituals into Assassin's Trophy/Finale or instant-speed Bowmasters.",
+   "construction": {
+    "identity": "Neither Lands nor Dredge deck: 'a consistent and grindy combo deck' that preys on midrange metas by re-threatening wins every turn.",
+    "legality_doctrine": "MTR 4.4 / IPG 3.3 distinctions documented: the library-draw is nondeterministic (not shortcuttable) but not slow play; ritual/Bowmasters loops are deterministic and MUST be shortcut."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Hold a fetch as the Gitrog bonus land drop (eases Ad Naus)",
+    "Six-configuration dredge state machine: stack Gitrog draw before shuffle triggers; discard surplus lands to raise library land density; below ~10 library cards, STACK draw triggers, then discard a titan repeatedly to shed extras",
+    "Ignore Silence by passing to cleanup (rules-knowledge tech)"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Dakmor Salvage",
+      "The Gitrog Monster",
+      "Kozilek, Butcher of Truth"
+     ],
+     "needs": "Discard outlet; Ulamog/Gaea's Blessing are redundant shufflers",
+     "note": "Draw the library",
+     "verified": [
+      true,
+      false,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Lotus Petal",
+      "Crop Rotation"
+     ],
+     "needs": "Library in hand",
+     "note": "Sorcery/instant mana loops; Talon Gates + Emergence Zone as instant-speed land tech",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Assassin's Trophy",
+      "Finale of Devastation"
+     ],
+     "needs": "Infinite mana",
+     "note": "Blow up everything, haste-buffed swing",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Orcish Bowmasters"
+     ],
+     "needs": "Loop at instant speed",
+     "note": "Instant-speed kill",
+     "verified": [
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "No stack interaction (sans-blue)",
+    "Creature theft (Gilded Drake/Volatile Stormdrake)",
+    "Praetor's Grasp extraction",
+    "Dauthi Voidwalker (grave-exile replacement) \u2014 THE stax threat"
+   ],
+   "key_cards": [
+    {
+     "card": "The Gitrog Monster",
+     "in_mainboard": false
+    },
+    {
+     "card": "Dakmor Salvage",
+     "in_mainboard": true
+    },
+    {
+     "card": "Kozilek, Butcher of Truth",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ulamog, the Infinite Gyre",
+     "in_mainboard": true
+    },
+    {
+     "card": "Gaea's Blessing",
+     "in_mainboard": false
+    },
+    {
+     "card": "Crop Rotation",
+     "in_mainboard": true
+    },
+    {
+     "card": "Orcish Bowmasters",
+     "in_mainboard": true
+    },
+    {
+     "card": "Finale of Devastation",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "full list",
+     "in": "$200-tier builds",
+     "reason": "'Essential cards cost very little' \u2014 tiered budget lists maintained"
+    }
+   ],
+   "heuristics": [
+    "'A true best list is highly variable' \u2014 single-card discussion keeps cut cards listed to prove flex breadth.",
+    "Meta-fit sentence template: not the fastest, but repeated win-threats beat a midrange field.",
+    "Collaborative primers with shared account custody outlive any single author."
+   ],
+   "name": "Collaborative Gitrog Primer",
+   "url": "https://moxfield.com/decks/4fbiNVFpr0edHL5Y3IKecg",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--earn-your-9th-tail-light-paws-edh-primer",
+   "commanders": [
+    "Light-Paws, Emperor's Voice"
+   ],
+   "color_identity": "W",
+   "archetype": "mono-white aura voltron toolbox",
+   "bracket": "crushes below high power; documented cEDH stax variants",
+   "gameplan": "Every cast aura tutors a second at <= MV: stack protection at instant speed, pump to lethal by T2-3, refill with Sage's Reverie, and never open a removal window.",
+   "construction": {
+    "mv_curve_design": "42 auras; REACTIVE (protection) auras deliberately skewed to MV1-2 (maximally tutorable), PROACTIVE (pump/keywords) skewed MV2-4 (bigger tutor range); intentionally heavy at MV4 to raise Sage's Reverie access ('8 copies').",
+    "response_tables": "Threat->fetch maps by MV: non-white removal -> Mask of Law and Grace/Shield of Duty and Reason/Flickering Ward; Wrath -> Hyena Umbra; edicts -> Cartouche of Solidarity (token); Deluge/Fire Covenant -> Ethereal Armor; white spot removal -> Benevolent Blessing (last resort \u2014 blocks future attaches; Curio-bounce to fix); mass removal w/ 2WW -> Flickerform; repeatable destroy -> Timely Ward; lethal damage -> Pariah (+protection = immortal).",
+    "mono_white_engines": "Draw solved by: Sram/Kor Spiritdancer + self-bouncers (Flickering Ward), Scroll Rack + Land Tax (+ Light-Paws shuffles = new hand each turn), Sage's Reverie, pumped Esper Sentinel; ramp via Serra's Sanctum/Nykthos fetched by Wayfarer/Expedition Map/Urza's Saga.",
+    "power_dials": "Down: remove fast mana, or house-rule the tutor into cascade-X (X=3 tested); Up: 20-card swap into stax (list given) \u2014 cEDH pods have less mass removal, so trade wipe-protection slots for stax protection and Opposition Agent answers."
+   },
+   "mulligan": {
+    "keep": [
+     "1+ flash aura, 3+ cheap auras, 1 ramp piece; goal = T1 Light-Paws or T2 with 1 mana held for flash protection"
+    ],
+    "mull": [
+     "'Mulligans hilariously easy' \u2014 all cards transmute to battlefield; a mull to 5 still killed on T3"
+    ]
+   },
+   "sequencing": [
+    "'If we sequence carefully we never leave a removal window' \u2014 always hold instant-speed tutor fuel",
+    "Kill the WHITE player first (hardest color to protect against)",
+    "Vs black, prioritize Cartouche of Solidarity early (edict insurance)",
+    "Stack Light-Paws tutor before Reverie's draw to grow the draw"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Ethereal Armor",
+      "All That Glitters",
+      "Battle Mastery"
+     ],
+     "needs": "T2 sequencing example: any 1-mana aura fetches Armor, any 3-mana fetches Glitters etc.",
+     "note": "Standard lethal stack",
+     "verified": [
+      true,
+      true,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Light of Promise",
+      "Daybreak Coronet",
+      "Battle Mastery"
+     ],
+     "needs": "+2 power source",
+     "note": "Lifegain doubling = effective triple strike lethal",
+     "verified": [
+      false,
+      true,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Aetherflux Reservoir",
+      "Flickering Ward",
+      "Cloudstone Curio"
+     ],
+     "needs": "",
+     "note": "Commander-independent kill through attack locks",
+     "verified": [
+      true,
+      true,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Walking Ballista",
+      "Cloudstone Curio",
+      "Light of Promise",
+      "Daybreak Coronet"
+     ],
+     "needs": "3-mana aura to start; maybeboard line",
+     "note": "Ballista survives at 0 counters (Coronet pump)",
+     "verified": [
+      false,
+      false,
+      false,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Hallowed Haunting",
+      "Flickering Ward",
+      "Serra's Sanctum"
+     ],
+     "needs": "",
+     "note": "No-commander aggro plan",
+     "verified": [
+      false,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "White spot removal (the 'bane')",
+    "Commander lockout (Darksteel Mutation-style) \u2014 answered by listed no-commander plans",
+    "Opposition Agent ('our nemesis')"
+   ],
+   "key_cards": [
+    {
+     "card": "Light-Paws, Emperor's Voice",
+     "in_mainboard": false
+    },
+    {
+     "card": "Sage's Reverie",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ethereal Armor",
+     "in_mainboard": true
+    },
+    {
+     "card": "All That Glitters",
+     "in_mainboard": true
+    },
+    {
+     "card": "Flickering Ward",
+     "in_mainboard": true
+    },
+    {
+     "card": "Cloudstone Curio",
+     "in_mainboard": false
+    },
+    {
+     "card": "Serra's Sanctum",
+     "in_mainboard": true
+    },
+    {
+     "card": "Scroll Rack",
+     "in_mainboard": false
+    },
+    {
+     "card": "Land Tax",
+     "in_mainboard": true
+    },
+    {
+     "card": "Pariah",
+     "in_mainboard": false
+    },
+    {
+     "card": "Sigarda's Aid",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "fast mana",
+     "in": "Transcendent Envoy / Hero of Iroas",
+     "reason": "$150 build exists; also the power-down lever"
+    }
+   ],
+   "heuristics": [
+    "Tutor-toolbox curve design: put ANSWERS at low MV (fetchable by everything) and PAYOFFS at the MV that itself tutors best.",
+    "'<= MV' tutors make every cheap card a virtual copy of the best card at its cost \u2014 evaluate slots as classes, not names.",
+    "Write the threat->response table into the primer; piloting IS the lookup.",
+    "House-rule dials (cascade-X tutoring) can retune a too-strong commander without deck surgery."
+   ],
+   "name": "Earn Your 9th Tail: Light-Paws EDH [PRIMER]",
+   "url": "https://moxfield.com/decks/b7JEv8j9d06-BicRKi2Lwg",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--musashi-s-mosh-pit-primer-tags",
+   "commanders": [
+    "Isshin, Two Heavens as One"
+   ],
+   "color_identity": "WBR",
+   "archetype": "Mardu attack-trigger tokens",
+   "bracket": "casual-tuned",
+   "gameplan": "Double attack triggers into token swarms + group slug, keep the curve low to rebuild after wipes, and hold 1 board-protection effect at all times.",
+   "construction": {
+    "keep_rules": "Adaptive keeps: vs token mirrors keep removal+ramp+1 producer; vs spellslingers keep more creatures+anthem; ALWAYS want >=1 protection (Teferi's Pro, Dolmen Gate, Clever Concealment).",
+    "curve": "Low curve on purpose: outpace early aggro, rebuild fast after wipes, hold cheap interaction.",
+    "group_slug": "Impact Tremors/Warleader's Call/Mishra take pressure off combat as the only damage source.",
+    "categories": "Offense 'Katana' (token producers/painful slices/anthems) vs Defense 'Wakizashi' (protection) \u2014 role-tagged list.",
+    "variant_map": "Documented alternate Isshin routes with card pools: exalted/equipment, curses, goad, monarch, forced combat + payoffs (Blood Artist etc.), rattlesnakes."
+   },
+   "mulligan": {
+    "keep": [
+     "See adaptive rules \u2014 read the table's commanders first"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Attack the path of least resistance (fewest/smallest bodies, tapped players)",
+    "Role check: if the most aggressive deck at the table, lean in; if a second token deck exists, slow-roll until removal is spent",
+    "With Florian, play lands/spells AFTER combat (bigger impulse pile)"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Impact Tremors",
+      "Warleader's Call",
+      "Adeline, Resplendent Cathar"
+     ],
+     "needs": "Doubled triggers + wide board",
+     "note": "Slug + combat hybrid rather than discrete combo",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Board wipes (hence the standing protection rule)",
+    "Removal-dense tables (slow-roll doctrine)"
+   ],
+   "key_cards": [
+    {
+     "card": "Isshin, Two Heavens as One",
+     "in_mainboard": false
+    },
+    {
+     "card": "Adeline, Resplendent Cathar",
+     "in_mainboard": true
+    },
+    {
+     "card": "Anim Pakal, Thousandth Moon",
+     "in_mainboard": true
+    },
+    {
+     "card": "Professional Face-Breaker",
+     "in_mainboard": true
+    },
+    {
+     "card": "Skullclamp",
+     "in_mainboard": true
+    },
+    {
+     "card": "Reconnaissance",
+     "in_mainboard": true
+    },
+    {
+     "card": "Dolmen Gate",
+     "in_mainboard": true
+    },
+    {
+     "card": "Breena, the Demagogue",
+     "in_mainboard": true
+    },
+    {
+     "card": "Purphoros, God of the Forge",
+     "in_mainboard": false
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Teferi's Protection",
+     "in": "Guardian of Faith",
+     "reason": "Named budget stand-in"
+    }
+   ],
+   "heuristics": [
+    "Card diary evals: Sword of the Animist = 4 total mana + telegraphed; Phyrexian Arena fails on PACING (competes with the T2-4 curve, clunky after); prefer a T2 creature over a mana rock when the deck rarely screws; Fireflux Squad = boom/bust cut for consistency.",
+    "Exile-based removal preferred in graveyard metas; make wipes as asymmetric as possible.",
+    "Reconnaissance = pseudo-vigilance + damage-free retreat; know your format's judge-tumblr tech."
+   ],
+   "name": "Musashi's Mosh Pit [Primer|Tags]",
+   "url": "https://moxfield.com/decks/emVL8CgjCk2mwuUjajPk8g",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--jurassic-park-a-new-world-fear",
+   "commanders": [
+    "Gishath, Sun's Avatar"
+   ],
+   "color_identity": "WRG",
+   "archetype": "ETB dinosaur kindred",
+   "bracket": "3",
+   "gameplan": "Ramp hard to an early Gishath, cheat ETB dinosaurs off combat hits, protect the board post-deploy, and finish with overruns.",
+   "construction": {
+    "etb_doctrine": "Cut the entire Enrage package: cheated-in dinos must pay off IMMEDIATELY (Enrage needs enablers, dropping Gishath's efficiency). Evaluate every creature by its value when put into play off the trigger (Carnage Tyrant's protection is irrelevant there; Wakening Sun's Avatar must be hardcast for its ETB).",
+    "ramp_rule": "Land ramp > rocks (removal resilience): Farseek/Three Visits/Skyshroud over Signet/Lantern; repeated changelog swaps in that direction; cost reducers (Incubator, Herald's Horn) rejected \u2014 'we're only looking to cast Gishath'.",
+    "commander_choice": "Gishath vs Atla (needs setup, doesn't care about dinos) vs Zacama (3 more mana, disruption-focused) vs Pantlaza (viable alternative) \u2014 pick the widest color + strongest tribal engine."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Use removal and board wipes EARLY, before Gishath (slow deck; wipes hurt you more later)",
+    "Post-Gishath, pivot fully to protection \u2014 free spells (Deflecting Swat, Flawless Maneuver) because you're always tapped out",
+    "Expect held removal when a late commander lands"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Savage Beating"
+     ],
+     "needs": "Entwine for double strike + extra combat",
+     "note": "",
+     "verified": [
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Finale of Devastation"
+     ],
+     "needs": "Big X",
+     "note": "Backup sink; combos exiled to a separate Itzquinth deck (bracket discipline)",
+     "verified": [
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Akroma's Will"
+     ],
+     "needs": "Wide dino board",
+     "note": "",
+     "verified": [
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Total commander reliance (extra ramp+protection quotas)",
+    "Board wipes (slow rebuild)",
+    "Linear/telegraphed"
+   ],
+   "key_cards": [
+    {
+     "card": "Gishath, Sun's Avatar",
+     "in_mainboard": false
+    },
+    {
+     "card": "The Skullspore Nexus",
+     "in_mainboard": true
+    },
+    {
+     "card": "Scroll Rack",
+     "in_mainboard": true
+    },
+    {
+     "card": "Kinjalli's Sunwing",
+     "in_mainboard": true
+    },
+    {
+     "card": "Goring Ceratops",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ghalta, Stampede Tyrant",
+     "in_mainboard": true
+    },
+    {
+     "card": "Pantlaza, Sun-Favored",
+     "in_mainboard": true
+    },
+    {
+     "card": "Lurking Predators",
+     "in_mainboard": true
+    },
+    {
+     "card": "Mirari's Wake",
+     "in_mainboard": true
+    },
+    {
+     "card": "Sylvan Library",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Delighted Halfling",
+     "in": "Birds of Paradise / Llanowar Elves",
+     "reason": "Creature ramp preserved"
+    },
+    {
+     "out": "Finale of Devastation",
+     "in": "Overwhelming Stampede",
+     "reason": "Overrun slot"
+    },
+    {
+     "out": "Deflecting Swat",
+     "in": "Bolt Bend / Not of This World",
+     "reason": "'I view this slot as protection for Gishath' \u2014 function-slot swap"
+    },
+    {
+     "out": "Teferi's Protection",
+     "in": "Unbreakable Formation",
+     "reason": ""
+    },
+    {
+     "out": "Cavern of Souls",
+     "in": "Secluded Courtyard",
+     "reason": ""
+    },
+    {
+     "out": "fetches",
+     "in": "Evolving Wilds / Terramorphic / Myriad Landscape",
+     "reason": ""
+    }
+   ],
+   "heuristics": [
+    "Cheat-into-play engines re-price the tribe: ETB text is the only text that always fires.",
+    "Cost reduction is dead weight when the commander is the only expensive cast.",
+    "Kinjalli's Sunwing-style taxes redirect attacks while you set up \u2014 deterrence as protection.",
+    "Scroll Rack converts a clogged fatty hand into trigger fuel \u2014 hand-to-library recycling suits topdeck-cheat commanders."
+   ],
+   "name": "Jurassic Park A New World...Fear",
+   "url": "https://moxfield.com/decks/Wwcu34oIU0CQWFHGty_lKQ",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--cedh-urza-poly-kraken-primer",
+   "commanders": [
+    "Urza, Lord High Artificer"
+   ],
+   "color_identity": "U",
+   "archetype": "cEDH midrange combo (Polymorph package)",
+   "bracket": "cEDH",
+   "gameplan": "Ramp rocks into T2-3 Urza + a draw engine, interact cheaply, then make infinite mana (Hullbreaker/Scepter/Power Artifact) and win through library access with zero dedicated wincons.",
+   "construction": {
+    "variant_tradeoffs": "Stax builds get outvalued late and lose to compact combos; Storm builds are glass cannons with bad mulligans (disjointed low-quality pieces); Midrange has card quality but tutors don't convert to wins; POLY adds a compact cheat package at the cost of running NO other creatures (Polymorph must hit Hullbreaker/Tyrant).",
+    "lands": "27-28 lands; utility-land rule: a nonbasic must produce >1 mana or carry utility worth the blue-screw risk; slot as many as possible without compromising production.",
+    "rocks": "0-cost artifacts are mana-POSITIVE with Urza; 1-cost neutral; 2-MV rocks are bad after Urza but buy density for explosive starts; Mox Amber roast: any 0-drop does the same job with more utility; LED excluded (draw-poor deck, no yard plan).",
+    "interaction": "'The difference between free interaction and 1-mana interaction is infinitely large' \u2014 0-1 MV counters are online the turn Urza taps out; protective > disruptive in proactive builds.",
+    "wincon_philosophy": "No dedicated wincon: infinite mana + full library access presents wins from playable cards \u2014 minimizes dead slots (Oracle/Lab Man 'dead as f***' and illegal in Poly shells anyway)."
+   },
+   "mulligan": {
+    "keep": [
+     "Mana + tutor->engine + interaction (3 worked examples: Vault->Tezzeret->One Ring; Sol Ring+Prized Statue->Reshape; Gemstone opener into T1 One Ring)"
+    ],
+    "mull": [
+     "Mana-flooded no-payoff hands",
+     "Board-presence-but-2-cards-left hands ('topdeck-mode table police')",
+     "Engines with no draw behind them"
+    ]
+   },
+   "sequencing": [
+    "T1-3: draw engine + 4-mana threshold + stop early wins",
+    "T4-6: strongest window \u2014 set up INSTANT-SPEED wins off one tutor",
+    "T7+: 'borderline impossible to lose' \u2014 grind, lock with Borne Upon a Wind + Hullbreaker, force the draw if needed"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Polymorph",
+      "Hullbreaker Horror"
+     ],
+     "needs": "Construct token target; 2 artifacts that together net mana",
+     "note": "Bounce-recast artifact loop = infinite mana; Proteus Staff redundant",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Isochron Scepter",
+      "Dramatic Reversal"
+     ],
+     "needs": "3+ rock mana",
+     "note": "+ The One Ring = infinite draw",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Grim Monolith",
+      "Power Artifact"
+     ],
+     "needs": "",
+     "note": "Basalt variant too",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Basalt Monolith",
+      "Rings of Brighthearth"
+     ],
+     "needs": "",
+     "note": "",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Codex Shredder",
+      "Rings of Brighthearth"
+     ],
+     "needs": "Infinite mana",
+     "note": "Loop any spell; mill table + Windfall to close",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Proteus Staff"
+     ],
+     "needs": "Hullbreaker NOT in library; target Urza",
+     "note": "100-card Doomsday: stack the entire library, build Brainstorm piles",
+     "verified": [
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Mono-color card pool (no unconditional tutors, weak 1-drops)",
+    "Fast Naus-Oracle metas",
+    "Overestimated reputation draws hate"
+   ],
+   "key_cards": [
+    {
+     "card": "Urza, Lord High Artificer",
+     "in_mainboard": false
+    },
+    {
+     "card": "The One Ring",
+     "in_mainboard": true
+    },
+    {
+     "card": "Hullbreaker Horror",
+     "in_mainboard": true
+    },
+    {
+     "card": "Polymorph",
+     "in_mainboard": true
+    },
+    {
+     "card": "Proteus Staff",
+     "in_mainboard": true
+    },
+    {
+     "card": "Isochron Scepter",
+     "in_mainboard": true
+    },
+    {
+     "card": "Dramatic Reversal",
+     "in_mainboard": true
+    },
+    {
+     "card": "Power Artifact",
+     "in_mainboard": true
+    },
+    {
+     "card": "Grim Monolith",
+     "in_mainboard": true
+    },
+    {
+     "card": "Rings of Brighthearth",
+     "in_mainboard": true
+    },
+    {
+     "card": "Mystic Remora",
+     "in_mainboard": true
+    },
+    {
+     "card": "Rhystic Study",
+     "in_mainboard": true
+    },
+    {
+     "card": "Urza's Saga",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Polymorph shells impose a creature-count constraint on the whole 99 \u2014 one package can dictate deck legality rules.",
+    "Teach mulligans with paired GOOD/BAD example hands and the exact line each enables.",
+    "Cutting disjointed combo pieces for ENGINES improved mulligans \u2014 combo density has a hand-quality cost.",
+    "Self-target Proteus Staff = full library stacking; know your commander's degenerate self-interactions."
+   ],
+   "name": "[cEDH] Urza Poly Kraken [Primer]",
+   "url": "https://moxfield.com/decks/kes83-onUU6X_H-RyM8HPw",
+   "source": "moxfield"
+  },
+  {
+   "id": "mox--25-budget-my-dog-and-i-voltron",
+   "commanders": [
+    "Pako, Arcane Retriever",
+    "Haldan, Avid Arcanist"
+   ],
+   "color_identity": "URG",
+   "archetype": "$25 budget commander-damage voltron",
+   "bracket": "budget casual (5 years of iteration)",
+   "gameplan": "Ritual Pako out on T3-4, protect him with instant-speed modal spells, clear enemy boards with Pako-sparing wipes, and kill via commander damage.",
+   "construction": {
+    "ramp_rule": "With a 5-MV commander, 3-mana ramp-for-a-tapped-basic 'is NOT where this deck wants to be' \u2014 rituals (Generator Servant, Wild Growth, Satyr Hedonist, Reckless Barbarian) and 2-mana-for-Pako dorks (Smokebraider, Flamebraider) enable T3 Pako; Pentad Prism bridges.",
+    "lands_rule": "Untapped > tapped even at $25: systematic guildgate/gainland -> painland/checkland/snarl swaps across the changelog.",
+    "aura_rule": "Auras disliked (2-for-1 when Pako dies); shroud anti-synergizes with own targeted pumps \u2014 prefer one-shot instant protection/evasion and modal spells.",
+    "wipe_pivot": "Big 2026 shift: token production OUT, Pako-sparing board wipes IN (Chain Reaction, Consuming Tide, Storm's Wrath) \u2014 'hitting many enemy targets while Pako stays is more effective than tokens'.",
+    "dead_card_rule": "Commander-dependent cards are dead draws without him (Miming Slime, Soul's Fire, fight spells) \u2014 every slot must function standalone."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Mind marked combat damage on Pako before casting Chain Reaction in main 2"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Pako, Arcane Retriever"
+     ],
+     "needs": "Evasion/pump (Sidequest: Play Blitzball double strike, Invigorating Surge) + protection held",
+     "note": "21 commander damage; Last Night Together as a finisher when evasive",
+     "verified": [
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Commander removal (deep protection suite as answer)",
+    "Budget mana"
+   ],
+   "key_cards": [
+    {
+     "card": "Pako, Arcane Retriever",
+     "in_mainboard": false
+    },
+    {
+     "card": "Haldan, Avid Arcanist",
+     "in_mainboard": false
+    },
+    {
+     "card": "Generator Servant",
+     "in_mainboard": true
+    },
+    {
+     "card": "Smokebraider",
+     "in_mainboard": true
+    },
+    {
+     "card": "Doc Aurlock, Grizzled Genius",
+     "in_mainboard": true
+    },
+    {
+     "card": "Chain Reaction",
+     "in_mainboard": true
+    },
+    {
+     "card": "Consuming Tide",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "price-spiked cards",
+     "in": "function-equivalent cheap cards",
+     "reason": "Every changelog entry names function preserved: Kediss->K-9->Water Wings (protection/evasion), Kalamax->Niblis of Frost (evasion), Faldorn->Lost and the Damned (tokens)"
+    }
+   ],
+   "heuristics": [
+    "A dated per-swap changelog with one-line reasons is the best training data an iterating builder can produce.",
+    "Ramp speed must be denominated in commander-turns: count 'can this hand cast the commander a turn earlier?'",
+    "Protection > one-shot pump for voltron longevity; modal spells stretch tight budget slots."
+   ],
+   "name": "[$25 Budget] My Dog and I (Voltron)",
+   "url": "https://moxfield.com/decks/AZKbE6E6kUWW2zMfHR41sQ",
+   "source": "moxfield"
+  },
+  {
+   "id": "arch--queergating",
+   "commanders": [
+    "Kynaios and Tiro of Meletis"
+   ],
+   "color_identity": "WURG",
+   "archetype": "Maze's End gates (alt-wincon lands)",
+   "bracket": "casual with listed power dials",
+   "gameplan": "Play multiple gates per turn (commander + extra-land effects), tutor gates to the battlefield, and win by activating Maze's End with 9 gates in play.",
+   "construction": {
+    "gate_priority": "Green-producing gates first (pip weight), then W/U by hand; Gond Gate is the #1 tutor target \u2014 battlefield gate tutors all enter untapped under it.",
+    "tutor_tiering": "Battlefield land tutors (Hour of Promise, Explore the Underdark, Circuitous Route, Reshape the Earth) > to-hand tutors (Expedition Map, Nylea's Intervention); creature tutors with bodies (Ulvenwald Hydra, Sowing Mycospawn) sit between.",
+    "threat_perception": "Pillowfort pieces draw MORE heat than 'just playing lands' \u2014 defense budget deliberately near zero."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": [
+     "Marit Lage fast-hands are traps: losing 2 lands + the token to removal is a massive hit"
+    ]
+   },
+   "sequencing": [
+    "Maze's End only needs 9 gates ON ACTIVATION (it fetches the 10th before checking)",
+    "Hold activation for the end step before your turn; bounce-to-hand is part of the cost so it dodges land destruction",
+    "Nylea's Intervention for (land drops available + 1) lands"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Maze's End",
+      "Gond Gate"
+     ],
+     "needs": "9 gates at activation",
+     "note": "Primary",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Thespian's Stage",
+      "Dark Depths"
+     ],
+     "needs": "",
+     "note": "Backup if Maze's End is exiled; recur lands freely",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Mirran Safehouse"
+     ],
+     "needs": "Maze's End in yard",
+     "note": "Cheeky recursion win",
+     "verified": [
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Reshape the Earth",
+      "Gond Gate"
+     ],
+     "needs": "9 mana",
+     "note": "Instant 10 gates = win",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Blood Moon ('probably cry')",
+    "Bojuka Bog on the yard plan"
+   ],
+   "key_cards": [
+    {
+     "card": "Maze's End",
+     "in_mainboard": true
+    },
+    {
+     "card": "Gond Gate",
+     "in_mainboard": true
+    },
+    {
+     "card": "Baldur's Gate",
+     "in_mainboard": true
+    },
+    {
+     "card": "Basilisk Gate",
+     "in_mainboard": true
+    },
+    {
+     "card": "Talon Gates of Madara",
+     "in_mainboard": true
+    },
+    {
+     "card": "Icetill Explorer",
+     "in_mainboard": true
+    },
+    {
+     "card": "Tiller Engine",
+     "in_mainboard": true
+    },
+    {
+     "card": "Spelunking",
+     "in_mainboard": true
+    },
+    {
+     "card": "Hour of Promise",
+     "in_mainboard": true
+    },
+    {
+     "card": "Circuitous Route",
+     "in_mainboard": true
+    },
+    {
+     "card": "Nylea's Intervention",
+     "in_mainboard": true
+    },
+    {
+     "card": "Scapeshift",
+     "in_mainboard": false
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Alt-wincons that live in the land slot dodge most interaction budgets.",
+    "Count activation-time requirements, not board-time (9 vs 10 gates).",
+    "Threat perception is a build resource: boring-looking plans buy real turns."
+   ],
+   "name": "Queergating",
+   "url": "https://archidekt.com/decks/4690866",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--uro-high-power-landfall-madness",
+   "commanders": [
+    "Uro, Titan of Nature's Wrath"
+   ],
+   "color_identity": "UG",
+   "archetype": "landfall value",
+   "bracket": "high 4, no instant-win combos by choice",
+   "gameplan": "Recast Uro repeatedly for ramp/draw/life, stack landfall engines, win by overwhelming value or Finale/Avenger/Craterhoof swings.",
+   "construction": {
+    "bounce_tech": "You'll rarely escape Uro \u2014 bounce him instead (Crystal Shard, Portal of Sanctuary, Erratic Portal) to dodge the sacrifice and rebuy the ETB."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [],
+   "win_lines": [
+    {
+     "cards": [
+      "Finale of Devastation",
+      "Avenger of Zendikar"
+     ],
+     "needs": "Big X",
+     "note": "",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Craterhoof Behemoth"
+     ],
+     "needs": "Wide board (Scute Swarm)",
+     "note": "",
+     "verified": [
+      true
+     ]
+    }
+   ],
+   "weaknesses": [],
+   "key_cards": [
+    {
+     "card": "Uro, Titan of Nature's Wrath",
+     "in_mainboard": false
+    },
+    {
+     "card": "Crystal Shard",
+     "in_mainboard": true
+    },
+    {
+     "card": "Scute Swarm",
+     "in_mainboard": true
+    },
+    {
+     "card": "Managorger Hydra",
+     "in_mainboard": false
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Self-bounce beats escape for sacrifice-on-ETB commanders: pay 1-3 mana to reset instead of exiling your yard."
+   ],
+   "name": "Uro - High Power - Landfall madness",
+   "url": "https://archidekt.com/decks/6306190",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--kibo-unga-bunga-cowabunga",
+   "commanders": [
+    "Kibo, Uktabi Prince"
+   ],
+   "color_identity": "RG",
+   "archetype": "gift-then-punish ape aggro",
+   "bracket": "casual",
+   "gameplan": "Feed opponents bananas/treasures to inflate their artifact counts, blow them all up one-sidedly, and swing with +1/+1-stacked apes given evasion.",
+   "construction": {
+    "own_artifacts_low": "Deck's own artifact count deliberately low so Meltdown/Vandalblast are one-sided; Descent into Avernus/Jolene/Pain Distributor accelerate the gifting."
+   },
+   "mulligan": {
+    "keep": [
+     "T1 dork (Llanowar/Birds/Halfling/Ragavan/Spirit Guide) for T2 Kibo \u2014 mulligan for it"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Make bananas for a few turns before the punish turn",
+    "Hold Heroic Intervention/Wrap in Vigor mana once the troop is built \u2014 'a wipe is devastating'; Deflecting Swat valued for costing nothing"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Meltdown",
+      "Kibo, Uktabi Prince"
+     ],
+     "needs": "Opponents holding gifted artifacts",
+     "note": "Vandalblast redundancy; counters land on apes, evasion via Kodama of the West Tree/Rogue's Passage",
+     "verified": [
+      true,
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Board wipes after committing",
+    "Kibo 'draws a lot of hate'"
+   ],
+   "key_cards": [
+    {
+     "card": "Kibo, Uktabi Prince",
+     "in_mainboard": false
+    },
+    {
+     "card": "Meltdown",
+     "in_mainboard": true
+    },
+    {
+     "card": "Vandalblast",
+     "in_mainboard": true
+    },
+    {
+     "card": "Descent into Avernus",
+     "in_mainboard": true
+    },
+    {
+     "card": "Viridian Revel",
+     "in_mainboard": true
+    },
+    {
+     "card": "Kodama of the West Tree",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Gifting is a setup cost for asymmetric destruction \u2014 track the table's artifact delta as your combo counter."
+   ],
+   "name": "Kibo UNGA BUNGA COWABUNGA",
+   "url": "https://archidekt.com/decks/10527215",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--captain-america-beatdown",
+   "commanders": [
+    "Captain America, First Avenger"
+   ],
+   "color_identity": "WUR",
+   "archetype": "equipment voltron",
+   "bracket": "4 (stat block: fastest kill T2, table kill T3, typical window T3-5, zero infinite combos)",
+   "gameplan": "Deploy Cap fast, stack Colossus Hammer/Excalibur, double the damage, and one-shot the player most able to stop you.",
+   "construction": {
+    "kill_math": "Add 7 to Cap's power, then DOUBLE it: 'any Voltron deck fails when it has to attack each player twice'. Colossus Hammer/Excalibur are the default tutor targets.",
+    "catch_tech": "Cap's catch bypasses equip costs and shroud friction \u2014 the classic voltron tax."
+   },
+   "mulligan": {
+    "keep": [
+     "2 lands + a 2-mana rock",
+     "3 lands",
+     "A fast-mana Cap line",
+     "An equipment tutor",
+     "An early draw engine",
+     "1+ threat or protection piece"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Be 'the bad guy': eliminate the single biggest threat TO YOUR PLAN first; never spread damage",
+    "Throw-equip loops: free equips + throw + re-equip (Serum returns on blocks too, stacks with Sunforger)",
+    "Don't overcommit equipment past the kill ceiling",
+    "Games are fast: save premium interaction to protect YOUR win, not to police theirs"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Colossus Hammer",
+      "Mj\u00f6lnir, Hammer of Thor"
+     ],
+     "needs": "Mj\u00f6lnir doubles ALL damage Cap deals, not just combat \u2014 a thrown Excalibur hits for 24",
+     "note": "",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Kediss, Emberclaw Familiar",
+      "Mj\u00f6lnir, Hammer of Thor"
+     ],
+     "needs": "",
+     "note": "Double to one player, replicate to the rest = table wipe",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Chandra's Ignition"
+     ],
+     "needs": "Big Cap",
+     "note": "Stalled-board table nuke",
+     "verified": [
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Removal (the one true voltron weakness)"
+   ],
+   "key_cards": [
+    {
+     "card": "Captain America, First Avenger",
+     "in_mainboard": false
+    },
+    {
+     "card": "Colossus Hammer",
+     "in_mainboard": true
+    },
+    {
+     "card": "Mj\u00f6lnir, Hammer of Thor",
+     "in_mainboard": true
+    },
+    {
+     "card": "Kediss, Emberclaw Familiar",
+     "in_mainboard": true
+    },
+    {
+     "card": "Sunforger",
+     "in_mainboard": true
+    },
+    {
+     "card": "Chandra's Ignition",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Ship a stat block (kill window, PL, combo count) at the top of every primer \u2014 it sets table expectations instantly.",
+    "Voltron target selection = the player with the answers, not the player with the life."
+   ],
+   "name": "Captain America Beatdown",
+   "url": "https://archidekt.com/decks/10593809",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--discounted-smacks",
+   "commanders": [
+    "Ghalta, Primal Hunger"
+   ],
+   "color_identity": "G",
+   "archetype": "mono-green power-ramp stompy",
+   "bracket": "casual-optimized",
+   "gameplan": "Stack high power-per-MV creatures so Ghalta costs GG on turn 4, then convert the board into card draw and overruns.",
+   "construction": {
+    "power_ramp": "'Power ramp': power-to-MV ratio IS the ramp (Managorger, Rhonas \u2014 indestructible keeps the discount through wipes, Wayward Swordtooth, 2-mana Tumbleweed Rising token).",
+    "scaling_dorks": "Selvala/Fanatic of Rhonas/Gwenna/Llanowar Tribe scale with the fatties they enable.",
+    "anti_fizzle": "Power-based draw prevents post-removal collapse: Outcaster Trailblazer, Garruk's Uprising, Spinner of Souls (a wipe becomes a fresh hand)."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Optimal curve: T1 Anthem/1-dork, T2 Fanatic/Gyre Sage, T3 Hammerskull/Rhonas (10+ total power), T4 Ghalta for GG + haste source, swing",
+    "Haste is the difference between a T4 threat and a T4 WIN (Crashing Drawbridge, Hall of the Bandit Lord)"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Ghalta, Primal Hunger",
+      "Crashing Drawbridge"
+     ],
+     "needs": "",
+     "note": "T4 12 damage",
+     "verified": [
+      false,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Pathbreaker Ibex"
+     ],
+     "needs": "Ghalta's 12 power on board",
+     "note": "Overwhelming Stampede redundancy",
+     "verified": [
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Majestic Genesis"
+     ],
+     "needs": "12-MV commander",
+     "note": "Top-12 dump",
+     "verified": [
+      false
+     ]
+    },
+    {
+     "cards": [
+      "The Skullspore Nexus"
+     ],
+     "needs": "",
+     "note": "Wipe insurance + doubler",
+     "verified": [
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Commander is a lightning rod (lean protection: Heroic Intervention, Wrap in Vigor, Saryth)"
+   ],
+   "key_cards": [
+    {
+     "card": "Ghalta, Primal Hunger",
+     "in_mainboard": false
+    },
+    {
+     "card": "Managorger Hydra",
+     "in_mainboard": true
+    },
+    {
+     "card": "Rhonas the Indomitable",
+     "in_mainboard": true
+    },
+    {
+     "card": "Selvala, Heart of the Wilds",
+     "in_mainboard": true
+    },
+    {
+     "card": "Gwenna, Eyes of Gaea",
+     "in_mainboard": true
+    },
+    {
+     "card": "Spinner of Souls",
+     "in_mainboard": true
+    },
+    {
+     "card": "Pathbreaker Ibex",
+     "in_mainboard": false
+    },
+    {
+     "card": "The Skullspore Nexus",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Treat stat-lines as mana: power-per-MV is a castable currency for cost-X commanders.",
+    "Recast math beats protection math when ramp density is high \u2014 GG + tax is trivial."
+   ],
+   "name": "Discounted Smacks",
+   "url": "https://archidekt.com/decks/15589651",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--chief-of-appliances",
+   "commanders": [
+    "Baral, Chief of Compliance"
+   ],
+   "color_identity": "U",
+   "archetype": "mono-blue tempo (not draw-go control)",
+   "bracket": "casual-competitive",
+   "gameplan": "Play for cards-in-hand, not board: arbitrate the table with conserved counterspells, land evasive beaters, then chain extra turns to close.",
+   "construction": {
+    "commander_role": "Baral = enabler/counterweight (cost reduction + loot + 1/3 blocker), NOT a finisher; the fair comparison is Sapphire Medallion, not Talrand \u2014 'thinking in ceilings not floors is a flawed mindset'.",
+    "counterspell_economics": "1-for-1s are weak vs 3 opponents: conserve, inform the table of threats, prevent wins until you take yours.",
+    "counter_rules": "Counter fast draw engines on sight (Beast Whisperer, Icetill, Necrodominance); IGNORE slow ones (Phyrexian Arena, BMC); almost never counter tutors \u2014 counter the tutored thing; ALWAYS counter Grand Abolisher/Teferi Time Raveler effects; counter hand-attack enchantments (Oppression/Painful Quandary); let Duress resolve as a mind game if you hold 2+ draw spells."
+   },
+   "mulligan": {
+    "keep": [
+     "Low curve + cantrips (Ponder/Preordain/Brainstorm save bad hands)",
+     "Any of the four 2-drop creatures",
+     "Sapphire Medallion / High Tide"
+    ],
+    "mull": [
+     "Freely to 6 or 5; hold opening tutors until the game shape is known (default grabs: Stock Up, Day's Undoing, Flow of Knowledge)"
+    ]
+   },
+   "sequencing": [
+    "Commander-as-bait: if they spend 2+ spells on Baral, let him die and NEVER recast at 4 \u2014 he's Azcanta food",
+    "Hold wraths until opponents overcommit; hold extra turns until they convert damage (floor = an extra land)",
+    "Thing in the Ice at 1 counter + Day's Undoing = wipe AND shuffle-away; Windfall is the ANTI-synergy (fills their yards and hands post-bounce) \u2014 cut for that reason",
+    "Day's Undoing ends your turn: keep mana up after; fake-tutoring it makes opponents dump hands"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Psychosis Crawler",
+      "Flow of Knowledge"
+     ],
+     "needs": "Big draw at instant speed",
+     "note": "Alpha strike from hand size",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Stormtide Leviathan",
+      "Time Warp"
+     ],
+     "needs": "Chain extra turns with evasive beaters (Hullbreaker, Guile, Sphinx of the Second Sun)",
+     "note": "",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Thing in the Ice // Awoken Horror",
+      "Day's Undoing"
+     ],
+     "needs": "1 counter left",
+     "note": "Board wipe into fresh threats",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Defense Grid / Teferi-3 (pivot to sorcery-speed proactive mode and pitch counters)",
+    "Own life total as clock with pain lands (deliberately avoided)"
+   ],
+   "key_cards": [
+    {
+     "card": "Baral, Chief of Compliance",
+     "in_mainboard": false
+    },
+    {
+     "card": "Thing in the Ice // Awoken Horror",
+     "in_mainboard": true
+    },
+    {
+     "card": "Day's Undoing",
+     "in_mainboard": true
+    },
+    {
+     "card": "Commandeer",
+     "in_mainboard": true
+    },
+    {
+     "card": "Psychosis Crawler",
+     "in_mainboard": true
+    },
+    {
+     "card": "Duelist of the Mind",
+     "in_mainboard": true
+    },
+    {
+     "card": "Haughty Djinn",
+     "in_mainboard": true
+    },
+    {
+     "card": "Mystic Sanctuary",
+     "in_mainboard": true
+    },
+    {
+     "card": "High Tide",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Evaluate commanders by FLOOR and role (enabler vs finisher); 2 vs 4 mana is the real comparison axis.",
+    "'Infinite mana is worthless with no cards' \u2014 attack hands, ignore ramp, in control mirrors of multiplayer.",
+    "Mind-game inventory: revealed tutors, held Commandeer, fake wheels \u2014 information is a playable resource.",
+    "Mono-color decks are budget + pedagogy: cheapest mana base, deepest lesson in one color's toolkit."
+   ],
+   "name": "~Chief of Appliances \ud83d\udc77\u200d\u2640\ufe0f\ud83e\uddf0~",
+   "url": "https://archidekt.com/decks/15951751",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--janitor-girl-wiping-boards-drawing-cards",
+   "commanders": [
+    "Massacre Girl, Known Killer"
+   ],
+   "color_identity": "B",
+   "archetype": "mono-black -X/-X reanimator",
+   "bracket": "casual-strong",
+   "gameplan": "Fill the yard via discard/connive/cleanup, wipe with -X/-X (ignores indestructible) while Massacre Girl converts every death into a draw, then loop Gray Merchant/Kokusho drains.",
+   "construction": {
+    "disguise": "'She's not seen as a Reanimator pre-game' \u2014 archetype camouflage buys setup turns; wither deters attacks."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Mill players are target #1 'until they're dead'",
+    "Cleanup-step discard is a free yard-filler"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Razaketh, the Foulblooded",
+      "Gray Merchant of Asphodel"
+     ],
+     "needs": "Mana + bodies to sac",
+     "note": "Sac Gary -> tutor reanimation -> rebuy -> drain, repeat",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Buried Alive",
+      "Metamorphosis Fanatic",
+      "Hoarding Broodlord",
+      "Vilis, Broker of Blood"
+     ],
+     "needs": "One non-Reanimate reanimation spell",
+     "note": "Fanatic chains Broodlord, Broodlord finds Reanimate, Vilis draws 8",
+     "verified": [
+      true,
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Entomb",
+      "Reanimate",
+      "Vilis, Broker of Blood"
+     ],
+     "needs": "",
+     "note": "T1-2 with Dark Ritual",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Torment of Hailfire",
+      "Cabal Coffers",
+      "Urborg, Tomb of Yawgmoth"
+     ],
+     "needs": "Big mana (+Nykthos)",
+     "note": "",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Graveyard hate",
+    "Mill"
+   ],
+   "key_cards": [
+    {
+     "card": "Massacre Girl, Known Killer",
+     "in_mainboard": false
+    },
+    {
+     "card": "Gray Merchant of Asphodel",
+     "in_mainboard": true
+    },
+    {
+     "card": "Kokusho, the Evening Star",
+     "in_mainboard": true
+    },
+    {
+     "card": "Buried Alive",
+     "in_mainboard": true
+    },
+    {
+     "card": "Vilis, Broker of Blood",
+     "in_mainboard": true
+    },
+    {
+     "card": "Cabal Coffers",
+     "in_mainboard": true
+    },
+    {
+     "card": "Torment of Hailfire",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "-X/-X sweepers dodge indestructible AND feed a draw commander \u2014 pick wipes your commander monetizes.",
+    "Buried Alive piles should chain tutors into payoffs, not just dump three fatties."
+   ],
+   "name": "Janitor Girl - Wiping Boards, Drawing Cards (Massacre Girl, Known Killer)",
+   "url": "https://archidekt.com/decks/17683230",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--kratos",
+   "commanders": [
+    "Kratos, God of War"
+   ],
+   "color_identity": "RG",
+   "archetype": "forced combat / goad",
+   "bracket": "casual",
+   "gameplan": "Give everyone haste, force the table to attack (or burn them for holding back), goad blockers away, and win on combat math you control.",
+   "construction": {},
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [],
+   "win_lines": [
+    {
+     "cards": [
+      "Kratos, God of War",
+      "Disrupt Decorum"
+     ],
+     "needs": "Forced-combat suite (Grand Melee, War's Toll, Goblin Spymaster)",
+     "note": "End-step damage punishes non-attackers",
+     "verified": [
+      false,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Boards that profit from being attacked"
+   ],
+   "key_cards": [
+    {
+     "card": "Kratos, God of War",
+     "in_mainboard": false
+    },
+    {
+     "card": "Disrupt Decorum",
+     "in_mainboard": true
+    },
+    {
+     "card": "War's Toll",
+     "in_mainboard": true
+    },
+    {
+     "card": "Bloodthirsty Blade",
+     "in_mainboard": true
+    },
+    {
+     "card": "Professional Face-Breaker",
+     "in_mainboard": true
+    },
+    {
+     "card": "Wheel of Fortune",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Forced combat converts opponents' creatures into your removal AND your clock; goad is the steering wheel."
+   ],
+   "name": "Kratos",
+   "url": "https://archidekt.com/decks/17797533",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--the-red-green-show-duct-tape-deck",
+   "commanders": [
+    "Alena, Kessig Trapper",
+    "Gilanra, Caller of Wirewood"
+   ],
+   "color_identity": "RG",
+   "archetype": "budget big-creature engine",
+   "bracket": "1-2 base, tuned to local 3",
+   "gameplan": "Gilanra -> Alena -> a 6+ power creature (or two) every turn, drawing off Gilanra each time; creatures ARE the removal/utility.",
+   "construction": {
+    "bulk_beef": "Bulk 6-power creatures with stapled effects replace most noncreature slots."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Get Gilanra out ASAP, then Alena, then chain 6+ power drops \u2014 'seriously, don't forget to draw from Gilanra'",
+    "Post-wipe recovery = repeat the same 3 steps ('recovers shockingly fast')",
+    "Alena has first strike \u2014 it matters"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Alena, Kessig Trapper",
+      "Gilanra, Caller of Wirewood"
+     ],
+     "needs": "Any 6+ power threats",
+     "note": "Engine, not combo",
+     "verified": [
+      false,
+      false
+     ]
+    }
+   ],
+   "weaknesses": [],
+   "key_cards": [
+    {
+     "card": "Alena, Kessig Trapper",
+     "in_mainboard": false
+    },
+    {
+     "card": "Gilanra, Caller of Wirewood",
+     "in_mainboard": false
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "When the commanders are the engine, the 99 can be pure payload \u2014 sequencing IS the deck; the opening loop doubles as the wipe-recovery loop."
+   ],
+   "name": "The Red/Green show \"Duct tape\" deck",
+   "url": "https://archidekt.com/decks/21857850",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--treebeard",
+   "commanders": [
+    "Treebeard, Gracious Host"
+   ],
+   "color_identity": "WG",
+   "archetype": "budget lifegain voltron",
+   "bracket": "holds to 3, some 4s",
+   "gameplan": "Stick Treebeard/Pridemate/Unicorn with Light of Promise-style engines, snowball power via lifegain, and two-shot players with commander damage before they read the threat.",
+   "construction": {
+    "budget_flex": "~$44 of commons beats $300 decks; Lion Umbra (totem armor) called the underrated key."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Protect the engine creature long enough to start compounding"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Treebeard, Gracious Host",
+      "Light of Promise"
+     ],
+     "needs": "Any repeatable lifegain (Twinblade Blessing, Spirit Link)",
+     "note": "200+ power documented; Ajani's Pridemate/Celestial Unicorn are backup hosts",
+     "verified": [
+      false,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Dedicated creature removal \u2014 'they have to kill Treebeard on sight'"
+   ],
+   "key_cards": [
+    {
+     "card": "Treebeard, Gracious Host",
+     "in_mainboard": false
+    },
+    {
+     "card": "Light of Promise",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ajani's Pridemate",
+     "in_mainboard": true
+    },
+    {
+     "card": "Lion Umbra",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Nobody threat-assesses a 0/5 lifegain wall \u2014 exponential engines with harmless faces steal wins."
+   ],
+   "name": "Treebeard",
+   "url": "https://archidekt.com/decks/21888050",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--teval-the-balanced-scale-v2",
+   "commanders": [
+    "Teval, the Balanced Scale"
+   ],
+   "color_identity": "UBG",
+   "archetype": "Sultai lands-graveyard combo",
+   "bracket": "3 (explicitly tuned; would need changes for 4)",
+   "gameplan": "T3 Teval, recur lands for zombie value, then assemble one of a documented family of Gravecrawler/Goldkeeper/Chasm/Woodland loops to drain or lock the table.",
+   "construction": {
+    "gc_choice": "Bracket-3 Game Changer slots argued individually: Field of the Dead + Glacial Chasm are autos; slot 3 rotates Gifts Ungiven vs Crop Rotation (testing documented with dates).",
+    "empty_lab_tech": "Keep EXACTLY 3 zombies in the 99 (Gravecrawler, Sidisi, Warren Soultrader) so Empty the Laboratory at X=3 tutors the whole combo to play; deck construction shaped around a single tutor's math.",
+    "iteration_lesson": "#1 observed weakness was interaction density on combo turns -> added counterspells + tutors-for-the-tutor (Spellseeker, Muddle)."
+   },
+   "mulligan": {
+    "keep": [
+     "1-2 mana ramp guaranteeing T3 Teval (with tri-color access)",
+     "A way to put a land in the yard before T4 (fetches; consider running more than 4)",
+     "A mill/value engine piece (Aesi, Gitrog, Overlord of the Balemurk)"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Expect Gifts Ungiven to eat a counter \u2014 play around it",
+    "Lotuslight priority picks: G = Colossal Grave Reaver/Nature's Rhythm/Aftermath Analyst; U = Uro/Kheru Goldkeeper; B = Gravecrawler/Dread Return/Bloodghast"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Gravecrawler",
+      "Phyrexian Altar",
+      "Ayara, First of Locthwain"
+     ],
+     "needs": "Another zombie",
+     "note": "Family: swap Ayara for The Meathook Massacre/Cauldron of Essence; Teval/Insidious Roots convert loops to infinite bodies; Kheru Goldkeeper converts to treasures",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Gravecrawler",
+      "Warren Soultrader",
+      "Cauldron of Essence"
+     ],
+     "needs": "Another zombie, 2+ life; Meathook does NOT work here (no life back)",
+     "note": "",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Kheru Goldkeeper",
+      "Tortured Existence"
+     ],
+     "needs": "Creature in hand + yard, B, your turn",
+     "note": "Infinite enters/leaves-yard triggers",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Glacial Chasm",
+      "Icetill Explorer"
+     ],
+     "needs": "Spare land drops",
+     "note": "Damage-lock loop; Walk-In Closet + Aesi/Gitrog variant draws through it",
+     "verified": [
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "The Gitrog Monster",
+      "Dakmor Salvage",
+      "Shifting Woodland"
+     ],
+     "needs": "8+ cards in hand at cleanup",
+     "note": "Discard-dredge loop; Woodland becomes Lab Man to win",
+     "verified": [
+      true,
+      false,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Shifting Woodland",
+      "Aftermath Analyst",
+      "Sylvan Safekeeper",
+      "Lotus Cobra"
+     ],
+     "needs": "5GGG of lands, Analyst in yard, 4 card types in yard",
+     "note": "cEDH-Lumra line; Field of the Dead or a surveil land converts it to a kill",
+     "verified": [
+      true,
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Combo turns without protection (pre-update)",
+    "Land destruction is the only out to the Chasm lock \u2014 warn newer pods"
+   ],
+   "key_cards": [
+    {
+     "card": "Teval, the Balanced Scale",
+     "in_mainboard": false
+    },
+    {
+     "card": "Gravecrawler",
+     "in_mainboard": true
+    },
+    {
+     "card": "Phyrexian Altar",
+     "in_mainboard": true
+    },
+    {
+     "card": "Kheru Goldkeeper",
+     "in_mainboard": true
+    },
+    {
+     "card": "Glacial Chasm",
+     "in_mainboard": true
+    },
+    {
+     "card": "Field of the Dead",
+     "in_mainboard": true
+    },
+    {
+     "card": "Icetill Explorer",
+     "in_mainboard": true
+    },
+    {
+     "card": "Shifting Woodland",
+     "in_mainboard": true
+    },
+    {
+     "card": "Empty the Laboratory",
+     "in_mainboard": true
+    },
+    {
+     "card": "Aftermath Analyst",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Deck-construction-as-tutor: capping a creature type's count makes X-tutors deterministic (Empty the Lab X=3).",
+    "Document combo FAMILIES with a payoff matrix (which third card converts the loop into which win).",
+    "Bracket lists force ranked Game-Changer arguments \u2014 write them down and revisit with dates."
+   ],
+   "name": "Teval, the Balanced Scale V2",
+   "url": "https://archidekt.com/decks/20998634",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--blight-curse-bayou-bash-upgraded-complet",
+   "commanders": [
+    "Auntie Ool"
+   ],
+   "color_identity": "BG",
+   "archetype": "-1/-1 counters / curses",
+   "bracket": "upgraded precon",
+   "gameplan": "Wither the board, tutor flexibly for the enchantment your matchup wants, and grind value with recursion loops.",
+   "construction": {
+    "mode_rule": "Asceticism (regenerate) and Everlasting Torment (no regen, wounds) are mutually exclusive modes \u2014 'don't overlap torment and asceticism'; plan tutors by which mode is live."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Save board wipes for when YOU need them (Kardur + Death Tyrant window)",
+    "Grief the combo/spellslinger player for info + tempo; Chimil means neither side has counterspells and your removal ignores ward"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Eternal Witness",
+      "Aberrant Return"
+     ],
+     "needs": "Witness rebuys Aberrant Return, Aberrant Return rebuys Witness; Cauldron + Pinnacle Monk recur the Return if lost",
+     "note": "Value loop; the two Blood Artist effects turn any infinite into a kill",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Hexproof boards (Glaring Spotlight/Sundering Eruption as outs)"
+   ],
+   "key_cards": [
+    {
+     "card": "Auntie Ool",
+     "in_mainboard": false
+    },
+    {
+     "card": "Asceticism",
+     "in_mainboard": true
+    },
+    {
+     "card": "Everlasting Torment",
+     "in_mainboard": true
+    },
+    {
+     "card": "Grief",
+     "in_mainboard": false
+    },
+    {
+     "card": "Dimir House Guard",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Wickersmith Tools",
+     "in": "Arcane Signet",
+     "reason": "post-ban replacement note"
+    }
+   ],
+   "heuristics": [
+    "When two engine enchantments conflict, define MODES and teach tutor decisions per mode."
+   ],
+   "name": "Blight curse bayou bash Upgraded (completed)",
+   "url": "https://archidekt.com/decks/23005347",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--i-connive-in-my-free-time",
+   "commanders": [
+    "Raffine, Scheming Seer"
+   ],
+   "color_identity": "WUB",
+   "archetype": "MV<=3 unearth-reanimator tempo",
+   "bracket": "budget-conscious",
+   "gameplan": "Connive freely because every discarded creature costs <=3 to rebuy with Unearth-style effects; beat down with counter-stacked evasive threats.",
+   "construction": {
+    "constraint": "Creature suite capped at MV<=3 so connive discards are always recoverable \u2014 the discard cost of the commander shaped the whole curve.",
+    "hidden_commander": "Abhorrent Oculus is the flagship: reanimation ignores the extra cost, evasion + manifests feed Raffine \u2014 'a 1 mana 5/5 flyer'."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Hunted Horror politics: pact with the centaur-recipient = 13 power/toughness for 2 mana, 'strictly beneficial for both' \u2014 rare honest deal"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Champions from Beyond",
+      "Skyhunter Strike Force",
+      "Practiced Offense"
+     ],
+     "needs": "Wide connived board",
+     "note": "Anthem stack finishers; Satoru + Oculus draw engine",
+     "verified": [
+      true,
+      false,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Empty-hand states if discards are careless"
+   ],
+   "key_cards": [
+    {
+     "card": "Raffine, Scheming Seer",
+     "in_mainboard": false
+    },
+    {
+     "card": "Abhorrent Oculus",
+     "in_mainboard": true
+    },
+    {
+     "card": "Satoru, the Infiltrator",
+     "in_mainboard": true
+    },
+    {
+     "card": "Hunted Horror",
+     "in_mainboard": true
+    },
+    {
+     "card": "Waterbender Ascension",
+     "in_mainboard": true
+    },
+    {
+     "card": "Military Intelligence",
+     "in_mainboard": true
+    },
+    {
+     "card": "Abzan Falconer",
+     "in_mainboard": true
+    },
+    {
+     "card": "Hashaton, Scarab's Fist",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Chivalric Alliance",
+     "in": "Military Intelligence",
+     "reason": "'Essentially strictly better' priced out; first re-add on upgrade"
+    }
+   ],
+   "heuristics": [
+    "Let the commander's COST (discard) dictate a hard deck constraint (MV<=3) and the archetype falls out of it.",
+    "Cut cards that can't act the turn the commander lands (Somnophage cut for a 2-drop that attacks on T3).",
+    "Mobilize tokens miss attack-COUNT anthems (Champions/Skyhunter) \u2014 check trigger wording before 'synergy' adds."
+   ],
+   "name": "I Connive In My Free Time",
+   "url": "https://archidekt.com/decks/24070889",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--quandrix-repeat-by-x",
+   "commanders": [
+    "Zimone, Infinite Analyst"
+   ],
+   "color_identity": "UG",
+   "archetype": "draw-scaling +1/+1 counters / X-spells",
+   "bracket": "casual",
+   "gameplan": "Convert every extra draw into counters via Zimone, multiply with Doubling Season-effects, and close with exponential Doppelgang or hydra overruns.",
+   "construction": {
+    "synergy_table": "Roles tabulated: counter multipliers / scalable draw+mana / instant-speed flexibility (Final-Word Phantom, Ride the Avalanche) / protection+trample."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "T1-3 land ramp + Zimone early so draw triggers start counting",
+    "T4-6 doublers + draw networks",
+    "T7+ X-spell pivot"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Doppelgang"
+     ],
+     "needs": "X>=3 targeting your own multipliers/lands",
+     "note": "Exponential copies",
+     "verified": [
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Mass Manipulation"
+     ],
+     "needs": "Banked mana",
+     "note": "Steal the table's best",
+     "verified": [
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Kodama of the West Tree",
+      "Primordial Hydra"
+     ],
+     "needs": "",
+     "note": "Trample overrun",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [],
+   "key_cards": [
+    {
+     "card": "Zimone, Infinite Analyst",
+     "in_mainboard": false
+    },
+    {
+     "card": "Doubling Season",
+     "in_mainboard": true
+    },
+    {
+     "card": "Hydroid Krasis",
+     "in_mainboard": true
+    },
+    {
+     "card": "Doppelgang",
+     "in_mainboard": true
+    },
+    {
+     "card": "Unbound Flourishing",
+     "in_mainboard": true
+    },
+    {
+     "card": "Gyre Sage",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Target your OWN multipliers with copy-X spells \u2014 Doppelgang compounds fastest on doublers and lands."
+   ],
+   "name": "Quandrix, repeat by X",
+   "url": "https://archidekt.com/decks/24693361",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--jandor-fortuned-traveler-naya-mount-comm",
+   "commanders": [
+    "Jandor, Fortuned Traveler"
+   ],
+   "color_identity": "WRG",
+   "archetype": "mounts/saddle combat",
+   "bracket": "started B1 theme, found real teeth",
+   "gameplan": "Jandor converts Beasts/Horses/Camels/Elephants/Wolves/changelings into mounts; saddle wide, draw off attack triggers, and go infinite with Aggravated Assault once 5 mounts are saddled.",
+   "construction": {
+    "tutor_web": "Guardian Sunmare repeatedly tutors noncreature <=3 (fetches Ninja Pizza/Aggravated Assault path); 2-creature tutors grab Sunmare + Kolodin; Defense of the Heart can be a win button.",
+    "protection_budget": "Heavy protection because all-in attack turns invite crackback (Reconnaissance, Ghostly Prison, Moment's Peace)."
+   },
+   "mulligan": {
+    "keep": [
+     "Troop of Ponies + any 2 mana guarantees the T4 curve"
+    ],
+    "mull": []
+   },
+   "sequencing": [
+    "Split Up trick: saddle can tap your whole board so the wipe mode hits only opponents",
+    "Aggravated Assault untaps let earlier riders re-mount for later combats"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Jandor, Fortuned Traveler",
+      "Aggravated Assault",
+      "Ninja Pizza"
+     ],
+     "needs": "5 saddled mounts",
+     "note": "Infinite combats",
+     "verified": [
+      false,
+      true,
+      true
+     ]
+    },
+    {
+     "cards": [
+      "Defense of the Heart",
+      "Kolodin, Triumph Caster",
+      "Guardian Sunmare"
+     ],
+     "needs": "",
+     "note": "Tutor both halves at once",
+     "verified": [
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Frenzied Baloth nonbos with your own Moment's Peace (flagged for a cut)",
+    "Third-color access (Changeling Wayfinder patch)"
+   ],
+   "key_cards": [
+    {
+     "card": "Jandor, Fortuned Traveler",
+     "in_mainboard": false
+    },
+    {
+     "card": "Aggravated Assault",
+     "in_mainboard": true
+    },
+    {
+     "card": "Ninja Pizza",
+     "in_mainboard": true
+    },
+    {
+     "card": "Guardian Sunmare",
+     "in_mainboard": true
+    },
+    {
+     "card": "Kolodin, Triumph Caster",
+     "in_mainboard": true
+    },
+    {
+     "card": "Motivated Pony",
+     "in_mainboard": true
+    },
+    {
+     "card": "Crested Sunmare",
+     "in_mainboard": true
+    },
+    {
+     "card": "Shadowfax, Lord of Horses",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Type-conversion commanders unlock off-tribe all-stars \u2014 audit every creature type the text touches.",
+    "Repeatable tutor-to-battlefield creatures (Sunmare) become the deck's spine; protect them like a commander.",
+    "List your own nonbos in the primer (Baloth vs Peace) so future cuts are pre-argued."
+   ],
+   "name": "Jandor, Fortuned Traveler - Naya Mount Commander - WIP",
+   "url": "https://archidekt.com/decks/24952542",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--king-t-challa-stockholm-syndrome",
+   "commanders": [
+    "King T'Challa"
+   ],
+   "color_identity": "WU",
+   "archetype": "group-hug draw control",
+   "bracket": "3 (can hang at B2 but 'frustrating' \u2014 ethics note)",
+   "gameplan": "Gift cards to trigger T'Challa draws (Howling Mine = 5+/rotation), pillowfort behind Propaganda + a big interaction suite, then win off a hand nobody can match.",
+   "construction": {},
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Wipe THEN alpha: White Sun's Twilight/Martial Coup into Moonshaker Cavalry or Champions from Beyond next turn",
+    "Kicked Rite of Replication / Reins of Power turns the archenemy's board into your weapon"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Approach of the Second Sun",
+      "Reprieve"
+     ],
+     "needs": "Bounce the first cast (or just redraw it via the engine)",
+     "note": "Narset's Reversal works too",
+     "verified": [
+      true,
+      false
+     ]
+    },
+    {
+     "cards": [
+      "Moonshaker Cavalry"
+     ],
+     "needs": "Board of gift-tokens after your own wipe",
+     "note": "",
+     "verified": [
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Feeding fast decks (gift selection matters)"
+   ],
+   "key_cards": [
+    {
+     "card": "King T'Challa",
+     "in_mainboard": false
+    },
+    {
+     "card": "Howling Mine",
+     "in_mainboard": true
+    },
+    {
+     "card": "Propaganda",
+     "in_mainboard": true
+    },
+    {
+     "card": "Approach of the Second Sun",
+     "in_mainboard": true
+    },
+    {
+     "card": "Reprieve",
+     "in_mainboard": false
+    },
+    {
+     "card": "Moonshaker Cavalry",
+     "in_mainboard": true
+    },
+    {
+     "card": "Reins of Power",
+     "in_mainboard": true
+    },
+    {
+     "card": "Rite of Replication",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Group hug is a draw ENGINE, not a personality: gift precisely what your commander monetizes.",
+    "Self-wipe-then-alpha inverts the token deck's sweeper weakness.",
+    "Bracket ethics: 'technically B2' decks that ruin B2 tables should self-report as B3."
+   ],
+   "name": "King T'Challa, Stockholm Syndrome",
+   "url": "https://archidekt.com/decks/25455643",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--would-you-like-a-hulk",
+   "commanders": [
+    "Bruce Banner // The Hulk (gift build)"
+   ],
+   "color_identity": "varies (primer lists gift shell)",
+   "archetype": "political gift-combo (goofy B2)",
+   "bracket": "2 by intent",
+   "gameplan": "Give the Hulk to an opponent, turn off trample with Archetype of Aggression, feed him an indestructible 1-power blocker for infinite growth, then steal him back for the kill.",
+   "construction": {
+    "asset_protection": "'Protect the asset' spells lack 'you control' clauses \u2014 cast them on the opponent-controlled Hulk (or on stolen things via Willbreaker)."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Negotiate explicit terms: no sac, no unfavorable attacks, no attacking you until 'the time is right'",
+    "Mind Slaver replaces diplomacy at high mana"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Archetype of Aggression",
+      "Homeward Path"
+     ],
+     "needs": "Hulk gifted, indestructible 1-power blocker; Willbreaker as the steal-back alternative",
+     "note": "Infinite pump then reclaim",
+     "verified": [
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Depends on table cooperation (feature, not bug)"
+   ],
+   "key_cards": [
+    {
+     "card": "Archetype of Aggression",
+     "in_mainboard": true
+    },
+    {
+     "card": "Homeward Path",
+     "in_mainboard": true
+    },
+    {
+     "card": "Willbreaker",
+     "in_mainboard": true
+    },
+    {
+     "card": "Daring Thief",
+     "in_mainboard": true
+    },
+    {
+     "card": "Mindslaver",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [],
+   "heuristics": [
+    "Read targeting clauses: protection without 'you control' is cross-table tech.",
+    "Write the political contract INTO the primer \u2014 deals with specified terms actually hold."
+   ],
+   "name": "Would you like a Hulk?",
+   "url": "https://archidekt.com/decks/25617092",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--a-captive-audience-baron-helmut-zemo",
+   "commanders": [
+    "Baron Helmut Zemo"
+   ],
+   "color_identity": "B",
+   "archetype": "mono-black pips-in-yard boast",
+   "bracket": "3 battlecruiser, modular 1-4+",
+   "gameplan": "Cast black spells to connive, stuff the yard with pip-dense bombs via self-mill, then boast (15 black pips exiled) to freecast 3 bombs off a declared attack.",
+   "construction": {
+    "loop": "Play Zemo -> cast black spells -> discard high-pip bombs -> boast -> refill (Angel of Suffering / Doom Whisperer / Stinkweed Imp turbo-refills).",
+    "haste_revalue": "Greaves/Boots re-earn slots in mono-B commander-dependent shells: one late boast can kill the table, haste makes it happen through repeated removal.",
+    "modularity": "Power dials listed both ways \u2014 heat: Citadel/tutors/fast mana/Bloodletter+Doomsday combos; chill: cut dredge + turbo engines, lean devotion/cycling."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "'Attacked' = DECLARED, not connected: boast before blockers to recur removal, or wait to main 2 \u2014 flexibility is the skill",
+    "Pip accounting: Prepared halves count only the creature side; split cards count both halves; Phyrexian pips count as colored; exile piles do NOT accumulate across activations"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Baron Helmut Zemo",
+      "Gray Merchant of Asphodel",
+      "Archon of Cruelty",
+      "Vilis, Broker of Blood"
+     ],
+     "needs": "15 black pips in yard + declared attack",
+     "note": "Shard of the Nightbringer/Temporal Extortion as other boast bombs",
+     "verified": [
+      false,
+      true,
+      true,
+      true
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Rest in Peace-style repeatable yard exile ('sunlight to a vampire')",
+    "Empty-hand states",
+    "Reliant on boast resolving"
+   ],
+   "key_cards": [
+    {
+     "card": "Baron Helmut Zemo",
+     "in_mainboard": false
+    },
+    {
+     "card": "Gray Merchant of Asphodel",
+     "in_mainboard": true
+    },
+    {
+     "card": "Vilis, Broker of Blood",
+     "in_mainboard": true
+    },
+    {
+     "card": "Archon of Cruelty",
+     "in_mainboard": true
+    },
+    {
+     "card": "Stitcher's Supplier",
+     "in_mainboard": true
+    },
+    {
+     "card": "Stinkweed Imp",
+     "in_mainboard": true
+    },
+    {
+     "card": "Lightning Greaves",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "$10+ top end",
+     "in": "'whatever cool mythic bulk you find in black'",
+     "reason": "Explicit chill-out lever"
+    }
+   ],
+   "heuristics": [
+    "Count PIPS not MV when the commander counts pips \u2014 split/Phyrexian/Prepared rules change card values.",
+    "Boast-before-blockers is the hidden safety valve on attack-gated abilities.",
+    "Ship the power-modularity appendix: same shell, four brackets."
+   ],
+   "name": "A Captive Audience \ud83e\uddb9\ud83c\udffb\u200d\u2642\ufe0f\ud83d\udcac - Baron Helmut Zemo",
+   "url": "https://archidekt.com/decks/25691642",
+   "source": "archidekt"
+  },
+  {
+   "id": "arch--gale-scion-mill-find-big-spell-win",
+   "commanders": [
+    "Gale, Waterdeep Prodigy",
+    "Scion of Halaster"
+   ],
+   "color_identity": "UB",
+   "archetype": "self-mill big-spell control",
+   "bracket": "2 (named power-up swaps listed)",
+   "gameplan": "Self-mill into a graveyard 'second hand', double every instant/sorcery via Gale, and ramp into one haymaker spell to win.",
+   "construction": {
+    "tutor_doubling": "Tutors are twice as good here \u2014 cast from hand AND later from yard via Gale."
+   },
+   "mulligan": {
+    "keep": [],
+    "mull": []
+   },
+   "sequencing": [
+    "Slow and steady; the yard is card advantage, not a cost"
+   ],
+   "win_lines": [
+    {
+     "cards": [
+      "Gale, Waterdeep Prodigy"
+     ],
+     "needs": "Any big spell + mill density",
+     "note": "Engine deck; no discrete combo listed",
+     "verified": [
+      false
+     ]
+    }
+   ],
+   "weaknesses": [
+    "Graveyard hate"
+   ],
+   "key_cards": [
+    {
+     "card": "Gale, Waterdeep Prodigy",
+     "in_mainboard": false
+    },
+    {
+     "card": "Scion of Halaster",
+     "in_mainboard": false
+    },
+    {
+     "card": "Fact or Fiction",
+     "in_mainboard": true
+    },
+    {
+     "card": "Devastation Tide",
+     "in_mainboard": true
+    }
+   ],
+   "budget_swaps": [
+    {
+     "out": "Devastation Tide",
+     "in": "Cyclonic Rift",
+     "reason": "Power-up swap (listed in reverse: budget card currently in)"
+    },
+    {
+     "out": "Fact or Fiction",
+     "in": "Gifts Ungiven",
+     "reason": "Power-up"
+    },
+    {
+     "out": "Thought Scour",
+     "in": "Imperial Seal",
+     "reason": "Power-up"
+    },
+    {
+     "out": "any disliked counterspell",
+     "in": "Force of Will / Force of Negation",
+     "reason": "Power-up"
+    }
+   ],
+   "heuristics": [
+    "Grade every instant/sorcery at 2x value under flashback-granting commanders \u2014 and grade tutors higher still."
+   ],
+   "name": "Gale/scion - mill, find big spell, win",
+   "url": "https://archidekt.com/decks/25693460",
+   "source": "archidekt"
+  }
+ ]
+}
