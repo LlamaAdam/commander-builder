@@ -625,6 +625,30 @@ def consistency_signal(deck_text: str) -> Optional[dict]:
     }
 
 
+def _consistency_targets_signal(
+    deck_text: str, consistency: Optional[dict],
+) -> Optional[dict]:
+    """Deck-health signal: primer-derived consistency floors (FP-019.2).
+
+    Thin degrade wrapper over
+    ``consistency_targets.evaluate_consistency_targets`` — the module
+    named after the table it grades against. ``consistency`` is the
+    projection ``consistency_signal`` already computed this audit; the
+    evaluator reads two of its numbers and computes the closed-form
+    checks itself through the same ``_lookup_card_safe`` path.
+
+    ``None`` on any failure: an unavailable signal must degrade, never
+    fabricate and never traceback out of the audit path.
+    """
+    try:
+        from . import consistency_targets as ct
+        return ct.evaluate_consistency_targets(
+            deck_text, consistency=consistency,
+        )
+    except Exception:  # noqa: BLE001 -- degrade, never break the panel
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Aggregator -- the single public entry the audit route calls
 # ---------------------------------------------------------------------------
@@ -649,6 +673,10 @@ def compute_deck_health(deck_text: str) -> dict:
     docstring's contract). The UI renders None as an explicit
     "unavailable" tile.
     """
+    # Computed once: the projection feeds its own tile AND the FP-019.2
+    # targets tile, which grades two of its numbers against the
+    # primer-derived floors without paying for a second Monte Carlo.
+    consistency = consistency_signal(deck_text)
     return {
         "mdfc": count_mdfc_lands(deck_text),
         "spell_density": compute_spell_density(deck_text),
@@ -663,7 +691,12 @@ def compute_deck_health(deck_text: str) -> dict:
         # Schema-additive: a new reported key, NOT a grade input --
         # compute_health_grade must keep ignoring it (see module
         # docstring). None under the outage contract.
-        "consistency": consistency_signal(deck_text),
+        "consistency": consistency,
+        # Primer-derived consistency floors (FP-019.2, consistency_targets
+        # module). Same doctrine as the consistency tile: reported,
+        # NEVER a grade input. None under the outage contract.
+        "consistency_targets": _consistency_targets_signal(
+            deck_text, consistency),
     }
 
 
