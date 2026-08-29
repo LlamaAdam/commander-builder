@@ -253,6 +253,55 @@ function renderDeckHealthTiles(health, grade, suggestion) {
     }));
   }
 
+  // Primer-targets tile (FP-019.2, consistency_targets module).
+  // DISPLAY-ONLY like the consistency tile: primer-derived floors are
+  // reported, never folded into the letter grade. Same three states.
+  const ct = health.consistency_targets;
+  const CT_LABELS = {
+    third_land_drop: "3rd land drop",
+    commander_on_curve: "Commander on curve",
+    card_advantage_by_t5: "Card advantage by T5",
+    t1_enablers: "T1 enablers",
+    tapped_fetchables: "Tapped fetchables",
+  };
+  if (ct === null) {
+    row.appendChild(renderHealthTile({
+      label: "Primer targets",
+      value: "—",
+      tooltip: "Primer-target signal unavailable (empty deck or card data "
+        + "could not be resolved for a majority of its lines).",
+      flavor: "muted",
+    }));
+  } else if (ct !== undefined && ct.checks) {
+    const fmtVal = (c) => (c.value == null ? "?"
+      : (c.target <= 1 ? `${Math.round(c.value * 100)}%` : `${c.value}`));
+    const fmtTarget = (c) =>
+      (c.target <= 1 ? `${Math.round(c.target * 100)}%` : `${c.target}`);
+    const lines = Object.entries(ct.checks).map(([key, c]) => {
+      const status = c.met === null
+        ? (c.applies ? "unavailable" : "info only — no declared plan")
+        : (c.met ? "met" : "MISSED");
+      return `${CT_LABELS[key] || key}: ${fmtVal(c)} `
+        + `(${c.op} ${fmtTarget(c)}) — ${status}`;
+    });
+    const missed = Object.entries(ct.checks)
+      .filter(([, c]) => c.met === false)
+      .map(([key]) => CT_LABELS[key] || key);
+    row.appendChild(renderHealthTile({
+      label: "Primer targets",
+      value: ct.evaluated ? `${ct.met}/${ct.evaluated}` : "info",
+      sub: missed.length ? missed.join(", ") : "",
+      tooltip: `Consistency floors derived from 40 community primers `
+        + `(FP-019.2):\n${lines.join("\n")}\n\n`
+        + `Conditional floors (T1 enablers, tapped fetchables) are `
+        + `informational until the deck declares that plan. `
+        + `Display-only — never part of the letter grade.`,
+      flavor: ct.evaluated === 0 ? "muted"
+            : (missed.length === 0 ? "good"
+            : (missed.length === 1 ? "neutral" : "warn")),
+    }));
+  }
+
   // Grade header wrap: keep the bare-row return for legacy payloads so
   // older servers (no health_grade field) render byte-identically.
   if (grade && grade.grade) {

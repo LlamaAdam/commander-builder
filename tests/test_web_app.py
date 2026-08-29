@@ -4461,6 +4461,7 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
         "wincon_protection", "self_mill", "role_targets", "consistency",
+        "consistency_targets",
     }
     # Named-card signals picked up correctly.
     assert health["mdfc"]["count"] == 1
@@ -4523,6 +4524,7 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
         "wincon_protection", "self_mill", "role_targets", "consistency",
+        "consistency_targets",
     }
     # Scryfall-dependent signals honor the outage contract: None, not
     # a fabricated zero. The UI renders these as "unavailable" tiles.
