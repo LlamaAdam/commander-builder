@@ -12,6 +12,17 @@
 
 # FP-019 — Primer-derived heuristics: encode the 40-primer synthesis
 
+**STATUS 2026-08-29: slices 019.1–019.6 SHIPPED** on
+`feat/fp-019-primer-heuristics` (KB asset `data/primer_kb.json` +
+`primer_kb.py`; `consistency_targets.py` + deck_health tile;
+`staples.contextual_role_targets` / `infer_commander_role`; four
+CardScore penalties; `nonbo_lint.py` + tile; judge/Claude-advisor
+grounding + budget-mode KB swaps). Remaining follow-ups: wire an
+archetype/plan classifier so the conditional consistency floors and
+quota context activate automatically; §16 re-harvest path (changelogs,
+notable exclusions); own-stax-vs-own-combo nonbo class (needs combo-line
+awareness).
+
 Source (2026-08-29): `primer_harvest/deckbuilding_heuristics.md` — a
 cross-primer synthesis of 40 community primers (21 Moxfield top-liked +
 19 Archidekt) — and `primer_harvest/primer_knowledge_base.json` (per-deck
