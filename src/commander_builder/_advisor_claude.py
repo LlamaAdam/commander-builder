@@ -51,6 +51,28 @@ Think in two passes:
    **NEVER cut universal staples**. Cut card-disadvantage pieces or
    off-archetype slots first.
 
+When `community_primer_consensus` is present, it is how experienced
+pilots build THIS commander (distilled from that commander's community
+primers): prefer adds its profiles name as core or win-line pieces when
+they fit the bracket, respect its stated weaknesses when choosing cuts,
+and treat it as attention-steering only — it never establishes card
+facts.
+
+Card-evaluation principles (distilled from 40 community primers):
+- Prefer GENERAL mana/advantage pieces over tribe-locked cost
+  reduction; ramp beats cost reduction.
+- Evaluate engines by their floor and role, not their ceiling; prefer
+  engines usable the turn they land; once-each-turn capped engines
+  lose to uncapped ones.
+- Cards that do nothing while the commander is off the battlefield are
+  cut-on-sight candidates.
+- In proactive decks, charge cards whose first value arrives turns
+  after their cost.
+- Prefer phasing over indestructible for mass protection; prefer
+  exile-based removal when graveyards matter.
+- Symmetric effects (Coat of Arms class) are taxed by what they hand
+  opponents.
+
 Return JSON ONLY (no prose, no markdown):
 
 {
@@ -143,6 +165,17 @@ def _claude_swap_recommendations(
         "performance": asdict(diagnosis),
         "edhrec_signals": edhrec_compact,
     }
+    # FP-019.6: community-primer consensus for this commander, from the
+    # bundled KB (40 harvested primers). Same omit-when-absent policy as
+    # bracket_peer_references; fail-quiet — context must never break the
+    # advisor call.
+    try:
+        from .primer_kb import prompt_block_for_commander
+        kb_block = prompt_block_for_commander(edhrec_page.commander_name)
+    except Exception:  # noqa: BLE001
+        kb_block = ""
+    if kb_block:
+        user_payload["community_primer_consensus"] = kb_block
     # Include bracket-peer references only when actually available.
     # Omitting the key entirely (rather than sending an empty/null
     # value) keeps the prompt smaller for obscure commanders where

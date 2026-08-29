@@ -243,6 +243,35 @@ def budget_swap_table(
     return tuple(s for p in pool for s in p.budget_swaps)
 
 
+def budget_swaps_for_deck(
+    commander_names, deck_card_names,
+    profiles: Optional[tuple[PrimerProfile, ...]] = None,
+) -> tuple[BudgetSwap, ...]:
+    """KB swaps applicable to THIS deck (FP-019.6 advisor budget mode).
+
+    Only swaps documented for one of the deck's own commanders, whose
+    ``out_card`` the deck actually runs and whose ``in_card`` it does
+    not already run. Swap direction is the AUTHOR'S (usually cheap-in,
+    sometimes an upgrade path) — the reason string carries which, so
+    consumers must surface it rather than assume."""
+    matched: list[PrimerProfile] = []
+    for cmdr in commander_names or ():
+        matched.extend(profiles_for_commander(cmdr, profiles))
+    deck_keys = {str(n).casefold() for n in deck_card_names or ()}
+    out: list[BudgetSwap] = []
+    seen = set()
+    for p in {id(m): m for m in matched}.values():
+        for s in p.budget_swaps:
+            key = (s.out_card.casefold(), s.in_card.casefold())
+            if key in seen:
+                continue
+            if s.out_card.casefold() in deck_keys \
+                    and s.in_card.casefold() not in deck_keys:
+                seen.add(key)
+                out.append(s)
+    return tuple(out)
+
+
 def _render_profile(p: PrimerProfile) -> str:
     lines = [f"## {p.name} ({' / '.join(p.commanders)})"
              + (f" — bracket {p.bracket}" if p.bracket else "")]
