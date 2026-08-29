@@ -10,6 +10,84 @@
 
 # ── ACTIVE / WORK NEEDED ──────────────────────────────────────────────
 
+# FP-019 — Primer-derived heuristics: encode the 40-primer synthesis
+
+Source (2026-08-29): `primer_harvest/deckbuilding_heuristics.md` — a
+cross-primer synthesis of 40 community primers (21 Moxfield top-liked +
+19 Archidekt) — and `primer_harvest/primer_knowledge_base.json` (per-deck
+structured records: gameplan, construction rules, mulligan trees,
+sequencing, win lines *verified against each deck's exact mainboard*,
+budget swaps, heuristics). Section numbers below (§) cite the heuristics
+doc.
+
+## What the system already does (validate/tune, don't rebuild)
+
+| Primer lesson | Existing seam | Gap |
+|---|---|---|
+| §1 per-color source ladder (18/23/25/28 by turn+pips) | `deck_builder_manabase.color_source_targets` — full Karsten table, build + report | None — numbers agree. Fetch rules below are new |
+| §1 land-drop / commander-on-curve / mulligan probabilities | `consistency.py` (hypergeom + seeded Monte Carlo, wired into deck_health 2026-08) | Thresholds aren't named targets; primers give convergent floors (85% 3rd drop, ~90% CA by T5, 13-enabler rule) |
+| §9 interaction floors rise with bracket; instant-speed share | `interaction.py` matrix + `BRACKET_INTERACTION_MINIMUMS` | Asymmetry/parity signal (wipes that spare your own board) not modeled |
+| §11 tutor density as bracket dial (weighted, not rule) | `bracket_estimator` DEFAULT_WEIGHTS (post-repeal handling matches §11 exactly) | Tuning input only |
+| §7 combo presence / one-away | `combo_detection.py` | No `min_requirements` audit, no assembly probability |
+| §4 role quotas | `staples.ROLE_TARGETS` + commander credit | Quotas are FLAT; primers show they're a function of archetype/commander-role/avg-MV/bracket |
+
+## Slices (cheap-first)
+
+**019.1 — Package the KB as a data asset.** Copy
+`primer_knowledge_base.json` → `data/primer_kb.json` with a loader
+module mirroring the `combos.json` / `game_changers` pattern (offline
+floor, refresh path later per §16 — changelogs and notable-exclusion
+sections are the richest future harvest). Exposes: per-commander
+consensus records (§13 — note the two-Ur-Dragon-profiles finding:
+encode PROFILES per commander, not one truth), win-line
+`min_requirements`, budget-swap table.
+
+**019.2 — Named consistency targets.** A `CONSISTENCY_TARGETS` dict
+(3rd-land-drop ≥ .85; on-curve commander color .85–.95; CA by T5 ≥ .90;
+T1-enabler count ≥ 13 *when the deck declares a T1-enabler plan*;
+tapped-fetchables ≤ 2 for proactive decks; §1 reveal-engine
+hypergeometric floor with post-shuffle depletion) evaluated from
+`consistency.py` + `deck_builder_manabase` outputs, surfaced as a
+deck_health tile. ADDITIVE ONLY — same doctrine as the 2026-08
+consistency wiring: reported, NOT folded into `compute_health_grade`
+without its own reviewed re-pin.
+
+**019.3 — Context-sensitive quotas.** `role_target_report` gains an
+optional context (archetype, commander-role from a §3 taxonomy
+classifier, avg MV, bracket); ROLE_TARGETS becomes the fallback when
+context is absent, so every existing caller is unchanged. Seed the
+adjustment rules from §4's generator sketch (+lands/−rocks as avg MV
+drops; +ramp+protection at total commander-reliance; interaction floor
+by bracket).
+
+**019.4 — CardScore terms (flag stays OFF).** New gates/modifiers from
+§2/§3/§5: dead-without-commander gate; value-delay/tempo-fail modifier
+(aggro/snowball); capped-vs-uncapped engine; tutor card-delta by
+strategy; variance-card audit (§2: success-definition → target count →
+hit probability vs build-relative threshold). FP-015's validation gate
+still governs enablement — these are ranking-prior refinements, not a
+bypass.
+
+**019.5 — Nonbo lint.** §14's table as data-driven pairwise checks
+(new `nonbo_lint.py`, audit tile + advisor pre-filter). First
+anti-synergy detector in the tree; also covers the §3
+commander-dependence check ("does this card do anything with the
+command zone occupied?").
+
+**019.6 — Advisor/judge grounding.** Feed 019.1's per-commander
+consensus + §5 WHY-rules into `_advisor_claude` / `_deck_judge_prompt`
+context blocks (same clip-with-marker cap as primers, via
+`primer.clip_for_prompt`), and the budget-swap table into
+`improvement_advisor`'s budget mode (§10 spend order: lands → ramp/draw
+→ threats; function-preserving swaps).
+
+## Non-goals
+
+§8 piloting/sequencing axioms (Forge's AI can't be steered by them —
+they'd be dead config) beyond what `_deck_judge_prompt` already quotes
+from primers; §12 archetype playbooks as hard rules (they're context
+for 019.3/019.6, not validators); any auto-enable of CardScore.
+
 # FP-018 — Adopt a deck: primer-guided understanding + gentle personalization
 
 Owner, 2026-08-27: "the primer could let someone use a deck and
