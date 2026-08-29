@@ -302,6 +302,36 @@ function renderDeckHealthTiles(health, grade, suggestion) {
     }));
   }
 
+  // Nonbo-lint tile (FP-019.5, nonbo_lint module). DISPLAY-ONLY. An
+  // empty list is a real "no conflicts found"; null is the outage
+  // shape; absent = legacy payload, render nothing.
+  const nb = health.nonbos;
+  if (nb === null) {
+    row.appendChild(renderHealthTile({
+      label: "Nonbos",
+      value: "—",
+      tooltip: "Nonbo lint unavailable (unexpected failure).",
+      flavor: "muted",
+    }));
+  } else if (Array.isArray(nb)) {
+    const warns = nb.filter((f) => f.severity === "warn");
+    const lines = nb.map((f) =>
+      `${f.severity.toUpperCase()}: ${f.cards_a.join(", ")}`
+      + (f.cards_b.length ? ` × ${f.cards_b.join(", ")}` : "")
+      + ` — ${f.why} [${f.source}]`);
+    row.appendChild(renderHealthTile({
+      label: "Nonbos",
+      value: nb.length === 0 ? "none" : `${nb.length}`,
+      sub: warns.length ? `${warns.length} warn` : "",
+      tooltip: nb.length === 0
+        ? "No known self-conflicts (anti-synergy pairs documented by "
+          + "community primers) found in this list."
+        : `Self-conflicts documented by community primers:\n`
+          + lines.join("\n"),
+      flavor: warns.length ? "warn" : (nb.length ? "neutral" : "good"),
+    }));
+  }
+
   // Grade header wrap: keep the bare-row return for legacy payloads so
   // older servers (no health_grade field) render byte-identically.
   if (grade && grade.grade) {

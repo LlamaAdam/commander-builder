@@ -649,6 +649,22 @@ def _consistency_targets_signal(
         return None
 
 
+def _nonbo_signal(deck_text: str) -> Optional[list]:
+    """Deck-health signal: §14 nonbo lint findings (FP-019.5).
+
+    Thin degrade wrapper over ``nonbo_lint.lint_deck_text``, which
+    resolves cards through this module's ``_lookup_card_safe`` by
+    default. An empty list is a real "no conflicts found"; ``None`` is
+    the wrapper's own outage shape (unexpected exception only — the
+    linter itself degrades per-card).
+    """
+    try:
+        from . import nonbo_lint as nl
+        return nl.lint_deck_text(deck_text)
+    except Exception:  # noqa: BLE001 -- degrade, never break the panel
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Aggregator -- the single public entry the audit route calls
 # ---------------------------------------------------------------------------
@@ -697,6 +713,10 @@ def compute_deck_health(deck_text: str) -> dict:
         # NEVER a grade input. None under the outage contract.
         "consistency_targets": _consistency_targets_signal(
             deck_text, consistency),
+        # Nonbo lint (FP-019.5, nonbo_lint module): §14 self-conflict
+        # pairs. A list (possibly empty) of fired rules; None only on
+        # unexpected failure. Reported only — never a grade input.
+        "nonbos": _nonbo_signal(deck_text),
     }
 
 
