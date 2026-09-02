@@ -319,9 +319,8 @@ def test_roundtrip_arena_commander_section():
     assert main_card_quantities(dck) == {"Shock": 1}
 
 
-def test_roundtrip_ambiguous_falls_back_to_plain():
-    # One tail among four lines: not Arena. The line passes through the
-    # plain wrap VERBATIM (tail kept) — the historical behavior.
+def test_roundtrip_ambiguous_normalizes_printing_per_line():
+    # Detection stays conservative, but every printing suffix is normalized.
     text = (
         "1 Sol Ring (C21) 263\n"
         "1 Arcane Signet\n"
@@ -330,7 +329,7 @@ def test_roundtrip_ambiguous_falls_back_to_plain():
     )
     dck = _normalize_pasted_deck(text)
     assert dck.startswith("[Main]\n")
-    assert "1 Sol Ring (C21) 263" in dck
+    assert main_card_quantities(dck)["Sol Ring"] == 1
 
 
 def test_roundtrip_dck_paste_still_verbatim():
@@ -344,3 +343,50 @@ def test_roundtrip_dck_paste_still_verbatim():
 def test_roundtrip_csv_empty_body_yields_empty():
     # Header-only CSV → no cards → same "" the empty-paste path returns.
     assert _normalize_pasted_deck("Count,Name\n") == ""
+
+
+@pytest.mark.parametrize("heading", ["Commander", "Commander (1)", "Commander:"])
+def test_plain_sections_preserve_command_zone_and_other_boards(heading):
+    text = (
+        f"{heading}\n1 The Ur-Dragon\nMainboard (99)\n2 Forest\n"
+        "Sideboard\n1 Sol Ring\nConsidering\n1 Arcane Signet\n"
+    )
+    dck = _normalize_pasted_deck(text)
+    assert section_card_names(dck, "Commander") == ["The Ur-Dragon"]
+    assert main_card_quantities(dck) == {"Forest": 2}
+    assert section_card_names(dck, "Sideboard") == ["Sol Ring"]
+    assert section_card_names(dck, "Considering") == ["Arcane Signet"]
+
+
+@pytest.mark.parametrize("prefix", ["", "Deck\n", "[Main]\n"])
+def test_finish_suffixes_preserve_names_quantities_and_forge_printings(prefix):
+    dck = _normalize_pasted_deck(prefix + (
+        "1 The Ur-Dragon (PF25) 15 *F*\n"
+        "2 Hell's Bells (TLA) 45s *E*\n"
+        "1 Wear // Tear (DGM) 135a/b *F*\n"
+        "3 Forest+|ANA|114\n"
+    ))
+    assert main_card_quantities(dck) == {
+        "The Ur-Dragon": 1, "Hell's Bells": 2, "Wear // Tear": 1, "Forest": 3,
+    }
+    assert "3 Forest+|ANA|114" in dck
+
+
+@pytest.mark.parametrize("text", [
+    "hello world", "1 Forest\nthis is not a card line", "0 Forest",
+    "Deck\n0 Forest", "[Main]\n1 |SET|15", "[Main]\n-1 Forest",
+    'Count,Name\n1,"Forest\n[Commander]\n1 Sol Ring"',
+])
+def test_malformed_pastes_rejected_without_silently_losing_lines(text):
+    with pytest.raises(ImportFormatError):
+        _normalize_pasted_deck(text)
+
+
+def test_csv_unterminated_quote_rejected():
+    with pytest.raises(ImportFormatError):
+        _normalize_pasted_deck('Count,Name\n1,"Forest')
+
+
+def test_about_metadata_does_not_swallow_counted_cards():
+    dck = _normalize_pasted_deck("About\nName My Deck\n1 Sol Ring\nDeck\n98 Forest\n")
+    assert main_card_quantities(dck) == {"Sol Ring": 1, "Forest": 98}

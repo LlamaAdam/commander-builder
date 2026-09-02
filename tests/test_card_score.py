@@ -245,6 +245,11 @@ def test_modifier_magnitudes_match_the_spec_table():
         "salt_penalty": -10.0,
         "bracket_pressure": -20.0,
         "mdfc_bonus": 3.0,
+        # FP-019.4 primer-derived penalties (heuristics §3/§5)
+        "commander_dependence": -8.0,
+        "tempo_fail": -6.0,
+        "capped_engine": -4.0,
+        "tutor_top_delta": -5.0,
     }
 
 
@@ -1347,3 +1352,107 @@ def test_real_deck_text_context_matches_direct_manabase_report():
     ctx = _stacked_ctx()
     assert ctx.manabase == manabase_report(_STACKED_DECK_TEXT,
                                            lookup=ctx.card)
+
+
+# ---------------------------------------------------------------------------
+# FP-019.4 -- primer-derived modifiers (heuristics §3/§5)
+# ---------------------------------------------------------------------------
+
+_PRIMER_MOD_CARDS = {
+    "banner of the general": {
+        "name": "Banner of the General", "type_line": "Enchantment",
+        "oracle_text": "As long as you control your commander, creatures "
+                       "you control get +2/+2.",
+        "color_identity": ["W"], "cmc": 3.0,
+        "legalities": {"commander": "legal"},
+    },
+    "slow banner": {
+        "name": "Slow Banner", "type_line": "Enchantment",
+        "oracle_text": "At the beginning of your upkeep, create a 1/1 "
+                       "white Soldier creature token.",
+        "color_identity": ["W"], "cmc": 4.0,
+        "legalities": {"commander": "legal"},
+    },
+    "patient scribe": {
+        "name": "Patient Scribe", "type_line": "Creature — Human",
+        "oracle_text": "Whenever another creature dies, draw a card. This "
+                       "ability triggers only once each turn.",
+        "color_identity": ["U"], "cmc": 3.0,
+        "legalities": {"commander": "legal"},
+    },
+    "grim tutor's map": {
+        "name": "Grim Tutor's Map", "type_line": "Instant",
+        "oracle_text": "Search your library for a card, then shuffle and "
+                       "put that card on top of your library.",
+        "color_identity": ["B"], "cmc": 1.0,
+        "legalities": {"commander": "legal"},
+    },
+    "plain sorcery": {
+        "name": "Plain Sorcery", "type_line": "Sorcery",
+        "oracle_text": "Draw two cards.",
+        "color_identity": ["U"], "cmc": 3.0,
+        "legalities": {"commander": "legal"},
+    },
+}
+
+
+def _primer_lookup(name):
+    return _PRIMER_MOD_CARDS.get(name.lower()) or _lookup(name)
+
+
+def _primer_ctx(**kwargs):
+    kwargs.setdefault("lookup", _primer_lookup)
+    return _ctx(_blue_deck(), **kwargs)
+
+
+def test_mod_commander_dependence_penalizes_commander_gated_card():
+    ctx = _primer_ctx()
+    mod = cs._mod_commander_dependence("Banner of the General", ctx)
+    assert mod is not None
+    assert mod.points == cs.CARD_SCORE_MODIFIERS["commander_dependence"]
+    assert mod.points < 0
+
+
+def test_mod_commander_dependence_ignores_standalone_card():
+    ctx = _primer_ctx()
+    assert cs._mod_commander_dependence("Plain Sorcery", ctx) is None
+
+
+def test_mod_tempo_fail_fires_only_for_aggro_context():
+    aggro = _primer_ctx(archetype="aggro")
+    other = _primer_ctx()
+    assert cs._mod_tempo_fail("Slow Banner", aggro) is not None
+    assert cs._mod_tempo_fail("Slow Banner", other) is None
+    # immediate-value cards are safe even in aggro
+    assert cs._mod_tempo_fail("Plain Sorcery", aggro) is None
+
+
+def test_mod_capped_engine_penalizes_once_each_turn_draw():
+    ctx = _primer_ctx()
+    mod = cs._mod_capped_engine("Patient Scribe", ctx)
+    assert mod is not None and mod.points < 0
+    assert cs._mod_capped_engine("Plain Sorcery", ctx) is None
+
+
+def test_mod_tutor_top_delta_spares_combo_decks():
+    plain = _primer_ctx()
+    combo = _primer_ctx(archetype="combo")
+    assert cs._mod_tutor_top_delta("Grim Tutor's Map", plain) is not None
+    assert cs._mod_tutor_top_delta("Grim Tutor's Map", combo) is None
+    # a to-hand tutor keeps its card parity: never penalized
+    assert cs._mod_tutor_top_delta("Plain Sorcery", plain) is None
+
+
+def test_primer_modifiers_are_registered():
+    for fn in (cs._mod_commander_dependence, cs._mod_tempo_fail,
+               cs._mod_capped_engine, cs._mod_tutor_top_delta):
+        assert fn in cs._MODIFIER_FNS
+    for key in ("commander_dependence", "tempo_fail", "capped_engine",
+                "tutor_top_delta"):
+        assert cs.CARD_SCORE_MODIFIERS[key] < 0
+
+
+def test_primer_modifiers_flow_through_score_card():
+    ctx = _primer_ctx()
+    scored = cs.score_card("Banner of the General", ctx)
+    assert any(m.name == "commander_dependence" for m in scored.modifiers)

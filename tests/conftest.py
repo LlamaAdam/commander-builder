@@ -17,8 +17,9 @@ at module level or use it as a def-time parameter default.
 Tests tagged ``@pytest.mark.slow`` are skipped by default so the
 inner-loop ``pytest`` run takes ~30s instead of ~3min. Run the full
 suite via ``pytest --run-slow`` (or ``pytest -m "slow or not slow"``
-if you prefer pure marker syntax). CI runs everything implicitly via
-``--run-slow``.
+if you prefer pure marker syntax). CI runs the offline integration lane via
+``--run-slow``. Tests marked ``live`` additionally require ``--run-live``;
+neither ``--run-slow`` nor a marker expression opts into external services.
 
 Tag a test ``slow`` when it:
 - exercises the full ``advise()`` pipeline (EDHREC fixtures, multi-
@@ -49,6 +50,16 @@ def pytest_addoption(parser):
             "Run tests marked @pytest.mark.slow (advisor + auto-curate "
             "integration). Off by default; the fast lane keeps inner-"
             "loop iteration under ~30s. CI runs with this flag set."
+        ),
+    )
+    parser.addoption(
+        "--run-live",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow tests marked @pytest.mark.live to contact real services "
+            "and consume subscription/API usage. Combine with --run-slow "
+            "for live tests that are also marked slow."
         ),
     )
 
@@ -84,6 +95,16 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(slow_marker)
                 break
 
+    # Live services need explicit consent even when slow tests or custom
+    # marker expressions are selected. Keep this before the early returns.
+    if not config.getoption("--run-live"):
+        skip_live = pytest.mark.skip(
+            reason="live-service test requires explicit --run-live opt-in",
+        )
+        for item in items:
+            if "live" in item.keywords:
+                item.add_marker(skip_live)
+
     # Pass 2: skip slow unless opted in.
     if config.getoption("--run-slow"):
         return
@@ -118,10 +139,65 @@ def _reset_process_memos():
     _gc.clear_memo()
     _sc.clear_lookup_memo()
     _cd._COMBOS_CACHE = None
+    # Importing Flask is optional for core-only installations. Reset the
+    # dashboard memo when its module has been loaded by a web test.
+    dashboard = sys.modules.get("commander_builder.web.routes_dashboard")
+    if dashboard is not None:
+        dashboard._reset_corpus_cache()
     yield
     _gc.clear_memo()
     _sc.clear_lookup_memo()
     _cd._COMBOS_CACHE = None
+    dashboard = sys.modules.get("commander_builder.web.routes_dashboard")
+    if dashboard is not None:
+        dashboard._reset_corpus_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_scryfall_cache(tmp_path, monkeypatch):
+    """A warm personal Oracle/printing cache must not supply test evidence.
+
+    Cache-only consumers (theme classification and combo validation among
+    them) bypass network stubs, so redirect the actual disk boundary. Tests
+    needing cached cards seed these paths or override them explicitly.
+    """
+    from commander_builder import scryfall_client
+
+    monkeypatch.setattr(scryfall_client, "CACHE_DIR", tmp_path / "oracle_cache")
+    monkeypatch.setattr(scryfall_client, "PRINTS_CACHE_DIR", tmp_path / "prints_cache")
+
+
+@pytest.fixture(autouse=True)
+def isolated_forge(tmp_path, monkeypatch):
+    """Default to an absent, test-owned Forge install, never the real corpus.
+
+    Forge tests can create a miniature corpus here or override the path.
+    This leaves the production locator and unavailable/error paths real.
+    """
+    from commander_builder import forge_runner
+
+    forge_dir = tmp_path / "isolated_forge"
+    monkeypatch.setattr(forge_runner, "VENDOR_FORGE", forge_dir)
+    return forge_dir
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config(tmp_path, monkeypatch):
+    """Startup and config consumers must never select a user's real library."""
+    monkeypatch.setenv("COMMANDER_BUILDER_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("COMMANDER_BUILDER_DECK_DIR", raising=False)
+
+
+@pytest.fixture
+def instance_lock(tmp_path):
+    """Real, test-owned desktop lock; release it even if a fake GUI never closes."""
+    from commander_builder import desktop
+
+    lock = desktop._acquire_instance_lock(tmp_path / "instance.lock")
+    try:
+        yield lock
+    finally:
+        lock.close()
 
 
 @pytest.fixture(autouse=True)

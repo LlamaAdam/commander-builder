@@ -13,7 +13,8 @@ Routes:
 Notes:
 - The deck index is built from a single ``deck_dir`` configured at
   app-create time. Pass ``deck_dir=Path(...)`` to ``create_app`` or set
-  the ``COMMANDER_BUILDER_DECK_DIR`` env var. Falls back to CWD/decks.
+  the ``COMMANDER_BUILDER_DECK_DIR`` env var, then the saved ``deck_dir``
+  setting. Unconfigured browser startup retains the Forge commander folder.
 - The Flask import is deferred so this module is harmless to import
   when the ``[web]`` extra is missing — only ``create_app`` raises.
 - All paths are validated against ``deck_dir`` to prevent traversal.
@@ -207,19 +208,12 @@ def create_app(
             "Install with: pip install commander-builder[web]"
         ) from exc
 
-    if deck_dir is None:
-        env_dir = os.environ.get("COMMANDER_BUILDER_DECK_DIR")
-        if env_dir:
-            deck_dir = Path(env_dir)
-        else:
-            # Canonical location every other module reads/writes from.
-            # Forge's `sim` mode requires decks live under
-            # `userdata/decks/commander/`; pointing the web app
-            # elsewhere split the world (import would land in
-            # CWD/decks/ but compare/audit would look here).
-            from ..forge_runner import VENDOR_FORGE
-            deck_dir = VENDOR_FORGE / "userdata" / "decks" / "commander"
-    deck_dir = deck_dir.resolve()
+    from ..config_store import get_deck_dir
+    from ..forge_runner import VENDOR_FORGE
+    deck_dir = get_deck_dir(
+        deck_dir=deck_dir,
+        default=VENDOR_FORGE / "userdata" / "decks" / "commander",
+    ).resolve()
 
     if knowledge_db is None:
         env_db = os.environ.get("COMMANDER_BUILDER_KNOWLEDGE_DB")
@@ -436,7 +430,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="commander-builder-web")
     ap.add_argument(
         "--deck-dir", type=Path, default=None,
-        help="Directory containing .dck files (default: $COMMANDER_BUILDER_DECK_DIR or ./decks)",
+        help="Directory containing .dck files. Precedence: this argument, "
+             "COMMANDER_BUILDER_DECK_DIR, saved deck_dir setting, then "
+             "vendor/forge/userdata/decks/commander.",
     )
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5000)

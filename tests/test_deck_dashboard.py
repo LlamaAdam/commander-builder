@@ -712,6 +712,7 @@ _PIN_CARDS = {
             "Landfall — Whenever a land enters under your control..."
         ),
         "color_identity": ["W", "U", "R", "G"],
+        "legalities": {"commander": "legal"},
         "cmc": 4.0,
         "prices": {"usd": "6.00"},
     },
@@ -720,6 +721,8 @@ _PIN_CARDS = {
         "oracle_text": "{T}: Add {G}.",
         "cmc": 0.0,
         "prices": {"usd": "0.05"},
+        "color_identity": ["G"],
+        "legalities": {"commander": "legal"},
     },
     "Lotus Cobra": {
         "type_line": "Creature — Snake",
@@ -727,24 +730,32 @@ _PIN_CARDS = {
                        "control, add one mana of any color.",
         "cmc": 2.0,
         "prices": {"usd": "8.00"},
+        "color_identity": ["G"],
+        "legalities": {"commander": "legal"},
     },
     "Cultivate": {
         "type_line": "Sorcery",
         "oracle_text": "Search your library for up to two basic land cards.",
         "cmc": 3.0,
         "prices": {"usd": "0.50"},
+        "color_identity": ["G"],
+        "legalities": {"commander": "legal"},
     },
     "Wrath of God": {
         "type_line": "Sorcery",
         "oracle_text": "Destroy all creatures.",
         "cmc": 4.0,
         "prices": {"usd": "5.00"},
+        "color_identity": ["W"],
+        "legalities": {"commander": "legal"},
     },
     "Lightning Bolt": {
         "type_line": "Instant",
         "oracle_text": "Lightning Bolt deals 3 damage to any target.",
         "cmc": 1.0,
         "prices": {"usd": "1.50"},
+        "color_identity": ["R"],
+        "legalities": {"commander": "legal"},
     },
 }
 
@@ -764,7 +775,25 @@ _PIN_EXPECTED = {
     },
     "deck_progress": {"current": 42, "target": 100},
     "legality": {
-        "all_legal": True,
+        "all_legal": False,
+        "legal": False,
+        "status": "illegal",
+        "verified": True,
+        "card_count": 42,
+        "commander_count": 1,
+        "lookup_failures": 0,
+        "violations": [{
+            "code": "DECK_SIZE",
+            "message": (
+                "A Commander deck must be exactly 100 cards "
+                "(command zone + library); this deck has 42 "
+                "(1 commander(s) + 41 mainboard)."
+            ),
+            "cards": [],
+        }],
+        "unverified": [],
+        "data_age_days": None,
+        "data_warning": None,
         "deck_size_ok": False,
         "deck_target": 100,
         "deck_total": 42,
@@ -807,7 +836,7 @@ def _write_pin_deck(tmp_path: Path) -> Path:
 
 
 def _stub_probes(monkeypatch):
-    """Freeze the three network/data probes build_dashboard fans out to,
+    """Freeze network/data probes build_dashboard fans out to,
     so the pinned payload is a function of the deck file alone."""
     monkeypatch.setattr(
         "commander_builder.game_changers.load_game_changers",
@@ -820,6 +849,13 @@ def _stub_probes(monkeypatch):
     monkeypatch.setattr(
         "commander_builder.bracket_estimator.estimate_bracket",
         lambda *a, **kw: {"estimate": 3, "pinned": True},
+    )
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard._classify_archetype_path",
+        lambda path: "midrange",
+    )
+    monkeypatch.setattr(
+        "commander_builder.oracle_store.snapshot_age_days", lambda name: None,
     )
 
 
@@ -838,11 +874,12 @@ def _http_error(code: int):
 
 
 def test_build_dashboard_happy_path_payload_is_pinned(tmp_path, monkeypatch):
-    """Healthy Scryfall -> the exact payload, byte for byte.
+    """Healthy Scryfall still identifies this 42-card fixture as illegal.
 
     This is the regression fence for the outage guard: adding the
     try/except around the commander lookup must not perturb ANY key of
-    a successful response.
+    other panels of a successful response. Legality checks full deck
+    construction, not merely whether the ban-list lookup found anything.
     """
     deck = _write_pin_deck(tmp_path)
     _stub_probes(monkeypatch)
@@ -865,7 +902,7 @@ def test_build_dashboard_degrades_when_commander_lookup_fails(
     (it comes from the .dck, no network needed) and reports the Scryfall
     detail as unavailable: empty ``type_line`` / ``color_identity``,
     exactly the shape an unresolvable commander has always produced.
-    Every other panel is untouched.
+    Other panels are untouched; legality identifies missing evidence.
     """
     import urllib.error
 
@@ -891,10 +928,25 @@ def test_build_dashboard_degrades_when_commander_lookup_fails(
         "type_line": "",
         "color_identity": [],
     }
-    # Nothing else moved — the outage is contained to the one panel.
+    # The known size violation remains; missing commander data is not
+    # misrepresented as a new violation or a successful check.
     expected = dict(_PIN_EXPECTED)
     expected["commander"] = result.commander
-    assert result.to_dict() == expected
+    actual = result.to_dict()
+    legality = actual.pop("legality")
+    expected.pop("legality")
+    assert actual == expected
+    assert legality["all_legal"] is False
+    assert legality["status"] == "illegal"
+    assert legality["verified"] is False
+    assert legality["lookup_failures"] == 1
+    assert legality["violations"] == _PIN_EXPECTED["legality"]["violations"]
+    assert {v["code"] for v in legality["unverified"]} == {
+        "UNVERIFIED_COMMANDER", "UNVERIFIED_COLOR_IDENTITY", "UNVERIFIED_BANNED",
+    }
+    assert all(
+        v["cards"] == ["Omnath, Locus of Creation"] for v in legality["unverified"]
+    )
 
     # One loud log line, in the module's established probe format.
     out = capsys.readouterr().out

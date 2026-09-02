@@ -640,6 +640,34 @@ def _intent_block(intent) -> str:
     return "\n".join(parts)
 
 
+def _primer_kb_block(commanders) -> str:
+    """Community-primer context for the judge (FP-019.6), or "".
+
+    When the bundled primer KB holds profiles for the deck's primary
+    commander, render them (clipped) under the same grounding rule the
+    intent block states: this steers attention, it never establishes
+    card facts. Identical for both A/B orderings — the commander is the
+    same in both decks — so it cannot bias the swap-pair design.
+    Empty string (rendering as a blank line) when the KB has nothing or
+    fails: the prompt must not change shape on a KB outage.
+    """
+    if not commanders:
+        return ""
+    try:
+        from .primer_kb import prompt_block_for_commander
+        rendered = prompt_block_for_commander(commanders[0])
+    except Exception:  # noqa: BLE001 — context only, never break a prompt
+        return ""
+    if not rendered:
+        return ""
+    return (
+        "\nCOMMUNITY PRIMER CONTEXT — how experienced pilots build this "
+        "commander\n(Attention-steering only, same grounding rule as the "
+        "intent block: cards\ndo only what the oracle text in this prompt "
+        f"says they do.)\n{rendered}\n"
+    )
+
+
 def build_judge_prompt(
     *,
     deck_a_text: str,
@@ -671,7 +699,7 @@ COMMANDER (identical in both decks)
 
 STATED INTENT — the standard to judge against
 {_intent_block(intent)}
-
+{_primer_kb_block(commanders)}
 ONLY IN DECK A ({len(only_a)} card(s), full oracle text)
 {_oracle_block(only_a, lookup)}
 

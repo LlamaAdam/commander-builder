@@ -365,6 +365,41 @@ from ._advisor_claude import (  # noqa: E402
 
 # --- Public entry ----------------------------------------------------------
 
+def kb_budget_swap_recommendations(
+    commander_names, deck_card_names,
+) -> "list[SwapRecommendation]":
+    """Primer-KB budget swaps as add/cut pairs (FP-019.6).
+
+    For each ``primer_kb.budget_swaps_for_deck`` hit — a swap a primer
+    AUTHOR documented for one of this deck's own commanders, whose
+    out-card the deck runs and whose in-card it lacks — emit a matched
+    add + cut carrying the author's reason. Direction is the author's
+    (usually budget-in, occasionally an upgrade path); the reason string
+    says which, so it is quoted verbatim rather than paraphrased.
+    Empty list when the commander has no KB coverage — the common case.
+    """
+    from .primer_kb import budget_swaps_for_deck
+
+    recs: list[SwapRecommendation] = []
+    for swap in budget_swaps_for_deck(commander_names, deck_card_names):
+        evidence = {"source": "primer_kb", "primer_url": swap.url,
+                    "commander": swap.commander}
+        why = swap.reason or "documented function-preserving swap"
+        recs.append(SwapRecommendation(
+            card=swap.in_card, action="add",
+            reason=(f"primer-documented swap in for {swap.out_card}: "
+                    f"{why}"),
+            evidence={**evidence, "replaces": swap.out_card},
+        ))
+        recs.append(SwapRecommendation(
+            card=swap.out_card, action="cut",
+            reason=(f"primer-documented swap out for {swap.in_card}: "
+                    f"{why}"),
+            evidence={**evidence, "replaced_by": swap.in_card},
+        ))
+    return recs
+
+
 def advise(
     deck_path: Path,
     bracket: int,
@@ -878,6 +913,22 @@ def _advise_steps(
             flush=True,
         )
 
+    # Primer-KB budget swaps (FP-019.6): author-documented,
+    # function-preserving alternatives for THIS commander, surfaced only
+    # in budget mode. Supplemental like lift — appended before dedup so
+    # the same post-processing applies; fail-quiet like every
+    # supplemental signal.
+    kb_recs: list[SwapRecommendation] = []
+    if budget:
+        try:
+            kb_recs = kb_budget_swap_recommendations(commanders, main_cards)
+        except Exception as exc:  # noqa: BLE001 — supplemental only
+            print(
+                f"WARN: primer-KB budget swaps skipped "
+                f"({type(exc).__name__}: {exc}).",
+                flush=True,
+            )
+
     # Prepend manabase so curated essentials surface at the top,
     # then deduplicate so the same card never appears in both the
     # manabase + primary slices (lift picks trail last — see above).
@@ -898,7 +949,8 @@ def _advise_steps(
     # source-badge rendering.
     seen_lc: set[str] = set()
     deduped: list[SwapRecommendation] = []
-    for rec in list(manabase_recs) + list(recs) + list(lift_recs):
+    for rec in (list(manabase_recs) + list(recs) + list(lift_recs)
+                + list(kb_recs)):
         # Only de-dup add candidates — cuts are user-deck cards
         # already present and naturally singleton.
         if rec.action == "add":

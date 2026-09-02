@@ -1,9 +1,10 @@
 """Deck-editing + deck-info routes for the web layer.
 
-Seven routes live here, all centered on reading/writing .dck
+Deck routes live here, all centered on reading/writing .dck
 files and answering questions about deck contents:
 
 - ``/api/deck_text``               (GET / PUT / DELETE)
+- ``/api/deck_commander``          (GET / PUT — commander and partner selection)
 - ``/api/import_deck``             (POST — Moxfield URL or paste)
 - ``/api/deck_source``             (GET / PUT — Moxfield= metadata)
 - ``/api/verify_against_source``   (GET — diff vs. live Moxfield)
@@ -26,6 +27,11 @@ from typing import Optional
 from uuid import uuid4
 
 from flask import Blueprint, jsonify, request
+
+from .commander_edit import (
+    change_commander_text, commander_names, commander_summary, commander_warnings,
+)
+from ..import_formats import ImportFormatError, normalize_dck_cards
 
 from ._helpers import (
     _bracket_from_filename,
@@ -385,6 +391,47 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             return jsonify({"error": str(exc)}), 500
         return jsonify({"deck": deck_id, "deleted": True})
 
+    @bp.route("/api/deck_commander", methods=["GET", "PUT"])
+    def deck_commander():
+        """Inspect candidates or choose one commander and an optional partner."""
+        deck_id = request.args.get("deck")
+        path = _resolve_deck_path(deck_dir, deck_id, request.args.get("path"))
+        if path is None:
+            return jsonify({"error": "deck not found"}), 404
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
+        try:
+            previous, candidates = commander_summary(text)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if request.method == "GET":
+            return jsonify({"deck": deck_id, "commanders": previous, "candidates": candidates})
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "expected JSON object"}), 400
+        try:
+            requested = commander_names(payload.get("commander"), payload.get("partner"))
+            changed, added = change_commander_text(text, requested)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        warnings = commander_warnings(changed, added)
+        declared = _bracket_from_filename(path.name)
+        if declared is not None:
+            from ..dck_meta import set_bracket_unverified
+            changed = set_bracket_unverified(changed, declared)
+        try:
+            atomic_write_text(path, changed)
+        except OSError as exc:
+            return jsonify({"error": str(exc)}), 500
+        commanders, _ = commander_summary(changed)
+        return jsonify({
+            "deck": deck_id, "commanders": commanders, "previous_commanders": previous,
+            "saved": True, "text": changed, "card_delta": len(added), "warnings": warnings,
+            "bracket_tag_unverified": declared is not None,
+        })
+
     @bp.route("/api/import_deck", methods=["POST"])
     def import_deck():
         """Create a new .dck under deck_dir from either a Moxfield URL
@@ -394,6 +441,10 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
               ``{"name": "<display>", "paste_text": "<.dck, MTGA
               export, CSV, or plain card lines>"}``
 
+        Optional ``commander`` and ``partner`` names move existing copies
+        into the command zone. Absent names add one copy with a warning;
+        blank fields preserve explicitly pasted sections.
+
         Filename is derived from ``name`` with a ``[USER]`` prefix and
         ``[B?]`` suffix so the deck shows up in the user-only sidebar.
         """
@@ -401,8 +452,15 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         # already guarantees Content-Type: application/json here, so
         # parsing honors the header; malformed JSON -> None -> 400.
         payload = request.get_json(silent=True)
-        if payload is None:
-            return jsonify({"error": "expected JSON body"}), 400
+        if not isinstance(payload, dict):
+            return jsonify({"error": "expected JSON object"}), 400
+        for field in ("name", "moxfield_url", "paste_text"):
+            if payload.get(field) is not None and not isinstance(payload[field], str):
+                return jsonify({"error": f"{field} must be text"}), 400
+        try:
+            requested = commander_names(payload.get("commander"), payload.get("partner"), required=False)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
         name = (payload.get("name") or "").strip()
         url = (payload.get("moxfield_url") or "").strip()
@@ -458,7 +516,6 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             # exports, CSV card lists, and the plain Moxfield
             # bulk-paste line list — all converge on the same .dck
             # intermediate the writers below consume.
-            from ..import_formats import ImportFormatError
             try:
                 deck_text_out = _normalize_pasted_deck(paste)
             except ImportFormatError as exc:
@@ -471,6 +528,17 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 }), 400
             if not derived_name:
                 derived_name = "Pasted Deck"
+
+        # Syntax and nonzero content are checked BEFORE creating a directory
+        # or file. Commander legality remains advisory, never a card filter.
+        added: list[str] = []
+        try:
+            deck_text_out = normalize_dck_cards(deck_text_out, require_cards=True)
+            if requested:
+                deck_text_out, added = change_commander_text(deck_text_out, requested)
+        except ValueError as exc:
+            return jsonify({"error": "could not parse pasted deck list", "detail": str(exc)}), 400
+        warnings = commander_warnings(deck_text_out, added) if requested else []
 
         # Filename: [USER] <name> [B<bracket>].dck. Sanitize invalid
         # path chars (keep brackets — they're meaningful here).
@@ -512,6 +580,9 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             "name": _re.sub(r"^\[USER\]\s*", "", target.stem),
             "filename": filename,
             "path": str(target),
+            "commanders": commander_summary(deck_text_out)[0],
+            "card_delta": len(added),
+            "warnings": warnings,
         })
 
     @bp.route("/api/build_deck", methods=["POST"])

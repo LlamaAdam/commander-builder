@@ -179,6 +179,19 @@ textarea::placeholder {
   font-weight: 600;
 }
 .legality-banner button.pill { font-weight: 500; }
+.legality-banner .pill.good { background: var(--good); color: #08361d; }
+.legality-banner .pill.warn { background: var(--warn); color: #4a3308; }
+.legality-banner .pill.bad { background: var(--bad); color: #380808; }
+.commander-form { display: flex; flex-direction: column; gap: 8px; }
+.commander-form input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font: inherit;
+}
+.commander-form .muted { font-size: 13px; line-height: 1.5; }
 
 /* Hero action row — small inline buttons next to "Propose changes". */
 .hero-actions {

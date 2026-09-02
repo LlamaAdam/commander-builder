@@ -913,8 +913,8 @@ def test_dashboard_sim_coverage_flags_forge_unsupported_cards(
         assert cov["unsupported_names"] == ["Cultivate"], url
 
 
-def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client):
-    """No vendor/forge (this test checkout) is "couldn't check", NOT
+def test_dashboard_sim_coverage_unavailable_without_forge_corpus(client, isolated_forge):
+    """An absent test-owned Forge corpus is "couldn't check", NOT
     "all supported": available=False with empty fields, and the
     dashboard renders normally."""
     resp = client.get("/api/dashboard/core?deck=Alpha")
@@ -993,7 +993,7 @@ def fake_corpus(tmp_path, monkeypatch):
     Forge cards corpus (``res/cardsfolder/<letter>/``), and hand back a
     counting CardsLoader.locate stand-in plus its counter dict.
 
-    A real corpus is absent from this checkout, so without this the
+    The isolated Forge path has no corpus by default, so without this the
     memo path never engages (``_corpus_signature`` returns None and
     ``_corpus_loader`` deliberately falls through uncached).
     """
@@ -1065,7 +1065,7 @@ def test_dashboard_corpus_cache_invalidates_when_forge_corpus_changes(
 
 
 def test_dashboard_sim_coverage_still_fail_quiet_with_memoized_loader(
-    client, monkeypatch,
+    client, isolated_forge,
 ):
     """The memo must not turn a corpus failure into a 500: with no
     vendored corpus the loader lookup still raises and the payload keeps
@@ -2547,11 +2547,14 @@ def test_deck_text_put_preserves_file_mode(client, deck_dir):
     not silently become owner-only on every edit."""
     target = deck_dir / "Alpha.dck"
     target.chmod(0o644)
+    # Windows exposes the writable bit (typically 0666), not POSIX 0644.
+    # Preserve the actual pre-save permissions on either platform.
+    original_mode = target.stat().st_mode & 0o777
     resp = client.put("/api/deck_text?deck=Alpha", json={
         "text": "[metadata]\nName=Alpha\n\n[Main]\n1 Forest\n",
     })
     assert resp.status_code == 200
-    assert target.stat().st_mode & 0o777 == 0o644
+    assert target.stat().st_mode & 0o777 == original_mode
 
 
 def test_deck_text_put_flags_bracket_tag_unverified_on_main_change(
@@ -4461,6 +4464,7 @@ def test_audit_endpoint_surfaces_deck_health_signals(
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
         "wincon_protection", "self_mill", "role_targets", "consistency",
+        "consistency_targets", "nonbos",
     }
     # Named-card signals picked up correctly.
     assert health["mdfc"]["count"] == 1
@@ -4523,6 +4527,7 @@ def test_audit_endpoint_deck_health_empty_shape_on_scryfall_failure(
     assert set(health.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
         "wincon_protection", "self_mill", "role_targets", "consistency",
+        "consistency_targets", "nonbos",
     }
     # Scryfall-dependent signals honor the outage contract: None, not
     # a fabricated zero. The UI renders these as "unavailable" tiles.

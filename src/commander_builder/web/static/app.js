@@ -422,8 +422,10 @@ function hideModal(id) {
   if (!bd || bd.hidden) return;
   const hadFocus = bd.contains(document.activeElement);
   bd.hidden = true;
-  const rf = bd._returnFocus;
+  let rf = bd._returnFocus;
   bd._returnFocus = null;
+  // A successful edit may have rebuilt the opener with fresh deck data.
+  if (rf?.id && !document.contains(rf)) rf = document.getElementById(rf.id);
   // Only restore when focus was inside the dialog (or got dropped on
   // <body> by the hide) — never yank it from wherever the user went.
   const active = document.activeElement;
@@ -465,6 +467,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 let _activeDeckId = null;
+let _deckSelectionGeneration = 0;
 // AbortController for the currently in-flight audit stream. Reset on
 // every loadAdvise() call so switching decks / re-running the audit
 // cancels the previous Claude call instead of letting the stream
@@ -479,6 +482,8 @@ async function selectDeck(deckId, li, opts) {
   // through 5+ seconds of "Loading…" while Scryfall resolves any
   // newly-added cards.
   const soft = opts && opts.soft;
+  if (!soft) _deckSelectionGeneration += 1;
+  if (!soft && _activeDeckId !== deckId) invalidateProposedSimulation();
   // Cancel any in-flight audit stream for the previous deck. We do
   // this BEFORE updating ``_activeDeckId`` so the audit's own
   // mid-stream "did the deck change?" check still sees the old id
@@ -534,7 +539,13 @@ async function selectDeck(deckId, li, opts) {
     // _activeDeckId) would operate on deck B while the user LOOKS at
     // deck A's data. Same check the audit auto-kick below already does.
     if (_activeDeckId !== deckId) return;
+    const previousFocus = soft && dash.contains(document.activeElement)
+      ? document.activeElement : null;
     renderDashboard(data, iters.iterations || []);
+    if (previousFocus?.id && !document.contains(previousFocus)
+        && document.activeElement === document.body) {
+      document.getElementById(previousFocus.id)?.focus();
+    }
     // Fill the deferred tiles. Not awaited — the dashboard is already
     // on screen and each section resolves into its own skeleton.
     loadDashboardSections(deckId, data.deferred_sections);
@@ -577,7 +588,117 @@ async function selectDeck(deckId, li, opts) {
   }
 }
 
+let _commanderEditDeckId = null;
+let _commanderEditGeneration = 0;
+
+function commanderEditIsCurrent(deckId, generation) {
+  return _commanderEditDeckId === deckId
+    && _activeDeckId === deckId
+    && _commanderEditGeneration === generation
+    && !$("commander-modal").hidden;
+}
+
+function setCommanderBusy(busy) {
+  for (const id of ["commander-name", "commander-partner", "commander-save"]) {
+    $(id).disabled = busy;
+  }
+}
+
+async function openCommanderModal() {
+  if (!_activeDeckId) return;
+  const deckId = _activeDeckId;
+  const generation = ++_commanderEditGeneration;
+  _commanderEditDeckId = deckId;
+  const status = $("commander-status");
+  status.className = "muted";
+  status.textContent = "Loading cards from this deck…";
+  $("commander-name").value = "";
+  $("commander-partner").value = "";
+  $("commander-candidates").replaceChildren();
+  setCommanderBusy(true);
+  showModal("commander-modal");
+  try {
+    const body = await fetchJSON(`/api/deck_commander?deck=${encodeURIComponent(deckId)}`);
+    if (!commanderEditIsCurrent(deckId, generation)) return;
+    for (const name of body.candidates || []) {
+      $("commander-candidates").appendChild(el("option", { value: name }));
+    }
+    $("commander-name").value = (body.commanders || [])[0] || "";
+    $("commander-partner").value = (body.commanders || [])[1] || "";
+    status.textContent = body.commanders?.length ? "" : "No commander is set. Choose one above.";
+    setCommanderBusy(false);
+    $("commander-name").focus();
+  } catch (e) {
+    if (commanderEditIsCurrent(deckId, generation)) {
+      status.textContent = `Could not load commanders: ${e.message}`;
+      status.className = "status-warn";
+    }
+  }
+}
+
+async function saveCommander(event) {
+  event.preventDefault();
+  const deckId = _commanderEditDeckId;
+  const generation = _commanderEditGeneration;
+  if (!commanderEditIsCurrent(deckId, generation) || $("commander-save").disabled) return;
+  const commander = $("commander-name").value.trim();
+  const partner = $("commander-partner").value.trim();
+  const status = $("commander-status");
+  if (!commander || commander.toLowerCase() === partner.toLowerCase()) {
+    status.textContent = "Choose a commander and, if needed, a different partner.";
+    status.className = "status-warn";
+    return;
+  }
+  status.className = "muted";
+  status.textContent = "Saving commander…";
+  setCommanderBusy(true);
+  try {
+    const response = await fetch(`/api/deck_commander?deck=${encodeURIComponent(deckId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commander, partner }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || body.error || `Save failed (${response.status})`);
+    if (commanderEditIsCurrent(deckId, generation)) {
+      const warnings = body.warnings || [];
+      status.textContent = `Saved commander: ${body.commanders.join(" + ")}.${warnings.length ? " " + warnings.join(" ") : ""}`;
+      status.className = warnings.length ? "status-warn" : "muted";
+      $("commander-name").value = body.commanders[0] || "";
+      $("commander-partner").value = body.commanders[1] || "";
+    }
+    // Closing the dialog does not undo a successful write. Reconcile the
+    // active deck even when its dialog was closed, but never change decks.
+    if (_activeDeckId !== deckId) return;
+    // Suggestions/sim results computed for the old commander are now stale.
+    if (_auditAbortController) _auditAbortController.abort();
+    _auditAbortController = null;
+    _lastAuditProposed = null;
+    _lastAuditManifest = null;
+    invalidateProposedSimulation();
+    await selectDeck(deckId, null, { soft: true });
+  } catch (e) {
+    if (commanderEditIsCurrent(deckId, generation)) {
+      status.textContent = `Could not change commander: ${e.message}`;
+      status.className = "status-warn";
+    }
+  } finally {
+    if (commanderEditIsCurrent(deckId, generation)) setCommanderBusy(false);
+  }
+}
+
 let _proposeMode = "ab";   // "ab" (Run A/B sim) or "save" (Edit deck)
+let _proposeRunGeneration = 0;
+
+function invalidateProposedSimulation() {
+  // Also called on deck navigation, so A → B → A cannot revive A's
+  // pending result, including a commander save that finished off-screen.
+  _proposeRunGeneration += 1;
+  _lastSimReport = null;
+  $("propose-run").disabled = false;
+  $("propose-result").replaceChildren();
+  setProposeStatus("");
+}
 
 // Per-game wall-time (seconds) by bracket — conservative (slow side of the
 // observed distribution) so ETAs don't breed "is it stuck?" questions. Pod =
@@ -776,6 +897,9 @@ async function runProposeSwap() {
   // poll that resolves after a deck switch never renders onto the wrong
   // deck's panel.
   const simDeckId = _activeDeckId;
+  const simGeneration = ++_proposeRunGeneration;
+  const simIsCurrent = () => _activeDeckId === simDeckId
+    && _proposeRunGeneration === simGeneration;
   try {
     // Async contract (2026-07-21): POST returns {job_id} immediately, then
     // we poll GET /api/sim_job/<id>. The old sync POST held the HTTP
@@ -795,6 +919,7 @@ async function runProposeSwap() {
       }),
     });
     const startBody = await startResp.json();
+    if (!simIsCurrent()) return;
     if (!startResp.ok) {
       // Validation/staging/availability errors still come back
       // synchronously here (before any job is created), so surface them
@@ -812,9 +937,10 @@ async function runProposeSwap() {
     let delay = 2000;
     const body = await new Promise((resolve, reject) => {
       const tick = async () => {
-        // Stop polling entirely if the user navigated away from this deck.
-        if (_activeDeckId !== simDeckId) {
-          reject(new Error("__deck_switched__"));
+        // Stop when the deck changed, including a new commander on the
+        // same deck. A completed old job must not become current again.
+        if (!simIsCurrent()) {
+          reject(new Error("__sim_obsolete__"));
           return;
         }
         try {
@@ -822,6 +948,10 @@ async function runProposeSwap() {
             `/api/sim_job/${encodeURIComponent(jobId)}`,
           );
           const job = await pollResp.json();
+          if (!simIsCurrent()) {
+            reject(new Error("__sim_obsolete__"));
+            return;
+          }
           if (!pollResp.ok) {
             reject(new Error(job.error || `HTTP ${pollResp.status}`));
             return;
@@ -836,7 +966,7 @@ async function runProposeSwap() {
           }
           // queued/running — update the status line with coarse progress
           // when compare() has reported a completed pod.
-          if (_activeDeckId === simDeckId) {
+          if (simIsCurrent()) {
             const prog = job.progress;
             if (prog && prog.pods_total) {
               setProposeStatus(
@@ -854,20 +984,18 @@ async function runProposeSwap() {
       setTimeout(tick, delay);
     });
 
-    // A poll that resolved after the user switched decks must not render.
-    if (_activeDeckId !== simDeckId) return;
+    // Neither an old deck nor an old commander can receive fresh results.
+    if (!simIsCurrent()) return;
     setProposeStatus(`Done. ${body.total_games} games played.`);
     _lastSimReport = body;
     renderProposeResult(result, body);
   } catch (e) {
-    // Swallow the deck-switch sentinel silently — it isn't an error, the
-    // user just moved on.
-    if (e && e.message === "__deck_switched__") return;
+    // Obsolete work is not a failure of the user's current comparison.
+    if (!simIsCurrent() || e?.message === "__sim_obsolete__") return;
     setProposeStatus(`Network error: ${e.message}`);
   } finally {
-    // Only re-enable the button if we're still on the deck we started on;
-    // a deck switch rebuilt the panel and its own button.
-    if (_activeDeckId === simDeckId) btn.disabled = false;
+    // Never re-enable a button that now belongs to a newer comparison.
+    if (simIsCurrent()) btn.disabled = false;
   }
 }
 
@@ -2667,6 +2795,10 @@ function renderDashboard(data, iterations) {
   editBtn.addEventListener("click", () => openProposeModal({ saveOnly: true }));
   actions.appendChild(editBtn);
 
+  const commanderBtn = el("button", { id: "btn-change-commander" }, "Change commander");
+  commanderBtn.addEventListener("click", openCommanderModal);
+  actions.appendChild(commanderBtn);
+
   const copyBtn = el("button", {}, "Copy to Moxfield");
   copyBtn.addEventListener("click", copyToMoxfield);
   actions.appendChild(copyBtn);
@@ -3180,15 +3312,53 @@ function renderSuggestions(container, suggestions) {
   container.appendChild(ul);
 }
 
+function showLegalityDetails(legality) {
+  $("alert-title").textContent = "Commander rules check";
+  const body = $("alert-body");
+  body.replaceChildren();
+  for (const [heading, findings] of [
+    ["Confirmed issues", legality.violations || []],
+    ["Not yet verified", legality.unverified || []],
+  ]) {
+    if (!findings.length) continue;
+    body.appendChild(el("h3", {}, heading));
+    const list = el("ul");
+    for (const finding of findings) {
+      const item = el("li", {}, finding.message);
+      if (Array.isArray(finding.cards) && finding.cards.length) {
+        item.appendChild(el("div", { class: "muted" }, `Cards: ${finding.cards.join(", ")}`));
+      }
+      list.appendChild(item);
+    }
+    body.appendChild(list);
+  }
+  if (legality.data_warning) body.appendChild(el("p", { class: "status-warn" }, legality.data_warning));
+  if (!body.childNodes.length) {
+    body.appendChild(el("p", {}, legality.status === "legal"
+      ? "No Commander rules violations found in the available card data."
+      : "Not enough card data is available to verify this deck."));
+  }
+  showModal("alert-modal");
+}
+
 function legalityBanner(legality, data) {
   const wrap = el("div", { class: "legality-banner" });
-  // Legality pill.
-  if (legality.all_legal) {
-    wrap.appendChild(el("span", { class: "pill good" },
-      "✓ All cards legal in Commander"));
-  } else {
-    wrap.appendChild(el("span", { class: "pill bad" },
-      `✗ ${legality.n_illegal} illegal card${legality.n_illegal === 1 ? "" : "s"}`));
+  // Missing evidence must never inherit the old ban-scan's green flag.
+  const status = legality.status;
+  const count = (legality.violations || []).length;
+  const label = status === "legal" ? "Commander-legal deck"
+    : status === "illegal" ? `Rules check: ${count || "some"} issue${count === 1 ? "" : "s"}`
+    : "Rules check: unverified";
+  const pill = el("button", {
+    class: `pill ${status === "legal" ? "good" : status === "illegal" ? "bad" : "warn"}`,
+    title: "View confirmed issues, missing card data, and rules-data warnings",
+  }, label);
+  pill.addEventListener("click", () => showLegalityDetails(legality));
+  wrap.appendChild(pill);
+  if (legality.data_warning) {
+    const warning = el("button", { class: "pill warn", title: legality.data_warning }, "Rules data warning");
+    warning.addEventListener("click", () => showLegalityDetails(legality));
+    wrap.appendChild(warning);
   }
   // Deck-size pill — only show when the deck isn't 100 cards.
   // Universal staples-aware audit produces sub-100 proposed decks
@@ -3774,12 +3944,18 @@ function showSimCoverageAlert(cov) {
   showModal("alert-modal");
 }
 
+let _newDeckGeneration = 0;
+let _pasteRequestGeneration = 0;
+
 function openNewDeckModal() {
+  _newDeckGeneration += 1;
   $("new-deck-status").textContent = "";
   $("new-mox-name").value = "";
   $("new-mox-url").value = "";
   $("new-paste-name").value = "";
   $("new-paste-text").value = "";
+  $("new-paste-commander").value = "";
+  $("new-paste-partner").value = "";
   const bulkUrls = $("new-bulk-urls");
   if (bulkUrls) bulkUrls.value = "";
   const bulkResult = $("new-bulk-result");
@@ -3976,6 +4152,8 @@ async function createPasteDeck() {
   const text = $("new-paste-text").value;
   const bracket = parseInt($("new-paste-bracket").value, 10);
   const status = $("new-deck-status");
+  const commander = $("new-paste-commander").value.trim();
+  const partner = $("new-paste-partner").value.trim();
   if (!name) {
     status.textContent = "Display name is required.";
     return;
@@ -3984,12 +4162,20 @@ async function createPasteDeck() {
     status.textContent = "Paste a deck list first.";
     return;
   }
+  const modalGeneration = _newDeckGeneration;
+  const selectionGeneration = _deckSelectionGeneration;
+  const requestGeneration = ++_pasteRequestGeneration;
+  const requestIsCurrent = () => _newDeckGeneration === modalGeneration
+    && _pasteRequestGeneration === requestGeneration;
+  const contextIsCurrent = () => requestIsCurrent()
+    && _deckSelectionGeneration === selectionGeneration;
+  const modalIsCurrent = () => contextIsCurrent() && !$("new-deck-modal").hidden;
   status.textContent = "Saving…";
   try {
     const resp = await fetch("/api/import_deck", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, paste_text: text, bracket }),
+      body: JSON.stringify({ name, paste_text: text, bracket, commander, partner }),
     });
     const body = await resp.json();
     if (!resp.ok) {
@@ -3998,14 +4184,32 @@ async function createPasteDeck() {
       // generic "could not parse" headline and has no idea which line
       // to fix.
       const detail = body.detail ? ` — ${body.detail}` : "";
-      status.textContent = `Error: ${body.error || resp.status}${detail}`;
+      if (modalIsCurrent()) status.textContent = `Error: ${body.error || resp.status}${detail}`;
       return;
     }
-    status.textContent = `Created ${body.filename}.`;
-    hideModal("new-deck-modal");
+    const shouldSelect = modalIsCurrent();
+    if (shouldSelect) {
+      status.textContent = `Created ${body.filename}.`;
+      hideModal("new-deck-modal");
+    }
+    // The file was created even if the user closed this request's dialog.
+    // Refresh the list without overriding a newer dialog or deck choice.
     await loadDecks();
+    if (!shouldSelect || !contextIsCurrent()) return;
+    const selection = selectDeck(body.id, null);
+    const importedSelectionGeneration = _deckSelectionGeneration;
+    await selection;
+    if (body.warnings?.length && requestIsCurrent()
+        && _deckSelectionGeneration === importedSelectionGeneration
+        && _activeDeckId === body.id && !_visibleModalBackdrop()) {
+      $("alert-title").textContent = "Imported deck: check these notes";
+      const list = el("ul");
+      for (const warning of body.warnings) list.appendChild(el("li", {}, warning));
+      $("alert-body").replaceChildren(list);
+      showModal("alert-modal");
+    }
   } catch (e) {
-    status.textContent = `Network error: ${e.message}`;
+    if (modalIsCurrent()) status.textContent = `Network error: ${e.message}`;
   }
 }
 
@@ -4389,7 +4593,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // ESC closes any open modal (and the mobile drawer).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      ["propose-modal", "new-deck-modal", "alert-modal"].forEach(hideModal);
+      ["propose-modal", "new-deck-modal", "commander-modal", "alert-modal"].forEach(hideModal);
       closeDrawer();
     }
   });
@@ -4428,6 +4632,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (moxImport) moxImport.addEventListener("click", importMoxfield);
   const pasteCreate = $("new-paste-create");
   if (pasteCreate) pasteCreate.addEventListener("click", createPasteDeck);
+  $("commander-form").addEventListener("submit", saveCommander);
   const bulkImport = $("new-bulk-import");
   if (bulkImport) bulkImport.addEventListener("click", bulkImportFromTextarea);
   const buildRun = $("new-build-run");

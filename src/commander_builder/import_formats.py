@@ -32,15 +32,13 @@ produces —
 * ``csv_to_lines``  → a plain ``<qty> <Name>`` line list, which the
   caller feeds through the SAME plain-paste wrap the Moxfield bulk
   list uses. That reuse is deliberate: CSV exports carry no commander
-  column, and the plain-paste path's commander behavior today is
-  "none — every card goes to [Main]"; routing CSV through it inherits
-  that behavior (and any future improvement to it) for free.
+  column, so rows default to [Main]. The web import may explicitly
+  select a commander afterwards without duplicating an existing copy.
 
-Malformed input in a *detected* format raises ``ImportFormatError``
+Malformed card input raises ``ImportFormatError``
 naming the offending line — the route turns that into a 400, never a
-stacktrace. Ambiguous input is never an error: ``detect_paste_format``
-only claims a format on a strong signal and otherwise answers
-``"plain"``, so the worst case is the historical plain-lines behavior.
+stacktrace. ``detect_paste_format`` only claims a format on a strong
+signal; the plain fallback validates the same counted card syntax.
 """
 from __future__ import annotations
 
@@ -48,14 +46,15 @@ import csv
 import io
 import re
 
+from .dck_utils import CARD_LINE_RE, parse_card_line
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
 
 
 class ImportFormatError(ValueError):
-    """A paste was positively detected as Arena/CSV but a line inside it
-    doesn't parse.
+    """A pasted card line or imported deck structure doesn't parse.
 
     Carries the 1-based line number and the raw line so the web route
     can show the user exactly what to fix. Subclasses ValueError so
@@ -106,11 +105,60 @@ _ARENA_TAIL_RE = re.compile(r"\s\([A-Za-z0-9]{2,7}\)(?:\s+\S+)?\s*$")
 #               form field, same as every other paste)
 _ARENA_HEADERS: dict[str, str | None] = {
     "deck": "main",
+    "main": "main",
+    "mainboard": "main",
     "commander": "commander",
     "sideboard": "sideboard",
     "companion": "sideboard",
     "about": None,
+    "considering": "considering",
 }
+
+
+def paste_section_heading(line: str) -> str:
+    """Recognize whole headings, not card-name prefixes like Commander Sphere."""
+    return re.sub(r"\s*(?:\(\d+\))?\s*:?$", "", line.strip()).casefold()
+
+
+def normalize_card_line(line: str, line_no: int) -> str:
+    """Strip foreign printing/finish tails; preserve Forge tails verbatim."""
+    stripped = line.strip()
+    if "|" not in stripped:
+        stripped = re.sub(r"(?:\s+\*[FE]\*)+$", "", stripped, flags=re.IGNORECASE)
+        match = _ARENA_LINE_RE.fullmatch(stripped)
+        if match:
+            stripped = f"{match.group('qty')} {match.group('name').strip()}"
+    parsed = parse_card_line(stripped)
+    if (parsed is None or parsed[0] <= 0 or not parsed[1]
+            or any(char in parsed[1] for char in "[]\r\n\x00")):
+        raise ImportFormatError(
+            "expected a positive count and card name", line_no, line,
+        )
+    return stripped
+
+
+def normalize_dck_cards(text: str, *, require_cards: bool = False) -> str:
+    """Validate card sections without conflating syntax with Commander legality."""
+    section = ""
+    total = 0
+    out: list[str] = []
+    for line_no, raw in enumerate(text.splitlines(), 1):
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].casefold()
+        elif stripped and not stripped.startswith(("#", "//", ";")):
+            if section in {"main", "commander", "sideboard", "considering"}:
+                normalized = normalize_card_line(raw, line_no)
+                if section in {"main", "commander"}:
+                    total += int(CARD_LINE_RE.fullmatch(normalized).group(1))
+                # Preserve untouched Forge lines (including indentation).
+                raw = raw if normalized == stripped else normalized
+            elif not section:
+                raise ImportFormatError("card line outside a deck section", line_no, raw)
+        out.append(raw)
+    if require_cards and total == 0:
+        raise ImportFormatError("deck contains no mainboard or commander cards", 1, "")
+    return "\n".join(out) + ("\n" if out else "")
 
 
 def _looks_like_arena(lines: list[str]) -> bool:
@@ -153,15 +201,14 @@ def arena_to_dck(text: str) -> str:
     that some exporters emit as repeated singles, and collapsing them
     keeps the .dck one-line-per-name like every other import path.
 
-    Raises ``ImportFormatError`` for any non-blank line that is neither
-    a known header nor a parseable card line — the caller only invokes
-    this after positive detection, so a bad line is a real user error
-    worth naming, not a reason to fall back silently.
+    Also accepts plain counted lists and Moxfield section headings.
+    Raises ``ImportFormatError`` for any non-comment line that is neither
+    a known header nor a parseable card line.
     """
     # Per-section name → qty, insertion-ordered (dict preserves order),
     # plus name casing of first occurrence.
     sections: dict[str, dict[str, int]] = {
-        "commander": {}, "main": {}, "sideboard": {},
+        "commander": {}, "main": {}, "sideboard": {}, "considering": {},
     }
     # Headerless Arena pastes start straight into card lines → main.
     current: str | None = "main"
@@ -176,26 +223,21 @@ def arena_to_dck(text: str) -> str:
             if current is None:
                 current = "main"
             continue
-        if s.lower() in _ARENA_HEADERS:
-            current = _ARENA_HEADERS[s.lower()]
+        heading = paste_section_heading(s)
+        if heading in _ARENA_HEADERS:
+            current = _ARENA_HEADERS[heading]
             continue
         if current is None:
-            # Inside About: metadata like ``Name My Deck`` — not cards.
+            # About metadata ends at the first counted card even when an
+            # exporter omits the blank line or Deck heading.
+            if not re.match(r"^\d+\s", s):
+                continue
+            current = "main"
+        if s.startswith(("#", "//", ";")):
             continue
-        m = _ARENA_LINE_RE.match(s)
-        if not m:
-            raise ImportFormatError(
-                "unrecognized MTG Arena line — expected "
-                "'<count> <card name> [(SET) <number>]' or a section "
-                "header (Deck / Commander / Sideboard / About)",
-                line_no, s,
-            )
-        qty = int(m.group("qty"))
-        name = m.group("name").strip()
-        if not name:
-            raise ImportFormatError(
-                "MTG Arena line has no card name", line_no, s,
-            )
+        normalized = normalize_card_line(s, line_no)
+        qty_text, name = normalized.split(maxsplit=1)
+        qty = int(qty_text)
         bucket = sections[current]
         bucket[name] = bucket.get(name, 0) + qty
 
@@ -211,6 +253,9 @@ def arena_to_dck(text: str) -> str:
     if sections["sideboard"]:
         out.append("[Sideboard]")
         out.extend(f"{q} {n}" for n, q in sections["sideboard"].items())
+    if sections["considering"]:
+        out.append("[Considering]")
+        out.extend(f"{q} {n}" for n, q in sections["considering"].items())
     return "\n".join(out) + "\n"
 
 
@@ -308,10 +353,16 @@ def csv_to_lines(text: str) -> str:
     # csv.reader over the raw text handles quoted fields spanning
     # delimiters. Track physical line numbers for error messages via
     # the reader's own line_num (accounts for quoted embedded newlines).
-    reader = csv.reader(io.StringIO(text.lstrip("\ufeff")), delimiter=delim)
+    reader = csv.reader(io.StringIO(text.lstrip("\ufeff")), delimiter=delim, strict=True)
     cards: dict[str, int] = {}
     header_seen = False
-    for row in reader:
+    while True:
+        try:
+            row = next(reader)
+        except StopIteration:
+            break
+        except csv.Error as exc:
+            raise ImportFormatError(f"malformed CSV: {exc}", reader.line_num, "") from None
         # Skip fully blank rows (trailing newline artifacts).
         if not row or all(not f.strip() for f in row):
             continue
@@ -326,6 +377,8 @@ def csv_to_lines(text: str) -> str:
                 "CSV row is missing a card name", line_no, raw_line,
             )
         name = row[name_idx].strip()
+        if any(char in name for char in "\r\n\x00[]"):
+            raise ImportFormatError("CSV card name contains a section or line break", line_no, raw_line)
         qty = 1
         if count_idx is not None and count_idx < len(row):
             count_raw = row[count_idx].strip()

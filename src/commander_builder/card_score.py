@@ -212,6 +212,13 @@ CARD_SCORE_MODIFIERS: dict[str, float] = {
     "salt_penalty": -10.0,      # bracket <= 3 only, scaled over the band
     "bracket_pressure": -20.0,  # tutors / fast mana / extra turns / MLD
     "mdfc_bonus": 3.0,          # modal land = 0.5 land in the health grade
+    # FP-019.4 — primer-derived penalties (heuristics doc §3/§5). Each
+    # fires on a narrow, regex-trustworthy oracle signature; anything
+    # ambiguous fires nothing (a ranking prior must not guess).
+    "commander_dependence": -8.0,  # §3: dead with the command zone occupied
+    "tempo_fail": -6.0,            # §5: value a turn-cycle late, aggro ctx
+    "capped_engine": -4.0,         # §5: once-each-turn < uncapped engine
+    "tutor_top_delta": -5.0,       # §5: top-of-library tutor, non-combo
 }
 
 # --- consensus -------------------------------------------------------------
@@ -1651,9 +1658,117 @@ def _mod_mdfc(name: str, ctx: DeckContext) -> Optional[Modifier]:
                     "without costing a spell slot")
 
 
+# --- FP-019.4: primer-derived penalties (heuristics §3/§5) ------------------
+#
+# Four narrow oracle signatures the 40-primer synthesis says to charge
+# for. Each pattern is deliberately conservative: these are RANKING
+# penalties inside a hand-set prior, so a miss (pattern doesn't fire on
+# a card it arguably should) costs nothing, while a false positive would
+# silently down-rank a fine card on every audit.
+
+#: §3 commander-dependence: an effect gated on CONTROLLING the
+#: commander is dead the moment the command zone is occupied — "cards
+#: that are dead without the commander get cut on sight" (Pako's fight
+#: spells, Gishath cutting Descendants' Path). Only the explicit
+#: gated-on-commander templating is trusted.
+_COMMANDER_GATED_RE = re.compile(
+    r"as long as you control your commander"
+    r"|if you control your commander"
+    r"|your commander deals combat damage", re.I)
+
+#: §5 tempo test (Winota's budget trap cards): a permanent whose first
+#: value arrives on a LATER upkeep/end step fails "does it produce value
+#: within the same turn cycle it costs you?" — Anim Pakal / Oltec
+#: Matterweaver arrive 2-3 turns late. Immediate-value text (an ETB
+#: trigger, an activated ability, a spell effect) disarms the pattern.
+_DELAYED_VALUE_RE = re.compile(
+    r"at the beginning of (?:your|each) (?:upkeep|end step)", re.I)
+_IMMEDIATE_VALUE_RE = re.compile(
+    r"when(?:ever)? [^.\n]{0,60}enters|\{t\}:|^draw |[.:] draw ", re.I)
+
+#: §5 capped engines lose to uncapped: Morbid Opportunist (1/turn) <
+#: Braids / Grim Haruspex. The printed limiter is the signature.
+_CAPPED_ENGINE_RE = re.compile(r"only once each turn", re.I)
+
+#: §5 tutor card-delta: the Vampiric class (to TOP of library) costs a
+#: card relative to the Demonic class (to hand) — threat-density decks
+#: skip the −1 class entirely; combo decks pay it happily.
+_TUTOR_TOP_RE = re.compile(
+    r"search your library[^.\n]{0,120}top of your library", re.I | re.S)
+
+
+def _mod_commander_dependence(name: str,
+                              ctx: DeckContext) -> Optional[Modifier]:
+    card = ctx.card(name)
+    if not card:
+        return None
+    oracle = _oracle_text(card)
+    named = next((c for c in ctx.commander_names
+                  if c and c in oracle and _key(c) != _key(name)), None)
+    if not _COMMANDER_GATED_RE.search(oracle) and named is None:
+        return None
+    why = (f"only functions alongside {named}"
+           if named is not None
+           else "its effect is gated on controlling your commander")
+    return Modifier(
+        "commander_dependence",
+        CARD_SCORE_MODIFIERS["commander_dependence"],
+        f"{why} — dead whenever the commander is answered",
+    )
+
+
+def _mod_tempo_fail(name: str, ctx: DeckContext) -> Optional[Modifier]:
+    if (ctx.archetype or "").lower() != "aggro":
+        return None  # §5 scopes the tempo test to aggro/snowball plans
+    card = ctx.card(name)
+    if not card or "Land" in _type_line(card):
+        return None
+    oracle = _oracle_text(card)
+    if not _DELAYED_VALUE_RE.search(oracle):
+        return None
+    if _IMMEDIATE_VALUE_RE.search(oracle):
+        return None
+    return Modifier(
+        "tempo_fail", CARD_SCORE_MODIFIERS["tempo_fail"],
+        "first value arrives on a later upkeep — fails the same-turn-cycle "
+        "tempo test an aggro plan holds cards to",
+    )
+
+
+def _mod_capped_engine(name: str, ctx: DeckContext) -> Optional[Modifier]:
+    card = ctx.card(name)
+    if not card:
+        return None
+    if not _CAPPED_ENGINE_RE.search(_oracle_text(card)):
+        return None
+    return Modifier(
+        "capped_engine", CARD_SCORE_MODIFIERS["capped_engine"],
+        "a once-each-turn limiter caps this engine — uncapped versions of "
+        "the effect outscale it in multiplayer",
+    )
+
+
+def _mod_tutor_top_delta(name: str, ctx: DeckContext) -> Optional[Modifier]:
+    if (ctx.archetype or "").lower() == "combo":
+        return None  # combo decks happily pay the card for selection
+    card = ctx.card(name)
+    if not card:
+        return None
+    if not _TUTOR_TOP_RE.search(_oracle_text(card)):
+        return None
+    return Modifier(
+        "tutor_top_delta", CARD_SCORE_MODIFIERS["tutor_top_delta"],
+        "tutors to the top of the library (−1 card vs a to-hand tutor) — "
+        "a threat-density deck pays that cost every time",
+    )
+
+
 _MODIFIER_FNS = (
     _mod_combo, _mod_redundancy, _mod_owned, _mod_price, _mod_salt,
     _mod_bracket_pressure, _mod_mdfc,
+    # FP-019.4 primer-derived penalties
+    _mod_commander_dependence, _mod_tempo_fail, _mod_capped_engine,
+    _mod_tutor_top_delta,
 )
 
 

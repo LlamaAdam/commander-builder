@@ -297,15 +297,16 @@ def _default_serve(deck_dir: Optional[str], host: str, port: int) -> _ServerHand
 def _resolve_deck_dir(deck_dir: Optional[str]) -> Optional[str]:
     """Resolve the effective deck directory for launch().
 
-    ``deck_dir`` (CLI arg or explicit kwarg) wins; otherwise fall back to
-    ``config_store.get_deck_dir()`` so the configured / default value is
-    used when launching via the packaged EXE with no CLI flag.
+    Share browser startup's precedence via ``config_store.get_deck_dir``:
+    explicit value, environment, saved setting, then default. Desktop keeps
+    its Documents fallback; browser keeps the legacy Forge fallback.
     """
-    if deck_dir is not None:
-        return deck_dir
     try:
         from .config_store import get_deck_dir
-        return str(get_deck_dir())
+        resolved = get_deck_dir(deck_dir=deck_dir)
+        # Preserve the caller's spelling (including slashes) for injected
+        # server functions; only implicit values need string conversion.
+        return deck_dir if deck_dir is not None else str(resolved)
     except Exception:  # noqa: BLE001
         return None
 
@@ -432,8 +433,9 @@ def main(argv=None) -> int:
         description="Run Commander Builder as a native desktop window.",
     )
     ap.add_argument("--deck-dir", default=None,
-                    help="Directory of .dck files. Overrides the persisted "
-                         "deck_dir config setting. If neither is set, uses "
+                    help="Directory of .dck files. Precedence: this argument, "
+                         "COMMANDER_BUILDER_DECK_DIR, saved deck_dir setting, "
+                         "then "
                          "%%USERPROFILE%%\\Documents\\CommanderBuilder\\decks "
                          "(Windows) or ~/Documents/CommanderBuilder/decks.")
     args = ap.parse_args(argv)

@@ -647,6 +647,7 @@ def test_compute_deck_health_returns_all_five_signals(monkeypatch):
     assert set(result.keys()) == {
         "mdfc", "spell_density", "mana_sinks",
         "wincon_protection", "self_mill", "role_targets", "consistency",
+        "consistency_targets", "nonbos",
     }
     # Each signal has its expected shape.
     assert "count" in result["mdfc"]
@@ -814,7 +815,13 @@ def test_compute_deck_health_consistency_is_strictly_additive(monkeypatch):
     )
     health = deck_health.compute_deck_health(_CONSISTENCY_DECK)
     assert isinstance(health.get("consistency"), dict)
-    legacy = {k: v for k, v in health.items() if k != "consistency"}
+    # consistency_targets (FP-019.2) rides the same additive contract:
+    # present, and equal to feeding the evaluator the SAME projection.
+    assert health["consistency_targets"] == \
+        deck_health._consistency_targets_signal(
+            _CONSISTENCY_DECK, health["consistency"])
+    legacy = {k: v for k, v in health.items()
+              if k not in ("consistency", "consistency_targets", "nonbos")}
     # Every pre-wiring field equals the individually-computed signal --
     # the aggregator added a key, it did not touch the others.
     assert legacy == {

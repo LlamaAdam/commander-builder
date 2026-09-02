@@ -141,6 +141,7 @@ STALE_SNAPSHOT_DAYS = 45.0
 # them as API. Human-facing wording lives in ``Violation.message``.
 
 CODE_DECK_SIZE = "DECK_SIZE"
+CODE_MALFORMED_CARD_LINE = "MALFORMED_CARD_LINE"
 CODE_COMMANDER_MISSING = "COMMANDER_MISSING"
 CODE_COMMANDER_COUNT = "COMMANDER_COUNT"
 CODE_COMMANDER_INELIGIBLE = "COMMANDER_INELIGIBLE"
@@ -784,6 +785,29 @@ def _deck_quantities(deck_text: str) -> tuple[dict[str, int], dict[str, str]]:
 # The checks
 # ---------------------------------------------------------------------------
 
+def _check_card_line_syntax(deck_text: str, violations: list[Violation]) -> None:
+    """Reject active-zone entries the permissive card iterators skip.
+
+    Use the canonical Forge parser so printing suffixes and foil markers
+    remain supported. Blanks, comments, metadata, and other sections are
+    not card entries; an unparseable active-zone line is not evidence that
+    the remaining, successfully parsed cards form the entire deck.
+    """
+    for section in ("Commander", "Main"):
+        for line in dck_utils.iter_section_lines(deck_text, section):
+            if line.startswith(("#", "//", ";")):
+                continue
+            parsed = dck_utils.parse_card_line(line)
+            if parsed is None or parsed[0] <= 0 or not parsed[1]:
+                violations.append(Violation(
+                    code=CODE_MALFORMED_CARD_LINE,
+                    message=(
+                        f"Malformed card line in [{section}]: {line!r}. "
+                        "Expected a positive quantity and a card name."
+                    ),
+                ))
+
+
 def _check_deck_size(
     deck_text: str, violations: list[Violation],
 ) -> tuple[int, int]:
@@ -1100,8 +1124,9 @@ def validate_deck(
 ) -> LegalityReport:
     """Validate ``deck_text`` (a Forge ``.dck`` blob) for Commander.
 
-    Runs seven checks — deck size, singleton (with the "any number of
-    cards named" and Nazgûl-style capped exemptions), color identity,
+    Validates card-line syntax, then runs seven checks — deck size,
+    singleton (with the "any number of cards named" and Nazgûl-style
+    capped exemptions), color identity,
     commander eligibility, partner/Background/Doctor's-companion
     pairing, bans, and the Lutri companion note — and returns a
     ``LegalityReport``.
@@ -1121,6 +1146,7 @@ def validate_deck(
     violations: list[Violation] = []
     unverified: list[Violation] = []
 
+    _check_card_line_syntax(deck_text, violations)
     commanders, _main = _check_deck_size(deck_text, violations)
     commander_lines = _iter_commander_cards(deck_text)
     commander_names = [

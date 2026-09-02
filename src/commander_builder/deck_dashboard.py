@@ -53,6 +53,8 @@ from pathlib import Path
 from typing import Optional
 
 from .archetype import classify as _classify_archetype_path
+from .dck_utils import iter_main_cards
+from .deck_legality import DECK_SIZE, validate_deck
 from .scryfall_client import lookup_card, _parse_commander_names_from_dck
 from .staples import (
     UNIVERSAL_STAPLES_LC,
@@ -66,6 +68,7 @@ from .staples import (
     _WIN_CONDITION_PATTERNS,
     detect_tribal_type,
 )
+from .web.deck_text_ops import _dck_name_key
 
 
 # Categories we surface in the UI's "Categories" panel, in display order.
@@ -236,29 +239,17 @@ def match_score(
 # --- Deck reading helpers ----------------------------------------------
 
 def _read_main_with_quantities(deck_path: Path) -> list[tuple[str, int]]:
-    """Parse the [Main] section, returning (name, qty) pairs."""
-    out: list[tuple[str, int]] = []
+    """Return canonical (name, qty) pairs, including Forge foil printings.
+
+    Share the validator's parser so a ``Forest+|SET|1`` lookup and its
+    retained legality evidence both use the base card name ``Forest``.
+    """
     if not deck_path.exists():
-        return out
-    in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() == "[main]":
-            in_main = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_main = False
-            continue
-        if not in_main:
-            continue
-        m = re.match(r"^(\d+)\s+(.+?)(?:\|.*)?$", line)
-        if m:
-            qty = int(m.group(1))
-            name = m.group(2).strip()
-            out.append((name, qty))
-    return out
+        return []
+    return [
+        (name, qty)
+        for qty, name in iter_main_cards(deck_path.read_text(encoding="utf-8"))
+    ]
 
 
 # --- Top-level dashboard builder --------------------------------------
@@ -273,9 +264,9 @@ class DashboardData:
     categories: dict[str, int] = field(default_factory=dict)
     theme_tags: list[str] = field(default_factory=list)
     suggested_adds: list[dict] = field(default_factory=list)
-    # Per-deck legality + brackets-fit banner data. Lets the UI
-    # surface "All cards legal in Commander" / "X illegal cards" /
-    # "Y game changers (bracket 4+)" without an extra API call.
+    # Shared validator report plus bracket-fit banner data. ``status``
+    # distinguishes legal, illegal, and unverified; ``all_legal`` is
+    # retained for compatibility and requires a fully verified verdict.
     legality: dict = field(default_factory=dict)
     # Moxfield URL parsed from the deck's `Moxfield=<publicId>`
     # metadata line. None when the deck wasn't imported from
@@ -308,7 +299,10 @@ def build_dashboard(
     """
     main_with_qty = _read_main_with_quantities(deck_path)
     deck_card_names = [n for n, _ in main_with_qty]
-    total_main = sum(q for _, q in main_with_qty)
+    # Retain the evidence already fetched for dashboard panels. The
+    # legality validator must not repeat the network pass (or silently
+    # turn a failed lookup into a positive verdict).
+    card_evidence: dict[str, Optional[dict]] = {}
 
     # Commander section. The lookup is guarded with the SAME degrade
     # contract the per-card loop below uses: a Scryfall outage (429,
@@ -334,6 +328,7 @@ def build_dashboard(
                 f"({type(exc).__name__}: {exc}); skipping",
                 flush=True,
             )
+        card_evidence[_dck_name_key(primary_commander)] = commander_data
     color_identity = []
     if commander_data:
         color_identity = list(commander_data.get("color_identity") or [])
@@ -358,6 +353,7 @@ def build_dashboard(
             data = lookup_card(name)
         except Exception:
             data = None
+        card_evidence[_dck_name_key(name)] = data
         # Lands count
         type_line = (data or {}).get("type_line", "") if data else ""
         oracle_text = (data or {}).get("oracle_text", "") if data else ""
@@ -482,6 +478,7 @@ def build_dashboard(
     # --- Legality banner data + Moxfield URL ----------------------------
     # Pull the (Moxfield publicId) metadata line if present.
     moxfield_url: Optional[str] = None
+    text = ""
     try:
         text = deck_path.read_text(encoding="utf-8")
         m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
@@ -491,10 +488,8 @@ def build_dashboard(
     except OSError:
         pass
 
-    # Cross-reference deck names against the Game Changers list AND
-    # the doctor module's banned-in-Commander set if it exposes one.
+    # Cross-reference deck names against the Game Changers list.
     in_deck_gcs: list[str] = []
-    illegal: list[str] = []
     try:
         from .game_changers import load_game_changers
         from .staples import UNIVERSAL_STAPLES_LC
@@ -521,17 +516,25 @@ def build_dashboard(
             f"({type(exc).__name__}: {exc}); skipping",
             flush=True,
         )
-    try:
-        from . import doctor as _doctor
-        banned = getattr(_doctor, "BANNED_IN_COMMANDER", None)
-        if banned:
-            illegal = sorted(set(deck_card_names) & set(banned))
-    except Exception as exc:  # noqa: BLE001 — dashboard must not fail on legality probes
-        print(
-            f"[dashboard] banned-list probe failed "
-            f"({type(exc).__name__}: {exc}); skipping",
-            flush=True,
-        )
+    # The hero only fetches the primary commander. Resolve any other
+    # command-zone entries from disk only, unless a mainboard lookup
+    # already supplied them. Missing partner evidence stays unverified.
+    for name in commander_names[1:]:
+        key = _dck_name_key(name)
+        if key not in card_evidence:
+            try:
+                card_evidence[key] = lookup_card(name, cache_only=True)
+            except Exception:  # noqa: BLE001 — missing evidence, not a verdict
+                card_evidence[key] = None
+    report = validate_deck(
+        text, lookup=lambda name: card_evidence.get(_dck_name_key(name)),
+    )
+    # Compatibility list: card-specific finding labels. Deck-wide
+    # failures (such as size) have no card labels; use status/violations
+    # for the verdict, never this list's emptiness.
+    illegal = sorted({
+        name for finding in report.violations for name in finding.cards
+    })
     # Salt-list cross-reference. EDHREC's /top/salt page ranks the
     # cards opponents most dislike seeing across the table (Smothering
     # Tithe, Rhystic Study, Stasis, …). A B1-B3 deck running many
@@ -557,16 +560,17 @@ def build_dashboard(
     # requires exactly 100. Surface deficits in the banner so the
     # user sees "deck is short by N" before running an audit /
     # propose-swap that would otherwise produce illegal A/B inputs.
-    deck_total = total_main + len(commander_names)
+    deck_total = report.card_count
     legality = {
+        **report.to_dict(),
         "in_deck_game_changers": in_deck_gcs,
         "n_game_changers": len(in_deck_gcs),
         "illegal_cards": illegal,
         "n_illegal": len(illegal),
-        "all_legal": len(illegal) == 0,
+        "all_legal": report.status == "legal",
         "deck_total": deck_total,
-        "deck_target": 100,
-        "deck_size_ok": deck_total == 100,
+        "deck_target": DECK_SIZE,
+        "deck_size_ok": deck_total == DECK_SIZE,
         "salt_cards_count": len(salt_in_deck),
         "salt_cards": salt_in_deck[:10],
     }
@@ -602,8 +606,8 @@ def build_dashboard(
             "color_identity": color_identity,
         },
         deck_progress={
-            "current": total_main + len(commander_names),
-            "target": 100,  # standard Commander 100-card constraint
+            "current": deck_total,
+            "target": DECK_SIZE,
         },
         stat_tiles={
             "avg_cmc": avg_cmc,

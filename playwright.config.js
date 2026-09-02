@@ -37,6 +37,9 @@ const STATE_DIR =
   process.env.CB_E2E_STATE_DIR || path.join(os.tmpdir(), "cb-web-smokes");
 const PORT = Number(process.env.CB_E2E_PORT || 5199);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
+// Windows may map python3 to a different installation (without Flask).
+// Let virtual-environment users select an interpreter explicitly as well.
+const PYTHON = process.env.CB_E2E_PYTHON || (process.platform === "win32" ? "python" : "python3");
 
 process.env.CB_E2E_STATE_DIR = STATE_DIR;
 process.env.CB_E2E_PORT = String(PORT);
@@ -72,7 +75,7 @@ module.exports = defineConfig({
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
   ],
   webServer: {
-    command: `python3 ${path.join("tests", "e2e", "server.py")} --port ${PORT} --state-dir ${STATE_DIR}`,
+    command: `"${PYTHON}" "${path.join("tests", "e2e", "server.py")}" --port ${PORT} --state-dir "${STATE_DIR}"`,
     url: `${BASE_URL}/api/health`,
     cwd: __dirname,
     // Always boot our own: reusing a stray dev server would run the
