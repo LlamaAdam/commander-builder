@@ -6,6 +6,68 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-09-02 — Negative-mode audit fixes
+
+#### Fixed
+
+- **Dashboard legality uses the shared, quantity-aware validator.** The
+  banner distinguishes `legal`, `illegal`, and `unverified`, includes
+  command-zone quantities, and reports malformed active-zone lines.
+  Missing card or partner evidence cannot produce an all-legal claim;
+  confirmed violations still take precedence over incomplete checks.
+- **Pasted imports preserve sections and normalize printing details.**
+  Commander/Mainboard/Sideboard/Considering headings are recognized,
+  Moxfield printing and finish suffixes are stripped while Forge
+  printing syntax is retained, and malformed or empty active lists are
+  rejected before a deck file is created.
+- **Import and Change commander now expose simple commander/partner
+  controls.** Selecting existing cards moves one copy into the command
+  zone and returns former commanders to the mainboard without silent
+  cuts. A name absent from both zones adds one copy with an explicit
+  warning and card-count delta; cached legality warnings remain advisory.
+- **Browser and desktop startup honor the same saved-directory
+  precedence:** explicit argument → environment → saved setting →
+  caller default. Unconfigured browser startup retains the Forge
+  commander folder; desktop retains its Documents library.
+- **Regression fixtures isolate personal caches, settings, and Forge
+  installations.** Dashboard memos reset between tests; desktop tests
+  release their own locks and servers, verify Windows lock contents
+  after release, and compare actual platform file modes after saving.
+- **Live-service tests require explicit `--run-live` consent.** The slow
+  regression lane no longer invokes an installed Claude CLI implicitly;
+  the live curator check remains available with `--run-live --run-slow`
+  and its optional dependencies/provider configured.
+- **Playwright supports an explicit `CB_E2E_PYTHON` interpreter.** Its
+  server defaults to `python` on Windows and `python3` elsewhere, with
+  quoted interpreter, script, and state-directory paths.
+
+### 2026-08-30 — Primer evidence and adoption hardening
+
+#### Fixed
+
+- **Primer win-line extraction now distinguishes current strategy from
+  page noise and historical notes.** It strips recognizable Moxfield
+  chrome, matches whole win/combo words, prefers explicit current-win
+  sections, and excludes TODO, cons, changelog/history, and removed-card
+  sections while preserving verbatim quotes and the unheaded-primer
+  fallback.
+- **Primer links are references, not implicit locks.** `commander adopt`
+  still cross-checks exact linked names against the current list, but
+  only user-authored `[metadata] Protect=` entries prevent a suggested
+  cut. New sidecars describe links accurately; the reader remains
+  compatible with the old auto-protect-era marker.
+- **Adopt reports quantity-aware counts and Commander legality warnings.**
+  It reuses `deck_legality.validate_deck` without blocking the read-only
+  personalization flow, so short lists, ineligible commanders, pairing,
+  singleton, color-identity, and ban problems are visible before testing.
+- **Primer-KB provenance is no longer overstated.** Legacy `verified[]`
+  values are exposed as current-list card presence, while a separate
+  `rules_status` says whether an interaction is author-claimed,
+  conditional, an engine, or independently rules-verified. Hell's Bells'
+  Kodama/Turf requirement and its three land-recursion value engines were
+  corrected so they are not presented as self-contained deterministic
+  wins.
+
 ### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
 
 #### Added

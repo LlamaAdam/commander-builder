@@ -27,9 +27,9 @@ Source (2026-08-29): `primer_harvest/deckbuilding_heuristics.md` — a
 cross-primer synthesis of 40 community primers (21 Moxfield top-liked +
 19 Archidekt) — and `primer_harvest/primer_knowledge_base.json` (per-deck
 structured records: gameplan, construction rules, mulligan trees,
-sequencing, win lines *verified against each deck's exact mainboard*,
-budget swaps, heuristics). Section numbers below (§) cite the heuristics
-doc.
+sequencing, author-described lines with card-name presence checked
+against each deck's exact mainboard (not rules-verified), budget swaps,
+heuristics). Section numbers below (§) cite the heuristics doc.
 
 ## What the system already does (validate/tune, don't rebuild)
 
@@ -116,7 +116,7 @@ with the overhaul path structurally off the table.
 |---|---|
 | Primer arrives with the deck | `archidekt_client` captures `description` (Quill Delta JSON — parser needed, shape pinned by `tests/fixtures/hazel_primer.md`) |
 | "Small, not crazy" | `change_budget` polish tier; the rebuild tier is ALREADY opt-in (decision C4) |
-| "Don't touch the identity" | `Protect=` + `intent.key_wincons` auto-protection; politics guard |
+| "Don't touch the identity" | User-authored `Protect=` metadata; `intent.key_wincons` and politics guards in their existing flows |
 | "What the pilot likes" | `intent` themes soft-bias the advisor's candidate pool; `deck_builder_personalize` (FP-014.3) already does like-for-like preference passes under the 99/CI/singleton invariants |
 | "Is this change true to the deck" | `deck_judge` (observe-only) judges against intent — needs the free-text field its boundary tests were built to force a decision on |
 
@@ -142,10 +142,12 @@ card facts; every card named still resolves through the oracle cache.
    primer says to keep/mulligan, where the wincons live), flagging
    where primer and list disagree.
 2. PERSONALIZE: swap suggestions hard-capped at the polish tier,
-   primer-named core cards auto-Protected, candidates biased by
-   pilot_preferences via the FP-014.3 passes generalized to imported
-   decks. Every suggestion says which preference it serves and what it
-   preserves. The rebuild tier is not reachable from this flow at all.
+   honoring only explicit `Protect=` locks while retaining primer links
+   as exact-name evidence, candidates biased by pilot_preferences via
+   the FP-014.3 passes generalized to imported decks. Every suggestion
+   says which preference it serves and what it preserves. Existing
+   Commander legality checks appear as warnings and do not block this
+   read-only flow. The rebuild tier is not reachable from this flow at all.
 
 **018.4 — Primer corpus (supporting study).** Batch-capture primer'd
 decks via the CI capture lane; distill how real primers explain decks

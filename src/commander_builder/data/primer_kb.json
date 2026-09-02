@@ -6,13 +6,13 @@
    "archidekt_primer_harvest.json"
   ],
   "deck_count": 40,
-  "trust_notes": "Card names in win_lines/key_cards were cross-checked against each deck's exact mainboard (case-insensitive; DFC front faces matched). verified=false usually means the card is a commander, an obsolete/maybeboard piece the primer discusses, or a suggested upgrade not in the current 99 - treat those names as unverified per the harvest README.",
+  "trust_notes": "Card names in win_lines/key_cards were cross-checked against each deck's exact mainboard (case-insensitive; DFC front faces matched). The legacy verified[] flags mean current-list presence only, not rules verification. verified=false usually means the card is a commander, an obsolete/maybeboard piece the primer discusses, or a suggested upgrade not in the current 99. rules_status separately records whether a line is author-claimed, conditional, an engine/value interaction, or independently rules-verified.",
   "schema": {
    "gameplan": "1-2 sentence strategy summary",
    "construction": "named deckbuilding rules/quotas stated by the author",
    "mulligan": "keep/mull criteria as stated",
    "sequencing": "play-pattern and priority/stack rules",
-   "win_lines": "explicit card sets with requirements; verified[] aligns with cards[]",
+   "win_lines": "author-described card sets with requirements; verified[] aligns with cards[] and means current-list presence only; rules_status is separate rules provenance",
    "budget_swaps": "out->in with the author's reason (function-preserving)",
    "heuristics": "encodable, generalizable rules extracted for commander-builder"
   }
@@ -51,8 +51,9 @@
       "Kodama of the East Tree",
       "Gruul Turf"
      ],
-     "needs": "Both on battlefield; stack triggers so Gruul Turf bounces itself, Kodama returns it",
-     "note": "Repeatable landfall loop",
+     "needs": "Kodama and Gruul Turf plus a permanent-producing landfall engine; the produced permanent triggers Kodama to put Turf from hand, Turf bounces itself, and its landfall trigger produces the next permanent",
+     "note": "Conditional repeatable landfall loop; Kodama plus Gruul Turf alone does not loop",
+     "rules_status": "conditional",
      "verified": [
       true,
       true
@@ -64,8 +65,9 @@
       "Aftermath Analyst",
       "Gruul Turf"
      ],
-     "needs": "Six in play, Analyst (or World Shaper) in yard via retrace, sac via Street Urchin; Wasteland Gruul Turf first if already in play",
-     "note": "Mass land recursion, usually once per turn unless Spelunking",
+     "needs": "During your turn, use Six to retrace Aftermath Analyst by paying its spell cost and discarding a land, then activate Analyst's own {3}{G} sacrifice ability to return all lands from the graveyard tapped; Gruul Turf can provide another landfall cycle",
+     "note": "Mass land-recursion value engine, not infinite on its own",
+     "rules_status": "engine",
      "verified": [
       true,
       true,
@@ -78,8 +80,9 @@
       "World Shaper",
       "Gruul Turf"
      ],
-     "needs": "Same as above with World Shaper",
-     "note": "Redundant copy of the loop",
+     "needs": "During your turn, use Six to retrace World Shaper by paying its spell cost and discarding a land, then have World Shaper die or sacrifice it so its death trigger returns the lands from the graveyard tapped",
+     "note": "Mass land-recursion value engine, not infinite on its own",
+     "rules_status": "engine",
      "verified": [
       true,
       true,
@@ -92,8 +95,9 @@
       "Snow-Covered Mountain",
       "Valakut, the Molten Pinnacle"
      ],
-     "needs": "Mountains to sacrifice repeatedly",
-     "note": "Valakut damage engine",
+     "needs": "A recurring Snow-Covered Mountain and a separate land-recursion effect let Glacial Crevasses fog repeatedly; Valakut damage also requires at least five other Mountains both when a Mountain enters and when the trigger resolves",
+     "note": "Recurring fog and landfall value engine, not a deterministic win",
+     "rules_status": "engine",
      "verified": [
       true,
       true,

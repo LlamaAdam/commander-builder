@@ -5,6 +5,8 @@
 > [STATUS.md](STATUS.md) tracks operational state; [CHANGELOG.md](CHANGELOG.md)
 > records what landed.
 
+**Last updated:** 2026-09-02 (deck import/edit, legality, and startup configuration).
+
 ---
 
 ## Layered view
@@ -89,7 +91,8 @@ imports layers 1-3**, not the reverse. Known, deliberate exceptions to
 "lower never imports higher": `status.py` and `doctor.py` (Layer 1
 boxes) read `knowledge_log` (Layer 3), and `deck_dashboard.py` reads
 `archetype`/`staples` (Layer 2) — they are reporting surfaces that may
-read any layer. Everything else honors the invariant.
+read any layer. `deck_dashboard` and `deck_legality` also reuse the pure
+card-name helper in `web/deck_text_ops`; this imports no Flask routes.
 
 ## Module responsibility table
 
@@ -100,7 +103,7 @@ read any layer. Everything else honors the invariant.
 | `game_analyzer` | Per-game telemetry: end_turn, winner, life curves, eliminations, draws | Match-level totals. That's `log_parser`. |
 | `moxfield_import` | Pull Moxfield deck JSON, convert to Forge `.dck`, bulk harvest by bracket | Knowing what to pull. The user/curator picks. |
 | `moxfield_push` | Render `.dck` as Moxfield textarea format (pipe→parens), clipboard copy | Authentication. `_api_push` is a typed stub (won't-do). |
-| `primer` (FP-018.1) | Deck primers: the Quill-Delta/plain-text provenance branch (`parse_primer` — card-link embeds are the only trusted card names), `<deckstem>.primer.md` sidecar read/write (card-links block included), the marked prompt clip (`clip_for_prompt`), verbatim win-line quoting | Deciding when to write a sidecar (`moxfield_import` does) or what the primer means (`adopt` / the judge consume). |
+| `primer` (FP-018.1) | Deck primers: the Quill-Delta/plain-text provenance branch (`parse_primer` — card-link embeds are exact-name references, not protection directives), `<deckstem>.primer.md` sidecar read/write (including legacy-marker compatibility), the marked prompt clip (`clip_for_prompt`), section-aware verbatim current win-line quoting | Deciding when to write a sidecar (`moxfield_import` does) or what the primer means (`adopt` / the judge consume). |
 | `scryfall_client` | Card lookups, disk cache, color identity, forced refresh | Anything beyond card metadata (archetype is its own thing). |
 | `edhrec_client` | EDHREC commander page + average-deck fetch, schema-tolerant `__NEXT_DATA__` walk, retry-with-backoff (5xx/429/URLError, `Retry-After` honored, capped at 30 s) | What to do with the data. Heuristic advisor + meta-test consume. |
 | `staples` | `UNIVERSAL_STAPLES_LC`, `BASIC_LANDS_LC`, `classify_role_extended` (canonical), frequency labels, confidence tiers, role saturation thresholds, manabase essentials, tribal essentials, `card_theme_slugs` (per-card theme membership; `detect_themes` sums it, so deck- and card-level answers cannot drift) | Recommendation logic. Advisors use these. |
@@ -139,18 +142,22 @@ read any layer. Everything else honors the invariant.
 | `export` | JSON dump/restore of knowledge_log (full / per-deck / recent-N filter); skip-existing semantics | Schema validation. Trusts the dump. |
 | `doctor` | 10 environment checks; GREEN/YELLOW/RED status; `--json` output. The local-model check delegates to `local_model.LocalModelClient.preflight` (flag off → GREEN with no socket; failures forward the preflight's own remedy text verbatim) | Fixing problems. Reports only. |
 | `status` | Decks-per-bracket, curated pools, recent reports, knowledge_log stats | The work itself. Pure observation. |
-| `deck_dashboard` | Stat tiles, mana curve, categories, theme tags (incl. tribal type), suggested adds, est. price, inferred bracket | Mutation. The web app's audit endpoint does. |
+| `deck_dashboard` | Stat tiles, mana curve, categories, theme tags (incl. tribal type), suggested adds, est. price, inferred bracket; quantity-aware legality banner using `deck_legality` and already-fetched card evidence (cache-only fallback for secondary commanders) | Mutation; independent legality rules or a second network validation pass. |
+| `deck_legality` | Shared Commander validator: active-zone card syntax, quantity-aware size, commander eligibility/pairing, singleton exemptions, color identity, bans; three-state `status` (`illegal` > `unverified` > `legal`) and freshness warnings | Editing cards or treating missing evidence as proof of legality. |
+| `import_formats` | Paste-format detection and counted-card normalization; Arena/Moxfield headings, CSV conversion, foreign printing/finish stripping, Forge printing preservation, syntax/nonempty checks | Choosing commanders, writing files, or filtering cards by Commander legality. |
+| `config_store` | Persisted settings and `get_deck_dir`: explicit directory → environment → saved setting → caller/platform default | Creating or migrating the library; choosing the browser's legacy Forge fallback. |
 | `deck_builder` (FP-014 orchestrator) | Build-from-scratch: commander + bracket → legal exactly-99. Seeds from `edhrec_client.fetch_average_deck` (or a role-target shell), enforces commander/singleton/99/color-identity, owns the land budget, renders the `.dck`; `commander-build` CLI + `--improve` hand-off | Manabase fill + personalization (its two sub-modules); running the sim (`commander-improve`). |
 | `deck_builder_manabase` (FP-014.2) | Color-source manabase: land count from the curve, per-color source targets (full Karsten per-CMC table, most-demanding-card rule; two-anchor fallback for unresolvable costs), fill order (keep seed lands → top-up fixing from advisor land tiers → basics). Degrades to basics-only when card data can't resolve | The 99-card budget + nonland trim. `deck_builder` owns those. |
 | `deck_builder_personalize` (FP-014.3) | Three net-zero like-for-like nonland-spell passes — lift co-occurrence picks (skips without a ≥10-deck corpus), bracket-steer, owned-collection bias — each preserving exactly-99 / singleton / color-identity | Sourcing, rendering, re-validation. `deck_builder` owns those. |
-| `adopt` (FP-018.3) | `commander adopt`: deterministic/offline primer-vs-list explanation (card-link cross-check, role/theme packages, quoted win lines) + preference-steered like-for-like suggestions via `deck_builder_personalize.lift_swaps`, budget hard-clamped to the polish tier with auto-Protected primer-linked cards | Applying changes (read-only; suggestions only) and any overhaul — the rebuild tier is structurally unreachable here; `commander improve` owns big changes. |
+| `adopt` (FP-018.3) | `commander adopt`: deterministic/offline primer-vs-list explanation (card-link cross-check, role/theme packages, quoted current win lines, warning-only Commander legality report) + preference-steered like-for-like suggestions via `deck_builder_personalize.lift_swaps`, budget hard-clamped to the polish tier; only explicit `Protect=` metadata locks a card | Applying changes (read-only; suggestions only) and any overhaul — the rebuild tier is structurally unreachable here; `commander improve` owns big changes. |
 | `forge_py_correlation` | Paired-verdict logging (Forge vs forge_py); CSV append; agreement-rate summary | Driving forge_py. Imported lazily; opt-in via env var. |
 | `web/app.py` (orchestrator) | Flask app creation; blueprint registration; `create_app()` entry point; stale file cleanup; deck listing; path resolution | Business logic. Blueprints call into the layers above. |
 | `web/_helpers.py` | Flask-independent helpers (`_apply_swaps_to_dck`, `_normalize_pasted_deck`, `_format_added_line`, etc.); `_BASIC_LANDS` constant; `atomic_write_text`, the crash-safe `.dck` overwrite shared by the two blueprints that write decks | Route-specific logic. Each blueprint uses as needed. |
+| `web/commander_edit.py` | Flask-independent commander/partner input validation, candidate summaries, quantity-preserving command-zone edits, explicit new-card additions, cache-only legality warnings | Saving files, automatic cuts, or blocking edits on external card services. |
 | `web/routes_audit.py` | Audit + streaming (`GET /api/audit`, `GET /api/audit/stream`, `GET /api/advise`); wires `improvement_advisor` | Other route groups. Each lives in its own blueprint. |
 | `web/routes_sim.py` | Propose-swap + iteration CRUD (`POST /api/propose_swap`, `POST /api/save_iteration`, `GET /api/iteration/<id>`, comparisons, snapshots) | Other endpoints. Organized by business domain. |
-| `web/routes_decks.py` | Deck CRUD + import/GC (`GET/PUT/DELETE /api/deck_text`, `POST /api/import_deck`, `GET/PUT /api/deck_source`, manabase verification, audit) | Other routes. Grouped by deck lifecycle. |
-| `web/routes_dashboard.py` | Dashboard data (`GET /api/decks`, `/api/dashboard`, `/api/iterations`, `/api/pricing_series`, `/api/verdict_breakdown`); the one write it makes: retiring a deck's `BracketUnverified=` marker when its own bracket estimate agrees with the filename tag | Audit/sim routes. Dashboard-specific aggregation. Setting the marker — that is the `deck_text` PUT. |
+| `web/routes_decks.py` | Deck CRUD + import/GC (`GET/PUT/DELETE /api/deck_text`, `GET/PUT /api/deck_commander`, `POST /api/import_deck`, `GET/PUT /api/deck_source`, manabase verification, audit); delegates command-zone edits and returns warnings/card deltas | Other routes. Grouped by deck lifecycle. |
+| `web/routes_dashboard.py` | Dashboard data (`GET /api/decks`, `/api/dashboard`, `/api/iterations`, `/api/pricing_series`, `/api/verdict_breakdown`); the one write it makes: retiring a deck's `BracketUnverified=` marker when its own bracket estimate agrees with the filename tag | Audit/sim routes. Dashboard-specific aggregation. Setting the marker — that is the `deck_text` or `deck_commander` PUT. |
 | `web/routes_meta.py` | Meta/utility routes (`GET /`, `/api/health`, `/api/forge_version`, `/api/correlation_summary`, `POST /api/log_error`) | Business routes. Ops + topbar concerns. |
 | `prompts/moxfield_audit_v3.md` | Current LLM proposer (manual paste workflow) + audit_manifest.json writeback JS | Validation. `compare_versions` + `analyst` do. |
 
@@ -391,11 +398,13 @@ web/routes_sim.py (blueprint: propose-swap + iteration CRUD)
 └── GET  /api/iteration/<id>/snapshot   # Deck text at that iteration
 
 web/routes_decks.py (blueprint: deck CRUD + import + GC)
-├── make_decks_blueprint(deck_dir, resolve_deck_path)
+├── make_decks_blueprint(deck_dir)
 ├── GET    /api/deck_text               # Read .dck file
 ├── PUT    /api/deck_text               # Write .dck file
 ├── DELETE /api/deck_text               # Remove .dck file
-├── POST   /api/import_deck             # Moxfield URL → .dck
+├── GET    /api/deck_commander?deck=... # Current commanders + candidates
+├── PUT    /api/deck_commander?deck=... # Save commander + optional partner
+├── POST   /api/import_deck             # URL or paste → .dck; optional commander/partner
 ├── GET    /api/deck_source             # Moxfield publicId from .dck
 ├── PUT    /api/deck_source             # Update Moxfield publicId metadata
 ├── GET    /api/verify_against_source   # Check Moxfield sync
@@ -420,6 +429,23 @@ web/routes_meta.py (blueprint: meta + ops routes)
 └── POST /api/log_error                 # Browser error sink
 ```
 
+**Commander-edit/import contract (2026-09-02):**
+`GET /api/deck_commander?deck=...` returns `commanders` and `candidates`.
+The matching `PUT` accepts `commander` and optional `partner` names and
+returns the saved text, previous/current commanders, `card_delta`,
+`warnings`, and `bracket_tag_unverified`. One existing copy moves into
+the command zone; former commanders move to `[Main]`. A new name adds
+one copy with a warning, never an automatic compensating cut. Saving
+marks an existing declared bracket as unverified.
+
+`POST /api/import_deck` accepts `paste_text` (Forge, Arena, CSV, or plain
+counted lines) and optional `commander`/`partner` fields; blank selection
+preserves pasted command-zone sections. The same move/add semantics
+apply. Normalization preserves sideboard/considering sections, validates
+card syntax, and rejects lists with no mainboard or commander cards
+before creating a file. Commander legality is advisory, not an import
+filter; these responses expose warnings and card deltas to the UI.
+
 **Blueprint factory pattern**: Each `make_<group>_blueprint(...)` returns
 a Flask Blueprint closing over the necessary state. This enables:
 
@@ -439,6 +465,17 @@ in scope across the module boundary after the split.
 ---
 
 ## Persistence locations
+
+Browser (`web/app.create_app`) and desktop startup share
+`config_store.get_deck_dir` precedence: explicit `--deck-dir`/factory
+argument → `COMMANDER_BUILDER_DECK_DIR` → saved `deck_dir` setting →
+caller default. Browser's unconfigured fallback remains
+`vendor/forge/userdata/decks/commander`; desktop's remains
+`%USERPROFILE%\Documents\CommanderBuilder\decks` on Windows or
+`~/Documents/CommanderBuilder/decks` elsewhere. The resolver neither
+creates directories nor migrates an existing library. The Forge paths
+below describe the legacy/default simulation layout, not an override
+of a configured browser or desktop library.
 
 | Path | Owner | What |
 |------|-------|------|
@@ -465,7 +502,7 @@ noted.
 
 | Variable | Owner | Effect |
 |----------|-------|--------|
-| `COMMANDER_BUILDER_DECK_DIR` | `dck_utils` / web | Override the Forge deck directory (default `vendor/forge/userdata/decks/commander`) |
+| `COMMANDER_BUILDER_DECK_DIR` | `dck_utils` / `config_store` / web / desktop | Deck-directory override; browser/desktop explicit arguments win over it, and it wins over saved `deck_dir` and caller defaults |
 | `COMMANDER_BUILDER_KNOWLEDGE_DB` | `knowledge_log` | Path to the SQLite iteration log (default repo-root `knowledge_log.sqlite`) |
 | `COMMANDER_BUILDER_CONFIG` | `config_store` | Path to `config.json` (default `~/.commander-builder/config.json`) |
 | `COMMANDER_BUILDER_CREDENTIALS` | `_secrets` | Path to the credentials file holding `ANTHROPIC_API_KEY` (default `~/.commander-builder/credentials`) |

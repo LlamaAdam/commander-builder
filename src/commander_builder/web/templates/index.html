@@ -270,6 +270,11 @@
         </select>
         <label for="new-paste-text">Deck list (.dck, MTG Arena export, CSV, or plain card lines — auto-detected)</label>
         <textarea id="new-paste-text" spellcheck="false" placeholder="1 Sol Ring&#10;1 Arcane Signet&#10;1 Command Tower&#10;..."></textarea>
+        <label for="new-paste-commander">Commander (optional if included in the list)</label>
+        <input id="new-paste-commander" type="text" autocomplete="off" placeholder="e.g. The Ur-Dragon" aria-describedby="paste-commander-help">
+        <label for="new-paste-partner">Partner / second commander (optional)</label>
+        <input id="new-paste-partner" type="text" autocomplete="off" placeholder="Leave blank for a single commander" aria-describedby="paste-commander-help">
+        <p id="paste-commander-help" class="muted">Commander section headings are kept. To choose a different commander, enter its card name here. Existing cards move to the command zone; names not in the list add a card.</p>
         <button class="advise-btn" id="new-paste-create">Create deck</button>
       </div>
       <div class="tab-panel" id="tab-bulk" role="tabpanel" aria-labelledby="tab-btn-bulk" hidden>
@@ -323,6 +328,25 @@
            validation errors (bad bracket, missing commander) announce to
            screen readers instead of being visual-only. -->
       <div id="new-deck-status" class="muted" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="commander-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="commander-title">
+      <header>
+        <h2 id="commander-title">Change commander</h2>
+        <button class="modal-close" data-close="commander-modal" aria-label="Close">&times;</button>
+      </header>
+      <form id="commander-form" class="commander-form">
+        <label for="commander-name">Commander</label>
+        <input id="commander-name" type="text" list="commander-candidates" autocomplete="off" required aria-describedby="commander-help">
+        <label for="commander-partner">Partner / second commander (optional)</label>
+        <input id="commander-partner" type="text" list="commander-candidates" autocomplete="off" aria-describedby="commander-help">
+        <datalist id="commander-candidates"></datalist>
+        <p id="commander-help" class="muted">Choose a card from your deck or type a new name. Existing cards move to the command zone, and former commanders return to the main deck. A new name adds one card; no cards are automatically cut. Check deck size and rules after saving.</p>
+        <button id="commander-save" class="advise-btn" type="submit">Save commander</button>
+      </form>
+      <div id="commander-status" class="muted" role="status" aria-live="polite"></div>
     </div>
   </div>
 

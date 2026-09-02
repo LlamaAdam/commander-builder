@@ -21,15 +21,16 @@ text. The same branch doubles as the degrade path for a malformed
 Archidekt field: wrong shape yields readable text, never a crashed
 import.
 
-CARD-LINK EMBEDS ARE THE ONLY TRUSTED CARD NAMES. The harvest showed
+CARD-LINK EMBEDS ARE THE ONLY TRUSTED EXACT-NAME REFERENCES. The harvest showed
 prose primers name cards with typos, nicknames and partial names
 ("Squirrel Girl", "cryptolith rite" — see the Hazel capture), so free
 text is never mined for names (no NLP). A card-link embed, by contrast,
 is the site's own exact name: :func:`parse_primer` collects them, the
-sidecar records them in a marked block, and FP-018.3's auto-protect
-trusts nothing else. Prose-only primers exist at every length (the
-harvest has a 4.9k-char one with zero embeds) — for those the list is
-honestly empty and adopt says protection is unavailable.
+sidecar records them in a marked block, and adopt reports them as
+primer-vs-list evidence. They do not lock cards; only an explicit
+``Protect=`` metadata line does that. Prose-only primers exist at every
+length (the harvest has a 4.9k-char one with zero embeds) — for those the
+exact-reference list is honestly empty.
 
 WHY A MODULE OF ITS OWN. Three consumers, three change reasons, one
 representation:
@@ -88,12 +89,18 @@ FREE_TEXT_PROMPT_CHAR_CAP = 4000
 # an ordinary word; only this block records that the SITE, not prose,
 # named the card).
 _CARD_LINKS_OPEN = (
+    "<!-- primer-card-links (exact-name references from the source's "
+    "card-link embeds)"
+)
+_LEGACY_CARD_LINKS_OPEN = (
     "<!-- primer-card-links (exact names from the source's card-link "
     "embeds; FP-018.3 auto-protect input)"
 )
 _CARD_LINKS_CLOSE = "-->"
 _CARD_LINKS_RE = re.compile(
-    re.escape(_CARD_LINKS_OPEN) + r"\n(.*?)\n" + re.escape(_CARD_LINKS_CLOSE)
+    r"(?:" + re.escape(_CARD_LINKS_OPEN) + "|"
+    + re.escape(_LEGACY_CARD_LINKS_OPEN) + r")\n(.*?)\n"
+    + re.escape(_CARD_LINKS_CLOSE)
     + r"\n?",
     re.DOTALL,
 )
@@ -251,9 +258,10 @@ def read_primer_sidecar(dck_path: Path) -> Optional[str]:
 def read_primer_card_links(dck_path: Path) -> list[str]:
     """The exact card names the sidecar's card-links block records.
 
-    Empty when there is no sidecar OR the primer carried no embeds —
-    callers that must tell those apart (adopt's "auto-protection
-    unavailable" disclosure) check :func:`read_primer_sidecar` first.
+    These are exact-name primer references, not protection directives.
+    Empty when there is no sidecar or the primer carried no embeds.
+    Both the current marker and pre-correction auto-protect-era marker
+    are accepted so existing imported sidecars remain readable.
     """
     try:
         raw = primer_sidecar_path(Path(dck_path)).read_text(encoding="utf-8")
@@ -265,32 +273,110 @@ def read_primer_card_links(dck_path: Path) -> list[str]:
     return [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
 
 
-def quoted_win_lines(text: Optional[str], limit: int = 3) -> list[str]:
-    """Paragraphs where the primer explains HOW IT WINS, verbatim.
+_WIN_WORD_RE = re.compile(
+    r"\b(?:win(?:s|ning)?|wincons?|combos?|infinite|loops?)\b",
+    re.IGNORECASE,
+)
+_POSITIVE_WIN_HEADING_RE = re.compile(
+    r"^(?:how\b.{0,60}\bwin(?:s|ning)?\b.{0,20}|"
+    r"winning(?: the game)?|win(?:ning)? conditions?(?: and combos?)?|"
+    r"wincons?|combos?(?: and loops?| lines?| packages?| in the deck)?|"
+    r"loops?|finishers?)[:?]?$",
+    re.IGNORECASE,
+)
+_EXCLUDED_WIN_HEADING_RE = re.compile(
+    r"^(?:(?:to[ -]?do|cons|weakness(?:es)?|history|change ?log|updates?|"
+    r"past versions?|previous versions?|old versions?|cuts?|"
+    r"removed(?: cards?)?|cards? (?:cut|removed))\b.*|"
+    r".*\bmaybe[ -]?board\b.*)$",
+    re.IGNORECASE,
+)
 
-    The harvest showed real primers carry step-by-step win lines (plus
-    dated update logs and budget variants — deliberately NOT parsed
-    structurally; out of scope). The adopt explanation QUOTES the
-    author's own win-line paragraphs rather than paraphrasing them: a
-    paraphrase of a combo line is exactly where a deterministic
-    explainer would start inventing card behavior. Keyword scan over
-    paragraphs, first ``limit`` hits, each clipped with the standard
-    marked truncation.
+
+def _heading_kind(label: str) -> str:
+    """Classify a normalized heading as positive, excluded, or neutral."""
+    if _EXCLUDED_WIN_HEADING_RE.fullmatch(label):
+        return "excluded"
+    if _POSITIVE_WIN_HEADING_RE.fullmatch(label):
+        return "positive"
+    return "neutral"
+
+
+def _primer_tokens(text: str) -> list[tuple[str, str, int]]:
+    """Split prose into heading/paragraph tokens without losing newlines.
+
+    Markdown headings always become tokens. Known plain-text headings do
+    too, even when the following body has no blank-line separator — the
+    shape emitted by rendered Quill descriptions in the harvest.
     """
-    if not text:
-        return []
-    keywords = ("win", "combo", "infinite", "loop")
-    out: list[str] = []
-    for para in re.split(r"\n\s*\n", text):
-        p = para.strip()
-        if not p:
+    tokens: list[tuple[str, str, int]] = []
+    paragraph: list[str] = []
+
+    def flush_paragraph() -> None:
+        value = "\n".join(paragraph).strip()
+        if value:
+            tokens.append(("paragraph", value, 0))
+        paragraph.clear()
+
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        markdown = re.fullmatch(r"(#{1,6})\s+(.+?)\s*#*", stripped)
+        if markdown:
+            flush_paragraph()
+            label = markdown.group(2).strip().casefold()
+            tokens.append(("heading", label, len(markdown.group(1))))
             continue
-        folded = p.casefold()
-        if any(k in folded for k in keywords):
-            out.append(clip_for_prompt(p, 600))
-            if len(out) >= limit:
-                break
-    return out
+
+        plain_label = stripped.casefold()
+        if stripped and _heading_kind(plain_label) != "neutral":
+            flush_paragraph()
+            tokens.append(("heading", plain_label, 1))
+            continue
+        if not stripped:
+            flush_paragraph()
+            continue
+        paragraph.append(raw_line)
+
+    flush_paragraph()
+    return tokens
+
+
+def quoted_win_lines(text: Optional[str], limit: int = 3) -> list[str]:
+    """Return current win-line paragraphs in the author's own words.
+
+    Moxfield page chrome and non-current sections are ignored.  Matches
+    use whole win/combo words, prefer explicit win-oriented sections,
+    and retain unheaded keyword paragraphs for older prose-only primers.
+    Quotes stay verbatim and use the standard marked truncation.
+    """
+    if not text or limit <= 0:
+        return []
+
+    primer_marker = re.search(r"(?im)^\s*primer\s*$", text)
+    if primer_marker:
+        text = text[primer_marker.end():]
+
+    preferred: list[str] = []
+    fallback: list[str] = []
+    headings: list[tuple[int, str]] = []
+    for kind, value, level in _primer_tokens(text):
+        if kind == "heading":
+            while headings and headings[-1][0] >= level:
+                headings.pop()
+            headings.append((level, value))
+            continue
+        if any(_heading_kind(label) == "excluded" for _, label in headings):
+            continue
+        if not _WIN_WORD_RE.search(value):
+            continue
+        target = (
+            preferred
+            if any(_heading_kind(label) == "positive" for _, label in headings)
+            else fallback
+        )
+        target.append(clip_for_prompt(value, 600))
+
+    return (preferred + fallback)[:limit]
 
 
 def clip_for_prompt(text: str, cap: int = FREE_TEXT_PROMPT_CHAR_CAP) -> str:

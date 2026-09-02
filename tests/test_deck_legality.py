@@ -121,6 +121,56 @@ def test_report_to_dict_is_json_shaped():
 
 
 # ---------------------------------------------------------------------------
+# Construction syntax — ignored lines must not produce a verified verdict
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("section", ["Main", "Commander"])
+@pytest.mark.parametrize("bad_line", [
+    "not a card line", "Forest", "-1 Forest", "0 Forest", "1 |SET|123", "1   |SET",
+])
+def test_malformed_card_line_cannot_hide_in_an_otherwise_legal_deck(section, bad_line):
+    deck = _legal_deck().replace(f"[{section}]", f"[{section}]\n{bad_line}")
+
+    report = validate_deck(deck, lookup=_legal_lookup())
+
+    assert report.status == "illegal"
+    assert "MALFORMED_CARD_LINE" in report.codes()
+    finding = next(v for v in report.violations if v.code == "MALFORMED_CARD_LINE")
+    assert f"[{section}]" in finding.message
+    assert bad_line in finding.message
+    assert finding.cards == ()  # Unparseable text is not a resolved card name.
+
+
+@pytest.mark.parametrize("extra", [
+    "\n  \n", "# note\n", " // note\n", "; note\n",
+    "[metadata]\nName=Test\nComment=not a card line\n",
+    "[Sideboard]\nnot checked as part of the Commander deck\n",
+    "[Custom Section]\nunrelated data\n",
+])
+def test_legality_preserves_blank_comments_metadata_and_other_sections(extra):
+    report = validate_deck(_legal_deck() + extra, lookup=_legal_lookup())
+
+    assert report.status == "legal"
+    assert report.verified is True
+    assert report.violations == ()
+    assert report.card_count == 100
+
+
+@pytest.mark.parametrize("suffix", ["", "+", "|C21", "|C21|123a", "+|C21|123a"])
+def test_legality_syntax_accepts_canonical_forge_printings(suffix):
+    deck = (
+        f"[metadata]\nName=Test\n[cOmMaNdEr]\n1 Test Commander{suffix}\n"
+        f"[mAiN]\n98 Forest{suffix}\n1 Sol Ring{suffix}\n"
+    )
+
+    report = validate_deck(deck, lookup=_legal_lookup())
+
+    assert report.status == "legal"
+    assert report.verified is True
+    assert report.card_count == 100
+
+
+# ---------------------------------------------------------------------------
 # 1. Deck size
 # ---------------------------------------------------------------------------
 

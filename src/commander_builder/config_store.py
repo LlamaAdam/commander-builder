@@ -216,19 +216,32 @@ def apply_update(
     return cfg
 
 
-def get_deck_dir(path: Optional[Path] = None) -> Path:
+def get_deck_dir(
+    path: Optional[Path] = None,
+    *,
+    deck_dir: Optional[Path | str] = None,
+    default: Optional[Path] = None,
+) -> Path:
     """Resolve the active deck directory.
 
     Resolution order (first wins):
-    1. ``COMMANDER_BUILDER_DECK_DIR`` environment variable.
-    2. ``deck_dir`` key in the persisted config (set via ``PUT /api/config``).
-    3. Platform default:
+    1. Explicit ``deck_dir`` (command-line argument or app-factory input).
+    2. ``COMMANDER_BUILDER_DECK_DIR`` environment variable.
+    3. ``deck_dir`` key in the persisted config (set via ``PUT /api/config``).
+    4. Caller-supplied ``default``, or the desktop platform default:
        Windows: ``%USERPROFILE%\\Documents\\CommanderBuilder\\decks``
        other:   ``~/Documents/CommanderBuilder/decks``
+
+    Browser startup supplies Forge's ``userdata/decks/commander`` as its
+    legacy fallback. Desktop keeps the Documents fallback above; neither
+    entry point silently migrates an unconfigured user's existing library.
 
     The directory is NOT created by this function — callers decide when to
     create it (e.g. on first actual write, not on every lookup).
     """
+    if deck_dir is not None:
+        return Path(deck_dir)
+
     env_override = os.environ.get(_DECK_DIR_ENV_VAR)
     if env_override:
         return Path(env_override)
@@ -237,6 +250,9 @@ def get_deck_dir(path: Optional[Path] = None) -> Path:
     configured = cfg.get("deck_dir")
     if configured:
         return Path(configured)
+
+    if default is not None:
+        return Path(default)
 
     # Platform default.
     user_profile = os.environ.get("USERPROFILE") if _is_windows() else None

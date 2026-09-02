@@ -170,14 +170,33 @@ def test_write_and_read_round_trip_the_hazel_primer(tmp_path):
 
 def test_sidecar_records_and_returns_card_links(tmp_path):
     deck = _deck(tmp_path)
-    write_primer_sidecar(deck, _sisay()["description"])
+    sidecar = write_primer_sidecar(deck, _sisay()["description"])
     links = read_primer_card_links(deck)
     assert links and links[0] == "Laboratory Maniac"
+    assert sidecar is not None
+    marker = sidecar.read_text(encoding="utf-8").splitlines()[0]
+    assert "exact-name references" in marker
+    assert "auto-protect" not in marker
     # The machine block never leaks into the TEXT read — prompts get the
     # author's words only.
     text = read_primer_sidecar(deck)
     assert "primer-card-links" not in text
     assert "Sisay" in text
+
+
+def test_sidecar_reader_accepts_the_legacy_auto_protect_marker(tmp_path):
+    deck = _deck(tmp_path)
+    primer_sidecar_path(deck).write_text(
+        "<!-- primer-card-links (exact names from the source's card-link "
+        "embeds; FP-018.3 auto-protect input)\n"
+        "Laboratory Maniac\n"
+        "-->\n\n"
+        "Primer words.\n",
+        encoding="utf-8",
+    )
+
+    assert read_primer_card_links(deck) == ["Laboratory Maniac"]
+    assert read_primer_sidecar(deck) == "Primer words."
 
 
 def test_empty_render_never_writes_a_sidecar(tmp_path):
@@ -248,3 +267,93 @@ def test_quoted_win_lines_empty_for_no_primer_or_no_win_talk():
 def test_quoted_win_lines_respects_the_limit(n):
     text = "we win here\n\nwe combo there\n\ninfinite squirrels\n\nplain"
     assert len(quoted_win_lines(text, limit=n)) == n
+
+
+def test_quoted_win_lines_ignores_moxfield_chrome_before_primer():
+    text = (
+        "Moxfield deck page\n"
+        "Overview  Primer  Win Conditions  History\n\n"
+        "Primer\n\n"
+        "# Overview\n\nA patient dragon deck.\n\n"
+        "# Win Conditions\n\nWe win by attacking with a lethal dragon army."
+    )
+
+    assert quoted_win_lines(text) == [
+        "We win by attacking with a lethal dragon army."
+    ]
+
+
+def test_quoted_win_lines_ignores_noncurrent_sections():
+    text = (
+        "# TODO\n\nTest an infinite combo with Future Card.\n\n"
+        "# Cons\n\nThis deck can struggle to win through fogs.\n\n"
+        "# Changelog\n\nRemoved the old Alpha plus Beta combo.\n\n"
+        "# Win Conditions\n\nWe win with the current Gamma plus Delta combo."
+    )
+
+    assert quoted_win_lines(text) == [
+        "We win with the current Gamma plus Delta combo."
+    ]
+
+
+def test_quoted_win_lines_ignores_qualified_noncurrent_headings():
+    text = (
+        "Removed Sections\n\nAn old infinite loop lived here.\n\n"
+        "Updates 07/03/23\n\nThis update removed a winning combo.\n\n"
+        "Change Log - 2025\n\nBeta plus Gamma used to combo.\n\n"
+        "Combos in the maybe-board:\n\nFuture Card goes infinite here.\n\n"
+        "Win Conditions\n\nWe win with the current Dragon attack."
+    )
+
+    assert quoted_win_lines(text) == [
+        "We win with the current Dragon attack."
+    ]
+
+
+def test_quoted_win_lines_keeps_nested_changelog_content_excluded():
+    text = (
+        "# Changelog\n"
+        "## 2025\n"
+        "Removed the old Alpha plus Beta combo.\n"
+        "# How It Wins\n"
+        "We win with the current Dragon attack."
+    )
+
+    assert quoted_win_lines(text) == [
+        "We win with the current Dragon attack."
+    ]
+
+
+def test_quoted_win_lines_handles_heading_and_body_in_one_text_block():
+    text = (
+        "TODO:\n- Test an infinite combo with Future Card.\n\n"
+        "Cons:\nThis deck struggles to win through fogs.\n\n"
+        "How do we win the game?\nAttack with enough Dragons to win."
+    )
+
+    assert quoted_win_lines(text) == [
+        "Attack with enough Dragons to win."
+    ]
+
+
+def test_quoted_win_lines_does_not_return_a_heading_as_part_of_the_quote():
+    text = "How to Win\nWe combo Alpha and Beta, then attack."
+
+    assert quoted_win_lines(text) == [
+        "We combo Alpha and Beta, then attack."
+    ]
+
+
+@pytest.mark.parametrize("text", [
+    "Our winner is chosen at random.",
+    "We keep swinging with dragons.",
+    "Twinblade Paladin is a useful threat.",
+])
+def test_quoted_win_lines_requires_whole_win_words(text):
+    assert quoted_win_lines(text) == []
+
+
+def test_quoted_win_lines_keeps_unheaded_win_paragraphs_as_fallback():
+    text = "A quiet introduction.\n\nWe win by attacking with dragons."
+
+    assert quoted_win_lines(text) == ["We win by attacking with dragons."]

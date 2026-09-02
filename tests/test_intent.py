@@ -591,6 +591,7 @@ def test_auto_curate_main_intent_themes_flag(tmp_path, monkeypatch):
 
 
 @pytest.mark.slow
+@pytest.mark.live
 @pytest.mark.skipif(
     __import__("shutil").which("claude") is None,
     reason="live curator check needs the `claude` CLI on PATH "
@@ -602,8 +603,10 @@ def test_auto_curate_main_live_curator_end_to_end(tmp_path, monkeypatch):
 
     This deliberately invokes the actual CLI — it exists to prove the
     subscription-mode call path works, per operator request. Kept out of
-    the fast lane (slow marker) so routine local runs don't spend a
-    subscription call, and skipped where the CLI is absent (Linux CI).
+    both routine lanes unless --run-live --run-slow is explicitly supplied,
+    so regression runs cannot silently spend a subscription/API call.
+    Also skipped where the CLI is absent (Linux CI). Requires the optional
+    [claude] dependencies and a configured model provider when enabled.
     Only the advisor is stubbed (no EDHREC/Scryfall network); the
     curator path is fully real.
     """

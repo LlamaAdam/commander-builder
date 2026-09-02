@@ -368,6 +368,12 @@ python -m commander_builder.oracle_store --from-bulk --all
 3. `python -m pytest tests/` — confirm the suite is green
 4. `git log --oneline -10` — what landed most recently
 
+Use `python -m pytest --run-slow` to include the slower regression tests.
+Live-service checks are excluded even when a provider CLI is installed;
+they require explicit `--run-live --run-slow`, their optional dependencies
+(such as `[claude]`), and a configured provider. Enabling them can consume
+subscription/API usage.
+
 Then either pick an item from STATUS's open backlog or jump into the
 web app and run a propose-swap end-to-end on one of your decks.
 

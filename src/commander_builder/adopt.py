@@ -16,12 +16,11 @@ and any future polish option must be opt-in and degrade to exactly this.
 WHAT THE PRIMER IS TRUSTED FOR (harvest evidence, 2026-08-27 — see
 ``primer.py``'s module docstring):
 
-* **Exact card names come ONLY from card-link embeds.** Prose primers
+* **Exact card references come ONLY from card-link embeds.** Prose primers
   name cards with typos and nicknames, so free text is never mined for
-  names. Auto-protection (below) keys exclusively on the sidecar's
-  card-links block; a prose-only primer gets an explanation WITHOUT
-  auto-protection, and the output says so out loud rather than silently
-  protecting nothing. Prose is still USED — read-only — to confirm
+  names. Links are evidence about what the primer discusses, not an
+  instruction to lock a card: only explicit ``Protect=`` metadata prevents
+  a cut. Prose is still USED — read-only — to confirm
   which deck cards the primer talks about (matching a KNOWN list name
   into the text is lookup, not NLP) and to quote the author's own
   win-line paragraphs verbatim (``primer.quoted_win_lines``).
@@ -64,13 +63,14 @@ from .intent import free_text_theme_slugs
 #: structurally unreachable here; see the module docstring.
 POLISH_MAX_SWAPS: int = TIER_CAPS["polish"][0]
 
-#: Printed whenever suggestions run without primer-derived protection,
-#: naming WHY (no sidecar vs. no embeds) — "we protected nothing" must
-#: never look like "everything important was protected".
-NO_AUTO_PROTECT_NOTE = (
-    "auto-protection unavailable: {reason}. Suggestions still preserve "
-    "roles and never touch the commander or lands; add Protect= lines "
-    "to the .dck [metadata] to pin specific cards."
+#: Printed whenever the deck has no user-authored protection metadata.
+#: Primer links remain exact-name evidence, but never imply permission to
+#: lock cards against otherwise valid suggestions.
+NO_EXPLICIT_PROTECT_NOTE = (
+    "no explicit Protect= locks are configured in [metadata]. Primer card "
+    "links are references only and do not lock cards; suggestions still "
+    "preserve roles and never touch the commander or lands. Add Protect= "
+    "lines to pin specific cards."
 )
 
 
@@ -191,9 +191,13 @@ def explain_deck(
             f"loop's job (commander improve), not adopt's."
         )
 
+    from .deck_legality import validate_deck
+    legality = validate_deck(deck_text, lookup=lookup).to_dict()
+
     return {
         "commanders": commanders,
-        "main_count": len(main_cards),
+        "main_count": dck_utils.count_main_cards(deck_text),
+        "legality": legality,
         "primer": {
             "present": bool(primer_text),
             "words": primer.primer_word_count(primer_text or ""),
@@ -237,8 +241,8 @@ def personalize_suggestions(
       budget. Soft by construction — order is all it changes; nothing
       is filtered for being un-preferred (``free_text_theme_slugs``
       maps the prose to the same slug vocabulary themes already use).
-    * ``protect``: the caller's protected names (Protect= lines +
-      primer card-links present in the list) are never swapped out.
+    * ``protect``: the caller's explicitly protected names (Protect=
+      metadata lines, not primer links) are never swapped out.
 
     ``max_swaps`` is CLAMPED to :data:`POLISH_MAX_SWAPS` — a caller may
     ask for fewer, never more. Suggestions are returned, not applied:
@@ -390,27 +394,12 @@ def adopt_deck(
     explanation = explain_deck(
         deck_text, primer_text, card_links, lookup=lookup)
 
-    # AUTO-PROTECT — card-link embeds only (exact names; the harvest
-    # rule), unioned with any Protect= lines already in the .dck (the
-    # existing metadata idiom, one reader for all of it). When neither
-    # yields anything the output SAYS protection is unavailable rather
-    # than silently protecting nothing.
+    # Only an explicit Protect= line is a lock. Primer card-link embeds
+    # stay in explanation.primer as exact-name evidence; treating a link
+    # as consent to prevent a cut made ordinary primer references sticky.
     from .web._helpers import read_protected_cards
     protected = list(read_protected_cards(deck_text))
-    for name in explanation["primer"]["linked_present"]:
-        if name.casefold() not in {p.casefold() for p in protected}:
-            protected.append(name)
-
-    protection_note: Optional[str] = None
-    if not protected:
-        if primer_text is None:
-            reason = "this deck has no primer sidecar"
-        elif not card_links:
-            reason = ("the primer is prose-only — no card-link embeds, "
-                      "and prose is never mined for names")
-        else:
-            reason = "none of the primer's linked cards are in the list"
-        protection_note = NO_AUTO_PROTECT_NOTE.format(reason=reason)
+    protection_note = None if protected else NO_EXPLICIT_PROTECT_NOTE
 
     if matrix is None:
         from . import lift_analysis
@@ -451,6 +440,25 @@ def render_adoption(payload: dict) -> str:
         f"  |  {exp['main_count']} main-deck cards")
     add("")
 
+    legality = exp.get("legality")
+    if legality:
+        add("-- Rules check (warning only) --")
+        if legality["status"] == "legal":
+            add("  no confirmed Commander rules problems found")
+        elif legality["status"] == "unverified":
+            add("  no confirmed rules problems, but some checks were unavailable")
+        else:
+            add("  confirmed rules problems found; suggestions remain advisory")
+        for item in legality.get("violations") or []:
+            cards = f" ({', '.join(item['cards'])})" if item["cards"] else ""
+            add(f"  WARNING [{item['code']}]: {item['message']}{cards}")
+        for item in legality.get("unverified") or []:
+            cards = f" ({', '.join(item['cards'])})" if item["cards"] else ""
+            add(f"  UNVERIFIED [{item['code']}]: {item['message']}{cards}")
+        if legality.get("data_warning"):
+            add(f"  DATA WARNING: {legality['data_warning']}")
+        add("")
+
     add("-- What this deck is (from the list itself) --")
     if exp["themes"]:
         for slug in exp["themes"]:
@@ -472,7 +480,8 @@ def render_adoption(payload: dict) -> str:
     else:
         add(f"  primer: {pr['words']} words")
         if pr["linked_present"]:
-            add(f"  primer-linked cards IN the list: "
+            add(f"  primer-linked exact-name references IN the list "
+                f"(not automatically protected): "
                 f"{', '.join(pr['linked_present'])}")
         if pr["linked_absent"]:
             add(f"  primer-linked cards NOT in the list: "

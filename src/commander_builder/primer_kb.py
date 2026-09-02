@@ -5,8 +5,9 @@ WHAT THIS IS
 A read-only loader over ``data/primer_kb.json`` — 40 community primers
 (21 Moxfield top-liked + 19 Archidekt, harvested 2026-08-29) distilled
 into per-deck structured records: gameplan, construction rules, mulligan
-criteria, sequencing notes, win lines *verified against each deck's
-exact mainboard*, budget swaps, and generalizable heuristics. The
+criteria, sequencing notes, author-described lines whose card names were
+checked against each deck's harvested mainboard, budget swaps, and generalizable
+heuristics. Rules text and combo claims are a separate provenance axis. The
 cross-primer synthesis these records support lives at
 ``primer_harvest/deckbuilding_heuristics.md`` (§-references throughout
 FP-019 cite it).
@@ -23,11 +24,14 @@ surface the spread instead.
 TRUST BOUNDARY
 ==============
 Card names in ``win_lines[].cards`` / ``key_cards`` / budget swaps were
-extracted from primer prose by an LLM pass and then VERIFIED against the
-deck's exact mainboard where possible — the per-card ``verified`` flags
-record the outcome. A ``verified=False`` name is an author's prose
-mention that did not resolve against the list: treat it as a hint, never
-as a card fact (same doctrine as ``primer.py``'s card-link rule).
+extracted from primer prose by an LLM pass and then checked against the
+deck's exact mainboard where possible. The legacy JSON ``verified`` array
+records only that harvested-mainboard presence, exposed as ``cards_present``.
+It does NOT verify card rules or prove that a described interaction wins.
+``rules_status`` carries that separate provenance. A false presence flag
+is an author's prose mention that did not resolve against the list: treat
+it as a hint, never as a card fact (same doctrine as ``primer.py``'s
+card-link rule).
 
 DESIGN CONTRACT (mirrors combos/game_changers loaders)
 ======================================================
@@ -55,21 +59,40 @@ PRIMER_KB_PATH = Path(__file__).parent / "data" / "primer_kb.json"
 #: without re-deriving ``primer.clip_for_prompt``'s marker length).
 _CLIP_MARKER_ALLOWANCE = 80
 
+_RULES_STATUSES = frozenset({
+    "author_claimed",
+    "conditional",
+    "engine",
+    "rules_verified",
+})
+
 
 @dataclass(frozen=True)
 class WinLine:
-    """One explicit win line: the cards, what they need, verification."""
+    """One author-described line with separate name/rules provenance."""
 
     cards: tuple[str, ...]
     needs: str = ""
     note: str = ""
     verified: tuple[bool, ...] = ()
+    rules_status: str = "author_claimed"
+
+    @property
+    def cards_present(self) -> tuple[bool, ...]:
+        """Clear name for legacy ``verified`` harvested-mainboard flags."""
+        return self.verified
+
+    @property
+    def all_cards_present(self) -> bool:
+        """True when every named card resolved against the harvested mainboard."""
+        return bool(self.cards) \
+            and len(self.verified) == len(self.cards) \
+            and all(self.verified)
 
     @property
     def all_verified(self) -> bool:
-        """True when every named card resolved against the mainboard."""
-        return bool(self.cards) and len(self.verified) == len(self.cards) \
-            and all(self.verified)
+        """Legacy alias; this never represented rules verification."""
+        return self.all_cards_present
 
 
 @dataclass(frozen=True)
@@ -119,14 +142,18 @@ def _parse_win_line(raw) -> Optional[WinLine]:
     cards = _str_tuple(raw.get("cards"))
     if not cards:
         return None
-    verified_raw = raw.get("verified")
-    verified = tuple(bool(v) for v in verified_raw) \
-        if isinstance(verified_raw, list) else ()
+    presence_raw = raw.get("cards_present", raw.get("verified"))
+    cards_present = tuple(bool(v) for v in presence_raw) \
+        if isinstance(presence_raw, list) else ()
+    rules_status = str(raw.get("rules_status") or "author_claimed")
+    if rules_status not in _RULES_STATUSES:
+        rules_status = "author_claimed"
     return WinLine(
         cards=cards,
         needs=str(raw.get("needs") or ""),
         note=str(raw.get("note") or ""),
-        verified=verified,
+        verified=cards_present,
+        rules_status=rules_status,
     )
 
 
@@ -286,8 +313,34 @@ def _render_profile(p: PrimerProfile) -> str:
     if p.mulligan_mull:
         lines.append("Mull: " + "; ".join(p.mulligan_mull))
     for w in p.win_lines:
-        flag = "" if w.all_verified else " [unverified names]"
-        lines.append(f"Win line: {' + '.join(w.cards)} — {w.needs}{flag}")
+        all_present = bool(w.cards) and all(
+            (index < len(w.cards_present) and w.cards_present[index])
+            or any(_commander_matches(name, commander) for commander in p.commanders)
+            for index, name in enumerate(w.cards)
+        )
+        presence = (
+            "all named cards confirmed in harvested deck"
+            if all_present
+            else "one or more names not confirmed in harvested mainboard or command zone"
+        )
+        labels = {
+            "author_claimed": "Author-claimed win line",
+            "conditional": "Conditional line",
+            "engine": "Engine/value line",
+            "rules_verified": "Rules-verified win line",
+        }
+        rules_note = (
+            "rules independently verified"
+            if w.rules_status == "rules_verified"
+            else "rules not independently verified"
+        )
+        needs = f" — {w.needs}" if w.needs else ""
+        lines.append(
+            f"{labels[w.rules_status]}: {' + '.join(w.cards)}{needs} "
+            f"[{presence}; {rules_note}]"
+        )
+        if w.note:
+            lines.append(f"Line note: {w.note}")
     if p.weaknesses:
         lines.append("Weak to: " + "; ".join(p.weaknesses))
     return "\n".join(lines)

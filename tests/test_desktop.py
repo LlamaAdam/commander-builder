@@ -35,7 +35,7 @@ def test_wait_until_up_false_on_timeout():
     assert desktop.wait_until_up("127.0.0.1", closed, timeout=0.3) is False
 
 
-def test_launch_wires_webview_to_served_url(monkeypatch):
+def test_launch_wires_webview_to_served_url(monkeypatch, instance_lock):
     """launch() resolves a URL, starts the server via the injected `serve`,
     and opens a window at that URL via the injected `webview`."""
     # Don't actually poll a socket — the fake serve starts nothing.
@@ -61,6 +61,7 @@ def test_launch_wires_webview_to_served_url(monkeypatch):
     url = desktop.launch(
         deck_dir="C:/decks", host="127.0.0.1", port=5599,
         webview=FakeWebview, serve=fake_serve,
+        _acquire_lock=lambda: instance_lock,
     )
 
     assert url == "http://127.0.0.1:5599/"
@@ -97,10 +98,13 @@ def test_default_serve_starts_real_flask_app(tmp_path):
         encoding="utf-8",
     )
     port = desktop.find_free_port()
-    desktop._default_serve(str(tmp_path), "127.0.0.1", port)
-    assert desktop.wait_until_up("127.0.0.1", port, timeout=10.0)
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as r:
-        assert r.status == 200
+    server = desktop._default_serve(str(tmp_path), "127.0.0.1", port)
+    try:
+        assert desktop.wait_until_up("127.0.0.1", port, timeout=10.0)
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as r:
+            assert r.status == 200
+    finally:
+        server.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -189,13 +193,13 @@ def test_second_instance_does_not_blank_the_first_ones_pid(tmp_path):
     lock_path = tmp_path / "instance.lock"
     held = desktop._acquire_instance_lock(lock_path)
     try:
-        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
         with pytest.raises(desktop.SingleInstanceError):
             desktop._acquire_instance_lock(lock_path)
-        # The payload survived the failed attempt.
-        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
     finally:
         held.close()
+    # Windows locks byte zero against other readers too. Read after release
+    # to verify the actual persisted PID survived the rejected contender.
+    assert lock_path.read_text(encoding="ascii") == str(os.getpid())
 
 
 def test_lock_pid_is_rewritten_by_the_new_holder(tmp_path):
@@ -205,11 +209,10 @@ def test_lock_pid_is_rewritten_by_the_new_holder(tmp_path):
 
     lock_path = tmp_path / "instance.lock"
     lock_path.write_text("999999", encoding="ascii")
-    lock = desktop._acquire_instance_lock(lock_path)
-    try:
-        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
-    finally:
-        lock.close()
+    with desktop._acquire_instance_lock(lock_path):
+        with pytest.raises(desktop.SingleInstanceError):
+            desktop._acquire_instance_lock(lock_path)
+    assert lock_path.read_text(encoding="ascii") == str(os.getpid())
 
 
 def test_main_reports_a_dead_server_and_exits_nonzero(monkeypatch, capsys):

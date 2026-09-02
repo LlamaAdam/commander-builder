@@ -85,6 +85,55 @@ def test_round_trip_deck_dir_via_config(tmp_path, cfg_file, monkeypatch):
     assert config_store.get_deck_dir(path=cfg_file) == target
 
 
+@pytest.mark.parametrize("source", ["saved", "environment", "explicit"])
+def test_browser_and_desktop_share_configured_deck_library(
+    tmp_path, cfg_file, monkeypatch, source,
+):
+    """Both entry points honor explicit > environment > persisted config."""
+    from commander_builder import forge_runner
+    from commander_builder.web.app import create_app
+
+    # Startup performs cleanup, so every candidate must be test-owned.
+    monkeypatch.setattr(forge_runner, "VENDOR_FORGE", tmp_path / "forge")
+    saved = tmp_path / "saved"
+    config_store.save_config({"deck_dir": str(saved)}, cfg_file)
+    expected = saved
+    explicit = None
+    if source in {"environment", "explicit"}:
+        expected = tmp_path / "environment"
+        monkeypatch.setenv("COMMANDER_BUILDER_DECK_DIR", str(expected))
+    if source == "explicit":
+        expected = tmp_path / "explicit"
+        explicit = expected
+
+    app = create_app(deck_dir=explicit)
+    assert Path(app.config["DECK_DIR"]) == expected.resolve()
+    desktop_dir = desktop._resolve_deck_dir(
+        str(explicit) if explicit is not None else None,
+    )
+    assert Path(desktop_dir).resolve() == expected.resolve()
+    assert not expected.exists()
+
+
+def test_get_deck_dir_explicit_beats_environment_and_saved_config(
+    tmp_path, cfg_file, monkeypatch,
+):
+    config_store.save_config({"deck_dir": str(tmp_path / "saved")}, cfg_file)
+    monkeypatch.setenv("COMMANDER_BUILDER_DECK_DIR", str(tmp_path / "environment"))
+    explicit = tmp_path / "explicit"
+    assert config_store.get_deck_dir(deck_dir=explicit) == explicit
+
+
+def test_get_deck_dir_caller_default_is_used_only_when_unconfigured(
+    tmp_path, cfg_file,
+):
+    fallback = tmp_path / "fallback"
+    assert config_store.get_deck_dir(default=fallback) == fallback
+    saved = tmp_path / "saved"
+    config_store.save_config({"deck_dir": str(saved)}, cfg_file)
+    assert config_store.get_deck_dir(default=fallback) == saved
+
+
 # --------------------------------------------------------------------------- #
 # desktop._resolve_deck_dir -- precedence
 # --------------------------------------------------------------------------- #
@@ -113,7 +162,7 @@ def test_resolve_deck_dir_none_explicit_means_use_config():
     assert result is None or (isinstance(result, str) and result != "")
 
 
-def test_launch_passes_resolved_deck_dir_to_serve(monkeypatch, tmp_path):
+def test_launch_passes_resolved_deck_dir_to_serve(monkeypatch, tmp_path, instance_lock):
     """launch() passes the resolved deck_dir (from config) to serve()."""
     monkeypatch.setattr(desktop, "wait_until_up", lambda *a, **k: True)
     expected = str(tmp_path / "deck_decks")
@@ -134,5 +183,6 @@ def test_launch_passes_resolved_deck_dir_to_serve(monkeypatch, tmp_path):
     desktop.launch(
         deck_dir=None, host="127.0.0.1", port=9911,
         webview=FakeWebview, serve=fake_serve,
+        _acquire_lock=lambda: instance_lock,
     )
     assert served["deck_dir"] == expected

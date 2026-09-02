@@ -17,7 +17,9 @@ from ..dck_utils import (
     main_target,
     parse_card_line,
 )
-from ..import_formats import arena_to_dck, csv_to_lines, detect_paste_format
+from ..import_formats import (
+    arena_to_dck, csv_to_lines, detect_paste_format, normalize_dck_cards,
+)
 
 
 def _normalize_pasted_deck(text: str) -> str:
@@ -30,44 +32,28 @@ def _normalize_pasted_deck(text: str) -> str:
     branch produces the same .dck intermediate downstream writers
     (Name= stamping, role prefixes) have always consumed.
 
-    May raise ``import_formats.ImportFormatError`` when a POSITIVELY
-    detected Arena/CSV paste contains a malformed line — the import
-    route turns that into a 400 naming the line. Ambiguous text never
-    errors; it falls through to the plain-lines wrap below.
+    Raises ``import_formats.ImportFormatError`` for malformed card lines.
+    Printing normalization is per-line, independent of format detection.
     """
     text = text.strip()
     if not text:
         return ""
     fmt = detect_paste_format(text)
     if fmt == "arena":
-        # Arena's Commander/Sideboard sections map to [Commander]/
-        # [Sideboard] — the only paste shape besides .dck that can
-        # carry an explicit commander.
+        # Arena's Commander/Sideboard sections map to Forge sections.
         return arena_to_dck(text)
     if fmt == "csv":
         # CSV degrades to the plain line list ON PURPOSE: exports have
         # no commander column, so commander handling must be exactly
-        # whatever the plain-paste path does (today: nothing — all
-        # cards to [Main]). Fall through to the wrap below.
+        # whatever the plain-paste path does (rows default to Main).
         text = csv_to_lines(text).strip()
         if not text:
             return ""
     elif fmt == "dck":
-        # The paste already has section headers — trust the user.
-        return text + "\n"
-    # Otherwise wrap in [Main]. Filter trivial header lines like
-    # "Mainboard (99)" that Moxfield's UI sometimes includes.
-    body_lines: list[str] = []
-    for line in text.splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        # Skip obvious headers (e.g. "Commander (1)", "Mainboard (99)").
-        if s.lower().startswith(("mainboard", "commander", "sideboard",
-                                 "considering")):
-            continue
-        body_lines.append(s)
-    return "[Main]\n" + "\n".join(body_lines) + "\n"
+        return normalize_dck_cards(text)
+    # Plain exports share Arena's counted card syntax, with aliases for
+    # Mainboard/Considering headings. Never silently discard a bad line.
+    return arena_to_dck(text)
 
 
 def _to_constructed_format(text: str) -> str:
