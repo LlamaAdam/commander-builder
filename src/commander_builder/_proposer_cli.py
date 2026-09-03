@@ -1125,7 +1125,13 @@ def _process_one_deck(
         # without bloating the NDJSON stream.
         err_text = errbuf.getvalue().strip()
         if len(err_text) > 1000:
-            err_text = err_text[:1000] + " …[truncated; full text on stderr]"
+            # Keep the TAIL as well as the head (2026-09-03): argparse
+            # prints usage first and the actual "error: unrecognized
+            # arguments: ..." line LAST, so a head-only cut dropped the
+            # one line that identifies the failure once the usage text
+            # grew past the cap (it did, with the round-3 flags).
+            err_text = (err_text[:650] + " …[truncated; full text on stderr]… "
+                        + err_text[-300:])
         return {
             "deck": str(deck_path),
             "status": "error",
