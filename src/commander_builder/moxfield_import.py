@@ -84,10 +84,31 @@ INVALID_FN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 NON_ASCII = re.compile(r"[^\x00-\x7f]")
 
 
+#: The shape of a Moxfield publicId — the only thing that may be spliced
+#: into an upstream URL path (R3 W-06, 2026-09-03).
+MOXFIELD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def parse_deck_id(url_or_id: str) -> str:
-    """Accept either a full Moxfield URL or a bare deck id."""
-    m = re.search(r"/decks/([A-Za-z0-9_-]+)", url_or_id)
-    return m.group(1) if m else url_or_id.strip()
+    """Accept either a full Moxfield URL or a bare deck id.
+
+    Raises ``ValueError`` for anything else (R3 W-06): the function used
+    to return the raw input on no match, so a pasted URL without
+    ``/decks/<id>`` — or ``../../v2/users/me?x=1`` — became the id and
+    was fetched under the literal ``/v3/decks/all/`` prefix, and
+    ``PUT /api/deck_source`` wrote it into ``[metadata]`` verbatim.
+    """
+    text = (url_or_id or "").strip()
+    m = re.search(r"/decks/([A-Za-z0-9_-]+)", text)
+    if m:
+        return m.group(1)
+    if MOXFIELD_ID_RE.match(text):
+        return text
+    raise ValueError(
+        f"not a Moxfield deck URL or id: {text[:80]!r} (expected "
+        f"https://moxfield.com/decks/<id> or a bare id of letters, digits, "
+        f"'_' and '-')"
+    )
 
 
 def _http_get_json(url: str) -> dict:
@@ -100,7 +121,12 @@ def _http_get_json(url: str) -> dict:
 
 
 def fetch_deck(deck_id: str) -> dict:
-    return _http_get_json(f"{API_BASE}/{deck_id}")
+    # Validated AND quoted (R3 W-06): the id shape above already forbids
+    # '/', '?' and '#', and quoting is the belt to that brace for any
+    # caller that hands over an unparsed id.
+    if not MOXFIELD_ID_RE.match(deck_id or ""):
+        raise ValueError(f"not a Moxfield deck id: {deck_id!r}")
+    return _http_get_json(f"{API_BASE}/{urllib.parse.quote(deck_id, safe='')}")
 
 
 def search_decks(
@@ -1218,35 +1244,65 @@ def import_deck(
     # FP-018.1 (2026-08-27): the deck's primer, stored as a sidecar
     # (`<stem>.primer.md`) beside the FINAL deck path — after every
     # uniquify/overwrite decision, so it can only ever accompany the file
-    # this import actually wrote. Archidekt lane only: its `description`
-    # shape is capture-pinned (Quill Delta, tests/fixtures/hazel_primer.md);
-    # Moxfield's has no capture in this repo, and unverified shapes stay
-    # untouched rather than guessed (the `_entry_name` discipline). The
-    # `.dck` itself is never touched — primers are paragraphs, not
-    # `[metadata]` directives, and the format belongs to Forge. A sidecar
-    # I/O failure is reported but never unwinds the import that already
-    # succeeded.
-    if lane_used == SOURCE_ARCHIDEKT and deck_json.get("description"):
+    # this import actually wrote. BOTH lanes (R3 F-06, 2026-09-03 — this
+    # used to be Archidekt-only under a comment claiming Moxfield's
+    # description "has no capture in this repo"; the corpus study walked
+    # 25 Moxfield descriptions and pinned the shape as markdown / plain
+    # text, PRIMER_CORPUS.md Appendix C, which is exactly the not-a-Delta
+    # branch `parse_primer` already handles). A Moxfield primer carries no
+    # card-link embeds, so it feeds the prose paths only, never
+    # auto-Protect. The `.dck` itself is never touched — primers are
+    # paragraphs, not `[metadata]` directives, and the format belongs to
+    # Forge. The sidecar is stamped with `source_id` so a later import of
+    # a DIFFERENT deck under a colliding stem can never overwrite it (R3
+    # F-07) and an unchanged upstream leaves hand edits alone (R3 F-08).
+    # A sidecar I/O failure is reported but never unwinds the import that
+    # already succeeded.
+    if deck_json.get("description"):
         from .primer import (
             primer_word_count,
             read_primer_sidecar,
-            write_primer_sidecar,
+            store_primer_sidecar,
         )
         try:
-            sidecar = write_primer_sidecar(
-                out_path, deck_json.get("description"))
+            outcome = store_primer_sidecar(
+                out_path, deck_json.get("description"),
+                source_id=source_id or None)
         except OSError as exc:
-            sidecar = None
+            outcome = None
             print(
                 f"  WARN: primer sidecar could not be written "
                 f"({type(exc).__name__}: {exc}); the deck imported fine.",
                 file=sys.stderr, flush=True,
             )
-        if sidecar is not None:
+        if outcome is not None and outcome.action == "refused":
+            print(f"  WARN: primer sidecar NOT written — {outcome.reason}",
+                  file=sys.stderr, flush=True)
+        elif outcome is not None and outcome.path is not None:
             # Word count over the TEXT read-back — the card-links block
             # is machine data, not the author's words.
             words = primer_word_count(read_primer_sidecar(out_path) or "")
-            print(f"  primer captured ({words} words) -> {sidecar.name}")
+            verb = {"written": "captured", "refreshed": "refreshed "
+                    "(overwrote the previous sidecar — upstream changed)",
+                    "unchanged": "unchanged (upstream words identical; "
+                    "sidecar left as-is)"}[outcome.action]
+            print(f"  primer {verb} ({words} words) -> {outcome.path.name}")
+    else:
+        # Upstream dropped its description (R3 F-07 §D): a sidecar that
+        # records THIS source is now the deck's own stale words — remove
+        # it and say so. Another source's sidecar is left alone (refuse-
+        # clobber applies to deletes too).
+        from .primer import primer_sidecar_path, sidecar_identity
+        ident = sidecar_identity(out_path)
+        if ident is not None and source_id and ident.get("source") == source_id:
+            try:
+                primer_sidecar_path(out_path).unlink()
+                print("  primer removed (the source deck no longer has a "
+                      "description)")
+            except OSError as exc:
+                print(f"  WARN: stale primer sidecar could not be removed "
+                      f"({type(exc).__name__}: {exc})",
+                      file=sys.stderr, flush=True)
 
     boards = deck_json.get("boards", {})
     cmdr_count = sum(c.get("quantity", 0) for c in boards.get("commanders", {}).get("cards", {}).values())

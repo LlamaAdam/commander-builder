@@ -37,6 +37,7 @@ from uuid import uuid4
 
 from flask import Blueprint, Response, current_app, jsonify, request
 
+from ..dck_utils import read_deck_text
 from ..knowledge_log import (
     SIM_REPORT_VERDICT_PARAMS_KEY,
     Iteration,
@@ -204,7 +205,7 @@ def _get_job_persisted(deck_dir: Path, job_id: str) -> Optional[dict]:
     already finished, its sidecar json still holds the full response."""
     path = _job_file(deck_dir, job_id)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(read_deck_text(path))
     except (OSError, ValueError):
         return None
 
@@ -265,7 +266,7 @@ def _prepare_swap(deck_dir: Path, payload: Optional[dict]):
 
     # Quick dry-run: if no actual changes, refuse to spend Forge cycles on
     # a no-op.
-    old_text = old_path.read_text(encoding="utf-8")
+    old_text = read_deck_text(old_path)
     diff = diff_deck_text(old_text, new_text)
     if not diff["added"] and not diff["removed"]:
         return None, ({"error": "no changes detected", "diff": diff}, 400)
@@ -346,7 +347,7 @@ def _prepare_swap(deck_dir: Path, payload: Optional[dict]):
     old_converted_path: Optional[Path] = None
     old_for_compare = old_path.name
     if mode == "1v1":
-        old_text = old_path.read_text(encoding="utf-8")
+        old_text = read_deck_text(old_path)
         # Ensure the old deck's metadata Name= is also distinct so
         # log_parser can split wins between old + new. Reuse the same
         # per-request uid — the _proposed_/_converted_ infix already
@@ -995,7 +996,7 @@ def make_sim_blueprint(
             path = _resolve_deck_path(deck_dir, deck_id, None)
             if path is not None:
                 try:
-                    deck_snapshot = path.read_text(encoding="utf-8")
+                    deck_snapshot = read_deck_text(path)
                 except OSError:
                     deck_snapshot = None
 

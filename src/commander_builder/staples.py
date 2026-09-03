@@ -1263,8 +1263,9 @@ def politics_guard_enabled(deck_text: str) -> bool:
     enforces, so a user who already learned the ``Protect=`` syntax
     doesn't have to learn a second one.
     """
+    from .dck_utils import strip_bom
     in_metadata = False
-    for raw in (deck_text or "").splitlines():
+    for raw in strip_bom(deck_text).splitlines():  # R3 W-03
         s = raw.strip()
         if s.startswith("[") and s.endswith("]"):
             in_metadata = s.lower() == "[metadata]"

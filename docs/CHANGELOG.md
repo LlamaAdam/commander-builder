@@ -103,6 +103,111 @@ backfills are dry-run-by-default scripts.
   UNIQUE traceback; judge dimension scores must be integers (`1.5` is
   discarded, `2.0` accepted).
 
+### 2026-09-03 — round-3 fixes (FP-018 + web)
+
+The FP-018 and web/CLI findings of the third negative-mode round
+(`NEGATIVE_MODE_ROUND3.md` §3–§4, F-01…F-18 and W-01…W-10, W-12, W-13),
+as adjudicated by the cross-examiner. Every fix carries a regression
+test that fails without it. Two FP-018 sentences in the 2026-08-27
+block below were proved false by the review and are corrected here
+rather than rewritten in place: "the adopt flow routinely builds
+free-text-only intents" (nothing in production built an `Intent` with
+free text — see F-01) and "Imports write a `<deckstem>.primer.md`
+sidecar (never empty, refuse-clobber semantics)" (Archidekt lane only,
+and "refuse-clobber" meant stem-following naming, not overwrite
+protection — see F-06/F-07/F-08).
+
+#### Fixed
+
+- **F-01 — free-text intent has a production writer.** `learn_intent`
+  reads the deck's `<stem>.primer.md` into `Intent.stated` (refusing a
+  sidecar whose header names another deck) and takes
+  `pilot_preferences` from the caller; `commander judge` and `commander
+  improve` gain `--preferences` / `--preferences-file` (one reader,
+  `intent.resolve_preferences`, shared with `adopt`). 018.2's judge
+  block and advisor bias are reachable from production for the first
+  time.
+- **F-03 — the free-text bias is additive.** Free-text slugs travel on
+  a new `--free-text-themes` flag (`improve` → `_proposer_cli` →
+  `advise(free_text_themes=)`), capped at 2, fetched IN ADDITION to the
+  advisor's 4 derived pages and marked `CommanderPage.soft_bias` so they
+  rank adds but never join the cut-protection known-set. The tribe page
+  is no longer evicted.
+- **F-05 — free text is fenced data.** The judge's intent block wraps
+  each quote in `<<<FREE-TEXT id=<hash> chars=N` … `>>>END-FREE-TEXT
+  id=<hash>` (the id is a hash of the text, so a payload cannot close
+  its own fence); the system prompt says only fenced text is quoted
+  data. `JudgeReport.prompt_version` (`2026-09-03.r3-fence`) is stamped
+  on every report and `judge_agreement` tallies rows per version so a
+  prompt change is never read as a change in the decks.
+- **F-04 — negation-aware, word-bounded preference matching.**
+  `free_text_theme_slugs` uses word-bounded patterns and drops a mention
+  inside a negation window ("no tokens", "not a lifegain deck", "afraid
+  of lifegain players", the real "Lifegain is brutal against this
+  deck"); a bare singular "artifact"/"enchantment" is a card
+  description, not a theme. `--preferences` help says preferences are
+  read as affirmative keywords.
+- **F-02 / F-10 / F-16 — one front-face key.** New
+  `collection.match_key` (case-folded front face + apostrophe fold +
+  whitespace collapse) on both sides of adopt's card-link cross-check,
+  the protection union, `Protect=` matching and `prose_mentions` (now
+  word-bounded). DFC embeds (`Front // Back`) match the `.dck`'s front
+  face and are auto-protected; a curly-apostrophe `Protect=` pins the
+  card; `Opt` no longer matches `option`.
+- **F-06 — the Moxfield lane writes the sidecar too** (plain text per
+  the corpus study, Appendix C pinned); the false "no capture in this
+  repo" comment is gone.
+- **F-07 / F-08 — sidecar identity and honest overwrite.** The sidecar
+  carries a `primer-source` header (source id + description hash).
+  `store_primer_sidecar` reports written / refreshed / unchanged /
+  refused: same source with changed words refreshes, same words leaves
+  the file (hand edits survive), another source's sidecar is never
+  overwritten (loud WARN). Readers (`adopt`, `learn_intent`) refuse a
+  header that does not match the deck's `Moxfield=`/`Archidekt=` id;
+  the web DELETE route removes the sidecar with the deck;
+  `snapshot_deck` copies it; a re-pull whose upstream dropped its
+  description removes the deck's own stale sidecar.
+- **F-09 — unresolved cards are never proposed as cuts**; past 25%
+  unresolved the suggestion pass is refused naming the remedy; the
+  "never touch … lands" sentence is printed only when every card
+  resolved; `commander-init`'s decline text no longer promises an
+  on-demand prime the cache-only commands cannot do.
+- **F-11** unrecognized card-links are reported separately from
+  oracle-resolved drift; **F-12** `quoted_win_lines` is word-bounded
+  and heading-aware (the paragraph under a "Win Conditions" heading is
+  quoted; no exclusion word list); **F-13** the two "rebuild
+  unreachable" pins are load-bearing (8-swap corpus, AST subscript
+  check); **F-14** non-Delta JSON is refused as a primer and card-link
+  lines are JSON-encoded; **F-15** `offline_game_changers` warns once on
+  stderr, sets `_FALLBACK_USED`, and `swap_label` records
+  `staple_list_source`; **F-18** `main_count` counts cards.
+- **W-01** `PUT /api/deck_source` accepts only a Moxfield URL / id and
+  writes atomically; **W-02** the request gate refuses any `/api/`
+  request whose `Sec-Fetch-Site` is neither `same-origin` nor `none`
+  (side-effecting GETs were outside the CSRF gate); **W-03** a UTF-8
+  BOM no longer disables the `[metadata]` parsers (`dck_utils.strip_bom`
+  at the three sites); **W-04** one `.dck` reader
+  (`dck_utils.read_deck_text`: BOM-stripped, non-UTF-8 decoded with
+  replacement + a loud per-file warning) replaces the strict reads in
+  the web routes and the intent/adopt/judge readers; out-of-dir symlinks
+  are not listed; **W-05** the web import uses the CLI's
+  `safe_filename`, NUL / over-long names are 400s, NUL in a deck id is
+  a 404, `MAX_CONTENT_LENGTH` is 8 MB; **W-06** `parse_deck_id` (both
+  lanes) raises on anything but a deck URL / id, `fetch_deck` validates
+  and URL-quotes, `verify_against_source` refuses a non-id `Moxfield=`
+  line; **W-07** `deck_dir` must be an absolute, NUL-free, existing
+  directory; **W-08** `save_config` writes atomically at 0o600 (parent
+  0o700); **W-09** new core `atomic_io.atomic_write_text` (re-exported
+  by `web._helpers`) backs the build worker, `deck_source`,
+  `rewrite_name_to_stem`, and the import route creates exclusively;
+  **W-10** `rewrite_name` / `set_bracket_unverified` keep a CRLF deck's
+  line endings and the atomic writer writes bytes verbatim, so an
+  unchanged GET→PUT is byte-identical; **W-12** the desktop launch test
+  injects the instance lock and every desktop test runs under a
+  per-test `COMMANDER_BUILDER_LOCK_DIR`; **W-13** a Playwright spec
+  drives `/api/audit/stream` through the real SSE client against a
+  stubbed stream.
+
 ### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
 
 #### Added
@@ -116,7 +221,11 @@ backfills are dry-run-by-default scripts.
   fixture `archidekt_primer_delta_86888.json`). Imports write a
   `<deckstem>.primer.md` sidecar (never empty, refuse-clobber
   semantics) with the card-links block preserved; `.dck` format
-  untouched. Prompt use goes through `clip_for_prompt` — explicit
+  untouched. *(Corrected 2026-09-03, R3 F-06/F-07/F-08: this was the
+  Archidekt lane only, and "refuse-clobber" meant stem-following naming
+  — the file was overwritten on every re-pull. Both lanes write it now,
+  with an identity header and honest overwrite rules; see the round-3
+  block above.)* Prompt use goes through `clip_for_prompt` — explicit
   truncation marker, never silent.
 - **Free-text intent (018.2).** `Intent` gains `stated` (the deck's
   own primer) and `pilot_preferences` (the adopter's words). Both flow
@@ -130,7 +239,10 @@ backfills are dry-run-by-default scripts.
   adopt flow routinely builds free-text-only intents, and without the
   guard those pairings would enter G3's population with a fabricated
   `staple_ward` direction). The two judge boundary tests moved with
-  the boundary, deliberately.
+  the boundary, deliberately. *(Corrected 2026-09-03, R3 F-01: no
+  production code built an `Intent` with free text at the time — the
+  guard was right, its stated rationale was not; `learn_intent` and the
+  `--preferences` flags are the writers, see the round-3 block above.)*
 - **`commander adopt` (018.3).** Deterministic, offline, read-only:
   (1) a grounded explanation — the primer's plan cross-checked against
   the actual list (cards it names that are/aren't present, packages by

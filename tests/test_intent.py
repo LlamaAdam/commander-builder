@@ -11,7 +11,9 @@ from typing import Optional
 
 import pytest
 
-from commander_builder.intent import Intent, intent_protect_cards, learn_intent
+from commander_builder.intent import (
+    Intent, intent_protect_cards, learn_intent, soft_bias_theme_slugs,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -758,9 +760,16 @@ def test_soft_bias_slugs_put_derived_themes_before_free_text():
 
 def test_default_round_fn_free_text_reaches_the_advisor_bias(tmp_path,
                                                              monkeypatch):
-    """FP-018.2's advisor half: free-text-only intent flows into the
-    SAME --intent-themes soft-bias channel themes already use (never a
-    hard filter — the flag only adds tag pages to the pool ranking)."""
+    """FP-018.2's advisor half: free-text-only intent reaches the advisor
+    as a soft bias (never a hard filter — the flag only adds tag pages to
+    the pool ranking).
+
+    RE-PINNED 2026-09-03 (R3 F-03): it used to assert the slug rode on
+    ``--intent-themes`` — the SAME list as the derived themes, where it
+    competed for the advisor's 4-page cap and evicted the tribe page.
+    Free text now travels on ``--free-text-themes`` (extra pages, never
+    cut-protection); ``--intent-themes`` is absent for a themeless
+    intent."""
     from commander_builder import improve
 
     received_argv: list[list[str]] = []
@@ -783,5 +792,210 @@ def test_default_round_fn_free_text_reaches_the_advisor_bias(tmp_path,
     improve._default_round_fn(deck, 1, args)
 
     argv = received_argv[0]
-    assert "--intent-themes" in argv
-    assert argv[argv.index("--intent-themes") + 1] == "tokens"
+    assert "--intent-themes" not in argv
+    assert argv[argv.index("--free-text-themes") + 1] == "tokens"
+
+
+# ---------------------------------------------------------------------------
+# R3 F-01 / F-03 / F-04 (2026-09-03) — free text has a production writer,
+# the bias is additive, and negations are read as negations
+# ---------------------------------------------------------------------------
+
+_HAZEL_PRIMER_MD = Path(__file__).parent / "fixtures" / "hazel_primer.md"
+
+
+def _hazel_delta() -> str:
+    text = _HAZEL_PRIMER_MD.read_text(encoding="utf-8")
+    return next(l for l in text.splitlines() if l.startswith('{"ops"'))
+
+
+def test_learn_intent_reads_the_primer_sidecar_into_stated(tmp_path):
+    """R3 F-01: the ONLY production ``Intent(`` constructor never set
+    ``stated``, so every judge/improve run judged against ``None`` no
+    matter what sidecar sat beside the deck. It now reads the sidecar."""
+    from commander_builder import primer
+
+    deck = tmp_path / "[USER] Hazel [B3].dck"
+    deck.write_text("[metadata]\nName=[USER] Hazel [B3]\nArchidekt=24864897\n"
+                    "[Commander]\n1 Hazel of the Rootbloom\n[Main]\n1 Sol Ring\n",
+                    encoding="utf-8")
+    primer.write_primer_sidecar(deck, _hazel_delta(),
+                                source_id="archidekt:24864897")
+    learned = learn_intent(deck, classify_fn=lambda p: "midrange",
+                           lookup_fn=lambda n: None,
+                           pilot_preferences="  I love tokens  ")
+    assert learned.stated and "sacrifice theme" in learned.stated
+    assert learned.pilot_preferences == "I love tokens"
+    # ...and the free text reaches the soft-bias channel.
+    assert "tokens" in soft_bias_theme_slugs(learned)
+    # Opt-out for callers that want the list-only anchor.
+    assert learn_intent(deck, classify_fn=lambda p: "midrange",
+                        lookup_fn=lambda n: None,
+                        read_primer=False).stated is None
+
+
+def test_learn_intent_refuses_another_decks_sidecar(tmp_path):
+    """R3 F-07: a sidecar whose header names a different source deck is
+    not this deck's primer; it must never anchor this deck's judge."""
+    from commander_builder import primer
+
+    deck = tmp_path / "[USER] Hazel [B3].dck"
+    deck.write_text("[metadata]\nName=[USER] Hazel [B3]\nMoxfield=zzz999\n"
+                    "[Commander]\n1 Hazel of the Rootbloom\n[Main]\n1 Sol Ring\n",
+                    encoding="utf-8")
+    primer.write_primer_sidecar(deck, _hazel_delta(),
+                                source_id="archidekt:24864897")
+    learned = learn_intent(deck, classify_fn=lambda p: "midrange",
+                           lookup_fn=lambda n: None)
+    assert learned.stated is None
+
+
+@pytest.mark.parametrize("sentence", [
+    "no tokens please, I hate token decks",
+    "not a lifegain deck",
+    "I don't want to play artifact decks",
+    "I dislike graveyard strategies, keep it fair",
+    "no equipment, no voltron",
+    "I want to sacrifice nothing; I keep my board",
+    "spellslinger is boring; instants and sorceries are not my thing",
+    # The real Baba Lysaga sentence (PRIMER_CORPUS.md Appendix A).
+    "Lifegain is brutal against this deck. Someone doubling their life is "
+    "very, very hard to chew through when your commander is chunking for "
+    "3 at a time.",
+    # Appendix A again: a card description, not an enchantress theme.
+    "Giving an enchantment creature a 3rd type is cool enough.",
+])
+def test_free_text_slugs_drop_negated_and_incidental_mentions(sentence):
+    """R3 F-04: the one LIVE steering input (adopt --preferences) used to
+    invert every negation — 'no tokens' steered toward tokens and printed
+    'serves: your stated preference: tokens'."""
+    from commander_builder.intent import free_text_theme_slugs
+    assert free_text_theme_slugs(sentence) == []
+
+
+def test_free_text_slugs_are_word_bounded_but_keep_prose_inflections():
+    from commander_builder.intent import free_text_theme_slugs
+    # 'token' inside another word is not a theme mention...
+    assert free_text_theme_slugs("a tokenizer is a parser") == []
+    # ...but the inflections the table was built for still land.
+    assert free_text_theme_slugs("I like sacrificing creatures") == ["sacrifice"]
+    assert free_text_theme_slugs("reanimating fatties") == ["reanimator"]
+    assert free_text_theme_slugs("I love enchantments") == ["enchantress"]
+    # An affirmative clause after a negated one still counts.
+    assert free_text_theme_slugs(
+        "not a lifegain deck. I love tokens though.") == ["tokens"]
+
+
+def test_free_text_bias_is_capped_and_split_from_derived_themes():
+    """R3 F-03: free-text slugs ride their own list, capped, so the
+    advisor can fetch them as EXTRA pages instead of letting them evict
+    the tribe page inside the 4-page cap."""
+    from commander_builder.intent import (
+        FREE_TEXT_SLUG_CAP, free_text_bias_slugs,
+    )
+    intent = Intent(themes=["tokens", "sacrifice", "artifacts"],
+                    tribal_type="Goblin",
+                    stated="I love my graveyard, my equipment and lifegain")
+    extra = free_text_bias_slugs(intent)
+    # Three free-text slugs (lifegain, reanimator, equipment in table
+    # order); the cap keeps the first two.
+    assert extra == ["lifegain", "reanimator"]
+    assert len(extra) == FREE_TEXT_SLUG_CAP == 2
+    # Derived themes never appear in the free-text half.
+    dup = Intent(themes=["tokens"], stated="tokens tokens tokens")
+    assert free_text_bias_slugs(dup) == []
+    assert soft_bias_theme_slugs(dup) == ["tokens"]
+
+
+def test_free_text_pages_never_evict_the_tribe_page(tmp_path, monkeypatch):
+    """R3 F-03, executed end-to-end through ``advise``: three derived
+    themes + a Goblin tribe + free-text slugs. The tribe page is fetched
+    (it used to be evicted), the free-text pages are fetched in addition
+    and marked ``soft_bias`` (so the heuristic never folds them into the
+    cut-protection known-set)."""
+    import commander_builder.improvement_advisor as ia
+    from commander_builder.edhrec_client import CommanderPage
+
+    fetched: list[str] = []
+
+    def fake_tag_page(slug):
+        fetched.append(slug)
+        return CommanderPage(commander_name=slug, slug=slug,
+                             fetched_at="2026-01-01T00:00:00")
+
+    def fake_cmd_page(c):
+        return CommanderPage(commander_name=c, slug="x",
+                             fetched_at="2026-01-01T00:00:00")
+
+    def fake_lookup(name):
+        if name == "Krenko, Mob Boss":
+            return {"oracle_text": "{T}: Create X 1/1 red Goblin creature "
+                                   "tokens, where X is the number of Goblins "
+                                   "you control.",
+                    "type_line": "Legendary Creature — Goblin Warrior",
+                    "color_identity": ["R"]}
+        return {"oracle_text": "", "type_line": "Creature",
+                "color_identity": ["R"]}
+
+    monkeypatch.setattr(ia, "fetch_tag_page", fake_tag_page)
+    monkeypatch.setattr(ia, "fetch_commander_page", fake_cmd_page)
+    monkeypatch.setattr(ia, "lookup_card", fake_lookup)
+    deck = tmp_path / "[USER] Krenko [B3].dck"
+    deck.write_text("[Commander]\n1 Krenko, Mob Boss\n\n[Main]\n1 Sol Ring\n",
+                    encoding="utf-8")
+    seen_pages: dict = {}
+    real = ia._heuristic_swap_recommendations
+
+    def spy(*a, **kw):
+        seen_pages["tag_pages"] = list(kw.get("tag_pages") or [])
+        return real(*a, **kw)
+
+    monkeypatch.setattr(ia, "_heuristic_swap_recommendations", spy)
+    ia.advise(deck, bracket=3, source="heuristic",
+              intent_themes=["tokens", "sacrifice", "artifacts"],
+              free_text_themes=["reanimator", "equipment"])
+    assert "goblins" in fetched, fetched
+    assert fetched[:4] == ["tokens", "sacrifice", "artifacts", "goblins"]
+    assert fetched[4:] == ["reanimator", "equipment"]
+    soft = {p.slug: p.soft_bias for p in seen_pages["tag_pages"]}
+    assert soft["goblins"] is False and soft["reanimator"] is True
+
+
+def test_default_round_fn_splits_derived_and_free_text_flags(tmp_path,
+                                                             monkeypatch):
+    """R3 F-03: ``--intent-themes`` carries the derived themes only; the
+    free-text slugs go on ``--free-text-themes``. (Re-pin of the FP-018.2
+    test above, which put free text on --intent-themes — the very list
+    that evicted the tribe page.)"""
+    from commander_builder import improve
+
+    received_argv: list[list[str]] = []
+
+    def fake_acm(argv):
+        received_argv.append(list(argv))
+        return 0
+
+    _patch_acm_in_proposer_cli(monkeypatch, fake_acm)
+    deck = tmp_path / "[USER] Test [B3].dck"
+    deck.write_text("[Commander]\n1 Test Commander\n\n[Main]\n1 Sol Ring\n",
+                    encoding="utf-8")
+    args = _make_minimal_args(
+        intent=Intent(archetype="midrange", themes=["landfall"],
+                      stated="we sacrifice stuff",
+                      pilot_preferences="I love tokens")
+    )
+    improve._default_round_fn(deck, 1, args)
+    argv = received_argv[0]
+    assert argv[argv.index("--intent-themes") + 1] == "landfall"
+    assert argv[argv.index("--free-text-themes") + 1] == "sacrifice,tokens"
+
+
+def test_resolve_preferences_is_one_reader_for_three_clis(tmp_path):
+    from commander_builder.intent import resolve_preferences
+    f = tmp_path / "p.txt"
+    f.write_text("  file wins  \n", encoding="utf-8")
+    assert resolve_preferences("inline", str(f)) == "file wins"
+    assert resolve_preferences("  inline  ", None) == "inline"
+    assert resolve_preferences("", None) is None
+    with pytest.raises(OSError):
+        resolve_preferences(None, str(tmp_path / "missing.txt"))

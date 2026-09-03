@@ -266,6 +266,11 @@ def collect(db_path: Optional[Path] = None) -> dict:
                 # guess, not None) so those rows land outside G3's
                 # population instead of inside one of its arms.
                 "swap_direction": _direction_of(report),
+                # Which prompt bytes the panel judged under (R3 F-05,
+                # 2026-09-03). None on rows older than the stamp; the
+                # summary tallies rows per version so a prompt change is
+                # never mistaken for a change in the decks.
+                "prompt_version": report.get("prompt_version"),
             })
         elif has_judge:
             judged_only += 1
@@ -310,8 +315,12 @@ def analyze(paired: list) -> dict:
     )
     order_flips = sum(1 for row in paired if row["order_flip"])
     judge_kept = sum(1 for row in paired if row["judge_verdict"] == "kept")
+    by_prompt: Counter = Counter(
+        row.get("prompt_version") or "unstamped" for row in paired
+    )
     return {
         "n": n,
+        "by_prompt_version": dict(by_prompt),
         "matrix": {f"{sim}|{judge}": count for (sim, judge), count in matrix.items()},
         "decided": decided,
         "undecided": n - decided,
@@ -389,6 +398,10 @@ def _render(collected: dict, stats: dict) -> str:
         f"  undecided (either side inconclusive): {stats['undecided']}"
         f"  — of which both inconclusive: {stats['both_inconclusive']} "
         f"(not counted as agreement)",
+        "  prompt versions: " + ", ".join(
+            f"{v} x{c}" for v, c in sorted(stats["by_prompt_version"].items())
+        ) + ("   (MIXED — read the gates per version, not pooled)"
+             if len(stats["by_prompt_version"]) > 1 else ""),
         "",
         "  Agreement table — rows: sim verdict, columns: judge opinion",
     ]

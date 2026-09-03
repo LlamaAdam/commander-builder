@@ -57,7 +57,12 @@ from typing import Optional
 # and synthesized a second one under [metadata] — leaving BOTH the empty
 # line and the new one in the file, and which of the two Forge honors is
 # parser-dependent. Replacing the empty line keeps exactly one.
-_NAME_LINE = re.compile(r"^Name=.*$", re.MULTILINE)
+# ``[^\r\n]*(?=\r?$)`` rather than ``.*$`` (R3 W-10, 2026-09-03): ``.``
+# matches a carriage return, so on a CRLF deck the ``Name=`` substitution
+# swallowed the line's CR and left the file with mixed endings. The
+# lookahead keeps the CR OUT of the match (so a substitution leaves it in
+# place) while still anchoring at the line's end.
+_NAME_LINE = re.compile(r"^Name=[^\r\n]*(?=\r?$)", re.MULTILINE)
 
 # `[metadata]` section header (usually the first line of the file). Used to
 # synthesize a Name= line right below it when the deck has none.
@@ -90,15 +95,24 @@ def rewrite_name(dck_text: str, new_name: str) -> str:
     """
     if _NAME_LINE.search(dck_text):
         return _NAME_LINE.sub(lambda _m: f"Name={new_name}", dck_text, count=1)
+    nl = line_ending(dck_text)
     m = _METADATA_HEADER.search(dck_text)
     if m:
         head = dck_text[: m.end()]
         if not head.endswith("\n"):
             # Degenerate case: file ends exactly at `[metadata]` with no
             # trailing newline — add one so Name= lands on its own line.
-            head += "\n"
-        return head + f"Name={new_name}\n" + dck_text[m.end():]
-    return f"[metadata]\nName={new_name}\n\n" + dck_text
+            head += nl
+        return head + f"Name={new_name}{nl}" + dck_text[m.end():]
+    return f"[metadata]{nl}Name={new_name}{nl}{nl}" + dck_text
+
+
+def line_ending(dck_text: str) -> str:
+    """The file's dominant line ending — ``"\r\n"`` when the first newline
+    is CRLF, else ``"\n"`` (R3 W-10). Synthesized lines use it so a
+    Windows-edited deck keeps one convention after a rewrite."""
+    i = dck_text.find("\n")
+    return "\r\n" if i > 0 and dck_text[i - 1] == "\r" else "\n"
 
 
 def stamp_name_preserving_display(dck_text: str, stem: str) -> str:
@@ -146,7 +160,13 @@ def stamp_name_preserving_display(dck_text: str, stem: str) -> str:
     # references (``\1``, ``\g<...>``) is inserted literally.
     nm = _NAME_LINE.search(out)
     assert nm is not None  # rewrite_name guarantees a Name= line exists
-    return out[: nm.end()] + f"\nDisplayName={old_name}" + out[nm.end():]
+    nl = line_ending(out)  # R3 W-10: a CRLF deck gets a CRLF line
+    return out[: nm.end()] + f"{nl}DisplayName={old_name}" + out[nm.end():]
+
+
+def _read(path: Path) -> str:
+    from .dck_utils import read_deck_text
+    return read_deck_text(path)
 
 
 def read_name(dck_text: str) -> Optional[str]:
@@ -190,7 +210,7 @@ def check_compare_name_alignment(old_path: Path, new_path: Path) -> list[str]:
     warnings: list[str] = []
     norms: dict[str, Optional[str]] = {}
     for path in (old_path, new_path):
-        name = read_name(path.read_text(encoding="utf-8"))
+        name = read_name(_read(path))
         if name is None:
             warnings.append(
                 f"{path.name} has no Name= line; win attribution keys on "
@@ -232,8 +252,10 @@ def rewrite_name_to_stem(path: Path) -> str:
     Call this right after copying or writing a ``.dck`` under a new
     filename. Returns the stem that was written, mostly for logging.
     """
-    text = path.read_text(encoding="utf-8")
-    path.write_text(rewrite_name(text, path.stem), encoding="utf-8")
+    from .atomic_io import atomic_write_text
+    from .dck_utils import read_deck_text
+    text = read_deck_text(path)
+    atomic_write_text(path, rewrite_name(text, path.stem))  # R3 W-09
     return path.stem
 
 
@@ -308,8 +330,9 @@ def read_bracket_unverified(dck_text: Optional[str]) -> Optional[int]:
     """
     if not dck_text:
         return None
+    from .dck_utils import strip_bom
     in_metadata = False
-    for raw in dck_text.splitlines():
+    for raw in strip_bom(dck_text).splitlines():  # R3 W-03
         s = raw.strip()
         if s.startswith("[") and s.endswith("]"):
             in_metadata = s.lower() == "[metadata]"
@@ -356,9 +379,12 @@ def set_bracket_unverified(dck_text: str, bracket: int) -> str:
     """
     out = clear_bracket_unverified(dck_text)
     line = f"{BRACKET_UNVERIFIED_META_KEY}={int(bracket)}"
+    nl = line_ending(out)
     m = _METADATA_HEADER.search(out)
     if not m:
-        return f"[metadata]\n{line}\n\n" + out
+        return f"[metadata]{nl}{line}{nl}{nl}" + out
+    # ``splitlines`` + join with the FILE's ending (R3 W-10): joining
+    # with "\n" LF-normalized every CRLF deck on save.
     lines = out.splitlines()
     # Line index of the `[metadata]` header itself: the number of
     # newlines in the text preceding it.
@@ -371,4 +397,4 @@ def set_bracket_unverified(dck_text: str, bracket: int) -> str:
         if stripped:
             insert_at = i + 1
     lines.insert(insert_at, line)
-    return "\n".join(lines) + "\n"
+    return nl.join(lines) + nl

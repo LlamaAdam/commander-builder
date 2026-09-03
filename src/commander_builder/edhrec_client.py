@@ -104,6 +104,12 @@ class CommanderPage:
     average_deck_url: Optional[str] = None
     deck_count: Optional[int] = None
     raw_size_bytes: int = 0
+    #: True for a tag page fetched on the strength of FREE TEXT alone (an
+    #: intent's primer / pilot preferences — R3 F-03, 2026-09-03). Such a
+    #: page ranks candidate ADDS like any other but never joins the
+    #: cut-protection known-set: words in a primer are not evidence that
+    #: a card belongs in the deck.
+    soft_bias: bool = False
 
     def all_known_cards(self) -> set[str]:
         """Return the lowercase union of every card across every section.

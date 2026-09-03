@@ -52,6 +52,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from . import dck_utils  # R3 W-04: the one tolerant .dck reader
 from .archetype import classify as _classify_archetype_path
 from .scryfall_client import lookup_card, _parse_commander_names_from_dck
 from .staples import (
@@ -241,7 +242,7 @@ def _read_main_with_quantities(deck_path: Path) -> list[tuple[str, int]]:
     if not deck_path.exists():
         return out
     in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
+    for raw in dck_utils.read_deck_text(deck_path).splitlines():
         line = raw.strip()
         if not line:
             continue
@@ -483,7 +484,7 @@ def build_dashboard(
     # Pull the (Moxfield publicId) metadata line if present.
     moxfield_url: Optional[str] = None
     try:
-        text = deck_path.read_text(encoding="utf-8")
+        text = dck_utils.read_deck_text(deck_path)
         m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
         if m:
             mox_id = m.group(1).strip()
@@ -583,7 +584,7 @@ def build_dashboard(
     try:
         from .bracket_estimator import estimate_bracket
         bracket_estimate = estimate_bracket(
-            deck_path.read_text(encoding="utf-8"),
+            dck_utils.read_deck_text(deck_path),
             declared=bracket,
             avg_cmc=avg_cmc or None,
             archetype=archetype if archetype != "unknown" else None,

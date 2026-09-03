@@ -90,8 +90,9 @@ from .forge_runner import VENDOR_FORGE
 from .intent import (
     Intent,
     intent_protect_cards,
+    free_text_bias_slugs,
     learn_intent,
-    soft_bias_theme_slugs,
+    resolve_preferences,
 )
 # Imported (not duplicated) so the sub-threshold warning and the
 # --sim-games default can never drift from the verdict gate in
@@ -210,18 +211,22 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
         argv += ["--protect", card]
     if args.protect_from:
         argv += ["--protect-from", args.protect_from]
-    # Soft-bias: pass the intent's themes as --intent-themes so the
-    # advisor candidate pool is ranked toward those EDHREC tag pages.
+    # Soft-bias: pass the intent's DERIVED themes as --intent-themes so
+    # the advisor candidate pool is ranked toward those EDHREC tag pages.
     # Only appended when the slug list is non-empty — the no-themes path
-    # must be identical to pre-Slice-A behavior. Since FP-018.2
-    # (2026-08-27) the list also carries slugs the intent's FREE TEXT
-    # (`stated` primer / `pilot_preferences`) mentions, appended AFTER
-    # the derived themes so the list's own evidence keeps the louder
-    # voice. Still soft by construction: the advisor only ADDS tag pages
-    # for these; it never filters a recommendation for missing them.
-    bias_slugs = soft_bias_theme_slugs(intent)
-    if bias_slugs:
-        argv += ["--intent-themes", ",".join(bias_slugs)]
+    # must be identical to pre-Slice-A behavior. Slugs the intent's FREE
+    # TEXT (`stated` primer / `pilot_preferences`) mentions travel on
+    # --free-text-themes instead (R3 F-03, 2026-09-03): as one list, the
+    # free-text slugs competed for the advisor's 4-page cap and evicted
+    # the tribe page (whose cards feed cut-protection); on their own flag
+    # they are fetched as EXTRA pages that rank adds and protect nothing.
+    derived_slugs = [s.strip() for s in (getattr(intent, "themes", None)
+                                         or []) if s.strip()]
+    if derived_slugs:
+        argv += ["--intent-themes", ",".join(dict.fromkeys(derived_slugs))]
+    free_text_slugs = free_text_bias_slugs(intent)
+    if free_text_slugs:
+        argv += ["--free-text-themes", ",".join(free_text_slugs)]
 
     buf = io.StringIO()
     try:
@@ -771,6 +776,12 @@ def _print_intent(intent: Intent) -> None:
         if len(intent.key_wincons) > 3:
             wc_preview += f" +{len(intent.key_wincons) - 3} more"
         parts.append(f"wincons=[{wc_preview}]")
+    # R3 F-01: say when free text is in play, so an operator can tell a
+    # primer-anchored run from a list-only one.
+    if intent.stated:
+        parts.append(f"primer={len(intent.stated.split())} words")
+    if intent.pilot_preferences:
+        parts.append(f"preferences={len(intent.pilot_preferences.split())} words")
     _safe_print(f"[improve] intent: {'; '.join(parts)}", flush=True)
 
 
@@ -1587,11 +1598,22 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--learn-intent", dest="learn_intent_path",
                    type=Path, default=None, metavar="DCK",
                    help="Path to a .dck file whose intent (archetype, themes, "
-                        "key win-cons) is learned before the improve loop "
-                        "starts. The intent's key win-cons are added to the "
-                        "protected-card list (auto-protect) and its themes "
-                        "serve as a soft bias on candidate adds. Intent is "
-                        "advisory: the win-margin objective remains primary.")
+                        "key win-cons, and its <stem>.primer.md sidecar as "
+                        "the stated free text) is learned before the improve "
+                        "loop starts. The intent's key win-cons are added to "
+                        "the protected-card list (auto-protect) and its "
+                        "themes serve as a soft bias on candidate adds. "
+                        "Intent is advisory: the win-margin objective remains "
+                        "primary.")
+    # R3 F-01 (2026-09-03): the pilot's own words had no CLI path.
+    p.add_argument("--preferences", default=None, metavar="TEXT",
+                   help="The pilot's own words about what they like doing "
+                        "(free text, read as AFFIRMATIVE keywords — a negated "
+                        "mention such as 'no tokens' contributes nothing). "
+                        "Implies --learn-intent on the deck being improved "
+                        "when --learn-intent is not given.")
+    p.add_argument("--preferences-file", default=None, metavar="PATH",
+                   help="Read --preferences text from a file instead.")
     args = p.parse_args(argv)
 
     # --health short-circuits: report the FP-013 gate counter and exit.
@@ -1747,6 +1769,17 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     # Intent learning (Slice A): learn the deck's intent before the loop.
     # Defaults to None when --learn-intent is not supplied.
     args.intent: Optional[Intent] = None
+    try:
+        preferences = resolve_preferences(
+            getattr(args, "preferences", None),
+            getattr(args, "preferences_file", None))
+    except OSError as exc:
+        print(f"ERROR: cannot read --preferences-file: {exc}", flush=True)
+        return 2
+    if preferences and args.learn_intent_path is None:
+        # The pilot's words need an intent to ride on; the deck under
+        # improvement is the natural source (R3 F-01).
+        args.learn_intent_path = deck_path
     if args.learn_intent_path is not None:
         intent_src = args.learn_intent_path.resolve()
         if not intent_src.exists():
@@ -1755,7 +1788,7 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
         if not args.json:
             print(f"[improve] learning intent from {intent_src.name} ...", flush=True)
         try:
-            args.intent = learn_intent(intent_src)
+            args.intent = learn_intent(intent_src, pilot_preferences=preferences)
             if not args.json:
                 _print_intent(args.intent)
         except Exception as exc:  # noqa: BLE001 — intent is advisory

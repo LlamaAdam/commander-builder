@@ -225,3 +225,45 @@ def test_alignment_warns_on_a_nameless_deck(tmp_path):
     old, new = _pair(tmp_path, None, "Foo v2")
     notes = dck_meta.check_compare_name_alignment(old, new)
     assert len(notes) == 1 and "no Name= line" in notes[0]
+
+
+# ---------------------------------------------------------------------------
+# R3 W-10 (2026-09-03) — CRLF decks keep one line-ending convention
+# ---------------------------------------------------------------------------
+
+def test_rewrite_name_keeps_the_crlf_of_the_name_line():
+    from commander_builder.dck_meta import rewrite_name, set_bracket_unverified
+
+    crlf = "[metadata]\r\nName=Foo\r\nProtect=Sol Ring\r\n\r\n[Main]\r\n1 Sol Ring\r\n"
+    out = rewrite_name(crlf, "Foo")
+    assert out == crlf
+    assert rewrite_name(crlf, "Bar") == crlf.replace("Name=Foo", "Name=Bar")
+    # A synthesized Name= and a synthesized marker use the file's ending.
+    nameless = "[metadata]\r\nProtect=Sol Ring\r\n\r\n[Main]\r\n1 Sol Ring\r\n"
+    assert "Name=Foo\r\n" in rewrite_name(nameless, "Foo")
+    marked = set_bracket_unverified(crlf, 3)
+    assert "BracketUnverified=3\r\n" in marked
+    assert "\n" not in marked.replace("\r\n", "")
+    # LF files are untouched by the CRLF fix.
+    lf = crlf.replace("\r\n", "\n")
+    assert set_bracket_unverified(lf, 3).count("\r") == 0
+
+
+def test_rewrite_name_to_stem_is_atomic(tmp_path):
+    """R3 W-09: the one core writer that still did a bare write_text."""
+    from commander_builder.dck_meta import rewrite_name_to_stem
+
+    p = tmp_path / "Foo.dck"
+    p.write_text("[metadata]\nName=Old\n[Main]\n1 Sol Ring\n", encoding="utf-8")
+    rewrite_name_to_stem(p)
+    assert "Name=Foo" in p.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_stamp_name_preserving_display_keeps_crlf():
+    from commander_builder.dck_meta import stamp_name_preserving_display
+
+    crlf = "[metadata]\r\nName=Pretty: Name\r\n\r\n[Main]\r\n1 Sol Ring\r\n"
+    out = stamp_name_preserving_display(crlf, "Pretty_ Name")
+    assert out == ("[metadata]\r\nName=Pretty_ Name\r\nDisplayName=Pretty: Name"
+                   "\r\n\r\n[Main]\r\n1 Sol Ring\r\n")

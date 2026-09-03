@@ -1851,17 +1851,96 @@ def test_archidekt_reimport_refreshes_the_sidecar(tmp_path, archidekt_stub):
     assert read_primer_sidecar(p1) == "rewritten primer"
 
 
-def test_moxfield_import_never_writes_a_sidecar(tmp_path, monkeypatch):
-    """Lane gating: a Moxfield payload with a description key does NOT
-    produce a sidecar — that shape is uncaptured, and unverified shapes
-    stay untouched."""
+#: PRIMER_CORPUS.md Appendix C — the Moxfield exemplar (The Magdanomicon,
+#: 8Y4qOAcLN0O_HHYhOboV3Q): markdown / plain text, no embeds. The corpus
+#: study walked 25 Moxfield descriptions and pinned this shape.
+_APPENDIX_C = (
+    "[Last Update: 8/09/26 - Blood Moon Variant Moved To New List (in "
+    "primer intro section) - Turbo Slanted in Considering] This deck seeks "
+    "to control the game with its diverse interaction package and tutorable "
+    "silver bullet targets, eventually finding an artifact combo to leverage "
+    "your commander abilites ability to win. Comprehensive primer for new "
+    "and experienced players aimed to help players make their own changes "
+    "based on playstyle preferences or meta requirements."
+)
+
+
+def test_moxfield_import_writes_the_primer_sidecar(tmp_path, monkeypatch,
+                                                  capsys):
+    """RE-PINNED 2026-09-03 (R3 F-06). This test used to assert the
+    PRIMARY import lane never wrote a sidecar, on the claim that
+    Moxfield's description shape "has no capture in this repo" — the
+    repo's own corpus study (PRIMER_CORPUS.md, 25 Moxfield descriptions,
+    Appendix C verbatim) pins it as plain text, the branch `parse_primer`
+    already handles. Every Moxfield-imported deck answered `commander
+    adopt` with "no primer sidecar found — this is common (~75%)",
+    attributing a code gap to a corpus statistic."""
     from commander_builder import moxfield_import as mi
+    from commander_builder.primer import (
+        read_primer_card_links, read_primer_sidecar, sidecar_identity,
+    )
 
     deck = _deck_json()
-    deck["description"] = "# A markdown primer"
+    deck["description"] = _APPENDIX_C
     monkeypatch.setattr(mi, "fetch_deck", lambda pid: deck)
+    path = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert read_primer_sidecar(path) == _APPENDIX_C
+    assert read_primer_card_links(path) == []   # prose only — never Protect
+    assert sidecar_identity(path)["source"] == "pid-1"
+    assert "primer captured (" in capsys.readouterr().out
+
+
+def test_reimport_of_an_unchanged_primer_keeps_hand_edits(tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    """R3 F-08: the sidecar was overwritten on every re-pull with no
+    message, so hand notes vanished silently. Same words upstream → the
+    file is left alone; changed words → refreshed, and the line says so."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.primer import primer_sidecar_path, read_primer_sidecar
+
+    deck = _deck_json()
+    deck["description"] = "A short primer."
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: deck)
+    path = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    sc = primer_sidecar_path(path)
+    sc.write_text(sc.read_text(encoding="utf-8") + "\nMY OWN NOTES\n",
+                  encoding="utf-8")
+    capsys.readouterr()
     mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
-    assert not list(tmp_path.glob("*.primer.md"))
+    assert "MY OWN NOTES" in read_primer_sidecar(path)
+    assert "primer unchanged" in capsys.readouterr().out
+    deck["description"] = "A rewritten primer."
+    mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert read_primer_sidecar(path) == "A rewritten primer."
+    assert "overwrote the previous sidecar" in capsys.readouterr().out
+
+
+def test_colliding_import_never_inherits_another_decks_sidecar(
+        tmp_path, monkeypatch, capsys):
+    """R3 F-07 (ex_import §C): delete the .dck, import a DIFFERENT deck
+    whose name sanitizes to the same stem — the orphaned sidecar is not
+    overwritten and adopt/intent readers refuse it (header mismatch)."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.primer import (
+        read_primer_sidecar, sidecar_identity_warning,
+    )
+
+    deck_a = _deck_json(name="Krenko Storm", pid="aaa")
+    deck_a["description"] = "deck A primer"
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: deck_a)
+    p_a = mi.import_deck("aaa", out_dir=tmp_path, is_user=True)
+    p_a.unlink()
+    deck_b = _deck_json(name="Krenko Storm", pid="bbb")
+    deck_b["description"] = "deck B primer"
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: deck_b)
+    p_b = mi.import_deck("bbb", out_dir=tmp_path, is_user=True)
+    assert p_b == p_a
+    err = capsys.readouterr().err
+    assert "primer sidecar NOT written" in err and "'aaa'" in err
+    # The words on disk are still A's — and every reader knows it.
+    assert read_primer_sidecar(p_b) == "deck A primer"
+    assert "may belong to another deck" in sidecar_identity_warning(p_b)
 
 
 def test_sidecar_io_failure_does_not_unwind_the_import(tmp_path,
@@ -1875,12 +1954,58 @@ def test_sidecar_io_failure_does_not_unwind_the_import(tmp_path,
 
     archidekt_stub["detail"]["description"] = _hazel_delta()
 
-    def boom(dck_path, description):
+    def boom(dck_path, description, **_kw):
         raise OSError("disk full")
 
-    monkeypatch.setattr(primer_mod, "write_primer_sidecar", boom)
+    # The lane's seam is ``store_primer_sidecar`` since 2026-09-03 (R3
+    # F-07: it returns the write OUTCOME, not just a path); the contract
+    # under test — an I/O blip degrades to a warning — is unchanged.
+    monkeypatch.setattr(primer_mod, "store_primer_sidecar", boom)
     path = mi.import_deck("https://archidekt.com/decks/1234567/k",
                           out_dir=tmp_path, is_user=True)
     assert path.exists()
     err = capsys.readouterr().err
     assert "primer sidecar could not be written" in err
+
+
+def test_reimport_without_a_description_removes_the_decks_own_stale_sidecar(
+        tmp_path, monkeypatch, capsys):
+    """R3 F-07 (ex_import §D): the upstream author removed the primer;
+    the deck's own stale words are removed on re-pull — another deck's
+    sidecar (header mismatch) would be left alone."""
+    from commander_builder import moxfield_import as mi
+    from commander_builder.primer import primer_sidecar_path
+
+    deck = _deck_json()
+    deck["description"] = "words that will be removed upstream"
+    monkeypatch.setattr(mi, "fetch_deck", lambda pid: deck)
+    path = mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert primer_sidecar_path(path).exists()
+    del deck["description"]
+    mi.import_deck("pid-1", out_dir=tmp_path, is_user=True)
+    assert not primer_sidecar_path(path).exists()
+    assert "primer removed" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# R3 W-06 (2026-09-03) — ids are validated before they touch a URL
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", [
+    "../../v2/users/me?x=1#frag", "https://evil.example/?archidekt.com",
+    "https://moxfield.com/users/me", "not a url", "",
+])
+def test_parse_deck_id_refuses_non_ids(bad):
+    with pytest.raises(ValueError, match="not a Moxfield deck URL or id"):
+        parse_deck_id(bad)
+
+
+def test_fetch_deck_quotes_and_validates_the_id(monkeypatch):
+    from commander_builder import moxfield_import as mi
+
+    seen = []
+    monkeypatch.setattr(mi, "_http_get_json", lambda url: seen.append(url) or {})
+    mi.fetch_deck("ab_C-1")
+    assert seen == [f"{mi.API_BASE}/ab_C-1"]
+    with pytest.raises(ValueError):
+        mi.fetch_deck("../x")
