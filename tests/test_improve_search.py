@@ -794,3 +794,29 @@ def test_screen_help_states_the_contract(capsys):
     # The contract must be in the operator's face, not just the docs.
     # (argparse re-wraps lines, so match words that survive wrapping.)
     assert "SCREEN," in out and "judge" in out.lower()
+
+
+# --- R3 C-09 (2026-09-03): the search round stamps verdict provenance -----
+
+def test_search_round_stamps_verdict_provenance(tmp_path):
+    """A row scored under a raised --sim-margin used to be
+    indistinguishable from a default row."""
+    from commander_builder.knowledge_log import SIM_REPORT_VERDICT_PARAMS_KEY
+    deck = _make_dck(tmp_path, "[USER] Foo [B3].dck", _FIXTURE_MAIN)
+    args = _search_args(tmp_path)
+    args.sim_margin = 3
+
+    def arm_builder(deck_path, bracket, source, *, protected=(), max_arms=None):
+        return [SearchArm(key="+Good / -OldCard A", add="Good", cut="OldCard A")]
+
+    round_fn = make_search_round_fn(arm_builder=arm_builder, sim_fn=_scripted_sim())
+    run_improve_loop(deck, "foo", 1, args, round_fn=round_fn)
+
+    con = sqlite3.connect(args.db_path)
+    con.row_factory = sqlite3.Row
+    report = json.loads(con.execute("SELECT sim_report FROM iterations").fetchone()["sim_report"])
+    con.close()
+    params = report[SIM_REPORT_VERDICT_PARAMS_KEY]
+    assert params["margin"] == 3
+    assert params["alpha"] == 0.05
+    assert params["min_decisive"] == 20

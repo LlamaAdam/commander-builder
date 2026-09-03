@@ -55,7 +55,8 @@ from typing import Callable, Optional
 
 from . import dck_utils, primer
 from .change_budget import TIER_CAPS
-from .intent import free_text_theme_slugs
+from .collection import match_key
+from .intent import free_text_theme_slugs, resolve_preferences
 
 #: The hard swap-suggestion ceiling: the polish tier's add budget (5).
 #: Read from TIER_CAPS so the two numbers cannot drift, but bound at
@@ -69,9 +70,14 @@ POLISH_MAX_SWAPS: int = TIER_CAPS["polish"][0]
 #: never look like "everything important was protected".
 NO_AUTO_PROTECT_NOTE = (
     "auto-protection unavailable: {reason}. Suggestions still preserve "
-    "roles and never touch the commander or lands; add Protect= lines "
-    "to the .dck [metadata] to pin specific cards."
+    "roles and never touch the commander{lands_clause}; add Protect= "
+    "lines to the .dck [metadata] to pin specific cards."
 )
+
+#: Above this share of unresolved main-deck cards the suggestion pass is
+#: refused outright (R3 F-09): with the oracle cache this cold every role
+#: is ``other`` and a like-for-like swap is a coin flip dressed as advice.
+UNRESOLVED_REFUSE_SHARE = 0.25
 
 
 def _lookup_cache_only(name: str) -> Optional[dict]:
@@ -126,8 +132,10 @@ def explain_deck(
 
     commanders = dck_utils.section_card_names(deck_text, "Commander")
     main_cards = dck_utils.main_card_names(deck_text)
-    main_keys = {n.casefold() for n in main_cards}
-    all_keys = main_keys | {n.casefold() for n in commanders}
+    # ONE key on both sides (R3 F-02): the sidecar's card-links carry a
+    # DFC as "Front // Back" while the .dck carries the front face.
+    main_keys = {match_key(n) for n in main_cards}
+    all_keys = main_keys | {match_key(n) for n in commanders}
 
     # One resolve pass; every downstream section reads from it.
     cards: dict[str, dict] = {}
@@ -162,16 +170,30 @@ def explain_deck(
         theme_packages[slug] = members[:8]  # examples, not an inventory
 
     links = list(card_links or [])
-    linked_present = [n for n in links if n.casefold() in all_keys]
-    linked_absent = [n for n in links if n.casefold() not in all_keys]
+    linked_present = [n for n in links if match_key(n) in all_keys]
+    # A linked name the list lacks is only a DRIFT signal when the oracle
+    # cache knows the card (R3 F-11); a name nothing recognizes is
+    # reported as unrecognized, never printed as a card the deck "does
+    # NOT run" — grounding rule: every card named resolves through the
+    # cache or the list.
+    linked_absent: list[str] = []
+    linked_unrecognized: list[str] = []
+    for n in links:
+        if match_key(n) in all_keys:
+            continue
+        card = lookup(n) or {}
+        if card.get("oracle_text") or card.get("type_line"):
+            linked_absent.append(n)
+        else:
+            linked_unrecognized.append(n)
 
     prose_mentions: list[str] = []
     if primer_text:
-        folded = primer_text.casefold()
-        linked_keys = {n.casefold() for n in links}
+        linked_keys = {match_key(n) for n in links}
         prose_mentions = [
             n for n in commanders + main_cards
-            if n.casefold() in folded and n.casefold() not in linked_keys
+            if match_key(n) not in linked_keys
+            and _prose_mentions_name(primer_text, n)
         ]
 
     notes: list[str] = []
@@ -190,16 +212,25 @@ def explain_deck(
             f"drifted from its primer. Reconciling that is the improve "
             f"loop's job (commander improve), not adopt's."
         )
+    if linked_unrecognized:
+        notes.append(
+            f"{len(linked_unrecognized)} primer card-link(s) are neither in "
+            f"the list nor in the local oracle snapshot "
+            f"({', '.join(linked_unrecognized)}) — not reported as drift; "
+            f"run commander oracle-refresh if they are real cards."
+        )
 
     return {
         "commanders": commanders,
-        "main_count": len(main_cards),
+        # Cards, not lines (R3 F-18): ``8 Swamp`` is eight cards.
+        "main_count": dck_utils.count_main_cards(deck_text),
         "primer": {
             "present": bool(primer_text),
             "words": primer.primer_word_count(primer_text or ""),
             "card_links": links,
             "linked_present": linked_present,
             "linked_absent": linked_absent,
+            "linked_unrecognized": linked_unrecognized,
             "prose_mentions": prose_mentions,
             "win_lines": primer.quoted_win_lines(primer_text),
         },
@@ -210,6 +241,25 @@ def explain_deck(
         "unresolved": unresolved,
         "notes": notes,
     }
+
+
+def _prose_mentions_name(prose: str, name: str) -> bool:
+    """Whole-name, word-bounded containment of a KNOWN list name in the
+    primer prose (R3 F-16: ``"Opt" in "option"`` used to count). Both
+    sides go through ``match_key`` so a curly apostrophe or a DFC's back
+    face in the prose still matches the list's spelling."""
+    import re
+    key = match_key(name)
+    if not key:
+        return False
+    # Not ``match_key(prose)``: that would keep only the text before the
+    # first "//" — fold the whole prose the same way minus that split.
+    folded = " ".join(
+        prose.casefold().translate(_APOSTROPHES).split()) if prose else ""
+    return re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", folded) is not None
+
+
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +318,18 @@ def personalize_suggestions(
         front = type_line.split("//")[0].lower()
         return "land" in front or (not type_line and is_basic_land(nm))
 
+    def _resolved(nm: str) -> bool:
+        card = _card(nm)
+        return bool(card.get("oracle_text") or card.get("type_line")
+                    or is_basic_land(nm))
+
+    # Unresolved names (R3 F-09): with no oracle text the role classifier
+    # calls a card ``other`` and ``_is_land`` calls it a nonland, so an
+    # unresolvable Command Tower used to be proposed as a cut under a
+    # note promising lands are never touched. Such names are never
+    # swapped OUT (protected below) and are counted here so the note
+    # can say so instead of promising what it cannot check.
+    unresolved = [n for n in main_cards if not _resolved(n)]
     nonlands = [n for n in main_cards if not _is_land(n)]
     lands = [n for n in main_cards if _is_land(n)]
 
@@ -302,15 +364,35 @@ def personalize_suggestions(
         slugs = card_theme_slugs(_card(nm).get("oracle_text") or "")
         return float(len(slugs & set(pref_slugs)))
 
-    protected_keys = {p.casefold() for p in protected}
+    # ONE key (R3 F-02 / F-10): ``Protect=Jeska’s Will`` (curly) must pin
+    # the list's ``Jeska's Will``; a DFC Protect= may carry either face
+    # spelling. Unresolved names join the set — see above.
+    protected_keys = {match_key(p) for p in protected}
+    protected_keys |= {match_key(n) for n in unresolved}
 
     def protect(nm: str) -> bool:
-        return nm.casefold() in protected_keys
+        return match_key(nm) in protected_keys
 
+    common = {
+        "max_swaps": max_swaps, "tier": "polish",
+        "preference_slugs": pref_slugs, "unresolved": unresolved,
+    }
     if not commanders:
         return {"suggestions": [], "skipped": "no [Commander] section",
-                "max_swaps": max_swaps, "tier": "polish",
-                "preference_slugs": pref_slugs}
+                **common}
+    if main_cards and len(unresolved) / len(main_cards) > UNRESOLVED_REFUSE_SHARE:
+        return {
+            "suggestions": [],
+            "skipped": (
+                f"{len(unresolved)} of {len(main_cards)} main-deck cards are "
+                f"not in the local oracle snapshot (> "
+                f"{UNRESOLVED_REFUSE_SHARE:.0%}); roles cannot be classified, "
+                f"so no swap is proposed. Run commander oracle-refresh "
+                f"--from-bulk --everything (adopt is cache-only and never "
+                f"primes on demand)."
+            ),
+            **common,
+        }
 
     new_nonlands, notes, skipped = personalize.lift_swaps(
         nonlands,
@@ -352,13 +434,7 @@ def personalize_suggestions(
             ),
         })
 
-    return {
-        "suggestions": suggestions,
-        "skipped": skipped,
-        "max_swaps": max_swaps,
-        "tier": "polish",
-        "preference_slugs": pref_slugs,
-    }
+    return {"suggestions": suggestions, "skipped": skipped, **common}
 
 
 # ---------------------------------------------------------------------------
@@ -381,14 +457,22 @@ def adopt_deck(
     just skips the suggestion pass with lift's own honest reason.
     """
     deck_path = Path(deck_path)
-    deck_text = deck_path.read_text(encoding="utf-8")
+    deck_text = dck_utils.read_deck_text(deck_path)
     lookup = lookup or _lookup_cache_only
 
-    primer_text = primer.read_primer_sidecar(deck_path)
-    card_links = primer.read_primer_card_links(deck_path)
+    # R3 F-07: a sidecar whose header names another source deck is not
+    # this deck's primer — say so loudly and explain from the list alone.
+    identity_warning = primer.sidecar_identity_warning(deck_path, deck_text)
+    if identity_warning is None:
+        primer_text = primer.read_primer_sidecar(deck_path)
+        card_links = primer.read_primer_card_links(deck_path)
+    else:
+        primer_text, card_links = None, []
 
     explanation = explain_deck(
         deck_text, primer_text, card_links, lookup=lookup)
+    if identity_warning:
+        explanation["notes"].insert(0, identity_warning)
 
     # AUTO-PROTECT — card-link embeds only (exact names; the harvest
     # rule), unioned with any Protect= lines already in the .dck (the
@@ -398,19 +482,31 @@ def adopt_deck(
     from .web._helpers import read_protected_cards
     protected = list(read_protected_cards(deck_text))
     for name in explanation["primer"]["linked_present"]:
-        if name.casefold() not in {p.casefold() for p in protected}:
+        if match_key(name) not in {match_key(p) for p in protected}:
             protected.append(name)
 
     protection_note: Optional[str] = None
     if not protected:
-        if primer_text is None:
+        if identity_warning:
+            reason = "the primer sidecar belongs to another deck"
+        elif primer_text is None:
             reason = "this deck has no primer sidecar"
         elif not card_links:
             reason = ("the primer is prose-only — no card-link embeds, "
                       "and prose is never mined for names")
         else:
             reason = "none of the primer's linked cards are in the list"
-        protection_note = NO_AUTO_PROTECT_NOTE.format(reason=reason)
+        # The lands promise is only true when every card resolved (R3
+        # F-09): an unresolved nonbasic land is invisible to the land
+        # test, so past that point the note names the gap instead.
+        lands_clause = (
+            " or lands" if not explanation["unresolved"] else
+            f" (lands are recognized from the oracle snapshot, and "
+            f"{explanation['unresolved']} card(s) are missing from it — "
+            f"those are never proposed as cuts either)"
+        )
+        protection_note = NO_AUTO_PROTECT_NOTE.format(
+            reason=reason, lands_clause=lands_clause)
 
     if matrix is None:
         from . import lift_analysis
@@ -477,6 +573,9 @@ def render_adoption(payload: dict) -> str:
         if pr["linked_absent"]:
             add(f"  primer-linked cards NOT in the list: "
                 f"{', '.join(pr['linked_absent'])}")
+        if pr.get("linked_unrecognized"):
+            add(f"  primer card-links nothing here recognizes: "
+                f"{', '.join(pr['linked_unrecognized'])}")
         if pr["prose_mentions"]:
             add(f"  also discussed in prose: "
                 f"{', '.join(pr['prose_mentions'])}")
@@ -498,6 +597,9 @@ def render_adoption(payload: dict) -> str:
     elif per.get("protected"):
         add(f"  protected (never suggested as cuts): "
             f"{', '.join(per['protected'])}")
+    if per.get("unresolved"):
+        add(f"  never proposed as cuts (not in the oracle snapshot, so "
+            f"unclassifiable): {', '.join(per['unresolved'])}")
     if per.get("preference_slugs"):
         add(f"  steering toward your preferences: "
             f"{', '.join(per['preference_slugs'])}")
@@ -534,7 +636,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("deck", help="Path to the .dck file to adopt.")
     parser.add_argument(
         "--preferences", default=None,
-        help="Your own words about what you like doing (free text).")
+        help="Your own words about what you like doing (free text). Read "
+             "as AFFIRMATIVE theme keywords: 'I love tokens' steers "
+             "toward tokens; a negated mention ('no tokens') is dropped, "
+             "it does not steer away (R3 F-04).")
     parser.add_argument(
         "--preferences-file", default=None,
         help="Read --preferences text from a file instead.")
@@ -557,15 +662,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"ERROR: deck not found: {deck_path}", file=sys.stderr)
         return 2
 
-    preferences = args.preferences
-    if args.preferences_file:
-        try:
-            preferences = Path(args.preferences_file).read_text(
-                encoding="utf-8")
-        except OSError as exc:
-            print(f"ERROR: cannot read --preferences-file: {exc}",
-                  file=sys.stderr)
-            return 2
+    try:
+        preferences = resolve_preferences(args.preferences,
+                                          args.preferences_file)
+    except OSError as exc:
+        print(f"ERROR: cannot read --preferences-file: {exc}",
+              file=sys.stderr)
+        return 2
 
     payload = adopt_deck(
         deck_path,

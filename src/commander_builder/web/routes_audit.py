@@ -40,6 +40,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 # keys or wiping one mid-API-call. The web layer must NEVER write
 # per-request secrets into ``os.environ``.
 
+from ..dck_utils import read_deck_text
 from ..edhrec_client import fetch_salt_list
 from ._helpers import (
     _apply_swaps_to_dck,
@@ -582,7 +583,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 "detail": f"{type(exc).__name__}: {exc}",
             }), 503
 
-        original = path.read_text(encoding="utf-8")
+        original = read_deck_text(path)
         return jsonify(_build_audit_payload(
             report,
             original=original,
@@ -723,7 +724,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                         # both paths go through _build_audit_payload so the
                         # warning logic + field names never diverge again.
                         report = phase.data["report"]
-                        original = path.read_text(encoding="utf-8")
+                        original = read_deck_text(path)
                         yield _sse("complete", _build_audit_payload(
                             report,
                             original=original,

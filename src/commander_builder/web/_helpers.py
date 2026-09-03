@@ -39,8 +39,6 @@ internal layout detail. The web layer's public surface stays
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -94,24 +92,30 @@ def _resolve_deck_path(
     cleanup so the 5 blueprint factories can import it directly
     instead of receiving it as a constructor parameter.
     """
-    if deck_id:
-        candidate = (deck_dir / f"{deck_id}.dck").resolve()
-        try:
-            candidate.relative_to(deck_dir.resolve())
-        except ValueError:
-            return None
-        return candidate if candidate.exists() else None
-    if explicit_path:
-        candidate = Path(explicit_path).resolve()
-        # Only ever resolve to actual deck files — never arbitrary files
-        # that merely happen to live inside deck_dir.
-        if candidate.suffix.lower() != ".dck":
-            return None
-        try:
-            candidate.relative_to(deck_dir.resolve())
-        except ValueError:
-            return None
-        return candidate if candidate.exists() else None
+    # A NUL byte in either form raised ValueError out of ``resolve()`` /
+    # ``exists()`` and rendered as an HTML 500 (R3 W-05, 2026-09-03); it
+    # can never name a deck, so it is simply "not found".
+    try:
+        if deck_id:
+            candidate = (deck_dir / f"{deck_id}.dck").resolve()
+            try:
+                candidate.relative_to(deck_dir.resolve())
+            except ValueError:
+                return None
+            return candidate if candidate.exists() else None
+        if explicit_path:
+            candidate = Path(explicit_path).resolve()
+            # Only ever resolve to actual deck files — never arbitrary
+            # files that merely happen to live inside deck_dir.
+            if candidate.suffix.lower() != ".dck":
+                return None
+            try:
+                candidate.relative_to(deck_dir.resolve())
+            except ValueError:
+                return None
+            return candidate if candidate.exists() else None
+    except (ValueError, OSError):
+        return None
     return None
 
 
@@ -353,8 +357,10 @@ def read_protected_cards(deck_text: str) -> list[str]:
         seen.add(key)
         protected.append(n)
 
+    from ..dck_utils import strip_bom
     in_metadata = False
-    for raw in deck_text.splitlines():
+    # BOM stripped first (R3 W-03): "\ufeff[metadata]" never matched.
+    for raw in strip_bom(deck_text).splitlines():
         s = raw.strip()
         if s.startswith("[") and s.endswith("]"):
             in_metadata = s.lower() == "[metadata]"
@@ -394,42 +400,8 @@ def read_protected_cards(deck_text: str) -> list[str]:
 # beats one blueprint reaching into another's private name.
 # ---------------------------------------------------------------------------
 
-def atomic_write_text(path: Path, text: str) -> None:
-    """Replace ``path``'s contents with ``text`` atomically.
-
-    Writes a temp file in the SAME directory (``os.replace`` is only
-    atomic within one filesystem) and renames it over the target, so a
-    crash / full disk mid-write leaves the previous deck intact instead
-    of a truncated one. The temp name is dot-prefixed and ends in
-    ``.tmp`` — never ``.dck`` — so the deck enumerators that glob
-    ``*.dck`` can never pick up a half-written file.
-
-    ``fsync`` before the rename so the rename cannot be reordered ahead
-    of the data on a crash. The replacement inherits the ORIGINAL file's
-    mode — ``mkstemp`` creates 0600, and silently narrowing a deck file
-    to owner-only on every save would be an invisible side effect of an
-    unrelated fix. Raises ``OSError`` like ``write_text``.
-    """
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError:
-        mode = None
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        if mode is not None:
-            os.chmod(tmp_name, mode)
-        os.replace(tmp_name, path)
-    except BaseException:
-        # Only reachable when the rename did NOT happen (a successful
-        # os.replace consumes tmp_name), so this never deletes live data.
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+# ``atomic_write_text`` moved to the core ``atomic_io`` module on
+# 2026-09-03 (R3 W-09): the core layer's writers (``dck_meta``,
+# ``config_store``) needed it and cannot import from ``web``. Re-exported
+# here so every existing importer keeps working unchanged.
+from ..atomic_io import atomic_write_text  # noqa: E402,F401

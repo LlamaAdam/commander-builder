@@ -250,15 +250,39 @@ def offline_game_changers() -> frozenset[str]:
     immutable answer cannot be mutated back into the module's caches).
     Never raises: a corrupt cache degrades to the bundled list.
     """
+    global _FALLBACK_USED
+    why: str
     try:
         data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
         cached = {c for c in data.get("cards", []) if _looks_like_card_name(c)}
-        trusted, _overlap = _scrape_is_trustworthy(cached)
+        trusted, overlap = _scrape_is_trustworthy(cached)
         if trusted:
+            _FALLBACK_USED = False
             return frozenset(cached)
-    except (OSError, ValueError, AttributeError):
-        pass
+        why = (f"cache at {CACHE_PATH} failed the trust bar "
+               f"({len(cached)} names, {overlap:.0%} overlap with the "
+               f"bundled list)")
+    except (OSError, ValueError, AttributeError) as exc:
+        why = f"cache at {CACHE_PATH} unreadable ({type(exc).__name__}: {exc})"
+    # Loud once per process (2026-09-03, R3 F-15): this used to degrade
+    # with no output and no flag, so which list labeled a G3 row was
+    # unrecorded. The flag is what ``_deck_judge_prompt`` stamps into
+    # ``swap_label["staple_list_source"]``.
+    _FALLBACK_USED = True
+    if why not in _FALLBACK_WARNED:
+        _FALLBACK_WARNED.add(why)
+        print(f"[game_changers] WARN: using the BUNDLED Game Changers list "
+              f"({len(_FALLBACK)} cards, hand-synced) — {why}. Run "
+              f"load_game_changers() online to refresh.",
+              file=sys.stderr, flush=True)
     return _FALLBACK
+
+
+#: True when the last ``offline_game_changers()`` call served the bundled
+#: list instead of a trusted cache (R3 F-15). Read by the judge's swap
+#: labeling so the agreement table can separate rows by list source.
+_FALLBACK_USED: bool = False
+_FALLBACK_WARNED: set[str] = set()
 
 
 def _log_divergence(names: set[str]) -> None:

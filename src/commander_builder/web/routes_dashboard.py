@@ -64,6 +64,7 @@ from typing import Optional
 
 from flask import Blueprint, current_app, jsonify, request
 
+from ..dck_utils import read_deck_text
 from ..deck_dashboard import build_dashboard
 from ..knowledge_log import (
     MIN_COMPARABLE_VERDICT_ERA,
@@ -111,7 +112,7 @@ def _pricing_section(path: Path, deck_dir: Path, bracket: Optional[int]):
     try:
         return {
             "printing_savings": printing_savings_for_deck_text(
-                path.read_text(encoding="utf-8"),
+                read_deck_text(path),
             ),
         }, True
     except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
@@ -293,7 +294,7 @@ def _sim_coverage(path: Path) -> dict:
     try:
         from .. import dck_utils
 
-        text = path.read_text(encoding="utf-8")
+        text = read_deck_text(path)
         names: list[str] = []
         seen: set[str] = set()
         for section in ("Commander", "Main"):
@@ -379,7 +380,7 @@ def _clear_verified_bracket_marker(
         return
     try:
         from .. import dck_meta
-        text = path.read_text(encoding="utf-8")
+        text = read_deck_text(path)
         if dck_meta.read_bracket_unverified(text) != declared:
             return
         atomic_write_text(path, dck_meta.clear_bracket_unverified(text))

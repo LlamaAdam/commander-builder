@@ -89,7 +89,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -143,6 +143,36 @@ def decisive_win_rate(wins: int, decisive: int) -> Optional[float]:
     if decisive <= 0:
         return None
     return round(wins / decisive, 4)
+
+
+def decisive_margin(wins_old: int, wins_new: int) -> Optional[int]:
+    """Canonical signed margin for the ``margin`` column: ``wins_new -
+    wins_old``, or ``None`` (NULL) when no game was decisive.
+
+    ONE convention (2026-09-03, R3 C-14). Until now the column had two:
+    the AB-shaped writers (``_proposer_sim._ab_to_iteration_fields``) and
+    ``iteration_loop`` wrote ``0`` whenever the sim ran at all, while the
+    web writer (``save_iteration``, 2026-08-16) and
+    ``scripts/backfill_web_margins.py`` wrote NULL when ``wins_old +
+    wins_new == 0`` — so a pooled margin analysis mixed "observed
+    dead-even" with "nothing observed" depending on which writer
+    produced the row, inside one era. NULL wins because it is the rule
+    the win-rate columns already follow (``decisive_win_rate``): a run
+    in which neither compared version won a game carries no observed
+    head-to-head delta, and a fabricated 0 reads as an observed tie in
+    every cross-run margin analysis. Readers were migrated (NULL was
+    already a value they had to handle); history was not rewritten.
+
+    Every writer of the column routes through this helper:
+
+      - ``_proposer_sim._ab_to_iteration_fields``  (wins_a, wins_b)
+      - ``iteration_loop.run_one_iteration``       (old_stats.wins, new_stats.wins)
+      - ``web.routes_sim.save_iteration``          (old_wins, new_wins)
+      - ``scripts/backfill_web_margins.recompute_margin``
+    """
+    if (wins_old or 0) + (wins_new or 0) <= 0:
+        return None
+    return int(wins_new or 0) - int(wins_old or 0)
 
 
 def canonical_content_hash(row: dict, exclude: frozenset = frozenset()) -> str:
@@ -314,7 +344,12 @@ def measurement_era_for(
 
     Returns None — "unknown", stored as NULL — rather than guessing, in
     the three cases where the honest answer is that we cannot tell:
-    a missing/unparseable timestamp with no id to fall back on; a row
+    a missing/unparseable timestamp with no id to fall back on (an
+    unparseable stamp is treated exactly like a missing one — R3 C-06,
+    2026-09-03: the raw string used to be compared lexically, so
+    ``"garbage"`` sorted above every boundary and landed in era 4, the
+    one era that feeds training; only an ISO ``YYYY-MM-DD`` prefix that
+    ``date.fromisoformat`` accepts is a date here); a row
     written during the 2026-05-21/22 fix session with no id to
     disambiguate; and a row written in the 2026-07-19 → 2026-07-20
     window, which is a MIXED population by writer (compare-shaped
@@ -333,8 +368,9 @@ def measurement_era_for(
     never leak into the data.
     """
     stamp = created_at.strip() if isinstance(created_at, str) else ""
-    if not stamp:
-        # No date. The id boundary is all that's left, and it can only
+    if not _has_iso_date_prefix(stamp):
+        # No date (missing OR unparseable — fail CLOSED, never into an
+        # era). The id boundary is all that's left, and it can only
         # ever establish era 1 — "id >= 314" means "not era 1", not
         # "era 2" (that needs a date).
         if (
@@ -358,6 +394,24 @@ def measurement_era_for(
             return None
         return 1 if iteration_id < PRE_SEAT_ATTRIBUTION_MAX_ID else 2
     return 1
+
+
+#: ``YYYY-MM-DD`` at the start of a stamp — the only shape the era
+#: boundaries (bare ISO date prefixes) can be compared against.
+_ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|[T ])")
+
+
+def _has_iso_date_prefix(stamp: str) -> bool:
+    """True when ``stamp`` starts with a real ISO calendar date (R3 C-06).
+    ``2026-8-14``, ``08/14/2026`` and ``garbage`` are all False; a bad
+    month/day (``2026-13-40``) is False too, via ``date.fromisoformat``."""
+    if not stamp or not _ISO_DATE_PREFIX.match(stamp):
+        return False
+    try:
+        date.fromisoformat(stamp[:10])
+    except ValueError:
+        return False
+    return True
 
 
 SCHEMA_VERSION = 4
@@ -662,7 +716,21 @@ def init_db(db_path: Optional[Path] = None) -> None:
         _migrate_to_v3(conn)
         _migrate_to_v4(conn)
         cur = conn.execute("SELECT version FROM schema_version")
-        row = cur.fetchone()
+        rows = cur.fetchall()
+        if len(rows) > 1:
+            # R3 S-3 (2026-09-03). No in-tree writer ever inserts a second
+            # row, so two rows mean a hand edit. ``fetchone()`` on an
+            # unordered SELECT picked an arbitrary one, and the UPDATE
+            # below (no WHERE) then rewrote every row to one value and
+            # died on the PRIMARY KEY — a bare UNIQUE traceback with no
+            # hint of the cause. Refuse first, and say what to do.
+            versions = sorted(r["version"] for r in rows)
+            raise RuntimeError(
+                f"schema_version has {len(rows)} rows {versions}; expected "
+                f"exactly one. The table was edited by hand — keep the "
+                f"row you mean (DELETE the others) and rerun."
+            )
+        row = rows[0] if rows else None
         if row is None:
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",

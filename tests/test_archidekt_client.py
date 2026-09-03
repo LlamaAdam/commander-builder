@@ -855,3 +855,12 @@ def test_to_deck_json_omits_an_empty_description(real_deck):
     deck = dict(real_deck)
     del deck["description"]
     assert "description" not in ac.to_deck_json(deck)
+
+
+def test_parse_deck_id_refuses_non_numeric_ids():
+    """R3 W-06 (2026-09-03): the raw input used to pass through into the
+    ``/api/decks/<id>/`` path."""
+    import pytest as _pytest
+    for bad in ("https://evil.example/?archidekt.com", "abc", "12/34", ""):
+        with _pytest.raises(ValueError, match="not an Archidekt deck URL"):
+            ac.parse_deck_id(bad)

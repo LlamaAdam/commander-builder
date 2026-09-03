@@ -108,15 +108,24 @@ def _fallback_opponents(bracket: int, exclude: str, n: int) -> list[str]:
     Excludes the user deck and any other [USER]-prefixed deck so a stale leftover
     can't sneak in as 'opposition'. [PREMADE] decks (popularity-ranked imports
     from premade_import) are excluded for the opposite reason: top-liked /
-    top-commander builds would skew pod opposition strength upward."""
+    top-commander builds would skew pod opposition strength upward.
+
+    2026-09-03 (R3 C-03): the exclusion is now ``filler_policy.
+    is_filler_eligible`` — the ONE list decision C1 defined — so this
+    path also turns away ``[REF]`` (the same popularity selection as
+    ``[PREMADE]``) and ``[CONTROL]`` (a do-nothing calibration deck
+    inflates the decisive count for both sides). Until now this
+    fallback hand-maintained a two-prefix subset of that list.
+    """
+    from .filler_policy import is_filler_eligible
+
     suffix = f" [B{bracket}].dck"
     out: list[str] = []
     for path in sorted(DECK_DIR.glob("*.dck")):
         name = path.name
         if not name.endswith(suffix):
             continue
-        if (name == exclude or name.startswith("[USER]")
-                or name.startswith("[PREMADE]")):
+        if name == exclude or not is_filler_eligible(name):
             continue
         out.append(name)
         if len(out) >= n:

@@ -1118,7 +1118,13 @@ _POLITICS_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
     # untap that creature" — Dance of the Dead's upkeep option) is an
     # ordinary optional cost, not a tax, and is pinned as a real-oracle
     # negative in test_staples.py. Subject alternation covers the
-    # each-opponent siblings (Protection Racket-style upkeep punishers).
+    # each-opponent siblings of the same pay-or-else template ("each
+    # opponent may pay {2}. If they don't, ..."). It does NOT cover
+    # upkeep punishers whose option is a life payment with a positive
+    # consequence ("any opponent may have you lose life ... If a player
+    # does, ..."): that text has no "doesn't" branch, so this pattern
+    # never fires on it, and no such card is on the tax list (comment
+    # corrected 2026-09-03, R3 S-2 — it used to name one as covered).
     ("tax", re.compile(
         r"\b(?:that player|that opponent|each opponent) may pay\b"
         r"[^.]{0,40}\.?\s*\bif (?:the player|that player|they) "
@@ -1257,8 +1263,9 @@ def politics_guard_enabled(deck_text: str) -> bool:
     enforces, so a user who already learned the ``Protect=`` syntax
     doesn't have to learn a second one.
     """
+    from .dck_utils import strip_bom
     in_metadata = False
-    for raw in (deck_text or "").splitlines():
+    for raw in strip_bom(deck_text).splitlines():  # R3 W-03
         s = raw.strip()
         if s.startswith("[") and s.endswith("]"):
             in_metadata = s.lower() == "[metadata]"

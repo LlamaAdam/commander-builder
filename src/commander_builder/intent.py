@@ -28,6 +28,7 @@ Callers
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -94,7 +95,7 @@ class Intent:
 def _read_deck_text(deck_path: Path) -> str:
     """Read a .dck file, returning '' on any I/O error."""
     try:
-        return deck_path.read_text(encoding="utf-8")
+        return dck_utils.read_deck_text(deck_path)
     except OSError:
         return ""
 
@@ -126,8 +127,22 @@ def learn_intent(
     lookup_fn: Optional[Callable[[str], Optional[dict]]] = None,
     role_fn: Optional[Callable[[str, str], str]] = None,
     tribal_fn: Optional[Callable[[str, str], Optional[str]]] = None,
+    pilot_preferences: Optional[str] = None,
+    read_primer: bool = True,
 ) -> Intent:
     """Compose existing classifiers to learn a deck's intent.
+
+    FREE TEXT (2026-09-03, R3 F-01). ``stated`` is filled from the deck's
+    own ``<stem>.primer.md`` sidecar (``primer.read_primer_sidecar``) —
+    the production writer FP-018.2 shipped without: every caller of this
+    function (``commander judge``, ``commander improve``) used to get
+    ``stated=None`` no matter what was on disk, so the judge's free-text
+    block and the advisor's free-text bias were dead on every production
+    path. A sidecar whose recorded source does not match the deck's
+    ``Moxfield=``/``Archidekt=`` id is NOT read (R3 F-07: a deck must
+    never be judged against another deck's primer); ``read_primer=False``
+    skips the sidecar entirely. ``pilot_preferences`` is the adopting
+    player's own words, threaded from ``--preferences`` on the CLIs.
 
     Steps
     -----
@@ -267,6 +282,17 @@ def learn_intent(
         except Exception:  # noqa: BLE001
             pass
 
+    # ------------------------------------------------------------------
+    # 8. Free text (R3 F-01): the deck's own primer sidecar, if any and if
+    #    it belongs to THIS deck; plus the pilot's words from the caller.
+    # ------------------------------------------------------------------
+    stated: Optional[str] = None
+    if read_primer:
+        from . import primer as _primer
+        if _primer.sidecar_identity_warning(deck_path, deck_text) is None:
+            stated = _primer.read_primer_sidecar(deck_path)
+    prefs = (pilot_preferences or "").strip() or None
+
     return Intent(
         archetype=archetype,
         themes=themes,
@@ -274,49 +300,98 @@ def learn_intent(
         color_identity=color_identity,
         tribal_type=tribal_type,
         commander_name=commander_name,
+        stated=stated,
+        pilot_preferences=prefs,
     )
 
 
 # ---------------------------------------------------------------------------
-# FP-018.2 — free text as a SOFT theme signal (2026-08-27)
+# FP-018.2 — free text as a SOFT theme signal (2026-08-27; matching rewritten
+# 2026-09-03, R3 F-04)
 # ---------------------------------------------------------------------------
 
-#: Prose keyword -> EDHREC tag slug. The slugs are EXACTLY the vocabulary
+#: Prose pattern -> EDHREC tag slug. The slugs are EXACTLY the vocabulary
 #: of ``staples._THEME_PATTERNS`` — the advisor fetches ``/tags/<slug>``
 #: pages for whatever this yields, so an invented slug would be a dead
 #: fetch, and a slug outside the deck-detection vocabulary would let free
-#: text claim themes the rest of the app cannot recognize. Keywords are
-#: substring-matched casefolded because primers are prose, not oracle
-#: text: "I like sacrificing creatures" has to hit ``sacrifice`` even
-#: though no oracle regex in ``_THEME_PATTERNS`` would.
-_FREE_TEXT_THEME_KEYWORDS: tuple[tuple[str, str], ...] = (
-    ("token", "tokens"),
-    ("spellslinger", "spellslinger"),
-    ("instants and sorceries", "spellslinger"),
-    ("sacrific", "sacrifice"),           # sacrifice / sacrificing
-    ("aristocrat", "sacrifice"),
-    ("death trigger", "sacrifice"),
-    ("+1/+1", "plus-1-plus-1-counters"),
-    ("landfall", "landfall"),
-    ("lands matter", "landfall"),
-    ("lifegain", "lifegain"),
-    ("gain life", "lifegain"),
-    ("gaining life", "lifegain"),
-    ("reanimat", "reanimator"),          # reanimate / reanimator
-    ("graveyard", "reanimator"),
-    ("equipment", "equipment"),
-    ("voltron", "equipment"),
-    ("artifact", "artifacts"),
-    ("enchantress", "enchantress"),
-    ("enchantment", "enchantress"),
+#: text claim themes the rest of the app cannot recognize. Patterns are
+#: WORD-BOUNDED regexes over casefolded prose (R3 F-04: the old table was
+#: bare substring containment — ``token`` matched inside any word, and
+#: ``enchantment`` fired on Baba Lysaga's "Giving an enchantment creature
+#: a 3rd type"). Stems (``sacrific``, ``reanimat``) keep the prose
+#: inflections the table was built for: "I like sacrificing creatures"
+#: has to hit ``sacrifice`` even though no oracle regex would.
+_FREE_TEXT_THEME_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\btokens?\b", "tokens"),
+    (r"\bspellslingers?\b", "spellslinger"),
+    (r"\binstants? and sorcer(?:y|ies)\b", "spellslinger"),
+    (r"\bsacrific\w*", "sacrifice"),           # sacrifice / sacrificing
+    (r"\baristocrats?\b", "sacrifice"),
+    (r"\bdeath triggers?\b", "sacrifice"),
+    (r"\+1/\+1", "plus-1-plus-1-counters"),
+    (r"\blandfall\b", "landfall"),
+    (r"\blands matter\b", "landfall"),
+    (r"\blifegain\b", "lifegain"),
+    (r"\bgain(?:ing)? life\b", "lifegain"),
+    (r"\breanimat\w*", "reanimator"),          # reanimate / reanimator
+    (r"\bgraveyard\b", "reanimator"),
+    (r"\bequipment\b", "equipment"),
+    (r"\bvoltron\b", "equipment"),
+    # Plural, or the singular with a theme word: "an artifact creature" /
+    # "an enchantment creature" is a card description, not a preference.
+    (r"\bartifacts\b|\bartifact (?:deck|theme|synerg\w*|strateg\w*)",
+     "artifacts"),
+    (r"\benchantress\b", "enchantress"),
+    (r"\benchantments\b|\benchantment (?:deck|theme|synerg\w*|strateg\w*)",
+     "enchantress"),
 )
+
+#: Backward-compatible view of the table for the vocabulary test
+#: (``tests/test_intent.py`` checks every emitted slug is a known theme).
+_FREE_TEXT_THEME_KEYWORDS: tuple[tuple[str, str], ...] = tuple(
+    (pat, slug) for pat, slug in _FREE_TEXT_THEME_PATTERNS
+)
+
+#: Negation cues (R3 F-04). A theme mention is DROPPED when one of these
+#: appears within ``_NEGATION_WINDOW`` words before it, or one of the
+#: post-cues within the window after it, inside the same clause. "no
+#: tokens please", "not a lifegain deck", "I dislike graveyard
+#: strategies", "spellslinger is boring", and the real Baba Lysaga
+#: sentence "Lifegain is brutal against this deck" all read as the
+#: pilot/author saying what the deck is NOT. Preferences are read as
+#: AFFIRMATIVE keywords; a negated mention simply contributes nothing
+#: (there is no "anti-theme" channel to steer away from — see
+#: ``adopt.main``'s ``--preferences`` help).
+_NEGATION_PRE = re.compile(
+    r"\b(?:no|not|never|nothing|without|avoid\w*|hate\w*|dislike\w*|"
+    r"don'?t|doesn'?t|isn'?t|aren'?t|can'?t|won'?t|wouldn'?t|"
+    r"against|anti|tired of|sick of|bored of|skip\w*|drop\w*|zero|"
+    r"afraid of|scared of|fear\w*|weak to|lose\w* to)\b"
+)
+_NEGATION_POST = re.compile(
+    r"\b(?:against|boring|bad|weak|nothing|not (?:my|for me|fun|"
+    r"interesting)|isn'?t (?:my|for me)|aren'?t (?:my|for me)|"
+    r"is brutal|are brutal)\b"
+)
+_NEGATION_WINDOW = 4
+_CLAUSE_SPLIT = re.compile(r"[.;!?\n]+")
+
+
+def _mention_is_negated(clause: str, start: int, end: int) -> bool:
+    """Is the match at ``clause[start:end]`` inside a negation window?"""
+    before = clause[:start].split()[-_NEGATION_WINDOW:]
+    after = clause[end:].split()[:_NEGATION_WINDOW + 1]
+    if _NEGATION_PRE.search(" ".join(before)):
+        return True
+    return bool(_NEGATION_POST.search(" ".join(after)))
 
 
 def free_text_theme_slugs(text: Optional[str]) -> list[str]:
     """Theme slugs a piece of FREE TEXT (primer / pilot preferences)
-    talks about. Keyword match, deduped, first-mention order.
+    talks about AFFIRMATIVELY. Word-bounded match, negation-aware,
+    deduped, first-mention order (table order).
 
-    Deliberately a keyword table and not ``staples.card_theme_slugs``:
+    Deliberately a pattern table and not ``staples.card_theme_slugs``:
     that function's regexes are tuned to ORACLE wording ("sacrifice a
     creature", "create ... token") and mostly miss prose. The slugs the
     two produce are the same vocabulary, so downstream consumers cannot
@@ -327,22 +402,61 @@ def free_text_theme_slugs(text: Optional[str]) -> list[str]:
         return []
     folded = text.casefold()
     out: list[str] = []
-    for keyword, slug in _FREE_TEXT_THEME_KEYWORDS:
-        if keyword in folded and slug not in out:
-            out.append(slug)
+    for pattern, slug in _FREE_TEXT_THEME_PATTERNS:
+        if slug in out:
+            continue
+        rx = re.compile(pattern)
+        for clause in _CLAUSE_SPLIT.split(folded):
+            hit = False
+            for m in rx.finditer(clause):
+                if not _mention_is_negated(clause, m.start(), m.end()):
+                    hit = True
+                    break
+            if hit:
+                out.append(slug)
+                break
     return out
 
 
-def soft_bias_theme_slugs(intent: Optional["Intent"]) -> list[str]:
-    """The advisor's soft-bias slug list: structured themes first, then
-    slugs the intent's free text mentions.
+#: How many free-text slugs may ride along with the derived themes (R3
+#: F-03). The advisor fetches at most 4 derived tag pages (intent themes
+#: + tribe + detected); free-text pages are fetched IN ADDITION, never in
+#: place of them, and this cap bounds that addition (each page is an
+#: HTTP round-trip on a cold cache).
+FREE_TEXT_SLUG_CAP = 2
 
-    Order matters — the advisor caps tag-page fetches at 4 and gives
-    earlier slugs the louder voice, so the DERIVED themes (evidence from
-    the actual list) stay ahead of what the free text merely says. This
-    is a SOFT bias by construction: the slugs only add candidate tag
-    pages to the advisor's pool ranking; nothing is ever filtered out
-    for missing them.
+
+def free_text_bias_slugs(intent: Optional["Intent"]) -> list[str]:
+    """Slugs the intent's FREE TEXT adds beyond its derived themes, capped
+    at :data:`FREE_TEXT_SLUG_CAP`. This is the advisor's
+    ``--free-text-themes`` input: pages fetched for these are ADDITIVE
+    (they never evict the tribe or a derived theme page) and never feed
+    cut-protection — see ``improvement_advisor._fetch_tag_pages_lazy``.
+    """
+    if intent is None:
+        return []
+    derived = {s.strip() for s in (intent.themes or []) if s.strip()}
+    out: list[str] = []
+    for text in (intent.stated, intent.pilot_preferences):
+        for s in free_text_theme_slugs(text):
+            if s not in derived and s not in out:
+                out.append(s)
+    return out[:FREE_TEXT_SLUG_CAP]
+
+
+def soft_bias_theme_slugs(intent: Optional["Intent"]) -> list[str]:
+    """The combined soft-bias slug list: structured themes first, then the
+    (capped) slugs the intent's free text mentions.
+
+    Order matters — earlier slugs get the louder voice. The DERIVED
+    themes (evidence from the actual list) stay ahead of what the free
+    text merely says. Soft by construction for the derived half; the
+    free-text half is soft only because the advisor fetches it as EXTRA
+    pages (``free_text_bias_slugs``) — ``improve`` passes the two halves
+    through two flags precisely so the advisor can tell them apart (R3
+    F-03: as one list, three derived themes plus one free-text slug
+    filled the 4-page cap and evicted the tribe page, whose cards feed
+    cut-protection).
     """
     if intent is None:
         return []
@@ -351,11 +465,23 @@ def soft_bias_theme_slugs(intent: Optional["Intent"]) -> list[str]:
         s = slug.strip()
         if s and s not in out:
             out.append(s)
-    for text in (intent.stated, intent.pilot_preferences):
-        for s in free_text_theme_slugs(text):
-            if s not in out:
-                out.append(s)
+    for s in free_text_bias_slugs(intent):
+        if s not in out:
+            out.append(s)
     return out
+
+
+def resolve_preferences(text: Optional[str],
+                        file_path: Optional[str] = None) -> Optional[str]:
+    """The ``--preferences`` / ``--preferences-file`` pair, resolved the
+    same way on every CLI that offers it (adopt / judge / improve — R3
+    F-01). The file wins when given. Raises ``OSError`` for an unreadable
+    file so the caller can print its own clean error; blank text is
+    ``None``."""
+    if file_path:
+        text = Path(file_path).read_text(encoding="utf-8")
+    text = (text or "").strip()
+    return text or None
 
 
 def intent_protect_cards(intent: Optional["Intent"]) -> list[str]:
