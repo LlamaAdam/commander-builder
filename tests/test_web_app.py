@@ -6518,14 +6518,17 @@ def test_win_rate_convention_null_when_no_decisive_games(
 
     # Writer 1 — the sim RAN (games > 0) but nothing was decisive: the
     # win_rate keys are omitted so update_iteration_sim leaves the
-    # columns NULL; margin (a real observed 0) is still recorded.
+    # columns NULL. Since 2026-09-03 (R3 C-14) margin follows the SAME
+    # rule -- it used to be written as a literal 0 here while the web
+    # writer and the backfill wrote NULL, two conventions for one
+    # column; "no decisive game" is an absence, not an observed tie.
     fields = _ab_to_iteration_fields(ABResult(
         deck_a="a.dck", deck_b="b.dck",
         wins_a=0, wins_b=0, games=5, status="done",
     ))
     assert "win_rate_old" not in fields
     assert "win_rate_new" not in fields
-    assert fields["margin"] == 0
+    assert "margin" not in fields
 
     # Writer 2 — all 20 attributed games drew.
     v1_name, v2_name = _stage_iteration_loop_decks(tmp_path, monkeypatch)
