@@ -470,7 +470,11 @@ def collect_deck_status(
 
     # Stable deck identity: Moxfield publicId if present, else filename
     # stem (matches `iteration_loop.resolve_deck_id`).
-    deck_id = mox_id or deck_path.stem
+    # Same identity every writer uses (2026-09-03, R3 C-08): provenance
+    # id first, else the VERSION-STRIPPED stem — ``mox_id or stem`` missed
+    # every Archidekt-lane deck and every versioned hand-built deck.
+    from .deck_identity import resolve_deck_id
+    deck_id = resolve_deck_id(deck_path, fallback=mox_id)
 
     # File mtime — UTC ISO so the JSON mode is unambiguous.
     if deck_path.exists():
@@ -639,7 +643,9 @@ def collect_user_decks_summary(
         display_name = _strip_deck_display_name(filename)
         bracket = _parse_bracket_from_filename(filename)
         name_meta, mox_id, commander_name = _parse_dck_metadata(path)
-        deck_id = mox_id or path.stem
+        # R3 C-08 (2026-09-03): see the same line in deck_status().
+        from .deck_identity import resolve_deck_id
+        deck_id = resolve_deck_id(path, fallback=mox_id)
         last_modified = datetime.fromtimestamp(
             path.stat().st_mtime, tz=timezone.utc,
         ).isoformat()

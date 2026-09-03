@@ -406,6 +406,11 @@ def test_supermajority_is_out_of_the_panel_not_the_survivors(pairing):
     (json.dumps({"preferred": "A",
                  "dimensions": {**{d: 0 for d in DIMENSIONS},
                                 DIMENSIONS[0]: "high"}}), "non-numeric"),
+    # R3 S-4 (2026-09-03): the prompt asks for <integer -2..2>; 1.5 used
+    # to pass the -2..2 range check.
+    (json.dumps({"preferred": "A",
+                 "dimensions": {**{d: 0 for d in DIMENSIONS},
+                                DIMENSIONS[0]: 1.5}}), "non-integer"),
 ])
 def test_out_of_schema_judgment_is_discarded_with_a_reason(pairing, bad, why):
     a, b = pairing
@@ -1354,3 +1359,96 @@ def test_cli_prints_the_swap_direction_with_its_reason(monkeypatch, capsys,
     assert "swap direction:" in text
     assert report.swap_direction in text
     assert report.swap_label["reason"] in text
+
+
+# --- R3 S-4 (2026-09-03): whole-number floats are still integers ----------
+
+def test_whole_number_float_dimension_is_accepted(pairing):
+    a, b = pairing
+    payload = _answer("B")
+    obj = json.loads(payload)
+    obj["dimensions"][DIMENSIONS[0]] = 2.0
+    fn = _scripted([json.dumps(obj)] + [_answer("B")] * 5)
+    report = judge_pairing(a, b, judge_fn=fn, lookup=_no_lookup)
+    assert report.discarded == 0
+
+
+# --- R3 S-1 (2026-09-03): tribal match is whole-word --------------------------
+
+def test_tribal_match_is_whole_word_not_substring():
+    """'Elf' inside 'yourself' and 'Rat' inside 'Pirate' used to count as
+    tribal fits."""
+    a_text, b_text, lookup = _swap(
+        ["Self Reflection", "Salty Pirate"],
+        oracles={
+            "Self Reflection": {"type_line": "Instant",
+                                "oracle_text": "Return target card to yourself."},
+            "Salty Pirate": {"type_line": "Creature — Human Pirate",
+                             "oracle_text": _PLAIN_ORACLE},
+        },
+    )
+    for tribe in ("Elf", "Rat"):
+        label = classify_swap_direction(
+            a_text, b_text, intent=_squirrel_intent(themes=[], tribal_type=tribe),
+            lookup=lookup,
+        )
+        assert label["added"]["intent"] == 0, tribe
+        assert label["direction"] == "neither"
+    # ...while a real subtype / creature-type mention still matches.
+    a_text, b_text, lookup = _swap(
+        ["Elvish Mystic", "Pirate Lord"],
+        oracles={
+            "Elvish Mystic": {"type_line": "Creature — Elf Druid",
+                              "oracle_text": "{T}: Add {G}."},
+            "Pirate Lord": {"type_line": "Creature — Human",
+                            "oracle_text": "Other Pirate creatures you control get +1/+1."},
+        },
+    )
+    for tribe, card in (("Elf", "Elvish Mystic"), ("Pirate", "Pirate Lord")):
+        label = classify_swap_direction(
+            a_text, b_text, intent=_squirrel_intent(themes=[], tribal_type=tribe),
+            lookup=lookup,
+        )
+        assert label["added"]["intent"] == 1, tribe
+
+
+# --- R3 C-12 (2026-09-03): all-staple swaps where some staples fit --------
+
+def test_all_staple_swap_with_some_intent_fits_is_staple_ward(monkeypatch):
+    """The critic's E5b: three generic staples, two of them declared
+    win-cons, labeled 'neither' with a reason quoting "staple 33%"."""
+    from commander_builder import _deck_judge_prompt as J
+    monkeypatch.setattr(J, "_generic_staple_names",
+                        lambda: frozenset({"sol ring", "rhystic study", "lightning bolt"}))
+    a_text, b_text, lookup = _swap(
+        ["Sol Ring", "Rhystic Study", "Lightning Bolt"],
+        oracles={n: {"type_line": "Artifact", "oracle_text": "x"}
+                 for n in ("Sol Ring", "Rhystic Study", "Lightning Bolt")},
+    )
+    label = classify_swap_direction(
+        a_text, b_text,
+        intent=_squirrel_intent(themes=[], key_wincons=["Rhystic Study", "Sol Ring"]),
+        lookup=lookup,
+    )
+    assert label["added"] == {"staple": 1, "intent": 0, "both": 2,
+                              "neither": 0, "unresolved": 0}
+    assert label["direction"] == "staple_ward"
+    assert "2 of them also match the intent" in label["reason"]
+
+
+def test_both_cards_that_reach_no_dominance_are_mixed_not_neither(monkeypatch):
+    from commander_builder import _deck_judge_prompt as J
+    monkeypatch.setattr(J, "_generic_staple_names",
+                        lambda: frozenset({"sol ring"}))
+    a_text, b_text, lookup = _swap(
+        ["Sol Ring", "Plain Bird", "Plain Bear"],
+        oracles={n: {"type_line": "Creature", "oracle_text": _PLAIN_ORACLE}
+                 for n in ("Sol Ring", "Plain Bird", "Plain Bear")},
+    )
+    label = classify_swap_direction(
+        a_text, b_text,
+        intent=_squirrel_intent(themes=[], key_wincons=["Sol Ring"]),
+        lookup=lookup,
+    )
+    assert label["added"]["both"] == 1 and label["added"]["neither"] == 2
+    assert label["direction"] == "mixed"

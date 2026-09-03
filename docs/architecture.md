@@ -124,16 +124,18 @@ read any layer. Everything else honors the invariant.
 | `_advisor_filters` | Card-name validator + saturation guard (`_filter_for_saturation`, `_validate_card_names`) | Recommendation logic. Called post-advice. |
 | `_advisor_manabase` | Curated manabase essentials (`_missing_manabase_recommendations`) | Role-based adds. That's other advisor paths. |
 | `_advisor_role_helpers` | Thin role-classifier wrapper for advisor use | Core classification. That's `staples.classify_role_extended`. |
-| `analyst` | Verdict (`kept` / `reverted` / `neutral`) with confidence + reasoning + lessons | Running the comparison itself. |
+| `analyst` | Verdict (`kept` / `reverted` / `neutral` / `inconclusive` — the last for sub-floor sims since 2026-09-03, R3 C-01) with confidence + reasoning + lessons | Running the comparison itself. |
 | `_llm_json` | Shared robust JSON extraction for LLM responses: `try_extract_json_object` (fence strip / brace-scan recovery) + `extract_json_object` raising a loud `LLMJsonError` with context + response snippets | Prompting or calling the LLM. Analyst / proposer / curator / advisor call it on the raw reply. |
 | `proposer` (orchestrator) | Router for manual / Claude proposers; the `Proposal` dataclass; `auto_propose()` curator pipeline; `apply_proposal_to_deck`; `_extract_curator_json` | Validating proposals (`compare_versions` + `analyst` do). Local-model proposing — retired 2026-08-17, see `local_model`. |
 | `_proposer_filters` | Post-response curator filters: `enforce_bracket_caps` (game-changers stripped at B1/B2), `enforce_color_identity` (off-color adds rejected via Scryfall CI), `_load_game_changers` | Recommendation logic. The advisor / curator generate; filters reject. |
-| `_proposer_sim` | Forge A/B sim glue: `_verdict_from_ab` (binomial-significance verdict → kept/reverted/neutral), `_ab_to_iteration_fields`, bracket-aware `_pick_filler_decks`, `_run_sim_and_record`, `_log_auto_curate_iteration` | Running the sim itself. `forge_runner` + `compare_versions` do. |
+| `_proposer_sim` | Forge A/B sim glue: `_verdict_from_ab` (binomial-significance verdict → kept/reverted/neutral/inconclusive), `_ab_to_iteration_fields`, bracket-aware `_pick_filler_decks`, `_run_sim_and_record`, `_log_auto_curate_iteration` | Running the sim itself. `forge_runner` + `compare_versions` do. Owning the filler-exclusion list — `filler_policy` does. |
+| `filler_policy` | Decision C1's filler-seat eligibility: the one `[USER]`/`[CONTROL]`/`[PREMADE]`/`[REF]` exclusion tuple + `partition_filler_candidates`, applied by `_pick_filler_decks`, `compare_versions._pick_filler_pairs` and `run_match._fallback_opponents` (R3 C-03, 2026-09-03) | Pool *candidacy* — `pool_curator` decides that, and keeps `[REF]` as a ranked candidate on purpose. |
+| `deck_identity` | The stable `deck_id`: `Moxfield=` publicId, else `archidekt:<id>`, else the version-stripped stem (`stable_deck_stem`, via the proposer's version regexes); `resolve_deck_id` for every writer and reader; `stable_deck_id_for_row` for `scripts/backfill_deck_ids.py` (R3 C-08, 2026-09-03) | Rewriting existing rows — the dry-run-default script does, on request. |
 | `_proposer_cli` | `auto_curate_main` (the `commander-auto-curate` console_script) — argparse + end-to-end orchestration of advisor → curator → apply → sim | Pipeline stages themselves; lives here only as a thin wrapper. |
 | `_card_list_refresh` | Hardcoded-list staleness diff helpers (`diff_card_lists`, `parse_mdfc_lands_from_response`, `fetch_mdfc_lands`); used by `scripts/refresh_card_lists.py` | Mutating `deck_health`'s lists. Manual review only. |
 | `consistency` | Opening-hand / mulligan / commander-on-curve math: exact hypergeometric + seeded Monte Carlo (`opening_hand_stats`). Wired 2026-08 into `deck_health`'s additive `consistency` signal → `/api/audit` payload → audit-panel tile | The letter grade. Deliberately display-only — folding it into `compute_health_grade` would silently re-grade every deck. |
-| `iteration_loop` | Wiring compare → analyst → knowledge_log; `propose_then_iterate()` | Multi-iteration loop (FP-012 territory). |
-| `knowledge_log` | SQLite-backed iteration history; lineage chains via `parent_id`; legacy deck_id migration | Reporting. `report.py` does. |
+| `iteration_loop` | Wiring compare → analyst → knowledge_log (verdict provenance stamped, R3 C-09); `propose_then_iterate()`; re-exports `resolve_deck_id` from `deck_identity` | Multi-iteration loop (FP-012 territory). |
+| `knowledge_log` | SQLite-backed iteration history; lineage chains via `parent_id`; legacy deck_id migration; the column-convention helpers every writer routes through (`decisive_win_rate`, `decisive_margin` — NULL when nothing was decisive, R3 C-14); `measurement_era_for` fails closed on non-ISO stamps (R3 C-06) | Reporting. `report.py` does. |
 | `report` | Markdown rendering of one deck's iteration lineage; cross-deck recent-iterations summary | Mutating the log. Read-only. |
 | `revert_to` | Restore deck to a previous iteration's snapshot blob; emits Moxfield push blob | Push step. User pastes. |
 | `export` | JSON dump/restore of knowledge_log (full / per-deck / recent-N filter); skip-existing semantics | Schema validation. Trusts the dump. |
@@ -703,8 +705,11 @@ load-bearing decisions:
   decks whose Moxfield-confirmed bracket matches.
 - **`publicId` as `deck_id` for lineage durability.** Moxfield deck
   renames break filename-keyed lineage. The `Moxfield=<publicId>`
-  metadata line in `.dck` files survives renames; iteration_loop
-  reads it preferentially.
+  metadata line in `.dck` files survives renames; `deck_identity`
+  reads it preferentially, then `Archidekt=` (namespaced), then the
+  VERSION-STRIPPED stem — so a deck without a provenance line still
+  keeps one id across the `v2`/`v3`… renames the pipeline itself
+  performs (R3 C-08, 2026-09-03).
 - **Personal-project scope cuts.** Moxfield API push (FP-005) closed
   as WON'T-DO — clipboard textarea is the final design. LICENSE
   deferred to "TBD" — adopt when going public.

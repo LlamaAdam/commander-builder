@@ -384,6 +384,14 @@ def _parse_judgment(text: str, *, index: int, order: str) -> Judgment:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return Judgment(index=index, order=order, valid=False,
                             error=f"dimension {name!r} not numeric: {value!r}")
+        # Integers only (2026-09-03, R3 S-4): the prompt asks for
+        # ``<integer -2..2>``, and "strict, out-of-schema is discarded"
+        # has to mean the schema it printed. ``1.5`` used to pass. A
+        # float that IS a whole number (``2.0``, JSON from a client that
+        # renders every number that way) is accepted as that integer.
+        if isinstance(value, float) and not value.is_integer():
+            return Judgment(index=index, order=order, valid=False,
+                            error=f"dimension {name!r} not an integer: {value!r}")
         if not -2 <= float(value) <= 2:
             return Judgment(index=index, order=order, valid=False,
                             error=f"dimension {name!r} out of -2..2: {value!r}")

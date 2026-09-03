@@ -83,6 +83,8 @@ from .forge_batch import (
     acquire_profile_pool,
     release_profile_pool,
 )
+from .dck_meta import check_compare_name_alignment
+from .filler_policy import describe_exclusions, partition_filler_candidates
 from .game_analyzer import analyze
 from .log_parser import _normalize, parse
 from .run_match import _fallback_opponents, _load_pool
@@ -290,17 +292,47 @@ def _pick_filler_pairs(
 
     Strategy: load the candidate pool, exclude the two versions under test,
     then walk the list with stride 2 to spread across the alphabetical / pool
-    order. Two pairs from a pool of >= 6 always returns disjoint pairs."""
+    order. Two pairs from a pool of >= 6 always returns disjoint pairs.
+
+    Filler eligibility (2026-09-03, R3 C-03): the curated pool is a
+    CANDIDATE list — ``pool_curator`` deliberately keeps ``[REF]`` decks
+    in it because a ranked seat is a different job from a filler seat —
+    so it is filtered through ``filler_policy`` here, the same list
+    ``_proposer_sim._pick_filler_decks`` and ``run_match.
+    _fallback_opponents`` apply. Until now this path seated the pool
+    verbatim, so every ``compare()`` caller (web A/B, commander-compare,
+    commander-iterate, meta_test) could seat a ``[REF]`` filler — or,
+    from a hand-edited pool JSON, a do-nothing ``[CONTROL]`` — while the
+    changelog said decision C1 was done. Exclusions are printed, and a
+    pool that cannot seat a pod after them raises naming the counts by
+    prefix: never a silent seat."""
+    source = "curated pool"
     candidates = _load_pool(bracket)
     if not candidates:
         # Fallback expects a single exclude string; pass the first version and
         # let the caller's de-dup in-loop drop the second.
+        source = "fallback (no curated pool)"
         candidates = _fallback_opponents(bracket, exclude=exclude[0], n=num_pairs * 2 + 4)
-    # Drop both versions if either snuck into the pool.
-    candidates = [c for c in candidates if c not in exclude]
+    # Drop both versions if either snuck into the pool, then every deck
+    # decision C1 keeps out of filler seats.
+    candidates, excluded = partition_filler_candidates(candidates, exclude)
+    if excluded:
+        print(
+            f"NOTE: {sum(excluded.values())} B{bracket} {source} deck(s) "
+            f"excluded from filler seats by prefix "
+            f"({describe_exclusions(excluded)}); decision C1 — a filler "
+            f"seat is never ranked, so [REF]/[PREMADE]/[CONTROL]/[USER] "
+            f"decks may not sit in one.",
+            flush=True,
+        )
     if len(candidates) < 2:
         raise RuntimeError(
-            f"need at least 2 filler candidates at B{bracket}, got {len(candidates)}"
+            f"need at least 2 filler candidates at B{bracket}, got "
+            f"{len(candidates)} from the {source} after excluding "
+            f"{sum(excluded.values())} by prefix "
+            f"({describe_exclusions(excluded)}). Fillers must be untagged "
+            f"opponent-pool decks: harvest some (commander-import "
+            f"--harvest {bracket}) or re-curate the pool."
         )
     pairs: list[list[str]] = []
     n = len(candidates)
@@ -812,6 +844,14 @@ def compare(
         raise FileNotFoundError(f"new deck not found: {new_deck}")
     if old_deck == new_deck:
         raise ValueError("old and new must be different decks")
+    # Sim-time guard on the Name=/stem invariant this function's win
+    # attribution depends on (2026-09-03, R3 C-04). Every in-tree writer
+    # restamps Name=, but a hand-copied pair (cp v1.dck v2.dck) shares
+    # one Name=, and this used to spend the whole run printing
+    # "OLD 0 - 0 NEW (TIE)" with nothing said. Raises with the remedy;
+    # a deck with no Name= at all only warns (it cannot be verified).
+    for note in check_compare_name_alignment(old_path, new_path):
+        print(f"WARNING: {note}", flush=True)
 
     old_norm = _normalize(old_deck)
     new_norm = _normalize(new_deck)

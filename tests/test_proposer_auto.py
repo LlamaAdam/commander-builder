@@ -2880,15 +2880,18 @@ def test_ab_to_iteration_fields_omits_rates_when_zero_games():
 
 def test_ab_to_iteration_fields_null_rates_when_no_decisive_games():
     """Sim ran (games > 0) but every game drew or went to a filler:
-    decisive == 0 -> win_rate keys omitted (columns stay NULL), while
-    margin=0 is still a real observation and is recorded."""
+    decisive == 0 -> win_rate keys omitted (columns stay NULL) AND the
+    margin key omitted too. (Re-pinned 2026-09-03, R3 C-14: this writer
+    used to record margin=0 as "a real observation" while the web writer
+    and the backfill stored NULL for the same outcome — one column, two
+    conventions inside one era. NULL is the win-rate columns' own rule.)"""
     from commander_builder.proposer import _ab_to_iteration_fields
     from commander_builder.forge_runner import ABResult
     ab = ABResult(wins_a=0, wins_b=0, games=5, status="done")
     fields = _ab_to_iteration_fields(ab)
     assert "win_rate_old" not in fields
     assert "win_rate_new" not in fields
-    assert fields["margin"] == 0
+    assert "margin" not in fields
 
 
 def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):

@@ -168,23 +168,29 @@ def _ab_to_iteration_fields(ab_result) -> dict:
     incomparable across runs.
 
     When decisive == 0 (all games drew or went to fillers -- or the sim was
-    skipped with games=0) the win_rate keys are OMITTED: the caller passes
-    the fields straight into ``update_iteration_sim``, which leaves absent
-    columns untouched, so a fresh 'pending' row keeps its NULL win rates
-    rather than recording a fabricated 0.0/0.0.
+    skipped with games=0) the win_rate AND margin keys are OMITTED: the
+    caller passes the fields straight into ``update_iteration_sim``, which
+    leaves absent columns untouched, so a fresh 'pending' row keeps its
+    NULL win rates and NULL margin rather than recording a fabricated
+    0.0/0.0/0 (margin joined the rule 2026-09-03, R3 C-14 -- see
+    ``knowledge_log.decisive_margin``).
     """
-    from .knowledge_log import decisive_win_rate
+    from .knowledge_log import decisive_margin, decisive_win_rate
 
     fields: dict = {
         "sim_report": ab_result.to_dict() if hasattr(ab_result, "to_dict") else None,
     }
-    total = getattr(ab_result, "games", 0) or 0
     wins_a = getattr(ab_result, "wins_a", 0) or 0
     wins_b = getattr(ab_result, "wins_b", 0) or 0
-    if total > 0:
-        # Margin is defined whenever the sim actually ran (0 is a real
-        # observation there), independent of whether any game was decisive.
-        fields["margin"] = wins_b - wins_a
+    # One margin convention (2026-09-03, R3 C-14): the shared helper
+    # returns None when no game was decisive, and the key is then
+    # OMITTED (the column stays NULL) exactly like the win-rate keys.
+    # This writer used to store margin=0 whenever games > 0 — "0 is a
+    # real observation" — while the web writer and the backfill stored
+    # NULL for the same outcome; one column, two meanings.
+    margin = decisive_margin(wins_a, wins_b)
+    if margin is not None:
+        fields["margin"] = margin
     decisive = wins_a + wins_b
     if decisive > 0:
         fields["win_rate_old"] = decisive_win_rate(wins_a, decisive)
@@ -196,10 +202,12 @@ def _ab_to_iteration_fields(ab_result) -> dict:
 #: and the "why did I get zero fillers?" census (R2-P22, 2026-08-20) can
 #: never drift apart — the census exists to EXPLAIN this exact list, and a
 #: second hand-maintained copy would eventually explain the wrong one.
-#: Rationale per prefix lives in ``_pick_filler_decks``' docstring.
-_FILLER_EXCLUDED_PREFIXES: tuple[str, ...] = (
-    "[USER]", "[CONTROL]", "[PREMADE]", "[REF]",
-)
+#: Since 2026-09-03 (R3 C-03) the tuple itself lives in ``filler_policy``
+#: and is shared with ``compare_versions._pick_filler_pairs`` and
+#: ``run_match._fallback_opponents`` — the three other filler paths that
+#: used to apply a shorter list, or none. Rationale per prefix lives there
+#: and in ``_pick_filler_decks``' docstring.
+from .filler_policy import FILLER_EXCLUDED_PREFIXES as _FILLER_EXCLUDED_PREFIXES  # noqa: E402
 
 
 def _filler_exclusion_census(
@@ -492,8 +500,10 @@ def _run_sim_and_record(
     # parameters this verdict was computed under into the row's
     # sim_report, so it is auditable without knowing which code
     # version (or --sim-margin) wrote it. Same mechanism as improve's
-    # replication writer and the web save writer; this was the third
-    # and last verdict writer without it.
+    # replication writer and the web save writer. (The earlier claim
+    # here that this was "the third and last verdict writer without
+    # it" was false — R3 C-09, 2026-09-03: improve_search's round and
+    # iteration_loop's analyst writer stamp it too now.)
     if isinstance(sim_fields.get("sim_report"), dict):
         from .knowledge_log import SIM_REPORT_VERDICT_PARAMS_KEY, verdict_provenance
         sim_fields["sim_report"][SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
@@ -569,16 +579,21 @@ def _log_auto_curate_iteration(
 ) -> int:
     """Persist a 'pending' Iteration row recording this auto-curate run.
 
-    Reads the moxfield publicId out of the new .dck (falls back to the
-    filename stem). Hooks the new row's parent_id to the most recent
-    prior iteration of the same deck so the iteration chain stays
-    threaded -- important for the upcoming knowledge_log graph view.
+    Reads the provenance id out of the new .dck (``Moxfield=`` /
+    ``Archidekt=``), falling back to the VERSION-STRIPPED filename stem.
+    Hooks the new row's parent_id to the most recent prior iteration of
+    the same deck so the iteration chain stays threaded -- important for
+    the knowledge_log graph view. The fallback used to be the raw stem
+    (R3 C-08, 2026-09-03): it carries `` v2``, `` v3`` ... after every
+    accepted round, so a non-Moxfield deck got a fresh deck_id per
+    round AND the "prior iterations of this deck" lookup below — keyed
+    by the just-bumped stem — found nothing, leaving parent_id None.
 
     Verdict is 'pending' -- we haven't actually played the new deck yet.
     Phase 2's analyst path (or a follow-up Forge sim) updates verdict
     + sim_report once results land.
     """
-    from .iteration_loop import resolve_deck_id
+    from .deck_identity import resolve_deck_id, stable_deck_stem
     from .knowledge_log import (
         DEFAULT_DB_PATH,
         Iteration,
@@ -588,7 +603,9 @@ def _log_auto_curate_iteration(
 
     effective_db = db_path or DEFAULT_DB_PATH
 
-    deck_id = resolve_deck_id(new_deck_path, fallback=new_deck_path.stem)
+    deck_id = resolve_deck_id(
+        new_deck_path, fallback=stable_deck_stem(new_deck_path.name),
+    )
     deck_name = new_deck_path.stem
 
     # Thread the iteration chain: find the latest existing iteration for

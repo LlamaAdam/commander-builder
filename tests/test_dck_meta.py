@@ -172,3 +172,56 @@ def test_deck_without_metadata_header_gets_one():
     out = dck_meta.set_bracket_unverified(bare, 5)
     assert out.startswith("[metadata]\nBracketUnverified=5\n")
     assert dck_meta.read_bracket_unverified(out) == 5
+
+
+# --- R3 C-04 (2026-09-03): check_compare_name_alignment --------------------
+
+def _pair(tmp_path, old_name, new_name):
+    old = tmp_path / "[USER] Foo v1 [B3].dck"
+    new = tmp_path / "[USER] Foo v2 [B3].dck"
+    for p, name in ((old, old_name), (new, new_name)):
+        meta = f"[metadata]\nName={name}\n" if name is not None else "[metadata]\n"
+        p.write_text(f"{meta}[Main]\n1 Forest\n", encoding="utf-8")
+    return old, new
+
+
+def test_read_name_returns_none_for_missing_or_empty():
+    assert dck_meta.read_name("[Main]\n1 Forest\n") is None
+    assert dck_meta.read_name("[metadata]\nName=\n[Main]\n1 Forest\n") is None
+    assert dck_meta.read_name("[metadata]\nName=Foo v1  \n") == "Foo v1"
+
+
+def test_alignment_passes_a_restamped_pair(tmp_path):
+    old, new = _pair(tmp_path, "[USER] Foo v1 [B3]", "Foo v2")
+    assert dck_meta.check_compare_name_alignment(old, new) == []
+
+
+def test_alignment_raises_on_a_hand_copied_pair(tmp_path):
+    """The copy's Name= is the source's, so it mismatches its own stem."""
+    import pytest
+    old, new = _pair(tmp_path, "Foo v1", "Foo v1")
+    with pytest.raises(ValueError, match="hand-copied"):
+        dck_meta.check_compare_name_alignment(old, new)
+
+
+def test_alignment_raises_when_two_stems_normalize_alike(tmp_path):
+    import pytest
+    old = tmp_path / "[USER] Foo [B3].dck"
+    new = tmp_path / "Foo [B3].dck"
+    for p in (old, new):
+        p.write_text(f"[metadata]\nName={p.stem}\n[Main]\n1 Forest\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="share Name="):
+        dck_meta.check_compare_name_alignment(old, new)
+
+
+def test_alignment_raises_when_name_matches_no_filename(tmp_path):
+    import pytest
+    old, new = _pair(tmp_path, "Foo v1", "Something Else")
+    with pytest.raises(ValueError, match="does not match its filename"):
+        dck_meta.check_compare_name_alignment(old, new)
+
+
+def test_alignment_warns_on_a_nameless_deck(tmp_path):
+    old, new = _pair(tmp_path, None, "Foo v2")
+    notes = dck_meta.check_compare_name_alignment(old, new)
+    assert len(notes) == 1 and "no Name= line" in notes[0]

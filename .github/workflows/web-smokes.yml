@@ -22,6 +22,15 @@ name: web smokes
 # server helper at boot. No network, no jar, no API keys.
 
 on:
+  # R3 W-13 (2026-09-03): the lane used to run only on pull requests,
+  # so a merge to master never re-ran the smokes on the merged tree —
+  # and the path filter missed the non-web modules that SHAPE the
+  # dashboard payload the UI renders. A master push now runs every
+  # spec unconditionally (merges are rare; the run is ~2 minutes).
+  push:
+    branches:
+      - master
+      - main
   pull_request:
     branches:
       - master
@@ -29,6 +38,12 @@ on:
     paths:
       # The UI under test...
       - "src/commander_builder/web/**"
+      # ...the modules whose output the UI renders (R3 W-13)...
+      - "src/commander_builder/deck_dashboard.py"
+      - "src/commander_builder/deck_health.py"
+      - "src/commander_builder/knowledge_log.py"
+      - "src/commander_builder/bracket_estimator.py"
+      - "src/commander_builder/dck_meta.py"
       # ...and the tooling that tests it (so a change to the harness is
       # validated by the harness before it lands).
       - "tests/e2e/**"

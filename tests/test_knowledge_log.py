@@ -1253,3 +1253,54 @@ def test_fp013_gate_era_floor_does_not_bypass_the_triple(db):
     # era exclusion — they failed earlier, for their own reasons.
     assert progress["excluded_by_era"] == 0
     assert progress["relabelable"] == 0
+
+
+# --- R3 C-06 (2026-09-03): the era classifier fails CLOSED -----------------
+
+@pytest.mark.parametrize("stamp", [
+    "garbage", "Z", "2026-8-14T00:00:00", "08/14/2026", "2026-13-40T00:00:00",
+    "14:32", "next tuesday",
+])
+def test_unparseable_timestamp_is_never_an_era(stamp):
+    """The raw string used to be compared lexically, so anything sorting
+    above '2026-08-14' ("garbage", "Z") landed in era 4 — the training
+    era. An unparseable stamp is treated like a missing one: the id can
+    still prove era 1 (archive-only), nothing can prove a later era."""
+    from commander_builder.knowledge_log import measurement_era_for
+    assert measurement_era_for(stamp, None) is None
+    assert measurement_era_for(stamp, 900) is None
+    assert measurement_era_for(stamp, 100) == 1
+
+
+def test_iso_stamps_still_classify():
+    from commander_builder.knowledge_log import measurement_era_for
+    assert measurement_era_for("2026-08-14T10:00:00+00:00", 900) == 4
+    assert measurement_era_for("2026-08-14", 900) == 4       # bare date
+    assert measurement_era_for("2026-07-25 10:00:00", 500) == 3
+
+
+# --- R3 C-14 (2026-09-03): one margin convention ---------------------------
+
+def test_decisive_margin_is_null_when_no_game_was_decisive():
+    from commander_builder.knowledge_log import decisive_margin
+    assert decisive_margin(0, 0) is None
+    assert decisive_margin(15, 30) == 15
+    assert decisive_margin(30, 15) == -15
+    assert decisive_margin(None, 3) == 3
+
+
+# --- R3 S-3 (2026-09-03): two-row schema_version -----------------------------
+
+def test_init_db_refuses_a_two_row_schema_version_table(tmp_path):
+    """A hand-edited table used to die on a bare UNIQUE traceback from an
+    unordered fetchone() + WHERE-less UPDATE."""
+    import sqlite3
+    from commander_builder.knowledge_log import init_db
+    p = tmp_path / "two_rows.sqlite"
+    init_db(p)
+    conn = sqlite3.connect(p)
+    conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+    conn.commit()
+    conn.close()
+    with pytest.raises(RuntimeError, match="schema_version has 2 rows"):
+        init_db(p)

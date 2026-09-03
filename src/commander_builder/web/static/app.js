@@ -602,6 +602,57 @@ function simEta(games, mode, bracket) {
   return { sec, str };
 }
 
+// R3 C-11 (2026-09-03): the Games radios are PER-POD counts and the sim
+// runs one pod per filler pair in parallel, so "40" is 40 x pods games.
+// The static HTML cannot know this host's pod count; fetch it once and
+// rewrite each option's label + tooltip with the real total, the
+// expected head-to-head decisive count (total x expected fraction — the
+// same constants the CLI's --sim-games floor arithmetic uses) and the
+// binomial noise 0.5/sqrt(decisive). The option that first clears the
+// decisive floor is marked as the floor; 40/pod stays "recommended".
+function describeGamesOption(gamesPerPod, settings) {
+  const pods = settings.filler_pairs;
+  const total = gamesPerPod * pods;
+  const decisive = Math.round(total * settings.expected_decisive_fraction);
+  const noise = decisive > 0 ? (0.5 / Math.sqrt(decisive)) : 1;
+  const floor = settings.min_decisive_games;
+  const clears = decisive >= floor;
+  return {
+    total, decisive, noise, clears,
+    title: `${gamesPerPod} games per pod x ${pods} parallel pods = ${total} `
+      + `pod games. ~${decisive} head-to-head decisive games expected `
+      + `(fillers take ~half the wins); +/-${noise.toFixed(2)} head-to-head `
+      + `noise. Verdict floor is ${floor} decisive: `
+      + (clears ? "cleared." : "NOT reached - inconclusive is the likely verdict.")
+      + ` Wall time ~ one pod (${gamesPerPod} games); JVM/CPU cost is all ${total}.`,
+  };
+}
+
+function applySimSettings(settings) {
+  if (!settings || !settings.filler_pairs) return;
+  let floorMarked = false;
+  document.querySelectorAll('input[name="games"]').forEach((input) => {
+    const label = input.closest("label");
+    const span = label ? label.querySelector(".games-label") : null;
+    if (!label || !span) return;
+    const g = parseInt(input.value, 10);
+    const d = describeGamesOption(g, settings);
+    let tag = "";
+    if (d.clears && !floorMarked) { tag = " - verdict floor"; floorMarked = true; }
+    if (g === 40) tag += " - recommended";
+    span.textContent = `${g}/pod x ${settings.filler_pairs} = ${d.total} games`
+      + ` (~${d.decisive} decisive, +/-${d.noise.toFixed(2)})${tag}`;
+    label.title = d.title;
+  });
+}
+
+function loadSimSettings() {
+  fetch("/api/sim_settings")
+    .then((r) => r.json())
+    .then(applySimSettings)
+    .catch(() => { /* placeholders already say totals are unknown */ });
+}
+
 // Update the live time hint next to the Games radios. Reads the currently
 // checked games + mode and the active deck's bracket. No-op in save mode
 // (the hint span is hidden with the rest of the sim controls).
@@ -4361,6 +4412,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // changes (radios are static markup, so bind once here).
   document.querySelectorAll('input[name="games"], input[name="mode"]')
     .forEach((r) => r.addEventListener("change", updateGamesEta));
+  // R3 C-11: label each Games option with this host's real pod total.
+  loadSimSettings();
 
   // FP-007 topbar card lookup: submit -> card-reference overlay.
   const cardForm = $("card-search-form");

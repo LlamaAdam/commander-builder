@@ -8017,3 +8017,77 @@ def test_dashboard_routes_degrade_on_commander_lookup_outage(
     assert body["stat_tiles"]["lands"] >= 35
     assert body["deck_progress"]["target"] == 100
     assert body["categories"]
+
+
+# --- R3 C-10 (2026-09-03): provenance is computed server-side --------------
+#
+# save_iteration used the CLIENT's suggested_verdict when the payload carried
+# one, so a stale tab or an edited body stamped whatever alpha/floor/verdict
+# it liked into the row's provenance and decided verdict_overrides_suggestion.
+
+def test_save_iteration_ignores_a_client_supplied_suggestion(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {
+            "winner": "new", "old_wins": 20, "new_wins": 21,
+            "total_games": 41, "draws": 0,
+            # A bogus client copy: p ~= 1.0 split declared 'kept' at
+            # alpha 0.5 over 5 decisive.
+            "suggested_verdict": {"verdict": "kept", "alpha": 0.5,
+                                  "min_decisive": 5, "margin": 1},
+        },
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    report = detail["sim_report"]
+    assert report["suggested_verdict"]["verdict"] == "neutral"   # server's
+    assert report["verdict_params"]["alpha"] == 0.05
+    assert report["verdict_params"]["min_decisive"] == 20
+    assert report["verdict_overrides_suggestion"] is True
+    # The client's copy is kept for diagnostics, under its own key.
+    assert report["client_suggested_verdict"]["alpha"] == 0.5
+
+
+def test_save_iteration_keeps_no_client_copy_when_it_matches(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {"old_wins": 15, "new_wins": 30, "total_games": 45,
+                       "draws": 0},
+    })
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert "client_suggested_verdict" not in detail["sim_report"]
+    assert detail["sim_report"]["verdict_overrides_suggestion"] is False
+
+
+# --- R3 C-11 (2026-09-03): "40" is 40 PER POD, and the page says so -------
+
+def test_sim_settings_reports_this_hosts_pod_count(client):
+    from commander_builder._proposer_sim import (
+        EXPECTED_DECISIVE_FRACTION, MIN_DECISIVE_GAMES_FOR_VERDICT,
+    )
+    from commander_builder.compare_versions import auto_filler_pairs
+    body = client.get("/api/sim_settings").get_json()
+    assert body["games_are_per_pod"] is True
+    assert body["filler_pairs"] == auto_filler_pairs()
+    assert body["expected_decisive_fraction"] == EXPECTED_DECISIVE_FRACTION
+    assert body["min_decisive_games"] == MIN_DECISIVE_GAMES_FOR_VERDICT
+
+
+def test_games_radios_no_longer_quote_the_40_total_arithmetic():
+    """The static tooltip claimed ~20 decisive / +/-0.11 for "40", the
+    40-TOTAL figures; the run is 40 x pods. The template now labels the
+    options per pod and defers the totals to /api/sim_settings."""
+    from pathlib import Path
+    import commander_builder.web as web_pkg
+    html = (Path(web_pkg.__file__).parent / "templates" / "index.html").read_text(
+        encoding="utf-8")
+    games_block = html.split('name="games" value="10"')[1].split("</fieldset>")[0]
+    assert "40 per pod" in html
+    assert "~20 head-to-head decisive games expected" not in html
+    assert "+/-0.11" not in games_block
+    js = (Path(web_pkg.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "/api/sim_settings" in js and "function describeGamesOption" in js

@@ -149,6 +149,83 @@ def stamp_name_preserving_display(dck_text: str, stem: str) -> str:
     return out[: nm.end()] + f"\nDisplayName={old_name}" + out[nm.end():]
 
 
+def read_name(dck_text: str) -> Optional[str]:
+    """The first ``Name=`` value, stripped, or None when the deck has no
+    ``Name=`` line (an EMPTY ``Name=`` counts as none: Forge has nothing
+    to report for it either)."""
+    m = _NAME_LINE.search(dck_text)
+    if not m:
+        return None
+    value = m.group(0)[len("Name="):].strip()
+    return value or None
+
+
+def check_compare_name_alignment(old_path: Path, new_path: Path) -> list[str]:
+    """Sim-time preflight for a head-to-head pair (2026-09-03, R3 C-04).
+
+    ``compare_versions`` attributes wins by ``log_parser._normalize``-d
+    NAME (see the module docstring), so two things must hold before a
+    single JVM game is spent:
+
+      * each deck's ``Name=`` normalizes to its own filename stem —
+        otherwise Forge reports a name no filename matches and that
+        deck's wins go to nobody;
+      * the two ``Name=`` values normalize DIFFERENTLY — otherwise both
+        seats report one name, neither side matches, and 20 games print
+        ``OLD 0 - 0 NEW (TIE)`` as if observed. A hand-copied pair
+        (``cp v1.dck v2.dck`` then edit cards) does exactly this; every
+        in-tree writer restamps, so nothing in the pipeline produces it,
+        and nothing used to catch it.
+
+    Raises ``ValueError`` naming the offending file(s) and the remedy
+    (``rewrite_name_to_stem`` / ``commander-snapshot``) for either
+    violation. A deck with NO ``Name=`` line cannot be checked; that is
+    returned as a warning string for the caller to print, not raised —
+    Forge's own default for a nameless deck is not something this module
+    can promise. Returns the list of warnings (empty when both decks
+    carry a ``Name=`` that checks out).
+    """
+    from .log_parser import _normalize
+
+    warnings: list[str] = []
+    norms: dict[str, Optional[str]] = {}
+    for path in (old_path, new_path):
+        name = read_name(path.read_text(encoding="utf-8"))
+        if name is None:
+            warnings.append(
+                f"{path.name} has no Name= line; win attribution keys on "
+                f"Name=, so if Forge reports a name other than "
+                f"{_normalize(path.stem)!r} this deck's wins go to nobody. "
+                f"Stamp it with dck_meta.rewrite_name_to_stem to be sure."
+            )
+            norms[path.name] = None
+            continue
+        if _normalize(name) != _normalize(path.stem):
+            raise ValueError(
+                f"{path.name}: Name={name!r} does not match its filename "
+                f"(normalized {_normalize(name)!r} != "
+                f"{_normalize(path.stem)!r}) — a hand-copied file inherits "
+                f"its source's Name= exactly like this. Forge reports decks "
+                f"by Name=, so every game this deck won would be attributed "
+                f"to nobody (and with both seats under one name, to nobody "
+                f"on either side: OLD 0 - 0 NEW). Fix: "
+                f"dck_meta.rewrite_name_to_stem(path), or re-snapshot with "
+                f"commander-snapshot."
+            )
+        norms[path.name] = _normalize(name)
+    a, b = norms[old_path.name], norms[new_path.name]
+    if a is not None and a == b:
+        raise ValueError(
+            f"{old_path.name} and {new_path.name} share Name= (both "
+            f"normalize to {a!r}) — a hand-copied pair? Forge would report "
+            f"both seats under one name, neither side would be attributed "
+            f"a single win, and the run would print OLD 0 - 0 NEW as if "
+            f"observed. Fix: dck_meta.rewrite_name_to_stem on each file "
+            f"(commander-snapshot does this for you)."
+        )
+    return warnings
+
+
 def rewrite_name_to_stem(path: Path) -> str:
     """Rewrite ``path``'s ``Name=`` to its own filename stem, in place.
 

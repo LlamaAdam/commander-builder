@@ -54,6 +54,7 @@ banner above the function.
 """
 from __future__ import annotations
 
+import re
 from typing import Callable, Optional
 
 from . import dck_utils
@@ -330,14 +331,22 @@ def _matches_intent(name: str, card: dict, intent) -> bool:
         if {s.casefold() for s in card_theme_slugs(oracle)} & themes:
             return True
 
-    tribe = (getattr(intent, "tribal_type", None) or "").strip().casefold()
-    if tribe and (tribe in type_line.casefold() or tribe in oracle.casefold()):
+    tribe = (getattr(intent, "tribal_type", None) or "").strip()
+    # Whole-word match (2026-09-03, R3 S-1): the substring test read
+    # "Elf" inside "yourself" and "Rat" inside "Pirate". Subtypes on a
+    # type line and creature types in oracle text are whole words.
+    if tribe and _tribe_word(tribe).search(f"{type_line}\n{oracle}"):
         return True
 
     wincons = {
         str(w).casefold() for w in (getattr(intent, "key_wincons", None) or [])
     }
     return name.casefold() in wincons
+
+
+def _tribe_word(tribe: str) -> "re.Pattern[str]":
+    """Case-insensitive whole-word pattern for a tribal type."""
+    return re.compile(rf"\b{re.escape(tribe)}\b", re.IGNORECASE)
 
 
 def _bucket_cards(
@@ -496,13 +505,37 @@ def classify_swap_direction(
             f"{intent_share:.0%} of classifiable added cards match the "
             f"deck's declared themes / tribe / win route"
         )
+    elif (
+        added["staple"] and added["both"] and not added["intent"]
+        and (added["staple"] + added["both"]) / classifiable
+        >= SWAP_LABEL_DOMINANCE
+    ):
+        # R3 C-12 (2026-09-03): a swap that is ALL generic staples, some
+        # of which also happen to be declared win-cons, used to fall
+        # through to ``neither`` ("we tested it and it was plain") with a
+        # reason quoting a staple share the ``both`` bucket had shrunk.
+        # With at least one generic-only staple and no intent-only card,
+        # the swap's only evidence points staple-ward, so ``both`` cards
+        # count toward staple dominance; the reason says so. A swap made
+        # ONLY of ``both`` cards stays ``mixed`` (next branches): that is
+        # evidence for neither side, as its test pins.
+        direction, reason = "staple_ward", (
+            f"{(added['staple'] + added['both']) / classifiable:.0%} of "
+            f"classifiable added cards are generic staples / game "
+            f"changers ({added['both']} of them also match the intent; "
+            f"no added card is intent-only)"
+        )
     elif added["staple"] and added["intent"]:
         direction, reason = "mixed", (
             f"{added['staple']} staple-ward and {added['intent']} "
             f"intent-ward added card(s); neither reaches "
             f"{SWAP_LABEL_DOMINANCE:.0%}"
         )
-    elif added["both"] and not (added["staple"] or added["intent"]):
+    elif added["both"]:
+        # Any remaining swap with a ``both`` card that reaches no
+        # dominance is ``mixed``, never ``neither`` (R3 C-12): ``neither``
+        # is an evidence category, and a swap carrying cards that are
+        # BOTH a staple and an intent match is not plain.
         direction, reason = "mixed", (
             f"{added['both']} added card(s) are both generic staples and "
             f"an intent match — evidence for neither side"

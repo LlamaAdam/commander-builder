@@ -40,6 +40,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 from ..knowledge_log import (
     SIM_REPORT_VERDICT_PARAMS_KEY,
     Iteration,
+    decisive_margin,
     decisive_win_rate,
     get_iteration,
     record_iteration,
@@ -922,6 +923,9 @@ def make_sim_blueprint(
         # at all) carries no observed head-to-head delta, and a fabricated
         # 0 would read as an observed dead-even split in every cross-run
         # margin analysis.
+        # 2026-09-03 (R3 C-14): the NULL-on-no-decisive rule is now the
+        # shared ``decisive_margin`` helper every writer routes through,
+        # so this writer and the AB-shaped ones can no longer disagree.
         win_rate_old = None
         win_rate_new = None
         margin = None
@@ -932,8 +936,7 @@ def make_sim_blueprint(
                 decisive = old_w + new_w
                 win_rate_old = decisive_win_rate(old_w, decisive)
                 win_rate_new = decisive_win_rate(new_w, decisive)
-                if decisive > 0:
-                    margin = new_w - old_w
+                margin = decisive_margin(old_w, new_w)
             except (TypeError, ValueError):
                 pass
 
@@ -950,15 +953,23 @@ def make_sim_blueprint(
         if isinstance(sim_report, dict) and (
             "old_wins" in sim_report or "new_wins" in sim_report
         ):
-            suggestion = sim_report.get("suggested_verdict")
-            if not isinstance(suggestion, dict):
-                # Hand-built / legacy payload (or one posted by a client
-                # older than the suggestion field): score it here rather
-                # than leave the row unexplained.
-                suggestion = suggested_verdict(
-                    sim_report.get("old_wins"), sim_report.get("new_wins"),
-                )
-                sim_report["suggested_verdict"] = suggestion
+            # ALWAYS recomputed here (2026-09-03, R3 C-10). The payload
+            # forwards the /api/propose_swap response body, which carries
+            # the server's own suggestion — but it arrives back from the
+            # CLIENT, and a stale tab (a browser left open across a
+            # server upgrade) or an edited body could hand this writer
+            # any alpha / floor / verdict, which then became the row's
+            # "provenance" and decided ``verdict_overrides_suggestion``.
+            # Provenance the writer does not compute itself is not
+            # provenance. The client's copy, when it sent one, is kept
+            # under its own key for diagnostics and never read.
+            client_copy = sim_report.get("suggested_verdict")
+            suggestion = suggested_verdict(
+                sim_report.get("old_wins"), sim_report.get("new_wins"),
+            )
+            sim_report["suggested_verdict"] = suggestion
+            if isinstance(client_copy, dict) and client_copy != suggestion:
+                sim_report["client_suggested_verdict"] = client_copy
             sim_report[SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
                 margin=suggestion.get("margin", 1),
                 alpha=suggestion.get("alpha", 0.05),

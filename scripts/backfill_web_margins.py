@@ -56,6 +56,37 @@ this repo. This mode lists every candidate row so the owner can answer it
 on their own data and decide whether to move the boundary. Following the
 D1 precedent: report first, owner applies (or doesn't) themselves.
 
+Timezones (2026-09-03, R3 C-07): ``created_at`` is UTC (``datetime.now(
+timezone.utc)``), so the boundary day is the UTC day and ``--commit-time``
+is compared in UTC. Read the commit time with ``git log --date=iso-strict``
+and pass it WITH its offset (``12:58:35+00:00``, ``08:58-04:00``); a bare
+``HH:MM`` is taken as UTC and the report says so. The old lexical
+HH:MM compare "sidestepped the timezone question" while the help text
+asked for the LOCAL wall-clock time — every row shifted by the owner's
+UTC offset.
+
+``--apply-era-shift`` (2026-09-03, R3 C-05) — the ONE write this mode has
+--------------------------------------------------------------------------
+The advice this report used to print ("move ``_SIGNIFICANCE_START`` to
+the next day, or NULL the day") could not be followed: the v3 backfill
+touches only rows whose era is NULL, so moving the constant alone never
+relabels an already-stamped era-4 row; and NULLing the day by hand is
+re-stamped to era 4 by the very next ``init_db`` (any CLI, the web app)
+unless the constant ALSO moved. Only both together work. So:
+
+  step 1  ``--era-boundary-report --apply-era-shift`` writes
+          ``measurement_era = <era if shifted>`` for every row on the
+          boundary day (the whole UTC day — the granularity the library
+          constant can express). Stored stamps are never rewritten by
+          ``init_db``, so this holds across restarts.
+  step 2  edit ``knowledge_log._SIGNIFICANCE_START`` to the shifted date,
+          so anything that RE-DERIVES an era from a timestamp (an
+          export/import round trip, a merge_soak fold) agrees with the
+          stored stamps.
+
+The report prints both steps verbatim; ``--apply`` (the margin backfill)
+is still refused alongside the report flag.
+
 Usage:
     python scripts/backfill_web_margins.py                # dry-run, default DB
     python scripts/backfill_web_margins.py --apply        # write changes
@@ -63,10 +94,13 @@ Usage:
 
     # report-only, never writes:
     python scripts/backfill_web_margins.py --era-boundary-report
-    # ...and once `git log` says when the significance commit landed
-    # (no line continuation here: this docstring is argparse's
-    # description, and a trailing backslash would splice the lines):
-    python scripts/backfill_web_margins.py --era-boundary-report --commit-time 14:32
+    # ...and once `git log --date=iso-strict` says when the significance
+    # commit landed (no line continuation here: this docstring is
+    # argparse's description, and a trailing backslash would splice
+    # the lines):
+    python scripts/backfill_web_margins.py --era-boundary-report --commit-time 12:58:35+00:00
+    # ...and, having decided the day is contaminated, relabel it:
+    python scripts/backfill_web_margins.py --era-boundary-report --apply-era-shift
 """
 from __future__ import annotations
 
@@ -75,7 +109,7 @@ import json
 import os
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -87,6 +121,7 @@ from commander_builder.knowledge_log import (  # noqa: E402
     DEFAULT_DB_PATH,
     _SIGNIFICANCE_START,
     _connect,
+    decisive_margin,
     measurement_era_for,
 )
 
@@ -111,10 +146,14 @@ _SHIFTED_SIGNIFICANCE_START = (
     date.fromisoformat(ERA_BOUNDARY_DATE) + timedelta(days=1)
 ).isoformat()
 
-#: ``--commit-time`` accepts HH:MM or HH:MM:SS, 24-hour, zero-padded —
-#: the shape that lexically compares against an ISO timestamp's time
-#: field (see ``_side_of_landing``).
-_COMMIT_TIME_RE = re.compile(r"([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?")
+#: ``--commit-time`` accepts HH:MM or HH:MM:SS, 24-hour, zero-padded,
+#: optionally followed by a UTC offset (``Z``, ``+00:00``, ``-04:00``) as
+#: ``git log --date=iso-strict`` prints it. Without an offset the time is
+#: taken as UTC (see ``_side_of_landing``; R3 C-07).
+_COMMIT_TIME_RE = re.compile(
+    r"(?P<time>([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?)"
+    r"(?P<offset>Z|[+-]([01]\d|2[0-3]):[0-5]\d)?"
+)
 
 
 def recompute_margin(sim_report: object) -> tuple[bool, Optional[int]]:
@@ -136,10 +175,10 @@ def recompute_margin(sim_report: object) -> tuple[bool, Optional[int]]:
         new_w = int(sim_report.get("new_wins") or 0)
     except (TypeError, ValueError):
         return False, None
-    decisive = old_w + new_w
-    if decisive <= 0:
-        return True, None
-    return True, new_w - old_w
+    # The shared convention helper (2026-09-03, R3 C-14): NULL when no
+    # game was decisive, else the signed delta — the same call every
+    # live writer makes, so this backfill cannot drift from them.
+    return True, decisive_margin(old_w, new_w)
 
 
 def backfill(db_path: Path, apply: bool = False) -> dict:
@@ -228,29 +267,59 @@ def print_report(summary: dict) -> None:
 # --era-boundary-report (R2-D5, 2026-08-20) — REPORT ONLY, ZERO WRITES
 # ---------------------------------------------------------------------------
 
+def commit_instant_utc(commit_time: str) -> datetime:
+    """``--commit-time`` on the boundary date as an aware UTC datetime.
+
+    ``12:58:35+00:00`` / ``08:58-04:00`` / ``14:32Z`` carry their offset;
+    a bare ``14:32`` is UTC (R3 C-07, 2026-09-03). Raises ``ValueError``
+    on anything else — ``main`` refuses before getting here.
+    """
+    m = _COMMIT_TIME_RE.fullmatch(commit_time)
+    if not m:
+        raise ValueError(f"malformed --commit-time {commit_time!r}")
+    offset = m.group("offset") or "+00:00"
+    if offset == "Z":
+        offset = "+00:00"
+    stamp = datetime.fromisoformat(f"{ERA_BOUNDARY_DATE}T{m.group('time')}{offset}")
+    return stamp.astimezone(timezone.utc)
+
+
+def _row_instant_utc(created_at: str) -> Optional[datetime]:
+    """A row's ``created_at`` as an aware UTC datetime, or None when it
+    is not a parseable ISO timestamp. A naive stamp is taken as UTC —
+    every in-tree writer stamps ``datetime.now(timezone.utc)``."""
+    try:
+        stamp = datetime.fromisoformat(created_at.strip())
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
 def _side_of_landing(created_at: str, commit_time: Optional[str]) -> str:
     """Which side of the significance commit a row's timestamp falls on.
 
     ``commit_time`` is the owner's answer to "when did the significance
-    commit actually land on 2026-08-14?" — an ``HH:MM`` (or ``HH:MM:SS``)
-    local wall-clock time they read off ``git log``. Without it the
-    honest answer is ``unknown``: nothing in the database records when
-    the code changed, and guessing is precisely the failure mode the
+    commit actually land on 2026-08-14?" — read off ``git log
+    --date=iso-strict``, offset included. Without it the honest answer
+    is ``unknown``: nothing in the database records when the code
+    changed, and guessing is precisely the failure mode the
     NULL-not-guess rule exists to prevent.
+
+    Both sides are converted to UTC before comparing (2026-09-03, R3
+    C-07). The previous lexical ``HH:MM`` compare put a UTC row time
+    next to whatever zone the owner read off ``git log`` — for any
+    non-UTC owner every row was shifted by the offset.
     """
     if not commit_time:
         return "unknown"
-    # created_at is ISO-8601, so the time component sorts lexically
-    # against a zero-padded HH:MM[:SS] once both are trimmed to the same
-    # width. Comparing strings (not datetimes) sidesteps the timezone
-    # question entirely — and the timezone question is the owner's to
-    # answer, since the commit time they read off git log is in whatever
-    # zone their machine reports.
-    if "T" not in created_at:
+    row = _row_instant_utc(created_at)
+    if row is None:
         return "unknown"
-    row_time = created_at.split("T", 1)[1][:len(commit_time)]
-    return "before (would move to era 3)" if row_time < commit_time \
-        else "after (stays era 4)"
+    return ("before (would move to era 3)"
+            if row < commit_instant_utc(commit_time)
+            else "after (stays era 4)")
 
 
 def era_boundary_report(
@@ -304,13 +373,55 @@ def era_boundary_report(
     }
 
 
+def apply_era_shift(db_path: Path) -> dict:
+    """Write ``measurement_era = era_if_shifted`` for every row on the
+    boundary day (R3 C-05, 2026-09-03). Returns ``{"changed": [(id,
+    before, after), ...], "unchanged": int}``. Idempotent: a row already
+    carrying the shifted era is a no-op.
+
+    Whole UTC day, deliberately: ``_SIGNIFICANCE_START`` is a bare date,
+    so the day is the finest boundary step 2 (moving the constant) can
+    express; relabeling only the before-commit rows would leave the
+    stored stamps and the constant disagreeing on the after-commit ones.
+    ``era_if_shifted`` comes from ``measurement_era_for`` with the
+    override — the one definition of the rules — never a literal 3.
+    """
+    report = era_boundary_report(db_path)
+    changed: list[tuple[int, Optional[int], Optional[int]]] = []
+    unchanged = 0
+    with _connect(db_path) as conn:
+        for row in report["rows"]:
+            if row["era"] == row["era_if_shifted"]:
+                unchanged += 1
+                continue
+            conn.execute(
+                "UPDATE iterations SET measurement_era = ? WHERE id = ?",
+                (row["era_if_shifted"], row["id"]),
+            )
+            changed.append((row["id"], row["era"], row["era_if_shifted"]))
+    return {"changed": changed, "unchanged": unchanged}
+
+
+def print_era_shift(result: dict, shifted_start: str) -> None:
+    print(f"\n  --apply-era-shift APPLIED: {len(result['changed'])} row(s) "
+          f"relabeled, {result['unchanged']} already carried the shifted "
+          f"era.")
+    for row_id, before, after in result["changed"]:
+        print(f"    id {row_id}: era {before} -> {after}")
+    print(f"\n  STEP 2 (not done by this script — a source edit): set "
+          f"knowledge_log._SIGNIFICANCE_START = \"{shifted_start}\" so "
+          f"anything that re-derives an era from a timestamp (export/"
+          f"import, merge_soak) agrees with the stamps just written.")
+
+
 def print_era_boundary_report(report: dict) -> None:
     """Human-readable listing. Labeled REPORT ONLY so nobody reads it as
-    a dry-run of a write this mode does not have."""
-    print("backfill_web_margins — ERA BOUNDARY REPORT ONLY (no writes; "
-          "this mode has no --apply)")
+    a dry-run of a write this mode does not have (its one write is the
+    explicit ``--apply-era-shift``, printed separately)."""
+    print("backfill_web_margins — ERA BOUNDARY REPORT ONLY (no writes "
+          "unless --apply-era-shift is given; --apply is refused here)")
     print(f"  question (decision R2-D5): were any knowledge_log rows "
-          f"written on {report['boundary_date']} BEFORE the "
+          f"written on {report['boundary_date']} (UTC day) BEFORE the "
           f"significance-verdict commit landed?")
     print(f"  today those rows are stamped era 4 by a bare date cut and "
           f"count toward the FP-013 training floor.")
@@ -326,10 +437,16 @@ def print_era_boundary_report(report: dict) -> None:
     if not report["commit_time"]:
         print("\n  NOTE: --commit-time was not given, so the 'side' column "
               "is 'unknown'. Nothing in the database records when the code "
-              "changed. Read the commit's time off `git log` and re-run "
-              "with --commit-time HH:MM to split the rows.")
-    print(f"\n  {len(rows)} row(s) on {report['boundary_date']}:\n")
-    print(f"  {'id':>6}  {'created_at':<32}  {'verdict':<13}  "
+              "changed. Read the commit's time off `git log "
+              "--date=iso-strict` and re-run with --commit-time "
+              "HH:MM[:SS][+hh:mm] (offset as printed; a bare time is UTC) "
+              "to split the rows.")
+    else:
+        print(f"\n  commit time {report['commit_time']} = "
+              f"{commit_instant_utc(report['commit_time']).isoformat()} "
+              f"(UTC); rows are compared in UTC.")
+    print(f"\n  {len(rows)} row(s) on {report['boundary_date']} (UTC):\n")
+    print(f"  {'id':>6}  {'created_at (UTC)':<32}  {'verdict':<13}  "
           f"{'era':>4}  {'if shifted':>10}  side")
     for r in rows:
         era = "NULL" if r["era"] is None else str(r["era"])
@@ -340,10 +457,16 @@ def print_era_boundary_report(report: dict) -> None:
               f"{r['side']}")
     print("\n  Decide on your own data: if every row above was written "
           "AFTER the commit, leave the constant alone and note the "
-          "window is clean. If any predate it, move "
-          "knowledge_log._SIGNIFICANCE_START to "
-          f"{report['shifted_start']} (or NULL the day) yourself — this "
-          "script will not relabel live rows.")
+          "window is clean. If any predate it, BOTH of these are needed "
+          "(either alone does nothing that lasts):")
+    print("    step 1: re-run this report with --apply-era-shift to "
+          "relabel the day's stored stamps to the 'if shifted' column;")
+    print(f"    step 2: edit knowledge_log._SIGNIFICANCE_START to "
+          f"\"{report['shifted_start']}\" so re-derived eras agree.")
+    print("  Why both: init_db's backfill only fills NULL eras, so moving "
+          "the constant never touches a stamped row; and a row NULLed by "
+          "hand is re-stamped era 4 on the next init_db unless the "
+          "constant moved too.")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -365,14 +488,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                          f"the owner reviews this on their own machine "
                          f"and decides whether the boundary needs "
                          f"shifting.")
-    ap.add_argument("--commit-time", default=None, metavar="HH:MM",
-                    help=f"Only with --era-boundary-report. The local "
-                         f"wall-clock time the significance-verdict commit "
-                         f"landed on {ERA_BOUNDARY_DATE} (read it off "
-                         f"`git log`). Splits the listed rows into before "
-                         f"/ after; without it the 'side' column reads "
-                         f"'unknown', because nothing in the database "
-                         f"records when the code changed.")
+    ap.add_argument("--commit-time", default=None, metavar="HH:MM[:SS][+hh:mm]",
+                    help=f"Only with --era-boundary-report. The time the "
+                         f"significance-verdict commit landed on "
+                         f"{ERA_BOUNDARY_DATE}, read off `git log "
+                         f"--date=iso-strict` WITH its offset (e.g. "
+                         f"12:58:35+00:00 or 08:58-04:00); a bare HH:MM is "
+                         f"taken as UTC. Rows are compared in UTC, the zone "
+                         f"created_at is written in. Splits the listed rows "
+                         f"into before / after; without it the 'side' "
+                         f"column reads 'unknown', because nothing in the "
+                         f"database records when the code changed.")
+    ap.add_argument("--apply-era-shift", action="store_true",
+                    help=f"Only with --era-boundary-report. Relabel every "
+                         f"row on {ERA_BOUNDARY_DATE} (UTC) to the era it "
+                         f"would carry under a boundary of "
+                         f"{_SHIFTED_SIGNIFICANCE_START} (step 1 of 2; the "
+                         f"report prints step 2, a source edit). Default: "
+                         f"report only.")
     args = ap.parse_args(argv)
 
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
@@ -394,14 +527,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         # along with a report flag is exactly the accident this
         # owner-reviews-first decision exists to prevent.
         if args.apply:
-            print("ERROR: --era-boundary-report is report-only; it has no "
-                  "write mode. Drop --apply.", file=sys.stderr)
+            print("ERROR: --era-boundary-report is report-only; the margin "
+                  "backfill's --apply does not ride along. Drop --apply "
+                  "(the era relabel is --apply-era-shift).", file=sys.stderr)
             return 2
-        print_era_boundary_report(
-            era_boundary_report(db_path, commit_time=args.commit_time))
+        report = era_boundary_report(db_path, commit_time=args.commit_time)
+        print_era_boundary_report(report)
+        if args.apply_era_shift:
+            if not report["rows"]:
+                print("\n  --apply-era-shift: nothing to relabel.")
+                return 0
+            print_era_shift(apply_era_shift(db_path), report["shifted_start"])
         return 0
-    if args.commit_time:
-        print("ERROR: --commit-time only applies to "
+    if args.commit_time or args.apply_era_shift:
+        print("ERROR: --commit-time / --apply-era-shift only applies to "
               "--era-boundary-report.", file=sys.stderr)
         return 2
 

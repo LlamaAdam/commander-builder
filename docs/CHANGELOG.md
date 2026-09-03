@@ -6,6 +6,103 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-09-03 — round-3 fixes (core)
+
+The statistics / simulation findings of the third negative-mode round
+(`NEGATIVE_MODE_ROUND3.md` §2, C-01…C-14 and S-1…S-4), as adjudicated
+by the cross-examiner. Every fix carries a regression test that fails
+without it; no knowledge-log row is rewritten by library code — the two
+backfills are dry-run-by-default scripts.
+
+#### Fixed
+
+- **C-08 — one `deck_id` per deck, across versions.** New
+  `deck_identity` module: `resolve_deck_id` reads `Moxfield=` (bare
+  publicId, unchanged), then `Archidekt=` (namespaced
+  `archidekt:<id>` — the C3 lane was stem-keyed before), then the
+  VERSION-STRIPPED filename stem via the proposer's own version regexes.
+  The two unattended writers (`_log_auto_curate_iteration`,
+  `_log_bandit_pull`) and `iteration_loop` pass `stable_deck_stem`
+  instead of the raw stem, so a hand-built deck's v2/v3/v4 rows are one
+  deck again and the auto-curate writer threads `parent_id` (it looked
+  up "prior iterations" by the just-bumped stem and found none).
+  `status` reads through the same function. Existing rows: new
+  `scripts/backfill_deck_ids.py` (dry-run by default, `--apply`), which
+  re-keys only filename-shaped ids and never touches `parent_id` or a
+  measurement column.
+- **C-03 — decision C1 on every filler path.** New `filler_policy`
+  module owns the `[USER]`/`[CONTROL]`/`[PREMADE]`/`[REF]` exclusion;
+  `compare_versions._pick_filler_pairs` (web A/B, `commander-compare`,
+  `commander-iterate`, `meta_test`) now filters the curated pool through
+  it — the pool is a *candidate* list and legitimately carries `[REF]`
+  decks, which were being seated as fillers — and
+  `run_match._fallback_opponents` applies the same list (it skipped only
+  `[USER]`/`[PREMADE]`). Exclusions are printed; a pool that cannot seat
+  a pod after them raises naming the counts by prefix.
+- **C-01 — sub-floor sims are `inconclusive`, not `neutral`.**
+  `analyst.heuristic_verdict`'s decisive-floor branch now returns the
+  schema's own label for "measured, not decided"; `iteration_loop` maps
+  it to `stop`; the LLM rung's schema and accepted labels include it.
+  Default `commander-iterate` runs (20 pod games) no longer land in
+  per-deck tallies as trustworthy near-ties, and sub-floor ≥40-game runs
+  no longer count toward the FP-013 gate. Four pinned tests re-pinned
+  deliberately.
+- **C-02 — a confirm sim that runs and FAILS is `inconclusive`.** Both
+  replication sites (`_default_replicate_fn`, the bandit evaluator) test
+  one predicate, `_confirm_sim_completed` (`status == 'done'`), instead
+  of `ab is None`; a crashed-JVM/skipped confirm no longer rewrites the
+  completed row to `pending` beside a `replication` record of fabricated
+  zeros — counts are `None`, `ran: False`, error carried.
+- **C-05 / C-07 — the era-boundary instructions work.**
+  `backfill_web_margins.py --era-boundary-report --apply-era-shift`
+  relabels the boundary day's stored stamps (the write that survives
+  `init_db`; NULLing by hand was re-stamped era 4, moving the constant
+  alone touched nothing) and the report prints both steps. Row times
+  and `--commit-time` are compared in UTC, the zone `created_at` is
+  written in; the flag accepts the offset `git log --date=iso-strict`
+  prints, a bare time is UTC and the header says so.
+- **C-06 — `measurement_era_for` fails closed.** A non-ISO stamp
+  (`garbage`, `2026-8-14`, `08/14/2026`) is treated like a missing one
+  (era 1 by id only, else NULL) instead of sorting lexically into era 4.
+- **C-09 — verdict provenance on the last two writers.**
+  `improve_search`'s round and `iteration_loop`'s analyst writer stamp
+  `verdict_params`; the `_proposer_sim` comment claiming it was the last
+  writer without it is corrected.
+- **C-10 — web provenance is server-computed.** `save_iteration` always
+  recomputes `suggested_verdict` from the row's own split; a client copy
+  that differs is kept under `client_suggested_verdict` and never read.
+- **C-11 — "40" is 40 per pod, and the page says so.** New
+  `GET /api/sim_settings` reports this host's pod count and the decisive
+  constants; `app.js` rewrites each Games option's label and tooltip
+  with the real total, expected decisive count and binomial noise
+  (40×4 = 160 games, ~80 decisive, ±0.06 — not the 40-total ~20 / ±0.11
+  the static tooltip quoted).
+- **C-12 — all-staple swaps with some intent fits are `staple_ward`.**
+  With at least one generic-only staple and no intent-only card,
+  `both` cards count toward staple dominance; any remaining swap with a
+  `both` card that reaches no dominance is `mixed`, never `neither`.
+- **C-13 — `inconclusive == inconclusive` is not agreement.**
+  `judge_agreement` computes the agreement rate over pairings both
+  instruments decided and reports undecided / both-inconclusive counts
+  separately.
+- **C-14 — one `margin` convention.** New `knowledge_log.
+  decisive_margin` (NULL when no game was decisive) is the helper every
+  writer and the margin backfill route through; `_ab_to_iteration_fields`
+  and `iteration_loop` no longer store `0` where the web writer stored
+  NULL. Readers migrated, history untouched.
+- **C-04 — sim-time guard on the `Name=`/stem invariant.** `compare()`
+  preflights both decks through `dck_meta.check_compare_name_alignment`:
+  a `Name=` that does not normalize to its own stem (a hand-copied
+  pair) or two stems that normalize alike are refused with the
+  `rewrite_name_to_stem` remedy before a game is spent; a nameless deck
+  only warns.
+- **S-1 / S-2 / S-3 / S-4.** Tribal intent match is whole-word
+  (`Elf` no longer matches `yourself`); the punisher-tax comment no
+  longer names a card the pattern does not cover; `init_db` refuses a
+  hand-edited two-row `schema_version` with the remedy instead of a bare
+  UNIQUE traceback; judge dimension scores must be integers (`1.5` is
+  discarded, `2.0` accepted).
+
 ### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
 
 #### Added
