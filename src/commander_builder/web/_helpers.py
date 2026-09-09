@@ -51,7 +51,10 @@ from typing import Optional
 # their new homes; this shim exists so existing importers keep working
 # unchanged.
 # ---------------------------------------------------------------------------
-from .deck_pricing import _total_price_for_deck_text  # noqa: F401
+from .deck_pricing import (  # noqa: F401
+    _total_price_for_deck_text,
+    audit_pricing_fields,
+)
 from .deck_text_ops import (  # noqa: F401
     _BASIC_LAND_KEYS,
     _BASIC_LANDS,

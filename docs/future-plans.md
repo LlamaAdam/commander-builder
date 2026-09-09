@@ -1565,19 +1565,34 @@ failure; `iter_cached_names` single-field parse; collection file
 read-once per build; `deck_pricing` single deck walk.
 
 **Open bugs from the audit (not perf)**
-1. WotC Game Changers scrape broken in production — every process serves
+1. ~~WotC Game Changers scrape broken in production — every process serves
    the bundled `_FALLBACK` list; parser needs updating for the current
-   page structure. *2026-09-09:* the fallback is now LOUD (stderr line +
-   `_FALLBACK_USED`, round-3 F-15 in PR #86) but the parser itself is
-   still not fixed — still open.
-2. Mixed snapshot schema in the shared oracle cache dir — trimmed
+   page structure.~~ *Fixed 2026-09-09:* the page is client-rendered and
+   the list lives in a JS payload; `game_changers` now parses that payload
+   first (legacy `<li>` scan kept as the fallback shape), pinned against a
+   verbatim CI capture of the live page — 53 names, identical to the
+   bundled list, trusted. The fallback path had already been made loud
+   (round-3 F-15).
+2. ~~Mixed snapshot schema in the shared oracle cache dir — trimmed
    `forge_py` snapshots lack `prices`, silently dropping cards from
-   `deck_pricing` totals.
-3. `tests/conftest.py` has no network-blocking autouse fixture — unpatched
-   lookup paths can still make live HTTP calls in tests. *2026-09-09:*
-   still true and measured — three `test_deck_builder` tests spend ~30 s
-   each retrying against blocked hosts; PR #85 adds cache/Forge-path
-   isolation fixtures but no socket block.
+   `deck_pricing` totals.~~ *Fixed 2026-09-09:* the reader side —
+   `price_status` (core) + `deck_pricing.price_deck_text` count and NAME
+   every unpriced card with a reason, flag the total `partial`, and print
+   one loud `[pricing]` line for the trimmed-schema case; the dashboard
+   tile, audit payload, `save_iteration` row and `commander-status` all
+   carry/render the partial label. The trimmed writer is `forge_py`'s
+   (not in this repo); every writer here persists the full object and is
+   now pinned to keep doing so. The schema stays mixed until forge_py's
+   writer keeps `prices` — the reader tolerates it indefinitely.
+3. ~~`tests/conftest.py` has no network-blocking autouse fixture — unpatched
+   lookup paths can still make live HTTP calls in tests.~~ *Fixed
+   2026-09-09:* autouse `network_block` refuses every non-loopback connect
+   (loud error naming test + host; teardown failure when a degrade guard
+   swallowed it), strips the loopback egress proxy, honors `live` +
+   `--run-live`. Every test that tripped it was fixed at the module seams
+   (shared `offline_scryfall` / `offline_edhrec` / `offline_game_changers`
+   fixtures); the three `test_deck_builder` cases dropped from 34-44 s to
+   milliseconds.
 
 ---
 

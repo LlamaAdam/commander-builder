@@ -32,6 +32,12 @@ import pytest
 
 from commander_builder import collection
 
+# Offline at the module seams (audit open bug 3, 2026-09-09): under the suite-
+# wide network block the pipelines these tests drive were reaching Scryfall
+# and EDHREC behind degrade guards. The shared fixtures make those upstreams
+# miss instantly; a test wanting a specific answer patches over them.
+pytestmark = pytest.mark.usefixtures("offline_scryfall", "offline_edhrec")
+
 
 def _registered_path() -> Path:
     """The per-test collection path the conftest autouse fixture

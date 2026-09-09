@@ -345,6 +345,42 @@ def test_collect_deck_status_meta_win_rate(tmp_path):
     assert report.meta_win_rate == pytest.approx(0.62)
 
 
+def test_partial_price_total_is_labeled_in_the_iteration_rows(tmp_path):
+    """Audit open bug 2 (2026-09-09): ``save_iteration`` stamps
+    ``pricing.partial`` when the client priced the deck with some cards
+    unpriced; the CLI row carries the flag and renders "(partial)" next
+    to the delta so a short total is never read as authoritative."""
+    deck = _touch(tmp_path / "[USER] Wyrm Sovereign [B4].dck", _WYRM_DCK)
+    db = tmp_path / "kl.sqlite"
+    manifests = [
+        {"added": ["A"], "removed": ["B"], "audit_version": "v3",
+         "pricing": {"total_price_usd": 200.0, "captured_at": "2026-09-01"}},
+        {"added": ["C"], "removed": ["D"], "audit_version": "v3",
+         "pricing": {"total_price_usd": 230.0, "captured_at": "2026-09-05",
+                     "partial": True}},
+    ]
+    for m in manifests:
+        record_iteration(
+            Iteration(
+                deck_id="ABC123",
+                deck_name="[USER] Wyrm Sovereign [B4].dck",
+                bracket=4, audit_version="v3", audit_manifest=m,
+                verdict="kept", win_rate_old=0.5, win_rate_new=0.55, margin=2,
+            ),
+            db_path=db,
+        )
+
+    report = collect_deck_status(deck, db_path=db)
+    rows = report.recent_iterations
+    assert [r["price_partial"] for r in rows] == [False, True]
+    assert rows[-1]["price_delta_usd"] == pytest.approx(30.0)
+
+    text = format_deck_text(report, use_rich=False)
+    partial_lines = [ln for ln in text.splitlines() if "(partial)" in ln]
+    assert len(partial_lines) == 1
+    assert "Δ$+30.00 (partial)" in partial_lines[0]
+
+
 def test_format_deck_text_renders_core_sections(tmp_path):
     deck = _touch(tmp_path / "[USER] Wyrm Sovereign [B4].dck", _WYRM_DCK)
     db = tmp_path / "kl.sqlite"

@@ -6,6 +6,68 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-09-09 — the three "Open bugs from the audit"
+
+All three items carried under "Open bugs from the audit" in
+`docs/future-plans.md` since 2026-07-25.
+
+#### Fixed
+
+- **Bug 1 — the Game Changers scraper reads the current WotC page.**
+  Since the site refresh the list is not in the HTML body but inside a
+  JavaScript payload as escaped strings, grouped under eight "Game
+  Changer Wiki <color>" entries as `<auto-card>` items; the `<li>` scan
+  saw only chrome (five names, zero overlap), the trust gate rejected
+  every fetch, and every process served the bundled fallback. A
+  payload parser now runs first (the legacy scan stays as the fallback
+  shape), pinned against a VERBATIM capture of the live page fetched
+  through the CI lane's new `url:` form
+  (`tests/fixtures/wotc_commander_page_2026-09-09.txt`): 53 names,
+  identical to the bundled list, trusted. The capture was consumed and
+  deleted per the lane discipline.
+- **Bug 3 — the test suite now ENFORCES offline.** `tests/conftest.py`
+  gains an autouse `network_block` fixture: every non-loopback socket
+  connect (and the `getaddrinfo` step before it) raises
+  `NetworkBlockedError` naming the test and the host; a blocked attempt
+  that a degrade guard swallows fails the test at teardown instead.
+  Loopback / AF_UNIX stay open (Flask test client, desktop tests'
+  127.0.0.1 servers) and the loopback egress proxy some sandboxes set
+  (`HTTPS_PROXY=http://127.0.0.1:…`) is stripped so it cannot tunnel
+  through that allowance. The error is deliberately not an `OSError`,
+  so urllib does not wrap it and the retry helpers do not back off on
+  it. `live` marker + `--run-live` registered (text identical to PR #85's
+  hunks) for the explicit-consent lane. Three shared opt-in seams
+  (`offline_scryfall`, `offline_edhrec`, `offline_game_changers`) make
+  the upstreams miss instantly for pipeline-level test families.
+  Measured: the three `test_deck_builder` cases that reached WotC and
+  Scryfall behind degrade guards went from 44 s / 35 s / 34 s to under
+  10 ms each; the whole file from 57 s to 0.6 s. Pinned by
+  `tests/test_network_block.py`.
+- **Bug 2 — an unpriced card is counted and named, never dropped.**
+  The oracle snapshot dir is shared with `forge_py`, whose trimmed
+  writer stores no `prices` block; `deck_pricing` and the dashboard
+  tile silently skipped such cards, so a deck total could be quietly
+  short. New core `price_status` module (shared by both readers)
+  classifies every card as priced or unpriced-with-reason
+  (`no snapshot` / `snapshot has no prices block` / `no usd price`);
+  `deck_pricing.price_deck_text` returns the total plus
+  `n_unpriced` / `unpriced[]` / `partial`, the audit payload carries
+  `unpriced_cards_original|proposed` and `price_partial`, the dashboard
+  tile carries `n_unpriced_cards` / `unpriced_cards` / `price_partial`,
+  and the trimmed-schema case prints one loud `[pricing]` stderr line
+  pointing at `commander-oracle-refresh`. The UI labels a short total
+  "≥ $X · N unpriced (partial)" with the names; `save_iteration` accepts
+  a `price_partial` bool that lands as `pricing.partial` on the row, and
+  `commander-status` renders "(partial)" next to that row's Δ. Every
+  writer in this repo (`lookup_card`, `refresh_card`,
+  `write_snapshots_from_bulk`) already persisted the full object — the
+  trimmed writer is the sibling project's — so the writer-side fix is a
+  pin (`tests/test_snapshot_writers_keep_prices.py`) that this repo
+  never becomes a second source of price-less snapshots. Reader
+  regression: `tests/test_deck_pricing.py` drives the real reader over
+  a mixed-schema temp dir. The dashboard's full-payload pin
+  (`_PIN_EXPECTED`) gained the three new keys deliberately.
+
 ### 2026-09-03 — round-3 fixes (core)
 
 The statistics / simulation findings of the third negative-mode round

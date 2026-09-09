@@ -14,6 +14,16 @@ flask = pytest.importorskip("flask")  # skip if [web] extra not installed
 
 from commander_builder.web.app import create_app, _list_decks, _resolve_deck_path
 
+# The route handlers fan out to Scryfall (paths that bind
+# ``lookup_card`` at import time and so bypass the ``client``
+# fixture's attribute patch), the EDHREC salt list and the WotC
+# game-changer scrape. Under the suite-wide network block (audit open
+# bug 3, 2026-09-09) every such fetch misses instantly at the module
+# seams; tests wanting a specific upstream answer patch over these.
+pytestmark = pytest.mark.usefixtures(
+    "offline_scryfall", "offline_edhrec", "offline_game_changers",
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -6690,6 +6700,47 @@ def test_save_iteration_accepts_zero_price(save_client):
     assert detail["audit_manifest"]["pricing"]["total_price_usd"] == 0.0
 
 
+def test_save_iteration_records_price_partial_marker(save_client):
+    """Audit open bug 2 (2026-09-09): a total the client computed with
+    some cards unpriced must stay labeled in the log, so the cost-over-
+    time series and ``commander-status`` never present it as whole."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 42.0, "price_partial": True,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["audit_manifest"]["pricing"]["total_price_usd"] == 42.0
+    assert detail["audit_manifest"]["pricing"]["partial"] is True
+
+
+def test_save_iteration_omits_partial_marker_for_a_whole_total(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 42.0, "price_partial": False,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert "partial" not in detail["audit_manifest"]["pricing"]
+
+
+def test_save_iteration_400_on_non_bool_price_partial(save_client):
+    """Same boundary discipline as total_price_usd: a string "true" is
+    rejected, never coerced."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 42.0, "price_partial": "true",
+        "verdict": "pending",
+    })
+    assert resp.status_code == 400
+    assert "price_partial" in resp.get_json()["error"]
+
+
 def test_save_iteration_rejects_negative_price(save_client):
     """Regression: a negative price almost certainly means bad Scryfall
     data or a sign-flip bug upstream — never a legitimate value.
@@ -7175,6 +7226,55 @@ def test_audit_payload_includes_price_delta(client, monkeypatch):
     # padding allowance. If this fails, the audit is leaking a
     # huge price somewhere.
     assert body["price_delta_usd"] < 20
+
+
+def test_audit_payload_names_unpriced_cards_and_flags_partial(client, monkeypatch):
+    """Audit open bug 2 (2026-09-09): a card whose oracle snapshot has no
+    ``prices`` block (the shared dir's trimmed schema) used to be dropped
+    from the audit's cost totals without a trace. The payload now names
+    it on each side with the reason and flags ``price_partial`` so the
+    UI labels the total partial instead of presenting it as whole."""
+    from types import SimpleNamespace
+
+    def fake_lookup(name, *_a, **_kw):
+        if name == "Cultivate":
+            # forge_py's trimmed shape: oracle fields, no prices block.
+            return {"type_line": "Sorcery", "oracle_text": "Search..."}
+        prices = {"Lotus Cobra": "10.00", "Forest": "0.05", "Test Cmdr": "1.00"}
+        if name in prices:
+            return {"prices": {"usd": prices[name]}}
+        return None
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add",
+                    reason="upgrade", evidence={}, name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    body = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
+    # The Alpha deck runs 5 Cultivate; the audit cuts none of them here,
+    # so both sides are short by the same trimmed card.
+    assert body["price_partial"] is True
+    assert body["unpriced_cards_original"] == [
+        {"name": "Cultivate", "qty": 5,
+         "reason": "snapshot has no prices block"},
+    ]
+    assert {u["name"] for u in body["unpriced_cards_proposed"]} == {"Cultivate"}
+    # The historical fields keep their meaning alongside the new ones.
+    assert body["original_price_usd"] is not None
+    assert body["n_priced_cards_original"] == 36  # 35 Forest + commander
+    assert body["price_delta_usd"] is not None
 
 
 def test_audit_payload_surfaces_unapplied_adds_when_no_cuts(client, monkeypatch):

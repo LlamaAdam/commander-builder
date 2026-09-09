@@ -26,6 +26,16 @@ from commander_builder.deck_dashboard import (
     match_score,
 )
 
+# ``build_dashboard`` fans out to three upstreams the tests below do
+# not all stub (game-changer count, EDHREC salt, per-card oracle
+# lookups); under the suite-wide network block (audit open bug 3,
+# 2026-09-09) every fetch now misses instantly at the module seams
+# instead of reaching magic.wizards.com / json.edhrec.com / Scryfall.
+# Tests that want a specific upstream answer still patch over these.
+pytestmark = pytest.mark.usefixtures(
+    "offline_scryfall", "offline_edhrec", "offline_game_changers",
+)
+
 
 # ---------------------------------------------------------------------------
 # Expanded role taxonomy
@@ -786,7 +796,13 @@ _PIN_EXPECTED = {
         "lands": 37,
         "n_game_changers": 0,
         "n_priced_cards": 4,
+        # Partial-total signal added 2026-09-09 (audit open bug 2):
+        # every non-land card in the pin deck carries a price, so the
+        # payload says so explicitly rather than by omission.
+        "n_unpriced_cards": 0,
         "power_level": 3,
+        "price_partial": False,
+        "unpriced_cards": [],
     },
     "suggested_adds": [],
     "theme_tags": ["Midrange"],
@@ -930,3 +946,58 @@ def test_build_dashboard_survives_total_scryfall_outage(tmp_path, monkeypatch):
     assert result.deck_progress == {"current": 42, "target": 100}
     assert result.moxfield_url == "https://moxfield.com/decks/abc123"
     assert json.loads(json.dumps(result.to_dict()))  # still serializable
+
+
+def test_tile_counts_and_names_unpriced_cards_and_flags_partial(
+    tmp_path, monkeypatch, capsys,
+):
+    """Audit open bug 2 (2026-09-09): a card whose snapshot has no
+    ``prices`` block (the shared dir's trimmed schema) used to vanish
+    from the Est. price tile without a trace. It is now counted, named
+    with its reason, the tile is flagged partial, and the trimmed-
+    schema case prints one loud line — while a null ``usd`` (ordinary
+    Scryfall reality) is named but does not trip the schema alarm."""
+    deck = _write_pin_deck(tmp_path)
+    _stub_probes(monkeypatch)
+    cards = {
+        "Omnath, Locus of Creation": {
+            "type_line": "Legendary Creature — Elemental Incarnation",
+            "color_identity": ["W", "U", "R", "G"], "cmc": 4.0,
+            "prices": {"usd": "9.00"},
+        },
+        "Forest": {"type_line": "Basic Land — Forest", "cmc": 0.0,
+                   "prices": {"usd": "0.10"}},
+        "Lotus Cobra": {"type_line": "Creature — Snake", "cmc": 2.0,
+                        "prices": {"usd": "5.00"}},
+        # forge_py's trimmed shape: oracle fields only, no prices.
+        "Cultivate": {"type_line": "Sorcery", "cmc": 3.0,
+                      "oracle_text": "Search your library for two lands."},
+        "Wrath of God": {"type_line": "Sorcery", "cmc": 4.0,
+                         "prices": {"usd": "10.00"}},
+        "Lightning Bolt": {"type_line": "Instant", "cmc": 1.0,
+                           "prices": {"usd": None}},
+    }
+    monkeypatch.setattr(
+        "commander_builder.deck_dashboard.lookup_card", cards.get,
+    )
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", cards.get,
+    )
+
+    tiles = build_dashboard(deck, bracket=3).stat_tiles
+
+    assert tiles["est_price_usd"] == pytest.approx(15.0)
+    assert tiles["n_priced_cards"] == 2
+    assert tiles["n_unpriced_cards"] == 2
+    assert tiles["price_partial"] is True
+    assert tiles["unpriced_cards"] == [
+        {"name": "Cultivate", "qty": 1,
+         "reason": "snapshot has no prices block"},
+        {"name": "Lightning Bolt", "qty": 1, "reason": "no usd price"},
+    ]
+    err = capsys.readouterr().err
+    assert "[pricing] dashboard tile" in err
+    assert "Cultivate" in err
+    assert "Lightning Bolt" not in err
+    assert json.loads(json.dumps(tiles))  # payload stays serializable
+

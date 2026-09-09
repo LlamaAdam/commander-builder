@@ -875,6 +875,13 @@ def make_sim_blueprint(
             return jsonify({
                 "error": "total_price_usd must be non-negative",
             }), 400
+        # Partial-total marker (2026-09-09): a total computed with some
+        # cards unpriced must stay labeled as such in the log, so the
+        # cost-over-time series and `commander-status` don't present a
+        # short number as authoritative. Strictly a bool when given.
+        price_partial = payload.get("price_partial")
+        if price_partial is not None and not isinstance(price_partial, bool):
+            return jsonify({"error": "price_partial must be a boolean"}), 400
 
         if total_price_usd is not None:
             from datetime import datetime as _dt, timezone as _tz
@@ -888,6 +895,8 @@ def make_sim_blueprint(
                     "total_price_usd": float(total_price_usd),
                     "captured_at": _dt.now(_tz.utc).isoformat(),
                 }
+                if price_partial:
+                    audit_manifest["pricing"]["partial"] = True
 
         # Pull win-rate / margin out of sim_report if present so the
         # row is queryable without parsing the JSON blob every time.
