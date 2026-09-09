@@ -30,54 +30,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import re
-
 from .analyst import AnalystConfig, AnalystInput, Verdict, analyze
 from .compare_versions import ComparisonReport, compare
+# Deck identity moved to ``deck_identity`` (2026-09-03, R3 C-08): the
+# resolver used to read only ``Moxfield=`` and fall back to the RAW stem,
+# so every non-Moxfield deck got a fresh ``deck_id`` per version. Re-
+# exported under its old name — ``improve``, ``_proposer_sim``, the web
+# dashboard and the tests all import ``iteration_loop.resolve_deck_id``.
+from .deck_identity import resolve_deck_id, stable_deck_stem  # noqa: F401
 from .forge_runner import VENDOR_FORGE
 # ``db_path=None`` defaults below defer to knowledge_log's call-time
 # resolver — a ``= DEFAULT_DB_PATH`` def-time default would freeze the
 # production path and bypass the test suite's isolation patch.
 from .knowledge_log import (
+    SIM_REPORT_VERDICT_PARAMS_KEY,
     Iteration,
+    decisive_margin,
     decisive_win_rate,
     record_iteration,
+    verdict_provenance,
 )
 from .proposer import ProposerConfig, ProposerInput, propose
 from .snapshot_deck import snapshot
 
 DECK_DIR = VENDOR_FORGE / "userdata" / "decks" / "commander"
-
-# `Moxfield=<publicId>` lines in the .dck metadata block let us recover the
-# durable deck identity even after the file is renamed (e.g. user changes
-# the deck name on Moxfield). Regex pinned at module level so it's compiled
-# once.
-_MOXFIELD_ID = re.compile(r"^Moxfield=(.+)$", re.MULTILINE)
-
-
-def resolve_deck_id(deck_path: Path, fallback: Optional[str] = None) -> str:
-    """Read the Moxfield publicId from the .dck metadata block.
-
-    Falls back to the filename stem if the deck wasn't imported via
-    `moxfield_import` (older deck, or hand-built locally) so the iteration
-    loop still works on legacy decks. Returns `fallback` only if no
-    `Moxfield=` line exists AND no fallback is supplied; in that case raises
-    `ValueError` so callers can't silently drop into filename-as-id mode by
-    accident.
-    """
-    if not deck_path.exists():
-        if fallback is not None:
-            return fallback
-        raise ValueError(f"deck not found and no fallback: {deck_path}")
-    text = deck_path.read_text(encoding="utf-8")
-    m = _MOXFIELD_ID.search(text)
-    if m:
-        return m.group(1).strip()
-    if fallback is not None:
-        return fallback
-    # Last resort: filename stem (without .dck and bracket suffix). Stable
-    # within a session but breaks on rename.
-    return deck_path.stem
 
 
 @dataclass
@@ -224,7 +200,9 @@ def propose_then_iterate(
     proposer_input = ProposerInput(
         deck_path=old_path,
         bracket=bracket,
-        deck_id=resolve_deck_id(old_path, fallback=deck_filename),
+        deck_id=resolve_deck_id(
+            old_path, fallback=stable_deck_stem(deck_filename),
+        ),
     )
     manifest = propose(proposer_input, proposer_config).to_dict()
     _materialize_proposed_deck(old_path, new_path, manifest)
@@ -321,6 +299,7 @@ def run_one_iteration(
     # outcome. wins_old + wins_new is the quantity every verdict gate
     # counts and every writer can compute, so it is THE convention.
     decisive = cmp_report.old_stats.wins + cmp_report.new_stats.wins
+    sim_report_row = cmp_report.to_dict()
     if cmp_report.total_games == 0:
         reason = (
             f"sim produced no attributed games "
@@ -340,6 +319,7 @@ def run_one_iteration(
         win_rate_new = None
         margin = None
     else:
+        analyst_cfg = analyst_config or AnalystConfig()
         verdict = analyze(
             AnalystInput(
                 deck_name=deck_filename,
@@ -347,7 +327,22 @@ def run_one_iteration(
                 audit_manifest=audit_manifest,
                 sim_report=cmp_report.to_dict(),
             ),
-            config=analyst_config,
+            config=analyst_cfg,
+        )
+        # Verdict provenance (2026-09-03, R3 C-09). This was one of two
+        # verdict writers still stamping nothing (the other is
+        # improve_search's round), so an analyst row scored under an
+        # AnalystConfig override was indistinguishable from a default
+        # row. The analyst has no --sim-margin pre-filter, so ``margin``
+        # is the no-op 1 the other writers default to; ``rule`` names
+        # the analyst path that rendered the label (heuristic, or the
+        # LLM rung when one is wired) so an audit can tell them apart.
+        sim_report_row[SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
+            margin=1,
+            alpha=analyst_cfg.alpha,
+            min_decisive=analyst_cfg.min_decisive_games,
+            rule=(f"analyst.{verdict.source}: binomial_two_sided_p < alpha "
+                  f"over >= min_decisive decisive"),
         )
         # Draws AND filler wins are excluded from the denominator. If
         # every attributed game drew or went to a filler there is no
@@ -359,15 +354,25 @@ def run_one_iteration(
         # stay comparable across writers.
         win_rate_old = decisive_win_rate(cmp_report.old_stats.wins, decisive)
         win_rate_new = decisive_win_rate(cmp_report.new_stats.wins, decisive)
-        margin = cmp_report.new_stats.wins - cmp_report.old_stats.wins
+        # One margin convention (2026-09-03, R3 C-14): NULL when no game
+        # was decisive, through the shared helper every writer uses.
+        # This writer used to store new - old = 0 whenever total_games >
+        # 0, while the web writer and the backfill stored NULL for the
+        # same outcome — two meanings for one column inside one era.
+        margin = decisive_margin(
+            cmp_report.old_stats.wins, cmp_report.new_stats.wins,
+        )
 
     # Step 7: persist.
     snapshot_text = new_path.read_text(encoding="utf-8") if new_path.exists() else None
-    # Use the Moxfield publicId from the .dck metadata as the durable deck_id.
-    # Falls back to the filename if the deck pre-dates the Moxfield= metadata
-    # patch (legacy import). Either side of the v1/v2 pair carries the same
-    # publicId, so old_path is the canonical source.
-    deck_id = resolve_deck_id(old_path, fallback=deck_filename)
+    # Use the provenance id from the .dck metadata as the durable deck_id.
+    # Either side of the v1/v2 pair carries the same id, so old_path is
+    # the canonical source. The fallback is the VERSION-STRIPPED stem
+    # (2026-09-03, R3 C-08): the raw filename used to be passed here, so
+    # a legacy deck's v1->v2 row and its v2->v3 row were two "decks".
+    deck_id = resolve_deck_id(
+        old_path, fallback=stable_deck_stem(deck_filename),
+    )
     iteration_id = record_iteration(
         Iteration(
             deck_id=deck_id,
@@ -376,7 +381,7 @@ def run_one_iteration(
             parent_id=parent_iteration_id,
             audit_version=audit_manifest.get("audit_version", "v3"),
             audit_manifest=audit_manifest,
-            sim_report=cmp_report.to_dict(),
+            sim_report=sim_report_row,
             verdict=verdict.label,
             verdict_notes=verdict.reasoning,
             win_rate_old=win_rate_old,
@@ -391,6 +396,12 @@ def run_one_iteration(
         "kept": "continue",
         "reverted": "revert",
         "neutral": "stop",  # User decides; loop pauses by default.
+        # Below the decisive floor (2026-09-03, R3 C-01): the analyst now
+        # labels a sub-floor sim 'inconclusive' — the schema's own word
+        # for "measured, not decided" — instead of a trustworthy-looking
+        # 'neutral'. Nothing to iterate on; stop and let the user rerun
+        # with more games.
+        "inconclusive": "stop",
         # Sim failed outright (zero attributed games) — nothing empirical
         # happened, so the only sane move is to stop and let the user
         # investigate/re-run. Continuing would iterate on unverified data.

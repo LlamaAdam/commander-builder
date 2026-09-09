@@ -117,6 +117,7 @@ from typing import Callable, Optional
 
 from ._deck_judge_prompt import (
     DIMENSIONS,
+    JUDGE_PROMPT_VERSION,
     build_judge_prompt,
     changed_cards,
     classify_swap_direction,
@@ -278,6 +279,9 @@ class JudgeReport:
     model: Optional[str] = None
     caveat: str = OPINION_CAVEAT
     notes: list[str] = field(default_factory=list)
+    #: Prompt bytes this panel judged under (R3 F-05); None on older rows
+    #: so the agreement script never reads a prompt change as a deck change.
+    prompt_version: Optional[str] = None
 
     @property
     def valid_count(self) -> int:
@@ -384,6 +388,14 @@ def _parse_judgment(text: str, *, index: int, order: str) -> Judgment:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return Judgment(index=index, order=order, valid=False,
                             error=f"dimension {name!r} not numeric: {value!r}")
+        # Integers only (2026-09-03, R3 S-4): the prompt asks for
+        # ``<integer -2..2>``, and "strict, out-of-schema is discarded"
+        # has to mean the schema it printed. ``1.5`` used to pass. A
+        # float that IS a whole number (``2.0``, JSON from a client that
+        # renders every number that way) is accepted as that integer.
+        if isinstance(value, float) and not value.is_integer():
+            return Judgment(index=index, order=order, valid=False,
+                            error=f"dimension {name!r} not an integer: {value!r}")
         if not -2 <= float(value) <= 2:
             return Judgment(index=index, order=order, valid=False,
                             error=f"dimension {name!r} out of -2..2: {value!r}")
@@ -536,8 +548,9 @@ def judge_pairing(
     """
     deck_a_path = Path(deck_a_path)
     deck_b_path = Path(deck_b_path)
-    deck_a_text = deck_a_path.read_text(encoding="utf-8")
-    deck_b_text = deck_b_path.read_text(encoding="utf-8")
+    from .dck_utils import read_deck_text
+    deck_a_text = read_deck_text(deck_a_path)
+    deck_b_text = read_deck_text(deck_b_path)
     call = judge_fn or _default_judge_fn
 
     system = judge_system_prompt()
@@ -634,6 +647,7 @@ def judge_pairing(
         intent=intent.to_dict() if hasattr(intent, "to_dict") else None,
         model=model,
         notes=notes,
+        prompt_version=JUDGE_PROMPT_VERSION,
     )
 
 
@@ -733,6 +747,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="model id for the SDK path (default %(default)s; the "
              "subscription CLI path uses its own configured model)",
     )
+    # R3 F-01 (2026-09-03): the pilot's words had no CLI path before.
+    parser.add_argument("--preferences", default=None,
+                        help="the pilot's own words (free text, read as "
+                             "affirmative keywords; fenced data to the panel)")
+    parser.add_argument("--preferences-file", default=None,
+                        help="read --preferences text from a file instead")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
 
@@ -741,11 +761,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"commander-judge: no such deck: {path}", file=sys.stderr)
             return 2
 
+    from .intent import learn_intent, resolve_preferences
+    try:
+        preferences = resolve_preferences(args.preferences, args.preferences_file)
+    except OSError as exc:
+        print(f"commander-judge: cannot read --preferences-file: {exc}", file=sys.stderr)
+        return 2
+    if preferences and args.no_intent:
+        print("commander-judge: --preferences needs the intent anchor; drop --no-intent.", file=sys.stderr)
+        return 2
+
     learned = None
     if not args.no_intent:
         try:
-            from .intent import learn_intent
-            learned = learn_intent(args.deck_a)
+            learned = learn_intent(args.deck_a, pilot_preferences=preferences)
         except Exception as exc:  # noqa: BLE001 — the anchor is best-effort
             print(f"commander-judge: WARN: could not learn intent "
                   f"({type(exc).__name__}: {exc}); judging without it.",

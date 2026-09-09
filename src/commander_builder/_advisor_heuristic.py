@@ -598,7 +598,13 @@ def _heuristic_swap_recommendations(
     # but ARE archetype-appropriate for the deck. Without this,
     # the cut path would flag niche tribal/theme cards as
     # off-archetype. One iteration per tag page (tribe + themes).
+    # Free-text pages (``soft_bias`` — R3 F-03, 2026-09-03) are skipped
+    # here on purpose: they were fetched because a primer or the pilot
+    # SAID a theme, not because the list shows it, and letting them
+    # exempt cards from absence-cuts would turn prose into protection.
     for tp in tag_pages:
+        if getattr(tp, "soft_bias", False):
+            continue
         for c in tp.all_known_cards():
             edhrec_known.add(c)
 

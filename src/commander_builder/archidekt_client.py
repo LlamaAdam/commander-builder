@@ -381,8 +381,18 @@ def parse_deck_id(url_or_id: str) -> str:
     Mirrors ``moxfield_import.parse_deck_id`` so the two importer lanes
     take the same shape of user input.
     """
-    m = _DECK_URL_RE.search(url_or_id or "")
-    return m.group(1) if m else (url_or_id or "").strip()
+    text = (url_or_id or "").strip()
+    m = _DECK_URL_RE.search(text)
+    if m:
+        return m.group(1)
+    if text.isdigit():
+        return text
+    # R3 W-06 (2026-09-03): the raw input used to pass through and be
+    # spliced into ``/api/decks/<id>/``; an Archidekt id is digits only.
+    raise ValueError(
+        f"not an Archidekt deck URL or id: {text[:80]!r} (expected "
+        f"https://archidekt.com/decks/<number> or a bare number)"
+    )
 
 
 def fetch_deck(

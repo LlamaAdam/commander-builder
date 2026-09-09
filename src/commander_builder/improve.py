@@ -90,8 +90,9 @@ from .forge_runner import VENDOR_FORGE
 from .intent import (
     Intent,
     intent_protect_cards,
+    free_text_bias_slugs,
     learn_intent,
-    soft_bias_theme_slugs,
+    resolve_preferences,
 )
 # Imported (not duplicated) so the sub-threshold warning and the
 # --sim-games default can never drift from the verdict gate in
@@ -210,18 +211,22 @@ def _default_round_fn(deck_path: Path, round_no: int, args) -> RoundResult:
         argv += ["--protect", card]
     if args.protect_from:
         argv += ["--protect-from", args.protect_from]
-    # Soft-bias: pass the intent's themes as --intent-themes so the
-    # advisor candidate pool is ranked toward those EDHREC tag pages.
+    # Soft-bias: pass the intent's DERIVED themes as --intent-themes so
+    # the advisor candidate pool is ranked toward those EDHREC tag pages.
     # Only appended when the slug list is non-empty — the no-themes path
-    # must be identical to pre-Slice-A behavior. Since FP-018.2
-    # (2026-08-27) the list also carries slugs the intent's FREE TEXT
-    # (`stated` primer / `pilot_preferences`) mentions, appended AFTER
-    # the derived themes so the list's own evidence keeps the louder
-    # voice. Still soft by construction: the advisor only ADDS tag pages
-    # for these; it never filters a recommendation for missing them.
-    bias_slugs = soft_bias_theme_slugs(intent)
-    if bias_slugs:
-        argv += ["--intent-themes", ",".join(bias_slugs)]
+    # must be identical to pre-Slice-A behavior. Slugs the intent's FREE
+    # TEXT (`stated` primer / `pilot_preferences`) mentions travel on
+    # --free-text-themes instead (R3 F-03, 2026-09-03): as one list, the
+    # free-text slugs competed for the advisor's 4-page cap and evicted
+    # the tribe page (whose cards feed cut-protection); on their own flag
+    # they are fetched as EXTRA pages that rank adds and protect nothing.
+    derived_slugs = [s.strip() for s in (getattr(intent, "themes", None)
+                                         or []) if s.strip()]
+    if derived_slugs:
+        argv += ["--intent-themes", ",".join(dict.fromkeys(derived_slugs))]
+    free_text_slugs = free_text_bias_slugs(intent)
+    if free_text_slugs:
+        argv += ["--free-text-themes", ",".join(free_text_slugs)]
 
     buf = io.StringIO()
     try:
@@ -357,6 +362,25 @@ def _run_confirm_sim(base_path: Path, candidate_path: Path, args):
     return ab, fillers, None
 
 
+def _confirm_sim_completed(ab) -> bool:
+    """True only when a confirming A/B actually PLAYED: an ABResult with
+    ``status == 'done'``. ``None`` (no fillers) and any other status
+    ('failed' = crashed JVM, 'skipped' = no Forge) mean the gate's second
+    half never executed (R2-D3; R3 C-02, 2026-09-03). Both replication
+    sites — the round writer and the bandit evaluator — test THIS, so
+    the two cannot disagree on what "could not run" means."""
+    return ab is not None and getattr(ab, "status", None) == "done"
+
+
+def _confirm_sim_error(ab) -> str:
+    """The reason a non-completed confirm sim gives, for notes/records."""
+    if ab is None:
+        return "no confirming A/B result"
+    status = getattr(ab, "status", None) or "unknown"
+    err = getattr(ab, "error", None)
+    return f"confirm sim status={status!r}" + (f": {err}" if err else "")
+
+
 def _default_replicate_fn(
     base_path: Path,
     candidate_path: Path,
@@ -434,10 +458,22 @@ def _default_replicate_fn(
     )
 
     ab, _fillers, error = _run_confirm_sim(base_path, candidate_path, args)
-    if ab is None:
+    if not _confirm_sim_completed(ab):
         # R2-D3 (2026-08-20): 'inconclusive', not 'pending'. Run 1 is a
         # COMPLETED sim sitting in this row's sim_report; 'pending' means
         # "the sim didn't complete" and would contradict it.
+        #
+        # R3 C-02 (2026-09-03): this branch now also covers a confirm
+        # sim that STARTED and came back 'failed' (JVM crash) or
+        # 'skipped' (Forge not locatable) -- the case the docstring
+        # above always named. ``run_ab_simulation`` never raises; those
+        # outcomes are ABResults whose wins_a/wins_b/games are dataclass
+        # DEFAULTS of 0, and routing them through ``_verdict_from_ab``
+        # rewrote the completed row to 'pending' beside a structured
+        # ``replication`` record of fabricated zeros ("run 2 was a 0-0
+        # over 0 games"). Counts are None here, never 0: nothing was
+        # measured.
+        error = error or _confirm_sim_error(ab)
         rep = Replication(
             verdict="inconclusive", confirmed=False,
             notes=(f"replication_failed: confirming A/B could not run "
@@ -446,7 +482,10 @@ def _default_replicate_fn(
                    f"verdict; base NOT advanced"),
         )
         run2: dict = {"ran": False, "error": error, "verdict": rep.verdict,
-                      "confirmed": False}
+                      "confirmed": False,
+                      "status": getattr(ab, "status", None),
+                      "wins_old": None, "wins_new": None, "games": None,
+                      "decisive": None, "margin": None}
     else:
         verdict = _verdict_from_ab(ab, margin=args.sim_margin)
         wins_a = getattr(ab, "wins_a", None)
@@ -737,6 +776,12 @@ def _print_intent(intent: Intent) -> None:
         if len(intent.key_wincons) > 3:
             wc_preview += f" +{len(intent.key_wincons) - 3} more"
         parts.append(f"wincons=[{wc_preview}]")
+    # R3 F-01: say when free text is in play, so an operator can tell a
+    # primer-anchored run from a list-only one.
+    if intent.stated:
+        parts.append(f"primer={len(intent.stated.split())} words")
+    if intent.pilot_preferences:
+        parts.append(f"preferences={len(intent.pilot_preferences.split())} words")
     _safe_print(f"[improve] intent: {'; '.join(parts)}", flush=True)
 
 
@@ -916,7 +961,7 @@ def _log_bandit_pull(
         VERDICT_ALPHA,
         _ab_to_iteration_fields,
     )
-    from .iteration_loop import resolve_deck_id
+    from .deck_identity import resolve_deck_id, stable_deck_stem
     from .knowledge_log import (
         SIM_REPORT_REPLICATION_KEY,
         SIM_REPORT_VERDICT_PARAMS_KEY,
@@ -931,15 +976,19 @@ def _log_bandit_pull(
     # test suite's autouse isolation fixture redirect it. Freezing the
     # constant here would silently write to the production log.
     db_path = Path(args.db_path) if getattr(args, "db_path", None) else None
-    deck_id = resolve_deck_id(candidate, fallback=candidate.stem)
+    # The fallback is the VERSION-STRIPPED stem (2026-09-03, R3 C-08):
+    # the raw ``candidate.stem`` gains a version suffix on every accepted
+    # pull, so a publicId-less deck was keyed as a different deck per
+    # pull and every per-deck knowledge_log surface saw one-row decks.
+    deck_id = resolve_deck_id(
+        candidate, fallback=stable_deck_stem(candidate.name),
+    )
 
     # Chain within the run FIRST, then fall back to the deck's history.
-    # ``iterations_for_deck`` alone is enough when resolve_deck_id finds
-    # a stable publicId, but the fallback is the candidate's STEM, which
-    # gains a version suffix on every accepted pull -- so a
-    # publicId-less deck would start a fresh chain per pull. Carrying
-    # the id in ``state`` (the same dict that carries the advancing
-    # deck) makes the chain hold either way.
+    # ``iterations_for_deck`` is enough now that the id is stable across
+    # versions, but carrying the id in ``state`` (the same dict that
+    # carries the advancing deck) keeps the chain exact within one run
+    # even if two runs interleave on the same deck.
     parent_id = state.get("last_iteration_id")
     if parent_id is None:
         prior = iterations_for_deck(deck_id, db_path=db_path)
@@ -1160,10 +1209,17 @@ def _make_swap_evaluator(state: dict, args):
             # _default_replicate_fn (R2-D3, 2026-08-20): run 1 completed,
             # so 'pending' ("the sim didn't complete") would misdescribe
             # the pull. Either way it isn't 'kept', so the base stays put.
-            confirm_verdict = (
-                _verdict_from_ab(confirm_ab, margin=args.sim_margin)
-                if confirm_ab is not None else "inconclusive"
-            )
+            # R3 C-02 (2026-09-03): "couldn't run" includes a confirm
+            # that started and came back failed/skipped — same predicate
+            # as the round writer, so a crashed JVM here no longer prints
+            # "run 2 pending".
+            if _confirm_sim_completed(confirm_ab):
+                confirm_verdict = _verdict_from_ab(
+                    confirm_ab, margin=args.sim_margin,
+                )
+            else:
+                confirm_verdict = "inconclusive"
+                err = err or _confirm_sim_error(confirm_ab)
             if confirm_verdict != "kept":
                 # Non-advance, recorded as such: the arm keeps run 1's
                 # reward (a real measurement) but reports the second
@@ -1542,11 +1598,22 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--learn-intent", dest="learn_intent_path",
                    type=Path, default=None, metavar="DCK",
                    help="Path to a .dck file whose intent (archetype, themes, "
-                        "key win-cons) is learned before the improve loop "
-                        "starts. The intent's key win-cons are added to the "
-                        "protected-card list (auto-protect) and its themes "
-                        "serve as a soft bias on candidate adds. Intent is "
-                        "advisory: the win-margin objective remains primary.")
+                        "key win-cons, and its <stem>.primer.md sidecar as "
+                        "the stated free text) is learned before the improve "
+                        "loop starts. The intent's key win-cons are added to "
+                        "the protected-card list (auto-protect) and its "
+                        "themes serve as a soft bias on candidate adds. "
+                        "Intent is advisory: the win-margin objective remains "
+                        "primary.")
+    # R3 F-01 (2026-09-03): the pilot's own words had no CLI path.
+    p.add_argument("--preferences", default=None, metavar="TEXT",
+                   help="The pilot's own words about what they like doing "
+                        "(free text, read as AFFIRMATIVE keywords — a negated "
+                        "mention such as 'no tokens' contributes nothing). "
+                        "Implies --learn-intent on the deck being improved "
+                        "when --learn-intent is not given.")
+    p.add_argument("--preferences-file", default=None, metavar="PATH",
+                   help="Read --preferences text from a file instead.")
     args = p.parse_args(argv)
 
     # --health short-circuits: report the FP-013 gate counter and exit.
@@ -1702,6 +1769,17 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
     # Intent learning (Slice A): learn the deck's intent before the loop.
     # Defaults to None when --learn-intent is not supplied.
     args.intent: Optional[Intent] = None
+    try:
+        preferences = resolve_preferences(
+            getattr(args, "preferences", None),
+            getattr(args, "preferences_file", None))
+    except OSError as exc:
+        print(f"ERROR: cannot read --preferences-file: {exc}", flush=True)
+        return 2
+    if preferences and args.learn_intent_path is None:
+        # The pilot's words need an intent to ride on; the deck under
+        # improvement is the natural source (R3 F-01).
+        args.learn_intent_path = deck_path
     if args.learn_intent_path is not None:
         intent_src = args.learn_intent_path.resolve()
         if not intent_src.exists():
@@ -1710,7 +1788,7 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
         if not args.json:
             print(f"[improve] learning intent from {intent_src.name} ...", flush=True)
         try:
-            args.intent = learn_intent(intent_src)
+            args.intent = learn_intent(intent_src, pilot_preferences=preferences)
             if not args.json:
                 _print_intent(args.intent)
         except Exception as exc:  # noqa: BLE001 — intent is advisory

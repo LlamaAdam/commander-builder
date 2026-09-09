@@ -16,7 +16,11 @@ Public API:
     #     "commander": {"name": ..., "type_line": ..., "color_identity": [...]},
     #     "deck_progress": {"current": 99, "target": 100},
     #     "stat_tiles": {"avg_cmc": 2.84, "lands": 37,
-    #                    "power_level": 7, "est_price_usd": 284.0},
+    #                    "power_level": 7, "est_price_usd": 284.0,
+    #                    "n_priced_cards": 60, "n_unpriced_cards": 2,
+    #                    "unpriced_cards": [{"name": ..., "qty": 1,
+    #                                        "reason": ...}],
+    #                    "price_partial": True},
     #     "mana_curve": [(0, 4), (1, 11), (2, 17), ...],
     #     "categories": {"ramp": 12, "draw": 10, "removal": 8, ...},
     #     "theme_tags": ["Landfall", "Counters"],
@@ -52,7 +56,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from . import dck_utils  # R3 W-04: the one tolerant .dck reader
 from .archetype import classify as _classify_archetype_path
+from .price_status import price_status, report_unpriced
 from .scryfall_client import lookup_card, _parse_commander_names_from_dck
 from .staples import (
     UNIVERSAL_STAPLES_LC,
@@ -91,19 +97,12 @@ __all__ = [
 def _extract_price_usd(card_data: dict | None) -> Optional[float]:
     """Pull ``prices.usd`` from a Scryfall card dict. Returns None when
     Scryfall didn't return a price (digital-only cards, just-released
-    sets) — caller treats absent prices as 0 for aggregation."""
-    if not card_data:
-        return None
-    prices = card_data.get("prices")
-    if not isinstance(prices, dict):
-        return None
-    raw = prices.get("usd")
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
+    sets) — caller treats absent prices as 0 for aggregation.
+
+    Delegates to ``price_status`` (2026-09-09) so the tile and the
+    web pricing helpers agree on what "unpriced" means; the tile loop
+    below reads the reason too so it can NAME the unpriced cards."""
+    return price_status(card_data)[0]
 
 
 # --- Power-level heuristic --------------------------------------------
@@ -241,7 +240,7 @@ def _read_main_with_quantities(deck_path: Path) -> list[tuple[str, int]]:
     if not deck_path.exists():
         return out
     in_main = False
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
+    for raw in dck_utils.read_deck_text(deck_path).splitlines():
         line = raw.strip()
         if not line:
             continue
@@ -343,6 +342,14 @@ def build_dashboard(
     lands = 0
     total_price = 0.0
     cards_with_price = 0
+    # Cards that contributed nothing to the total, with the reason —
+    # surfaced on the tile as "N unpriced (partial)" so a snapshot
+    # with no prices block (the shared dir's trimmed schema, audit open
+    # bug 2) can no longer shorten the total silently. Lands are
+    # excluded from the tile's price math above and are therefore not
+    # counted here either.
+    cards_without_price = 0
+    unpriced_cards: list[dict] = []
     role_counts: dict[str, int] = {}
     curve_buckets: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
     # Per-deck creature-subtype frequency. We piggyback on the main
@@ -376,10 +383,15 @@ def build_dashboard(
             bucket = int(cmc_val) if cmc_val < 6 else 6
             curve_buckets[bucket] = curve_buckets.get(bucket, 0) + qty
         # Price.
-        price = _extract_price_usd(data)
+        price, unpriced_reason = price_status(data)
         if price is not None:
             total_price += price * qty
             cards_with_price += qty
+        else:
+            cards_without_price += qty
+            unpriced_cards.append(
+                {"name": name, "qty": qty, "reason": unpriced_reason},
+            )
         # Role classification.
         if not is_land:
             role = classify_role_extended(oracle_text, type_line)
@@ -400,6 +412,8 @@ def build_dashboard(
                     subtype_counts[sub] = subtype_counts.get(sub, 0) + qty
             except (IndexError, AttributeError):
                 pass
+
+    report_unpriced(unpriced_cards, where="dashboard tile")
 
     avg_cmc = round(sum(cmcs) / len(cmcs), 2) if cmcs else 0.0
     n_game_changers = _count_game_changers(deck_card_names)
@@ -483,7 +497,7 @@ def build_dashboard(
     # Pull the (Moxfield publicId) metadata line if present.
     moxfield_url: Optional[str] = None
     try:
-        text = deck_path.read_text(encoding="utf-8")
+        text = dck_utils.read_deck_text(deck_path)
         m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
         if m:
             mox_id = m.group(1).strip()
@@ -583,7 +597,7 @@ def build_dashboard(
     try:
         from .bracket_estimator import estimate_bracket
         bracket_estimate = estimate_bracket(
-            deck_path.read_text(encoding="utf-8"),
+            dck_utils.read_deck_text(deck_path),
             declared=bracket,
             avg_cmc=avg_cmc or None,
             archetype=archetype if archetype != "unknown" else None,
@@ -634,6 +648,11 @@ def build_dashboard(
             "n_game_changers": n_game_changers,
             "est_price_usd": round(total_price, 2),
             "n_priced_cards": cards_with_price,
+            # Partial-total signal (2026-09-09): the UI labels the tile
+            # "partial" and lists these names when any is unpriced.
+            "n_unpriced_cards": cards_without_price,
+            "unpriced_cards": unpriced_cards,
+            "price_partial": cards_without_price > 0,
         },
         mana_curve=mana_curve,
         categories=categories,

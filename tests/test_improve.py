@@ -2052,3 +2052,73 @@ def test_default_judge_round_writes_beside_the_sim_verdict(tmp_path, monkeypatch
     assert stored.judge_verdict == "kept"
     assert stored.verdict == "neutral"      # the sim's column, untouched
     assert stored.judge_report["votes"]["b"] == 6
+
+
+# --- R3 C-02 (2026-09-03): a confirm sim that RUNS and FAILS ---------------
+#
+# R2-D3 said a confirming sim that could not run gets 'inconclusive'; the
+# code tested only ``ab is None`` (no fillers). A crashed JVM comes back as
+# ``ABResult(status='failed')`` with dataclass-default zeros, went through
+# _verdict_from_ab -> 'pending', and rewrote the COMPLETED row to pending
+# beside a structured replication record of fabricated zeros.
+
+@pytest.mark.parametrize("status", ["failed", "skipped"])
+def test_failed_confirmation_labels_the_row_inconclusive_not_pending(
+    tmp_path, monkeypatch, status,
+):
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY, get_iteration,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    failed = _RepAB(0, 0, status=status, games=0)
+    failed.error = "jvm died"
+    _patch_confirm_sim(monkeypatch, failed)   # two fillers: the sim STARTS
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    rep = improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+    assert rep.verdict == "inconclusive"
+    assert rep.confirmed is False
+    assert "jvm died" in rep.notes
+
+    row = get_iteration(iid, db_path=db)
+    assert row.verdict == "inconclusive"
+    assert row.sim_report["status"] == "done"       # run 1 untouched
+    run2 = row.sim_report[SIM_REPORT_REPLICATION_KEY]
+    assert run2["ran"] is False
+    assert run2["status"] == status
+    # None, never fabricated zeros: nothing was measured.
+    assert run2["wins_old"] is None and run2["wins_new"] is None
+    assert run2["games"] is None and run2["decisive"] is None
+    assert run2["margin"] is None
+
+
+def test_bandit_failed_confirmation_is_inconclusive_too(
+    monkeypatch, tmp_path, capsys,
+):
+    """Same predicate on the bandit path: a confirm that came back
+    'failed' used to print "run 2 pending"."""
+    args = _eval_args(replicate=True)
+    state, base, _cand, _ = _make_eval(
+        monkeypatch, tmp_path, ab=None, args=args)
+    sims = iter([_AB(15, 30, games=45),
+                 _AB(0, 0, status="failed", error="jvm died", games=0)])
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: next(sims),
+    )
+    monkeypatch.setattr(
+        "commander_builder._proposer_sim._pick_filler_decks",
+        lambda deck_dir, exclude_paths, count, target_bracket: ["f1.dck", "f2.dck"],
+    )
+    evaluate = improve._make_swap_evaluator(state, args)
+
+    out = evaluate(_arm())
+    assert out.accepted is False
+    assert out.verdict == "inconclusive"
+    assert state["deck"] == base
+    err = capsys.readouterr().err
+    assert "run 2 inconclusive" in err and "jvm died" in err

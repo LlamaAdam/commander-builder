@@ -2,15 +2,24 @@
 
 > Consolidated 2026-05-26 from the per-FP plan docs; **reordered
 > 2026-07-25** — active / work-needed items at the top, shipped or
-> fully-parked reference material at the bottom. **STATUS.md -> Parked
-> plans is the authoritative status**; this file collects the detailed
-> findings/plans in one place.
+> fully-parked reference material at the bottom. **The dated Status
+> line under each FP heading here is authoritative for that FP; STATUS.md
+> holds the ranked queue and the parked-plans rationale** (corrected
+> 2026-09-09 — STATUS.md had drifted behind this file twice).
 
 ---
 
 # ── ACTIVE / WORK NEEDED ──────────────────────────────────────────────
 
 # FP-018 — Adopt a deck: primer-guided understanding + gentle personalization
+
+**Status (2026-09-09): slices 018.1–018.3 SHIPPED 2026-08-27 (PR #83);
+018.4 corpus DONE (two batches, 62 decks — study in mtga-advisor
+`PRIMER_CORPUS.md`). Round-3 review (2026-09-03) found the shipped
+018.2 had no production writer, DFC card-links never matched the
+front-face `.dck` names, and the Moxfield lane wrote no sidecar — all
+corrected in PR #86 (F-01…F-18). Open owner decision R3-D1: whether
+PR #85's removal of primer card-link auto-Protect stands.**
 
 Owner, 2026-08-27: "the primer could let someone use a deck and
 understand it and do small modifications on that deck list to what they
@@ -27,7 +36,7 @@ with the overhaul path structurally off the table.
 |---|---|
 | Primer arrives with the deck | `archidekt_client` captures `description` (Quill Delta JSON — parser needed, shape pinned by `tests/fixtures/hazel_primer.md`) |
 | "Small, not crazy" | `change_budget` polish tier; the rebuild tier is ALREADY opt-in (decision C4) |
-| "Don't touch the identity" | `Protect=` + `intent.key_wincons` auto-protection; politics guard |
+| "Don't touch the identity" | `Protect=` + primer card-link auto-protection as shipped at master (the earlier "`intent.key_wincons` auto-protection" wording described a mechanism adopt never had — round-3 PR-06); R3-D1 decides whether the auto-protect stays |
 | "What the pilot likes" | `intent` themes soft-bias the advisor's candidate pool; `deck_builder_personalize` (FP-014.3) already does like-for-like preference passes under the 99/CI/singleton invariants |
 | "Is this change true to the deck" | `deck_judge` (observe-only) judges against intent — needs the free-text field its boundary tests were built to force a decision on |
 
@@ -211,11 +220,12 @@ signal predicts margin" should be low.
 
 # FP-015 — Unified per-card scoring formula (`CardScore`)
 
-**Status (2026-08-03): SHIPPED behind default-off flag; whole-ordering
-validation CONCLUDED (gate FAIL 2026-07-28 and 2026-07-31 — see the
-dated GATED RESULT sections); per-swap validation harness BUILT
-(PR #63) with its gated run IN FLIGHT — the flag's fate rides on that
-result. `COMMANDER_BUILDER_CARD_SCORE` remains default-off.**
+**Status (2026-09-09, superseding the 2026-08-03 line): CLOSED.
+Whole-ordering validation failed its gate twice (2026-07-28,
+2026-07-31) and the per-swap pooled gate FAILED on 2026-08-05 with a
+negative rho — see "FP-015 FINAL" below. `COMMANDER_BUILDER_CARD_SCORE`
+stays default-off; the code and the harness remain for a replication
+of box2b's arm or a new pre-registered design, nothing is in flight.**
 Original implementation note (2026-07-25): The spec below (2026-07-24) was
 implemented alongside the build-order items from
 `docs/archive/REVIEW-2026-07-24.md`: `card_score.py`
@@ -1555,14 +1565,34 @@ failure; `iter_cached_names` single-field parse; collection file
 read-once per build; `deck_pricing` single deck walk.
 
 **Open bugs from the audit (not perf)**
-1. WotC Game Changers scrape broken in production — every process serves
+1. ~~WotC Game Changers scrape broken in production — every process serves
    the bundled `_FALLBACK` list; parser needs updating for the current
-   page structure, and the divergence alarm only goes to stderr.
-2. Mixed snapshot schema in the shared oracle cache dir — trimmed
+   page structure.~~ *Fixed 2026-09-09:* the page is client-rendered and
+   the list lives in a JS payload; `game_changers` now parses that payload
+   first (legacy `<li>` scan kept as the fallback shape), pinned against a
+   verbatim CI capture of the live page — 53 names, identical to the
+   bundled list, trusted. The fallback path had already been made loud
+   (round-3 F-15).
+2. ~~Mixed snapshot schema in the shared oracle cache dir — trimmed
    `forge_py` snapshots lack `prices`, silently dropping cards from
-   `deck_pricing` totals.
-3. `tests/conftest.py` has no network-blocking autouse fixture — unpatched
-   lookup paths can still make live HTTP calls in tests.
+   `deck_pricing` totals.~~ *Fixed 2026-09-09:* the reader side —
+   `price_status` (core) + `deck_pricing.price_deck_text` count and NAME
+   every unpriced card with a reason, flag the total `partial`, and print
+   one loud `[pricing]` line for the trimmed-schema case; the dashboard
+   tile, audit payload, `save_iteration` row and `commander-status` all
+   carry/render the partial label. The trimmed writer is `forge_py`'s
+   (not in this repo); every writer here persists the full object and is
+   now pinned to keep doing so. The schema stays mixed until forge_py's
+   writer keeps `prices` — the reader tolerates it indefinitely.
+3. ~~`tests/conftest.py` has no network-blocking autouse fixture — unpatched
+   lookup paths can still make live HTTP calls in tests.~~ *Fixed
+   2026-09-09:* autouse `network_block` refuses every non-loopback connect
+   (loud error naming test + host; teardown failure when a degrade guard
+   swallowed it), strips the loopback egress proxy, honors `live` +
+   `--run-live`. Every test that tripped it was fixed at the module seams
+   (shared `offline_scryfall` / `offline_edhrec` / `offline_game_changers`
+   fixtures); the three `test_deck_builder` cases dropped from 34-44 s to
+   milliseconds.
 
 ---
 

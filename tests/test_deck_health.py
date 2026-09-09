@@ -22,6 +22,12 @@ import pytest
 
 from commander_builder import deck_health
 
+# Offline at the module seams (audit open bug 3, 2026-09-09): under the suite-
+# wide network block the pipelines these tests drive were reaching Scryfall
+# behind degrade guards. The shared fixtures make those upstreams miss
+# instantly; a test wanting a specific answer patches over them.
+pytestmark = pytest.mark.usefixtures("offline_scryfall")
+
 
 # ---------------------------------------------------------------------------
 # _iter_main_cards -- parse [Main] section into (qty, name) tuples

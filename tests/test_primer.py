@@ -106,11 +106,19 @@ def test_invalid_json_degrades_to_plain_text_never_raises():
     assert parse_primer(broken).was_delta is False
 
 
-def test_valid_json_that_is_not_a_delta_stays_verbatim():
-    for weird in ('[1, 2, 3]', '42', '{"not_ops": []}', '{"ops": "nope"}'):
+def test_valid_json_that_is_not_a_delta_is_refused(tmp_path):
+    """Re-pinned 2026-09-03 (R3 F-14). This test used to assert the
+    literal passed through VERBATIM — so ``[1, 2, 3]`` became a sidecar
+    whose primer said ``[1, 2, 3]``. A JSON literal / alien object is not
+    the author's words; it parses to the honest empty primer and never
+    writes a file."""
+    for weird in ('[1, 2, 3]', '42', 'null', '0', '{"not_ops": []}',
+                  '{"ops": "nope"}'):
         parsed = parse_primer(weird)
-        assert parsed.text == weird, weird
+        assert parsed.text == "" and parsed.card_links == [], weird
         assert parsed.was_delta is False
+        assert write_primer_sidecar(_deck(tmp_path), weird) is None
+    assert not list(tmp_path.glob("*.primer.md"))
 
 
 def test_json_encoded_bare_string_is_decoded():
@@ -248,3 +256,137 @@ def test_quoted_win_lines_empty_for_no_primer_or_no_win_talk():
 def test_quoted_win_lines_respects_the_limit(n):
     text = "we win here\n\nwe combo there\n\ninfinite squirrels\n\nplain"
     assert len(quoted_win_lines(text, limit=n)) == n
+
+
+# --------------------------------------------------------------------------- #
+# R3 F-07 / F-08 / F-14 (2026-09-03) — sidecar identity, overwrite rules,
+# machine-block encoding
+# --------------------------------------------------------------------------- #
+
+def test_sidecar_header_records_the_source_and_readers_strip_it(tmp_path):
+    from commander_builder.primer import sidecar_identity
+
+    deck = _deck(tmp_path)
+    write_primer_sidecar(deck, _hazel_delta(), source_id="archidekt:24864897")
+    ident = sidecar_identity(deck)
+    assert ident["source"] == "archidekt:24864897"
+    assert len(ident["sha256"]) == 64
+    text = read_primer_sidecar(deck)
+    assert "primer-source" not in text and "sha256" not in text
+    assert "sacrifice theme" in text
+
+
+def test_same_source_refreshes_only_when_the_words_changed(tmp_path):
+    """R3 F-08: the CHANGELOG's "refuse-clobber" meant naming; the file was
+    overwritten on every re-pull and hand notes vanished silently. Now an
+    unchanged upstream leaves the file alone (hand notes survive) and a
+    changed one refreshes it — and the caller is told which."""
+    from commander_builder.primer import store_primer_sidecar
+
+    deck = _deck(tmp_path)
+    first = store_primer_sidecar(deck, '{"ops": [{"insert": "old words"}]}',
+                                 source_id="abc")
+    assert first.action == "written"
+    sc = primer_sidecar_path(deck)
+    sc.write_text(sc.read_text(encoding="utf-8") + "\nMY NOTES\n",
+                  encoding="utf-8")
+    again = store_primer_sidecar(deck, '{"ops": [{"insert": "old words"}]}',
+                                 source_id="abc")
+    assert again.action == "unchanged"
+    assert "MY NOTES" in read_primer_sidecar(deck)
+    changed = store_primer_sidecar(deck, '{"ops": [{"insert": "new words"}]}',
+                                   source_id="abc")
+    assert changed.action == "refreshed"
+    assert read_primer_sidecar(deck) == "new words"
+
+
+def test_another_sources_sidecar_is_never_clobbered(tmp_path):
+    """R3 F-07: delete deck A in the web UI, import deck B whose name
+    sanitizes to the same stem — B must not inherit (or overwrite) A's
+    primer. The write is refused with a reason; the readers report the
+    mismatch against the deck's own id."""
+    from commander_builder.primer import (
+        sidecar_identity_warning, store_primer_sidecar,
+    )
+
+    deck = _deck(tmp_path)
+    store_primer_sidecar(deck, '{"ops": [{"insert": "deck A primer"}]}',
+                         source_id="archidekt:111")
+    res = store_primer_sidecar(deck, '{"ops": [{"insert": "deck B primer"}]}',
+                               source_id="zzz")
+    assert res.action == "refused" and "archidekt:111" in res.reason
+    assert read_primer_sidecar(deck) == "deck A primer"
+    # The deck on disk is B (Moxfield=zzz): the sidecar does not belong.
+    deck.write_text("[metadata]\nName=[USER] Hazel [B3]\nMoxfield=zzz\n"
+                    "[Main]\n1 Sol Ring\n", encoding="utf-8")
+    warn = sidecar_identity_warning(deck)
+    assert warn and "archidekt:111" in warn and "'zzz'" in warn
+    # A matching deck: no warning. A deck with no id at all: warned too.
+    deck.write_text("[metadata]\nArchidekt=111\n[Main]\n1 Sol Ring\n",
+                    encoding="utf-8")
+    assert sidecar_identity_warning(deck) is None
+    deck.write_text("[Main]\n1 Sol Ring\n", encoding="utf-8")
+    assert "carries no Moxfield=" in sidecar_identity_warning(deck)
+
+
+def test_pre_r3_sidecar_without_a_header_still_reads(tmp_path):
+    from commander_builder.primer import sidecar_identity, sidecar_identity_warning
+
+    deck = _deck(tmp_path)
+    primer_sidecar_path(deck).write_text(
+        "<!-- primer-card-links (exact names from the source's card-link "
+        "embeds; FP-018.3 auto-protect input)\nSol Ring\n-->\n\nold style\n",
+        encoding="utf-8")
+    assert read_primer_sidecar(deck) == "old style"
+    assert read_primer_card_links(deck) == ["Sol Ring"]
+    assert sidecar_identity(deck) is None
+    assert sidecar_identity_warning(deck) is None
+
+
+def test_card_link_names_with_newlines_or_arrows_round_trip(tmp_path):
+    """R3 F-14: a link carrying a newline or the literal ``-->`` used to
+    break the block's regex (``['Sol', 'Ring']``). Links are JSON-encoded
+    one per line now."""
+    deck = _deck(tmp_path)
+    ops = [{"insert": "text "}]
+    for n in ("Sol\nRing", "-->", "Good Ramp"):
+        ops += [{"insert": {"card-link": n}}, {"insert": " "}]
+    write_primer_sidecar(deck, json.dumps({"ops": ops}))
+    assert read_primer_card_links(deck) == ["Sol\nRing", "-->", "Good Ramp"]
+    assert "primer-card-links" not in read_primer_sidecar(deck)
+
+
+# --------------------------------------------------------------------------- #
+# R3 F-12 (2026-09-03) — win lines: word-bounded, heading-aware
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("prose", [
+    "The winds of change blow.", "Open a window.", "Twincast copies.",
+    "Loophole in the rules.", "Windgrace's Judgment.", "Winter Orb locks.",
+    "Growing threats.", "Darwin's Vault",
+])
+def test_quoted_win_lines_are_word_bounded(prose):
+    assert quoted_win_lines(prose) == []
+
+
+def test_quoted_win_lines_quote_the_paragraph_under_a_win_heading():
+    """The real deep primers (PRIMER_CORPUS.md Appendix A) put the win
+    line under a bare 'Win Conditions' heading; the old scan quoted the
+    heading itself and skipped bodies with no keyword."""
+    text = ("General Strategy\nWe ramp and draw.\n\n"
+            "Win Conditions\nJolrael makes Cat tokens as Baba draws; "
+            "Bogbeast pumps the team for lethal.\n\n"
+            "Weak Points\nLifegain is brutal against this deck.\n\n"
+            "MVP Cards\n")
+    quotes = quoted_win_lines(text)
+    assert quotes == ["Jolrael makes Cat tokens as Baba draws; Bogbeast "
+                      "pumps the team for lethal."]
+
+
+def test_quoted_win_lines_never_silence_prose_for_what_it_mentions():
+    """Reconciled with PR #85's rewrite (PR-03): no word list turns an
+    in-sentence 'maybeboard' into a heading, so a win line that mentions
+    one is still quoted."""
+    text = ("I keep Sol Ring in the maybeboard. We win with Kiki-Jiki and "
+            "Zealous Conscripts.")
+    assert quoted_win_lines(text) == [text]

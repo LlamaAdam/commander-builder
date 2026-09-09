@@ -5,11 +5,17 @@ Phase 2's "did this swap actually help?" voice. Inputs are a
 output is a structured verdict the iteration loop uses to decide whether to
 keep the swap, revert it, or treat as neutral.
 
-Verdict taxonomy:
+Verdict taxonomy (the knowledge_log vocabulary — see its schema docstring):
 
-  "kept"      — sim shows clear improvement; swap stays
-  "reverted"  — sim shows regression; old version restored
-  "neutral"   — within noise threshold; user decides
+  "kept"         — sim shows clear improvement; swap stays
+  "reverted"     — sim shows regression; old version restored
+  "neutral"      — measured at a trustworthy sample size, within noise;
+                   user decides
+  "inconclusive" — fewer than MIN_DECISIVE_GAMES_FOR_VERDICT head-to-head
+                   decisive games: measured, but the evidence does not
+                   support a decision (2026-09-03, R3 C-01 — this path
+                   used to label that case "neutral", which the schema
+                   defines as the OPPOSITE claim: a trustworthy near-tie)
 
 The analyst itself is just a function. It has two live implementations and
 one retired one:
@@ -122,7 +128,7 @@ class AnalystInput:
 
 @dataclass
 class Verdict:
-    label: str               # "kept" | "reverted" | "neutral"
+    label: str               # "kept" | "reverted" | "neutral" | "inconclusive" | "pending"
     confidence: float        # 0-1
     reasoning: str           # human-readable explanation
     lessons: list[str] = field(default_factory=list)  # transferable observations
@@ -264,7 +270,17 @@ def heuristic_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     always >= 1 - alpha = 0.95, above the router's 0.75 escalation bar,
     same role the old fixed 0.85 played. Non-significant splits stay
     "neutral" at 0.4 (below the bar, so the router may escalate to an
-    LLM) and the draws-dominated/inconclusive gate stays at 0.3."""
+    LLM) and the draws-dominated/inconclusive gate stays at 0.3.
+
+    Label on the floor branch (2026-09-03, R3 C-01): "inconclusive", the
+    knowledge_log vocabulary's word for "fewer than the decisive floor".
+    It used to be "neutral" — defined there as "measured at a
+    trustworthy sample size, no significant difference" — so every
+    default ``commander-iterate`` run (20 pod games, ~10 decisive)
+    landed in the per-deck tallies as a trustworthy-looking near-tie,
+    and >= 40-game runs below the floor counted toward the FP-013
+    training gate as decided verdicts. ``_proposer_sim._verdict_from_ab``
+    already returned "inconclusive" for the same outcome."""
     sim = input_.sim_report
     old_wins = sim.get("old_stats", {}).get("wins", 0)
     new_wins = sim.get("new_stats", {}).get("wins", 0)
@@ -277,7 +293,7 @@ def heuristic_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
     # signal (draws and filler-seat wins took the rest).
     if decisive < config.min_decisive_games:
         return Verdict(
-            label="neutral",
+            label="inconclusive",
             confidence=0.3,
             reasoning=(
                 f"Inconclusive: only {decisive}/{total} games were decisive "
@@ -352,7 +368,7 @@ render a structured verdict.
 
 Output JSON ONLY (no prose, no markdown). Schema:
 {
-  "label": "kept" | "reverted" | "neutral",
+  "label": "kept" | "reverted" | "neutral" | "inconclusive",
   "confidence": 0.0-1.0,
   "reasoning": "one paragraph explaining the verdict",
   "lessons": ["transferable observation 1", "..."]
@@ -371,9 +387,10 @@ significant, p~0.01; 12-8 over 20 is NOT, p~0.5 — a coin would do that \
 half the time). A meaningful qualitative gain (avg ending life much \
 higher, fewer eliminations) can also justify "kept".
 - "reverted": signed_margin < 0 under the same significance standard.
-- "neutral": the split is within binomial noise for the sample size, OR \
-the sim was inconclusive (few h2h_decisive games: most games drew or \
-went to filler seats).
+- "neutral": the split is within binomial noise for the sample size at \
+a trustworthy h2h_decisive count (20 or more).
+- "inconclusive": fewer than 20 h2h_decisive games (most games drew or \
+went to filler seats), so no verdict can be read regardless of the split.
 
 Confidence: 0.85+ for statistically clear signals; 0.5-0.7 for noisy \
 cases; below 0.5 when the sim itself doesn't carry signal (e.g. >50% \
@@ -512,7 +529,10 @@ def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
 
     parsed = _parse_verdict_payload(text, "claude_verdict")
     label = parsed.get("label", "neutral")
-    if label not in {"kept", "reverted", "neutral"}:
+    # "inconclusive" accepted since 2026-09-03 (R3 C-01) — the LLM rung
+    # is asked for it on sub-floor sims, and coercing it to "neutral"
+    # would reintroduce exactly the mislabel the heuristic just lost.
+    if label not in {"kept", "reverted", "neutral", "inconclusive"}:
         label = "neutral"
     return Verdict(
         label=label,

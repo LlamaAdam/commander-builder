@@ -14,6 +14,16 @@ flask = pytest.importorskip("flask")  # skip if [web] extra not installed
 
 from commander_builder.web.app import create_app, _list_decks, _resolve_deck_path
 
+# The route handlers fan out to Scryfall (paths that bind
+# ``lookup_card`` at import time and so bypass the ``client``
+# fixture's attribute patch), the EDHREC salt list and the WotC
+# game-changer scrape. Under the suite-wide network block (audit open
+# bug 3, 2026-09-09) every such fetch misses instantly at the module
+# seams; tests wanting a specific upstream answer patch over these.
+pytestmark = pytest.mark.usefixtures(
+    "offline_scryfall", "offline_edhrec", "offline_game_changers",
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -6518,14 +6528,17 @@ def test_win_rate_convention_null_when_no_decisive_games(
 
     # Writer 1 — the sim RAN (games > 0) but nothing was decisive: the
     # win_rate keys are omitted so update_iteration_sim leaves the
-    # columns NULL; margin (a real observed 0) is still recorded.
+    # columns NULL. Since 2026-09-03 (R3 C-14) margin follows the SAME
+    # rule -- it used to be written as a literal 0 here while the web
+    # writer and the backfill wrote NULL, two conventions for one
+    # column; "no decisive game" is an absence, not an observed tie.
     fields = _ab_to_iteration_fields(ABResult(
         deck_a="a.dck", deck_b="b.dck",
         wins_a=0, wins_b=0, games=5, status="done",
     ))
     assert "win_rate_old" not in fields
     assert "win_rate_new" not in fields
-    assert fields["margin"] == 0
+    assert "margin" not in fields
 
     # Writer 2 — all 20 attributed games drew.
     v1_name, v2_name = _stage_iteration_loop_decks(tmp_path, monkeypatch)
@@ -6685,6 +6698,47 @@ def test_save_iteration_accepts_zero_price(save_client):
     assert resp.status_code == 200
     detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
     assert detail["audit_manifest"]["pricing"]["total_price_usd"] == 0.0
+
+
+def test_save_iteration_records_price_partial_marker(save_client):
+    """Audit open bug 2 (2026-09-09): a total the client computed with
+    some cards unpriced must stay labeled in the log, so the cost-over-
+    time series and ``commander-status`` never present it as whole."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 42.0, "price_partial": True,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert detail["audit_manifest"]["pricing"]["total_price_usd"] == 42.0
+    assert detail["audit_manifest"]["pricing"]["partial"] is True
+
+
+def test_save_iteration_omits_partial_marker_for_a_whole_total(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 42.0, "price_partial": False,
+        "verdict": "pending",
+    })
+    assert resp.status_code == 200
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert "partial" not in detail["audit_manifest"]["pricing"]
+
+
+def test_save_iteration_400_on_non_bool_price_partial(save_client):
+    """Same boundary discipline as total_price_usd: a string "true" is
+    rejected, never coerced."""
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "total_price_usd": 42.0, "price_partial": "true",
+        "verdict": "pending",
+    })
+    assert resp.status_code == 400
+    assert "price_partial" in resp.get_json()["error"]
 
 
 def test_save_iteration_rejects_negative_price(save_client):
@@ -7172,6 +7226,55 @@ def test_audit_payload_includes_price_delta(client, monkeypatch):
     # padding allowance. If this fails, the audit is leaking a
     # huge price somewhere.
     assert body["price_delta_usd"] < 20
+
+
+def test_audit_payload_names_unpriced_cards_and_flags_partial(client, monkeypatch):
+    """Audit open bug 2 (2026-09-09): a card whose oracle snapshot has no
+    ``prices`` block (the shared dir's trimmed schema) used to be dropped
+    from the audit's cost totals without a trace. The payload now names
+    it on each side with the reason and flags ``price_partial`` so the
+    UI labels the total partial instead of presenting it as whole."""
+    from types import SimpleNamespace
+
+    def fake_lookup(name, *_a, **_kw):
+        if name == "Cultivate":
+            # forge_py's trimmed shape: oracle fields, no prices block.
+            return {"type_line": "Sorcery", "oracle_text": "Search..."}
+        prices = {"Lotus Cobra": "10.00", "Forest": "0.05", "Test Cmdr": "1.00"}
+        if name in prices:
+            return {"prices": {"usd": prices[name]}}
+        return None
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", fake_lookup,
+    )
+
+    def fake_advise(deck_path, bracket, **_kwargs):
+        return SimpleNamespace(
+            recommendations=[
+                SimpleNamespace(
+                    card="Lotus Cobra", action="add",
+                    reason="upgrade", evidence={}, name_known=True,
+                ),
+            ],
+            diagnosis=SimpleNamespace(pattern_summary="", weakness_signals=[]),
+            source="heuristic", fallback_reason=None,
+        )
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.advise", fake_advise,
+    )
+    body = client.get("/api/audit?deck=Alpha&bracket=3").get_json()
+    # The Alpha deck runs 5 Cultivate; the audit cuts none of them here,
+    # so both sides are short by the same trimmed card.
+    assert body["price_partial"] is True
+    assert body["unpriced_cards_original"] == [
+        {"name": "Cultivate", "qty": 5,
+         "reason": "snapshot has no prices block"},
+    ]
+    assert {u["name"] for u in body["unpriced_cards_proposed"]} == {"Cultivate"}
+    # The historical fields keep their meaning alongside the new ones.
+    assert body["original_price_usd"] is not None
+    assert body["n_priced_cards_original"] == 36  # 35 Forest + commander
+    assert body["price_delta_usd"] is not None
 
 
 def test_audit_payload_surfaces_unapplied_adds_when_no_cuts(client, monkeypatch):
@@ -8017,3 +8120,299 @@ def test_dashboard_routes_degrade_on_commander_lookup_outage(
     assert body["stat_tiles"]["lands"] >= 35
     assert body["deck_progress"]["target"] == 100
     assert body["categories"]
+
+
+# --- R3 C-10 (2026-09-03): provenance is computed server-side --------------
+#
+# save_iteration used the CLIENT's suggested_verdict when the payload carried
+# one, so a stale tab or an edited body stamped whatever alpha/floor/verdict
+# it liked into the row's provenance and decided verdict_overrides_suggestion.
+
+def test_save_iteration_ignores_a_client_supplied_suggestion(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {
+            "winner": "new", "old_wins": 20, "new_wins": 21,
+            "total_games": 41, "draws": 0,
+            # A bogus client copy: p ~= 1.0 split declared 'kept' at
+            # alpha 0.5 over 5 decisive.
+            "suggested_verdict": {"verdict": "kept", "alpha": 0.5,
+                                  "min_decisive": 5, "margin": 1},
+        },
+    })
+    assert resp.status_code == 200, resp.get_json()
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    report = detail["sim_report"]
+    assert report["suggested_verdict"]["verdict"] == "neutral"   # server's
+    assert report["verdict_params"]["alpha"] == 0.05
+    assert report["verdict_params"]["min_decisive"] == 20
+    assert report["verdict_overrides_suggestion"] is True
+    # The client's copy is kept for diagnostics, under its own key.
+    assert report["client_suggested_verdict"]["alpha"] == 0.5
+
+
+def test_save_iteration_keeps_no_client_copy_when_it_matches(save_client):
+    client, _ = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "kept",
+        "sim_report": {"old_wins": 15, "new_wins": 30, "total_games": 45,
+                       "draws": 0},
+    })
+    detail = client.get(f"/api/iteration/{resp.get_json()['id']}").get_json()
+    assert "client_suggested_verdict" not in detail["sim_report"]
+    assert detail["sim_report"]["verdict_overrides_suggestion"] is False
+
+
+# --- R3 C-11 (2026-09-03): "40" is 40 PER POD, and the page says so -------
+
+def test_sim_settings_reports_this_hosts_pod_count(client):
+    from commander_builder._proposer_sim import (
+        EXPECTED_DECISIVE_FRACTION, MIN_DECISIVE_GAMES_FOR_VERDICT,
+    )
+    from commander_builder.compare_versions import auto_filler_pairs
+    body = client.get("/api/sim_settings").get_json()
+    assert body["games_are_per_pod"] is True
+    assert body["filler_pairs"] == auto_filler_pairs()
+    assert body["expected_decisive_fraction"] == EXPECTED_DECISIVE_FRACTION
+    assert body["min_decisive_games"] == MIN_DECISIVE_GAMES_FOR_VERDICT
+
+
+def test_games_radios_no_longer_quote_the_40_total_arithmetic():
+    """The static tooltip claimed ~20 decisive / +/-0.11 for "40", the
+    40-TOTAL figures; the run is 40 x pods. The template now labels the
+    options per pod and defers the totals to /api/sim_settings."""
+    from pathlib import Path
+    import commander_builder.web as web_pkg
+    html = (Path(web_pkg.__file__).parent / "templates" / "index.html").read_text(
+        encoding="utf-8")
+    games_block = html.split('name="games" value="10"')[1].split("</fieldset>")[0]
+    assert "40 per pod" in html
+    assert "~20 head-to-head decisive games expected" not in html
+    assert "+/-0.11" not in games_block
+    js = (Path(web_pkg.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "/api/sim_settings" in js and "function describeGamesOption" in js
+
+
+# ---------------------------------------------------------------------------
+# R3 W-01 … W-10 (2026-09-03) — web input validation / encoding / atomicity
+# ---------------------------------------------------------------------------
+
+def test_deck_source_put_refuses_metadata_injection(client, deck_dir):
+    """R3 W-01: a multi-line value used to land in [metadata] verbatim —
+    Protect=, PoliticsGuard=off and a second [Main] section rode in on
+    the Moxfield= line."""
+    inj = ("abc\nProtect=Mountain\nPoliticsGuard=off\nBracketUnverified=3\n"
+           "[Main]\n1 Injected Card")
+    resp = client.put("/api/deck_source?deck=Alpha", json={"moxfield_url": inj})
+    assert resp.status_code == 400
+    text = (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    assert "Injected" not in text and "PoliticsGuard" not in text
+    # A URL with no /decks/<id> is a 400 too — never ``Moxfield=<raw url>``.
+    resp = client.put("/api/deck_source?deck=Alpha",
+                      json={"moxfield_url": "https://moxfield.com/users/me"})
+    assert resp.status_code == 400
+    assert "Moxfield=" not in (deck_dir / "Alpha.dck").read_text(encoding="utf-8")
+    # The real shape still works, and is written atomically (no temp left).
+    resp = client.put("/api/deck_source?deck=Alpha",
+                      json={"moxfield_url": "https://moxfield.com/decks/ab_C-1"})
+    assert resp.status_code == 200 and resp.get_json()["moxfield_id"] == "ab_C-1"
+    assert not list(deck_dir.glob(".*.tmp"))
+
+
+def test_deck_source_put_400_on_bad_url_is_now_exact(client):
+    """The pre-R3 pin above accepted (200, 400); parse_deck_id is strict
+    now (R3 W-06), so this is a 400 — not a nonsense id."""
+    resp = client.put("/api/deck_source?deck=Alpha",
+                      json={"moxfield_url": "not a url"})
+    assert resp.status_code == 400
+
+
+def test_verify_against_source_refuses_a_non_id_moxfield_line(client, deck_dir,
+                                                               monkeypatch):
+    """R3 W-06: a hand-edited Moxfield= value was spliced into the
+    upstream URL path (``../../v2/users/me?x=1`` fetched under the
+    /v3/decks/all/ prefix)."""
+    (deck_dir / "Alpha.dck").write_text(
+        "[metadata]\nName=Alpha\nMoxfield=../../v2/users/me?x=1#frag\n\n"
+        "[Main]\n1 Sol Ring\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr("commander_builder.moxfield_import._http_get_json",
+                        lambda url: calls.append(url) or {})
+    resp = client.get("/api/verify_against_source?deck=Alpha")
+    assert resp.status_code == 400
+    assert calls == []
+
+
+@pytest.mark.parametrize("site", ["cross-site", "same-site"])
+def test_api_gets_from_another_site_are_refused(client, site):
+    """R3 W-02: the mutation gate covered POST/PUT/PATCH/DELETE only, so
+    a hostile page's ``<img src="http://127.0.0.1:5000/api/audit?…">``
+    could spend the stored key / write Scryfall snapshots. Browsers
+    stamp ``Sec-Fetch-Site``; anything but same-origin/none is refused
+    on /api/."""
+    resp = client.get("/api/decks", headers={"Sec-Fetch-Site": site})
+    assert resp.status_code == 403
+    body = resp.get_json()
+    assert "Sec-Fetch-Site" in body["error"] and body["received"] == site
+    resp = client.get("/api/verify_against_source?deck=Alpha",
+                      headers={"Sec-Fetch-Site": site})
+    assert resp.status_code == 403
+    # A scripted fetch that carries an Origin but no Sec-Fetch-Site
+    # (the round-3 probe's shape) is refused on the Origin alone; a
+    # loopback Origin passes.
+    resp = client.get("/api/audit?deck=Alpha&source=claude",
+                      headers={"Origin": "http://evil.example"})
+    assert resp.status_code == 403
+    resp = client.get("/api/decks", headers={"Origin": "http://127.0.0.1:5000"})
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("site", ["same-origin", "none", None])
+def test_api_gets_from_the_page_itself_pass_the_gate(client, site):
+    headers = {"Sec-Fetch-Site": site} if site else {}
+    resp = client.get("/api/decks", headers=headers)
+    assert resp.status_code == 200
+    # The index page itself is not under /api/ and is never gated.
+    resp = client.get("/", headers={"Sec-Fetch-Site": "cross-site"})
+    assert resp.status_code == 200
+
+
+def test_bom_deck_keeps_its_protect_and_politics_lines(deck_dir):
+    """R3 W-03: U+FEFF before ``[metadata]`` silently disabled every
+    [metadata] parser while the card sections still loaded."""
+    from commander_builder.dck_meta import read_bracket_unverified
+    from commander_builder.dck_utils import read_deck_text
+    from commander_builder.staples import politics_guard_enabled
+    from commander_builder.web._helpers import read_protected_cards
+
+    bom = ("﻿[metadata]\nName=X\nProtect=Sol Ring\nPoliticsGuard=off\n"
+           "BracketUnverified=3\n\n[Main]\n1 Sol Ring\n")
+    assert read_protected_cards(bom) == ["Sol Ring"]
+    assert politics_guard_enabled(bom) is False
+    assert read_bracket_unverified(bom) == 3
+    p = deck_dir / "[USER] Bom [B3].dck"
+    p.write_bytes(bom.encode("utf-8"))
+    assert read_deck_text(p).startswith("[metadata]")
+
+
+def test_cp1252_deck_no_longer_500s_the_library(client, deck_dir, capsys):
+    """R3 W-04: one ANSI re-save 500'd /api/library, deck_text and the
+    dashboard for the whole library (UnicodeDecodeError is a ValueError;
+    the handlers caught OSError only)."""
+    lat = deck_dir / "[USER] Latin [B3].dck"
+    lat.write_bytes(
+        "[metadata]\nName=[USER] Latin [B3]\n\n[Main]\n1 Lim-D\xfbl's Vault\n"
+        "98 Mountain\n".encode("cp1252"))
+    resp = client.get("/api/library?card=Mountain")
+    assert resp.status_code == 200
+    assert "[USER] Latin [B3]" in resp.get_json()["decks"]
+    resp = client.get("/api/deck_text?deck=[USER] Latin [B3]")
+    assert resp.status_code == 200
+    assert "�" in resp.get_json()["text"]  # replaced, not dropped
+    err = capsys.readouterr().err
+    assert "not valid UTF-8" in err and "Latin" in err
+
+
+def test_symlink_outside_the_deck_dir_is_not_listed(deck_dir, tmp_path):
+    outside = tmp_path / "outside.dck"
+    outside.write_text("[Main]\n1 Sol Ring\n", encoding="utf-8")
+    link = deck_dir / "[USER] Link [B3].dck"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert not any("Link" in d["id"] for d in _list_decks(deck_dir))
+
+
+@pytest.mark.parametrize("name,status", [
+    ("Evil\nName", 200), ("nul\x00byte", 400), ("x" * 300, 400),
+])
+def test_import_deck_names_are_sanitized_like_the_cli(client, deck_dir,
+                                                       name, status):
+    """R3 W-05: the route's own sanitizer let a newline into the filename
+    (splitting Name= across two lines); NUL / over-long names 500'd
+    outside the try. One sanitizer with the CLI importer now."""
+    resp = client.post("/api/import_deck", json={
+        "name": name, "paste_text": "1 Sol Ring\n98 Mountain",
+    })
+    assert resp.status_code == status, resp.get_data(as_text=True)
+    if status == 200:
+        fn = resp.get_json()["filename"]
+        assert "\n" not in fn and fn == "[USER] Evil_Name [B3].dck"
+        assert "Name=[USER] Evil_Name [B3]" in (deck_dir / fn).read_text(
+            encoding="utf-8")
+    else:
+        assert resp.is_json and "error" in resp.get_json()
+
+
+def test_nul_in_deck_id_is_a_404_not_a_500(client):
+    resp = client.get("/api/deck_text?deck=x%00y")
+    assert resp.status_code == 404
+    assert _resolve_deck_path(Path("/tmp"), "x\x00y", None) is None
+
+
+def test_request_bodies_are_bounded(client):
+    """R3 W-05: MAX_CONTENT_LENGTH was None."""
+    from commander_builder.web.app import MAX_REQUEST_BYTES
+    assert client.application.config["MAX_CONTENT_LENGTH"] == MAX_REQUEST_BYTES
+    resp = client.post("/api/import_deck",
+                       data="x" * (MAX_REQUEST_BYTES + 1),
+                       content_type="application/json")
+    assert resp.status_code == 413
+
+
+def test_import_deck_route_is_atomic_against_a_concurrent_write(client,
+                                                               deck_dir):
+    """R3 W-09: exists→write race closed with an exclusive create."""
+    import builtins
+    real_open = builtins.open
+    target = deck_dir / "[USER] Race [B3].dck"
+
+    def racing_open(file, mode="r", *a, **kw):
+        if str(file) == str(target) and "x" in mode:
+            # Another writer lands between exists() and our create.
+            target.write_text("[Main]\n1 Other Deck\n", encoding="utf-8")
+        return real_open(file, mode, *a, **kw)
+
+    import unittest.mock as um
+    with um.patch("builtins.open", racing_open):
+        resp = client.post("/api/import_deck", json={
+            "name": "Race", "paste_text": "1 Sol Ring\n98 Mountain",
+        })
+    assert resp.status_code == 409
+    assert "Other Deck" in target.read_text(encoding="utf-8")
+
+
+def test_deck_text_crlf_round_trip_is_byte_identical(client, deck_dir):
+    """R3 W-10: GET→PUT of an unchanged CRLF deck was not byte-identical
+    (rewrite_name dropped the Name= line's CR; the bracket marker
+    re-join used LF)."""
+    raw = (b"[metadata]\r\nName=[USER] Crlf [B3]\r\n\r\n[Commander]\r\n"
+           b"1 Test Cmdr\r\n\r\n[Main]\r\n1 Sol Ring\r\n98 Mountain\r\n")
+    p = deck_dir / "[USER] Crlf [B3].dck"
+    p.write_bytes(raw)
+    got = client.get("/api/deck_text?deck=[USER] Crlf [B3]").get_json()["text"]
+    resp = client.put("/api/deck_text?deck=[USER] Crlf [B3]", json={"text": got})
+    assert resp.status_code == 200
+    assert p.read_bytes() == raw
+    # A mainboard change on a CRLF deck adds the marker with CRLF too.
+    changed = got.replace("98 Mountain", "97 Mountain\r\n1 Cultivate")
+    client.put("/api/deck_text?deck=[USER] Crlf [B3]", json={"text": changed})
+    body = p.read_bytes()
+    assert b"BracketUnverified=3\r\n" in body and b"\n\n" not in body.replace(b"\r\n", b"")
+
+
+def test_delete_deck_removes_its_primer_sidecar(client, deck_dir):
+    """R3 F-07: an orphaned sidecar was inherited by the next deck under
+    the same stem."""
+    (deck_dir / "Alpha.primer.md").write_text("words\n", encoding="utf-8")
+    # The D2 mutation gate wants the JSON content type on every
+    # mutating method, same as the sibling delete tests above.
+    resp = client.delete(
+        "/api/deck_text?deck=Alpha", content_type="application/json",
+    )
+    assert resp.status_code == 200 and resp.get_json()["sidecar_deleted"]
+    assert not (deck_dir / "Alpha.primer.md").exists()

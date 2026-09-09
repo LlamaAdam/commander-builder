@@ -455,6 +455,8 @@ def make_search_round_fn(
         from .proposer import Proposal, apply_proposal_to_deck, \
             _bump_version_filename
         from ._proposer_sim import (
+            MIN_DECISIVE_GAMES_FOR_VERDICT,
+            VERDICT_ALPHA,
             _ab_to_iteration_fields,
             _log_auto_curate_iteration,
             _pick_filler_decks,
@@ -687,8 +689,25 @@ def make_search_round_fn(
         verdict = _verdict_from_ab(ab, margin=args.sim_margin)
 
         if iteration_id is not None:
-            from .knowledge_log import update_iteration_sim
+            from .knowledge_log import (
+                SIM_REPORT_VERDICT_PARAMS_KEY,
+                update_iteration_sim,
+                verdict_provenance,
+            )
             sim_fields = _ab_to_iteration_fields(ab)
+            # Verdict provenance (2026-09-03, R3 C-09): the search round
+            # was one of two verdict writers stamping nothing, so a row
+            # scored under a raised --sim-margin was indistinguishable
+            # from a default row. Same three lines as
+            # _proposer_sim._run_sim_and_record.
+            if isinstance(sim_fields.get("sim_report"), dict):
+                sim_fields["sim_report"][SIM_REPORT_VERDICT_PARAMS_KEY] = (
+                    verdict_provenance(
+                        margin=args.sim_margin,
+                        alpha=VERDICT_ALPHA,
+                        min_decisive=MIN_DECISIVE_GAMES_FOR_VERDICT,
+                    )
+                )
             try:
                 update_iteration_sim(
                     iteration_id=iteration_id,

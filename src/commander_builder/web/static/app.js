@@ -602,6 +602,57 @@ function simEta(games, mode, bracket) {
   return { sec, str };
 }
 
+// R3 C-11 (2026-09-03): the Games radios are PER-POD counts and the sim
+// runs one pod per filler pair in parallel, so "40" is 40 x pods games.
+// The static HTML cannot know this host's pod count; fetch it once and
+// rewrite each option's label + tooltip with the real total, the
+// expected head-to-head decisive count (total x expected fraction — the
+// same constants the CLI's --sim-games floor arithmetic uses) and the
+// binomial noise 0.5/sqrt(decisive). The option that first clears the
+// decisive floor is marked as the floor; 40/pod stays "recommended".
+function describeGamesOption(gamesPerPod, settings) {
+  const pods = settings.filler_pairs;
+  const total = gamesPerPod * pods;
+  const decisive = Math.round(total * settings.expected_decisive_fraction);
+  const noise = decisive > 0 ? (0.5 / Math.sqrt(decisive)) : 1;
+  const floor = settings.min_decisive_games;
+  const clears = decisive >= floor;
+  return {
+    total, decisive, noise, clears,
+    title: `${gamesPerPod} games per pod x ${pods} parallel pods = ${total} `
+      + `pod games. ~${decisive} head-to-head decisive games expected `
+      + `(fillers take ~half the wins); +/-${noise.toFixed(2)} head-to-head `
+      + `noise. Verdict floor is ${floor} decisive: `
+      + (clears ? "cleared." : "NOT reached - inconclusive is the likely verdict.")
+      + ` Wall time ~ one pod (${gamesPerPod} games); JVM/CPU cost is all ${total}.`,
+  };
+}
+
+function applySimSettings(settings) {
+  if (!settings || !settings.filler_pairs) return;
+  let floorMarked = false;
+  document.querySelectorAll('input[name="games"]').forEach((input) => {
+    const label = input.closest("label");
+    const span = label ? label.querySelector(".games-label") : null;
+    if (!label || !span) return;
+    const g = parseInt(input.value, 10);
+    const d = describeGamesOption(g, settings);
+    let tag = "";
+    if (d.clears && !floorMarked) { tag = " - verdict floor"; floorMarked = true; }
+    if (g === 40) tag += " - recommended";
+    span.textContent = `${g}/pod x ${settings.filler_pairs} = ${d.total} games`
+      + ` (~${d.decisive} decisive, +/-${d.noise.toFixed(2)})${tag}`;
+    label.title = d.title;
+  });
+}
+
+function loadSimSettings() {
+  fetch("/api/sim_settings")
+    .then((r) => r.json())
+    .then(applySimSettings)
+    .catch(() => { /* placeholders already say totals are unknown */ });
+}
+
 // Update the live time hint next to the Games radios. Reads the currently
 // checked games + mode and the active deck's bracket. No-op in save mode
 // (the hint span is hidden with the rest of the sim controls).
@@ -1081,6 +1132,12 @@ function renderSaveIterationBlock(body) {
           && _lastAuditManifest.total_price_usd != null)
           ? _lastAuditManifest.total_price_usd
           : _lastDashboardPriceUsd,
+      price_partial:
+        (_lastAuditManifest
+          && _lastAuditManifest.deck_id === _activeDeckId
+          && _lastAuditManifest.total_price_usd != null)
+          ? !!_lastAuditManifest.price_partial
+          : _lastDashboardPricePartial,
     };
     try {
       const resp = await fetch("/api/save_iteration", {
@@ -1149,6 +1206,9 @@ let _lastSimReport = null;
 // Reset to null on deck switch so we never persist a stale price for
 // a deck the user moved away from.
 let _lastDashboardPriceUsd = null;
+// Whether that snapshot was computed with some cards unpriced (the
+// tile's price_partial). Travels with it so the log row stays labeled.
+let _lastDashboardPricePartial = false;
 
 // Audit-backend preference. Stored in localStorage (browser-local).
 // FP-011 unification: the BYO Anthropic key is NO LONGER kept in
@@ -1661,6 +1721,7 @@ async function loadAdvise(sourceOverride) {
       total_price_usd: completeBody.proposed_price_usd != null
         ? completeBody.proposed_price_usd
         : completeBody.original_price_usd,
+      price_partial: !!completeBody.price_partial,
     };
     renderAuditResult(sug, completeBody);
   } catch (e) {
@@ -2044,15 +2105,30 @@ function renderAuditResult(container, body) {
     const origN = body.n_priced_cards_original ?? 0;
     const propN = body.n_priced_cards_proposed ?? 0;
     const mainN = body.main_count ?? 99;
-    if (origN < mainN || propN < mainN) {
+    // Since 2026-09-09 the backend also NAMES the unpriced cards and
+    // flags price_partial; a short total is labeled partial here
+    // rather than left to a card-count the user has to interpret.
+    const unpricedNames = [
+      ...(body.unpriced_cards_original || []),
+      ...(body.unpriced_cards_proposed || []),
+    ].map((u) => u.name);
+    const uniqueUnpriced = [...new Set(unpricedNames)];
+    if (body.price_partial || origN < mainN || propN < mainN) {
+      const label = body.price_partial
+        ? `(partial — ${uniqueUnpriced.length} unpriced: `
+          + `${uniqueUnpriced.slice(0, 4).join(", ")}`
+          + `${uniqueUnpriced.length > 4 ? ", …" : ""})`
+        : `(${Math.min(origN, propN)} cards priced)`;
       priceP.appendChild(el(
         "span",
         { class: "muted",
           style: "margin-left: 8px; font-size: 11px;",
           title: `${origN}/${propN} cards have Scryfall prices in `
-               + `the original/proposed deck respectively.`,
+               + `the original/proposed deck respectively.`
+               + (uniqueUnpriced.length
+                  ? ` Unpriced: ${uniqueUnpriced.join(", ")}.` : ""),
         },
-        `(${Math.min(origN, propN)} cards priced)`,
+        label,
       ));
     }
     container.appendChild(priceP);
@@ -2188,6 +2264,10 @@ function renderAuditResult(container, body) {
         _lastAuditManifest.total_price_usd != null
           ? _lastAuditManifest.total_price_usd
           : _lastDashboardPriceUsd,
+      price_partial:
+        _lastAuditManifest.total_price_usd != null
+          ? !!_lastAuditManifest.price_partial
+          : _lastDashboardPricePartial,
     };
     try {
       const resp = await fetch("/api/save_iteration", {
@@ -2627,6 +2707,8 @@ function renderDashboard(data, iterations) {
     (data.stat_tiles && typeof data.stat_tiles.est_price_usd === "number")
       ? data.stat_tiles.est_price_usd
       : null;
+  _lastDashboardPricePartial =
+    !!(data.stat_tiles && data.stat_tiles.price_partial);
 
   // Commander hero
   const hero = el("section", { class: "commander-hero" });
@@ -4213,11 +4295,31 @@ function priceTile(t, savings, deferred) {
   // printings breakdown is slow — it needs a separate per-card printings
   // cache that is cold for a freshly imported deck — so it lives in its
   // own progressive slot underneath.
+  // A short total is labeled, never presented as the whole deck:
+  // "N priced cards · M unpriced (partial)" with the unpriced names
+  // in the tooltip and a muted list under the tile.
+  const unpriced = t.unpriced_cards || [];
+  const partial = !!t.price_partial;
+  const sub = t.n_priced_cards != null
+    ? `${t.n_priced_cards} priced cards`
+      + (partial ? ` · ${t.n_unpriced_cards} unpriced (partial)` : "")
+    : null;
   const tl = tile(
     "Est. price",
-    t.est_price_usd != null ? `$${t.est_price_usd.toFixed(2)}` : "—",
-    t.n_priced_cards != null ? `${t.n_priced_cards} priced cards` : null,
+    t.est_price_usd != null
+      ? `${partial ? "≥ " : ""}$${t.est_price_usd.toFixed(2)}`
+      : "—",
+    sub,
   );
+  if (partial && unpriced.length) {
+    tl.title = "Unpriced: "
+      + unpriced.map((u) => `${u.qty} ${u.name} (${u.reason})`).join(", ");
+    tl.appendChild(el(
+      "div",
+      { class: "muted", style: "font-size: 11px; margin-top: 4px;" },
+      "Unpriced: " + unpriced.map((u) => u.name).join(", "),
+    ));
+  }
   const slot = el("div", { id: "dash-section-pricing" });
   tl.appendChild(slot);
   if (deferred) renderSectionSkeleton(slot, "Checking cheaper printings…");
@@ -4361,6 +4463,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // changes (radios are static markup, so bind once here).
   document.querySelectorAll('input[name="games"], input[name="mode"]')
     .forEach((r) => r.addEventListener("change", updateGamesEta));
+  // R3 C-11: label each Games option with this host's real pod total.
+  loadSimSettings();
 
   // FP-007 topbar card lookup: submit -> card-reference overlay.
   const cardForm = $("card-search-form");

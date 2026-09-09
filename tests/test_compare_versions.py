@@ -2440,3 +2440,133 @@ def test_compare_parallel_releases_locks_when_a_pod_explodes(
 
     for p in profiles:
         assert not _lockfile(p).exists()
+
+
+# --- R3 C-03 (2026-09-03): decision C1 on compare()'s filler path ----------
+#
+# _pick_filler_pairs seated _load_pool() verbatim. The curator keeps [REF]
+# decks as ranked CANDIDATES, so any [REF] deck that ranked top-6 became a
+# filler for every compare() caller; a hand-edited pool JSON could seat a
+# do-nothing [CONTROL] deck. Now the shared filler_policy list applies here
+# too, and a pool that cannot seat a pod after exclusion refuses loudly.
+
+def test_pick_filler_pairs_never_seats_c1_excluded_prefixes(monkeypatch, capsys):
+    pool = ["[REF] Top Likes [B3].dck", "[CONTROL] Calib [B3].dck",
+            "[PREMADE] Precon [B3].dck", "Plain [B3].dck",
+            "[USER] Mine [B3].dck", "Other [B3].dck", "Third [B3].dck",
+            "Fourth [B3].dck"]
+    monkeypatch.setattr(
+        "commander_builder.compare_versions._load_pool", lambda bracket: list(pool),
+    )
+    pairs = _pick_filler_pairs(bracket=3, exclude=["x.dck", "y.dck"], num_pairs=2)
+    flat = [d for pair in pairs for d in pair]
+    assert flat == ["Plain [B3].dck", "Other [B3].dck", "Third [B3].dck", "Fourth [B3].dck"]
+    out = capsys.readouterr().out
+    assert "excluded from filler seats" in out
+    assert "[REF] 1" in out and "[CONTROL] 1" in out and "[PREMADE] 1" in out
+    assert "[USER] 1" in out
+
+
+def test_pick_filler_pairs_refuses_loudly_when_only_excluded_decks_remain(monkeypatch):
+    """No silent seat: a pool of one plain deck plus a [CONTROL] deck used
+    to seat the control deck; now it raises naming what was excluded."""
+    monkeypatch.setattr(
+        "commander_builder.compare_versions._load_pool",
+        lambda bracket: ["Plain [B3].dck", "[CONTROL] Calib [B3].dck", "[REF] R [B3].dck"],
+    )
+    with pytest.raises(RuntimeError) as exc:
+        _pick_filler_pairs(bracket=3, exclude=["x.dck"], num_pairs=1)
+    msg = str(exc.value)
+    assert "got 1" in msg and "[CONTROL] 1" in msg and "[REF] 1" in msg
+
+
+def test_pick_filler_pairs_fallback_path_shares_the_policy(monkeypatch, tmp_path):
+    """The no-pool fallback (run_match._fallback_opponents) used to skip
+    only [USER]/[PREMADE]; it applies the same list now."""
+    for n in ("Alpha [B3].dck", "Beta [B3].dck", "[REF] R [B3].dck",
+              "[CONTROL] C [B3].dck"):
+        (tmp_path / n).write_text("[Main]\n1 Forest\n", encoding="utf-8")
+    monkeypatch.setattr("commander_builder.run_match.DECK_DIR", tmp_path)
+    monkeypatch.setattr(
+        "commander_builder.compare_versions._load_pool", lambda bracket: [],
+    )
+    pairs = _pick_filler_pairs(bracket=3, exclude=["x.dck"], num_pairs=1)
+    assert pairs == [["Alpha [B3].dck", "Beta [B3].dck"]]
+
+
+def test_proposer_sim_and_compare_share_one_exclusion_tuple():
+    from commander_builder import _proposer_sim, filler_policy
+    assert _proposer_sim._FILLER_EXCLUDED_PREFIXES is filler_policy.FILLER_EXCLUDED_PREFIXES
+    assert set(filler_policy.FILLER_EXCLUDED_PREFIXES) == {
+        "[USER]", "[CONTROL]", "[PREMADE]", "[REF]",
+    }
+
+
+# --- R3 C-04 (2026-09-03): sim-time guard on the Name=/stem invariant -----
+#
+# compare() attributes wins by normalized NAME, relying on every writer
+# having restamped Name=. A hand-copied pair (cp v1.dck v2.dck) shares one
+# Name= and used to spend the whole run printing OLD 0 - 0 NEW (TIE).
+
+def _pair_with_names(tmp_path, monkeypatch, old_name, new_name):
+    from commander_builder import compare_versions as cv
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    old = deck_dir / "[USER] Foo v1 [B3].dck"
+    new = deck_dir / "[USER] Foo v2 [B3].dck"
+    for p, name in ((old, old_name), (new, new_name)):
+        meta = f"[metadata]\nName={name}\n" if name is not None else ""
+        p.write_text(f"{meta}[Commander]\n1 Cmdr\n[Main]\n1 Forest\n", encoding="utf-8")
+    monkeypatch.setattr(cv, "DECK_DIR", deck_dir)
+
+    class _NeverRun:
+        def __getattr__(self, item):
+            raise AssertionError("runner must not be touched before the preflight")
+
+    return cv, old.name, new.name, _NeverRun()
+
+
+def test_compare_refuses_a_hand_copied_pair_before_spending_a_game(tmp_path, monkeypatch):
+    """cp v1.dck v2.dck: the copy carries the source's Name=, which no
+    longer matches its own filename — refused with the remedy."""
+    cv, old, new, runner = _pair_with_names(tmp_path, monkeypatch, "Foo v1", "Foo v1")
+    with pytest.raises(ValueError) as exc:
+        cv.compare(old_deck=old, new_deck=new, bracket=3, runner=runner)
+    assert "hand-copied" in str(exc.value)
+    assert "rewrite_name_to_stem" in str(exc.value)
+
+
+def test_compare_refuses_two_files_whose_names_normalize_alike(tmp_path, monkeypatch):
+    """Both Name= lines match their own stems, but the stems themselves
+    normalize alike ('[USER] Foo [B3]' vs 'Foo [B3]' -> 'Foo'): Forge
+    reports one name for both seats."""
+    from commander_builder import compare_versions as cv
+    deck_dir = tmp_path / "decks"
+    deck_dir.mkdir()
+    old = deck_dir / "[USER] Foo [B3].dck"
+    new = deck_dir / "Foo [B3].dck"
+    for p in (old, new):
+        p.write_text(f"[metadata]\nName={p.stem}\n[Main]\n1 Forest\n", encoding="utf-8")
+    monkeypatch.setattr(cv, "DECK_DIR", deck_dir)
+    with pytest.raises(ValueError, match="share Name="):
+        cv.compare(old_deck=old.name, new_deck=new.name, bracket=3, runner=object())
+
+
+def test_compare_refuses_a_name_that_matches_no_filename(tmp_path, monkeypatch):
+    cv, old, new, runner = _pair_with_names(tmp_path, monkeypatch, "My Deck", "Foo v2")
+    with pytest.raises(ValueError) as exc:
+        cv.compare(old_deck=old, new_deck=new, bracket=3, runner=runner)
+    assert "does not match its filename" in str(exc.value)
+
+
+def test_compare_only_warns_when_a_deck_has_no_name_line(tmp_path, monkeypatch, capsys):
+    """Nameless decks cannot be checked; that is a warning, not a refusal
+    — the guard must not break the existing nameless-fixture tests."""
+    cv, old, new, runner = _pair_with_names(tmp_path, monkeypatch, None, "Foo v2")
+    monkeypatch.setattr(cv, "_load_pool", lambda bracket: [])
+    monkeypatch.setattr(cv, "_fallback_opponents", lambda bracket, exclude, n: [])
+    # Past the preflight the (empty) filler pick is the next thing that
+    # fails, and it fails with RuntimeError, not the guard's ValueError.
+    with pytest.raises(RuntimeError):
+        cv.compare(old_deck=old, new_deck=new, bracket=3, runner=runner)
+    assert "has no Name= line" in capsys.readouterr().out

@@ -25,7 +25,9 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
+
+from ..dck_utils import read_deck_text
 
 from ._helpers import (
     _bracket_from_filename,
@@ -292,7 +294,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
 
         if request.method == "GET":
             try:
-                text = path.read_text(encoding="utf-8")
+                text = read_deck_text(path)
             except OSError as exc:
                 return jsonify({"error": str(exc)}), 500
             return jsonify({
@@ -350,7 +352,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             if declared is not None:
                 from .. import dck_meta, dck_utils
                 try:
-                    old_text = path.read_text(encoding="utf-8")
+                    old_text = read_deck_text(path)
                 except OSError:
                     old_text = None
                 changed = old_text is not None and (
@@ -383,7 +385,22 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             path.unlink()
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
-        return jsonify({"deck": deck_id, "deleted": True})
+        # The primer sidecar goes with its deck (R3 F-07, 2026-09-03): an
+        # orphaned `<stem>.primer.md` used to be inherited by whatever
+        # deck next landed under the same stem.
+        from ..primer import primer_sidecar_path
+        sidecar = primer_sidecar_path(path)
+        sidecar_deleted = False
+        if sidecar.exists():
+            try:
+                sidecar.unlink()
+                sidecar_deleted = True
+            except OSError as exc:
+                current_app.logger.warning(
+                    "primer sidecar for %s not deleted: %s", path.name, exc,
+                )
+        return jsonify({"deck": deck_id, "deleted": True,
+                        "sidecar_deleted": sidecar_deleted})
 
     @bp.route("/api/import_deck", methods=["POST"])
     def import_deck():
@@ -442,7 +459,12 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 from ..moxfield_import import (
                     fetch_deck, parse_deck_id, to_dck,
                 )
-                public_id = parse_deck_id(url)
+                try:
+                    public_id = parse_deck_id(url)
+                except ValueError as exc:
+                    # R3 W-06: not a Moxfield URL / id — a client error,
+                    # never a fetch of a nonsense path.
+                    return jsonify({"error": str(exc)}), 400
                 deck_json = fetch_deck(public_id)
                 deck_text_out = to_dck(deck_json)
                 if not derived_name:
@@ -472,11 +494,22 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             if not derived_name:
                 derived_name = "Pasted Deck"
 
-        # Filename: [USER] <name> [B<bracket>].dck. Sanitize invalid
-        # path chars (keep brackets — they're meaningful here).
+        # Filename: [USER] <name> [B<bracket>].dck. ONE sanitizer with
+        # the CLI importer (R3 W-05, 2026-09-03): the route's own regex
+        # let newlines, tabs, control bytes and RTL overrides into
+        # filenames (a newline split ``Name=`` across two lines), and a
+        # NUL / 300-char name reached ``exists()`` / ``write_text`` and
+        # rendered as an HTML 500. Those two are client errors.
         import re as _re
-        safe = _re.sub(r"[<>:\"/\\|?*]", "_", derived_name)
-        safe = safe.strip().strip(".")
+        from ..moxfield_import import _MAX_STEM_LEN, safe_filename
+        if "\x00" in derived_name:
+            return jsonify({"error": "name contains a NUL byte"}), 400
+        if len(derived_name) > _MAX_STEM_LEN:
+            return jsonify({
+                "error": f"name too long ({len(derived_name)} chars; "
+                         f"max {_MAX_STEM_LEN})",
+            }), 400
+        safe = safe_filename(derived_name)
         if not safe.lower().startswith("[user]"):
             safe = f"[USER] {safe}"
         if not _re.search(r"\[B\d\]$", safe):
@@ -489,6 +522,8 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 "error": "deck with this name already exists",
                 "filename": filename,
             }), 409
+        # (The exists() check above is advisory; the ``open(..., "x")``
+        # below is the real guard — R3 W-09 closed the exists→write race.)
         # Stamp Name= from the final filename stem so Forge's deck picker
         # and every name-keyed pipeline (compare_versions, pool_curator)
         # can map this file back to itself even when the sanitizer above
@@ -504,7 +539,15 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             # may not have created the deck dir yet. Create parents so
             # the import doesn't fail with ENOENT on a missing parent.
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(deck_text_out, encoding="utf-8")
+            # Exclusive create: two concurrent imports of one name cannot
+            # both pass ``exists()`` and then both write (R3 W-09).
+            with open(target, "x", encoding="utf-8", newline="") as fh:
+                fh.write(deck_text_out)
+        except FileExistsError:
+            return jsonify({
+                "error": "deck with this name already exists",
+                "filename": filename,
+            }), 409
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify({
@@ -646,7 +689,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 # refresh, not 409.
                 deck_dir.mkdir(parents=True, exist_ok=True)
                 target = deck_dir / f"{result.stem}.dck"
-                target.write_text(result.text, encoding="utf-8")
+                atomic_write_text(target, result.text)  # R3 W-09
 
                 import re as _re
                 _set_build_job(job_id, status="done", result={
@@ -775,7 +818,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         if path is None:
             return jsonify({"error": "deck not found"}), 404
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_deck_text(path)
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
 
@@ -803,6 +846,12 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
 
         url = (payload.get("moxfield_url") or "").strip()
         if url:
+            # R3 W-01 (2026-09-03): the value used to land in [metadata]
+            # verbatim — a multi-line payload wrote Protect= /
+            # PoliticsGuard=off / a second [Main] section, and any pasted
+            # URL without /decks/<id> became ``Moxfield=<raw url>``.
+            # ``parse_deck_id`` now accepts only a Moxfield URL or an id
+            # of the shape ``[A-Za-z0-9_-]+`` (ValueError otherwise).
             try:
                 from ..moxfield_import import parse_deck_id
                 mox_id = parse_deck_id(url)
@@ -827,7 +876,10 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                     )
                 else:
                     text = f"[metadata]\n{new_meta}\n\n" + text
-            path.write_text(text, encoding="utf-8")
+            try:
+                atomic_write_text(path, text)  # R3 W-09
+            except OSError as exc:
+                return jsonify({"error": str(exc)}), 500
             return jsonify({
                 "deck": deck_id, "moxfield_id": mox_id,
                 "moxfield_url": f"https://moxfield.com/decks/{mox_id}",
@@ -838,7 +890,10 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             text = _re.sub(
                 r"^Moxfield=.+\n?", "", text, count=1, flags=_re.MULTILINE,
             )
-            path.write_text(text, encoding="utf-8")
+            try:
+                atomic_write_text(path, text)  # R3 W-09
+            except OSError as exc:
+                return jsonify({"error": str(exc)}), 500
         return jsonify({
             "deck": deck_id, "moxfield_id": None, "moxfield_url": None,
         })
@@ -873,7 +928,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         if path is None:
             return jsonify({"error": "deck not found"}), 404
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_deck_text(path)
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
         import re as _re
@@ -884,6 +939,15 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 "hint": "PUT /api/deck_source first",
             }), 400
         mox_id = m.group(1).strip()
+        from ..moxfield_import import MOXFIELD_ID_RE
+        if not MOXFIELD_ID_RE.match(mox_id):
+            # R3 W-06: a hand-edited Moxfield= line is not an id; it must
+            # never be spliced into the upstream URL path.
+            return jsonify({
+                "error": "the deck's Moxfield= line is not a Moxfield id",
+                "moxfield_id": mox_id,
+                "hint": "PUT /api/deck_source with the deck's URL to fix it",
+            }), 400
         try:
             from ..moxfield_import import fetch_deck, to_dck
             deck_json = fetch_deck(mox_id)
@@ -1009,7 +1073,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
 
         # Read deck card names.
         try:
-            deck_text = path.read_text(encoding="utf-8")
+            deck_text = read_deck_text(path)
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
         names: list[str] = []

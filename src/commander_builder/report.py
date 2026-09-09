@@ -90,6 +90,10 @@ def _verdict_badge(verdict: str) -> str:
         "kept": "↑ KEPT",
         "reverted": "↓ REVERTED",
         "neutral": "→ NEUTRAL",
+        # Reader migrated for R3 C-01 (2026-09-03): the analyst writer
+        # now emits the schema's 'inconclusive' for sub-floor sims, so
+        # commander-history renders it as a label rather than "? ...".
+        "inconclusive": "~ INCONCLUSIVE",
         "pending": "… PENDING",
     }
     return badges.get(verdict, f"? {verdict.upper()}")
