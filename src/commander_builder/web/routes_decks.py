@@ -19,6 +19,7 @@ refactor (tier-3 issue #3.1).
 
 from __future__ import annotations
 
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from uuid import uuid4
 
 from flask import Blueprint, current_app, jsonify, request
 
+from ..dck_meta import line_ending
 from ..dck_utils import read_deck_text
 
 from ._helpers import (
@@ -205,6 +207,40 @@ def _build_summary(result) -> dict:
         "buy_list": result.buy_list,
     }
 
+
+
+def _store_import_primer(target: Path, deck_json: Optional[dict],
+                         public_id: Optional[str]) -> Optional[dict]:
+    """Write the primer sidecar for a URL import (R4 B-12) and describe the
+    outcome for the JSON reply: ``{action, path, words, warning}`` or
+    ``None`` when the import was a paste (no description to store)."""
+    if not deck_json or not deck_json.get("description"):
+        return None
+    from ..primer import (
+        primer_word_count, read_primer_sidecar, store_primer_sidecar,
+    )
+    warning: Optional[str] = None
+    try:
+        outcome = store_primer_sidecar(
+            target, deck_json.get("description"), source_id=public_id or None,
+        )
+    except OSError as exc:
+        warning = (f"primer sidecar could not be written "
+                   f"({type(exc).__name__}: {exc}); the deck imported fine.")
+        print(f"[import] WARN: {warning}", file=sys.stderr, flush=True)
+        return {"action": "error", "path": None, "words": 0, "warning": warning}
+    if outcome.action == "refused":
+        warning = f"primer sidecar NOT written — {outcome.reason}"
+        print(f"[import] WARN: {warning}", file=sys.stderr, flush=True)
+    words = 0
+    if outcome.path is not None and outcome.action != "refused":
+        words = primer_word_count(read_primer_sidecar(target) or "")
+    return {
+        "action": outcome.action,
+        "path": str(outcome.path) if outcome.path is not None else None,
+        "words": words,
+        "warning": warning,
+    }
 
 def make_decks_blueprint(deck_dir: Path) -> Blueprint:
     """Build a Flask Blueprint for the deck-edit / deck-info route
@@ -454,6 +490,8 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
 
         deck_text_out: str
         derived_name = name
+        deck_json: Optional[dict] = None
+        public_id: Optional[str] = None
         if url:
             try:
                 from ..moxfield_import import (
@@ -550,11 +588,20 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             }), 409
         except OSError as exc:
             return jsonify({"error": str(exc)}), 500
+        # Primer sidecar for the UI import lane (R4 B-12, 2026-09-16): the
+        # CLI's Moxfield and Archidekt lanes have written one since R3
+        # F-06, but this route dropped ``deck_json["description"]`` on the
+        # floor, so every desktop-imported deck answered ``commander
+        # adopt`` with "no primer sidecar found — common (~75 %)" and had
+        # no ``stated`` intent. Same WARN-on-refused handling as the CLI;
+        # a sidecar I/O failure never unwinds the import that succeeded.
+        primer_info = _store_import_primer(target, deck_json, public_id)
         return jsonify({
             "id": target.stem,
             "name": _re.sub(r"^\[USER\]\s*", "", target.stem),
             "filename": filename,
             "path": str(target),
+            "primer": primer_info,
         })
 
     @bp.route("/api/build_deck", methods=["POST"])
@@ -823,7 +870,12 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
             return jsonify({"error": str(exc)}), 500
 
         import re as _re
-        existing = _re.search(r"^Moxfield=(.+)$", text, _re.MULTILINE)
+        # ``[^\r\n]`` rather than ``.`` (R4 B-09, 2026-09-16): ``.``
+        # matches a carriage return, so on a CRLF deck the replace ate
+        # the CR and the clear left one bare-LF line — the W-10 defect
+        # ``dck_meta._NAME_LINE`` was rewritten to avoid; the inserted
+        # line uses the file's own ending for the same reason.
+        existing = _re.search(r"^Moxfield=([^\r\n]+)(?=\r?$)", text, _re.MULTILINE)
 
         if request.method == "GET":
             mox_id = existing.group(1).strip() if existing else None
@@ -861,9 +913,10 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                     "detail": str(exc),
                 }), 400
             new_meta = f"Moxfield={mox_id}"
+            nl = line_ending(text)  # R4 B-09
             if existing:
                 text = _re.sub(
-                    r"^Moxfield=.+$", new_meta, text, count=1,
+                    r"^Moxfield=[^\r\n]*(?=\r?$)", new_meta, text, count=1,
                     flags=_re.MULTILINE,
                 )
             else:
@@ -871,11 +924,11 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
                 if "[metadata]" in text.lower():
                     text = _re.sub(
                         r"(\[metadata\][^\n]*\n)",
-                        rf"\1{new_meta}\n", text, count=1,
-                        flags=_re.IGNORECASE,
+                        lambda m: f"{m.group(1)}{new_meta}{nl}", text,
+                        count=1, flags=_re.IGNORECASE,
                     )
                 else:
-                    text = f"[metadata]\n{new_meta}\n\n" + text
+                    text = f"[metadata]{nl}{new_meta}{nl}{nl}" + text
             try:
                 atomic_write_text(path, text)  # R3 W-09
             except OSError as exc:
@@ -888,7 +941,8 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         # Empty URL → clear the metadata line.
         if existing:
             text = _re.sub(
-                r"^Moxfield=.+\n?", "", text, count=1, flags=_re.MULTILINE,
+                r"^Moxfield=[^\r\n]*\r?\n?", "", text, count=1,
+                flags=_re.MULTILINE,
             )
             try:
                 atomic_write_text(path, text)  # R3 W-09

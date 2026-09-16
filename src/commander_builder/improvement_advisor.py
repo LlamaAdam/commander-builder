@@ -563,8 +563,12 @@ def _advise_steps(
     # lines ("27 Mountain") to 1x — phantom color deficits, inflated mana
     # producers. Existence was validated above, so a read failure here is
     # a real I/O error worth degrading quietly on (empty set, no audit).
+    # ``read_deck_text`` (R4 B-02, 2026-09-16): the web routes above this
+    # call already read tolerantly (R3 W-04), but this strict re-read
+    # 503'd ``/api/audit`` and put an error frame on ``/api/audit/stream``
+    # for the same cp1252 deck they had just accepted.
     try:
-        deck_text = deck_path.read_text(encoding="utf-8")
+        deck_text = dck_utils.read_deck_text(deck_path)
     except OSError:
         deck_text = ""
     main_cards = set(dck_utils.main_card_names(deck_text))
@@ -878,7 +882,7 @@ def _advise_steps(
     # since this is the post-processing step.
     deck_id: Optional[str] = None
     try:
-        text = deck_path.read_text(encoding="utf-8")
+        text = dck_utils.read_deck_text(deck_path)  # tolerant (R4 B-02)
         m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
         if m:
             deck_id = m.group(1).strip()

@@ -8416,3 +8416,220 @@ def test_delete_deck_removes_its_primer_sidecar(client, deck_dir):
     )
     assert resp.status_code == 200 and resp.get_json()["sidecar_deleted"]
     assert not (deck_dir / "Alpha.primer.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# R4 (2026-09-16) — negative-mode round 4, FIX-NOW batch
+# ---------------------------------------------------------------------------
+
+def _stamp_moxfield(path: Path, public_id: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("[metadata]\n", f"[metadata]\nMoxfield={public_id}\n", 1),
+                    encoding="utf-8")
+
+
+def test_verdict_breakdown_and_pricing_series_merge_stem_and_stable_id(
+    save_client, deck_dir,
+):
+    """R4 A-02: ``/api/iterations`` merged rows under the posted stem and
+    the resolved id; ``verdict_breakdown`` and ``pricing_series`` queried
+    the raw stem only, so after ``backfill_deck_ids.py --apply`` (or any
+    CLI-written row) the pills and the sparkline went blank for every
+    versioned / Moxfield / Archidekt deck. All three readers now read
+    both keys."""
+    from commander_builder.knowledge_log import Iteration, record_iteration
+    client, db = save_client
+    _write_deck(deck_dir, "[USER] Foo v2 [B3]")
+    mox = _write_deck(deck_dir, "[USER] Mox [B3]")
+    _stamp_moxfield(mox, "abc123")
+    rows = [
+        ("[USER] Foo v2 [B3]", 10.0),   # pre-backfill web row (raw stem)
+        ("[USER] Foo [B3]", 20.0),      # stable id (CLI writer / backfill)
+        ("[USER] Mox [B3]", 30.0),
+        ("abc123", 40.0),
+    ]
+    for stored_under, price in rows:
+        record_iteration(Iteration(
+            deck_id=stored_under, deck_name=stored_under, bracket=3,
+            audit_version="v3", verdict="kept",
+            audit_manifest={"pricing": {
+                "total_price_usd": price,
+                "captured_at": "2026-09-16T00:00:00+00:00"}},
+        ), db_path=db)
+    for stem, prices in (("[USER] Foo v2 [B3]", [10.0, 20.0]),
+                         ("[USER] Mox [B3]", [30.0, 40.0])):
+        body = client.get(f"/api/verdict_breakdown?deck={stem}").get_json()
+        assert body["total_iterations"] == 2, body
+        assert body["breakdown"]["v3"]["kept"] == 2
+        assert body["breakdown"]["v3"]["total"] == 2
+        body = client.get(f"/api/pricing_series?deck={stem}").get_json()
+        assert body["count"] == 2
+        assert [p["total_price_usd"] for p in body["points"]] == prices
+        assert body["points"] == sorted(body["points"], key=lambda p: p["iteration_id"])
+        assert client.get(f"/api/iterations?deck={stem}").get_json()["count"] == 2
+    # A deck with no file on disk (or an unreadable one) still answers.
+    assert client.get("/api/verdict_breakdown?deck=[USER] Nope [B3]").get_json()["total_iterations"] == 0
+
+
+def test_save_iteration_stores_the_stable_deck_id(save_client, deck_dir):
+    """R4 A-03: the web writer stored the raw filename stem while every
+    other writer keys the provenance id / version-stripped stem, so the
+    auto-curate parent lookup could not see web rows on a versioned file
+    and ``deck_identity``'s "every writer" claim was false. An id that is
+    not filename-shaped, or whose file does not resolve, passes through."""
+    from commander_builder.knowledge_log import iterations_for_deck
+    client, db = save_client
+    _write_deck(deck_dir, "[USER] Foo v2 [B3]")
+    mox = _write_deck(deck_dir, "[USER] Mox [B3]")
+    _stamp_moxfield(mox, "abc123")
+    cases = [
+        ("[USER] Foo v2 [B3]", "[USER] Foo [B3]"),
+        ("[USER] Mox [B3]", "abc123"),
+        ("Alpha", "Alpha"),                              # not filename-shaped
+        ("[USER] NoFile v3 [B3]", "[USER] NoFile v3 [B3]"),  # no file on disk
+    ]
+    for posted, expected in cases:
+        resp = client.post("/api/save_iteration", json={
+            "deck_id": posted, "deck_name": posted, "bracket": 3,
+            "verdict": "pending",
+        })
+        assert resp.status_code == 200, resp.get_json()
+        rows = list(iterations_for_deck(expected, db_path=db))
+        assert len(rows) == 1 and rows[0].deck_name == posted, (posted, expected)
+    # The UI still finds the row under the stem it posted (A-02 merge).
+    assert client.get("/api/iterations?deck=[USER] Foo v2 [B3]").get_json()["count"] == 1
+    assert client.get("/api/iterations?deck=[USER] Mox [B3]").get_json()["count"] == 1
+
+
+def test_save_iteration_keeps_price_partial_on_caller_supplied_pricing(save_client):
+    """R4 A-10: the partial marker was written only when the route built
+    the pricing block itself; a caller supplying its own ``pricing`` plus
+    ``price_partial: true`` got a row rendered as a whole total."""
+    from commander_builder.knowledge_log import iterations_for_deck
+    client, db = save_client
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "pending", "total_price_usd": 12.5, "price_partial": True,
+        "audit_manifest": {"pricing": {
+            "total_price_usd": 12.5, "captured_at": "2026-09-16T00:00:00+00:00"}},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    row = list(iterations_for_deck("Alpha", db_path=db))[0]
+    manifest = row.audit_manifest
+    if isinstance(manifest, str):
+        manifest = json.loads(manifest)
+    assert manifest["pricing"]["partial"] is True
+    assert manifest["pricing"]["total_price_usd"] == 12.5  # caller's block kept
+    # A non-object pricing block cannot carry the flag: 400, not a silent drop.
+    resp = client.post("/api/save_iteration", json={
+        "deck_id": "Alpha", "deck_name": "Alpha", "bracket": 3,
+        "verdict": "pending", "total_price_usd": 1.0, "price_partial": True,
+        "audit_manifest": {"pricing": "n/a"},
+    })
+    assert resp.status_code == 400
+    assert "price_partial" in resp.get_json()["error"]
+
+
+def test_games_labels_use_a_strict_floor_and_honor_1v1_mode():
+    """R4 A-05/A-06: the badge used ``decisive >= floor`` and the tooltip
+    said "cleared" for an EXPECTATION sitting exactly on the floor (a 56 %
+    coin); the label ignored the mode radio (1v1 has one pair, no pods)
+    and the run-status line printed the per-pod count."""
+    import commander_builder.web as web_pkg
+    js = (Path(web_pkg.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    fn = js.split("function describeGamesOption")[1].split("\nfunction ")[0]
+    assert "const clears = decisive > floor;" in fn
+    assert '"cleared."' not in fn and "expected to reach it" in fn
+    assert "const pods = onevone ? 1 : settings.filler_pairs;" in fn
+    assert "const fraction = onevone ? 1 : settings.expected_decisive_fraction;" in fn
+    # The status line prints the run's total, in both places it is set.
+    assert "Running ${games}" not in js
+    assert js.count("Running ${totalGames}") == 2
+    assert "const totalGames = simTotalGames(games, mode);" in js
+    # Mode changes recompute the labels from the cached settings.
+    assert "applySimSettings(_simSettings)" in js
+
+
+def test_api_audit_heuristic_on_cp1252_deck_does_not_503(
+    client, deck_dir, monkeypatch, offline_edhrec,
+):
+    """R4 B-02 (FIX-INCOMPLETE of R3 W-04): the route read the deck
+    tolerantly and then called ``advise()``, which re-read it strictly —
+    a JSON 503 for the audit of the same deck ``/api/deck_text`` served."""
+    lat = deck_dir / "[USER] Latin [B3].dck"
+    lat.write_bytes(
+        "[metadata]\nName=[USER] Latin [B3]\n\n[Commander]\n1 Test Cmdr\n\n"
+        "[Main]\n1 Lim-D\xfbl's Vault\n98 Mountain\n".encode("cp1252"))
+    monkeypatch.setattr(
+        "commander_builder.improvement_advisor.lookup_card", lambda n: None,
+    )
+    resp = client.get("/api/audit?deck=[USER] Latin [B3]&bracket=3&source=heuristic")
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert "UnicodeDecodeError" not in json.dumps(body)
+
+
+def test_deck_source_put_keeps_crlf_endings(client, deck_dir):
+    """R4 B-09 (FIX-INCOMPLETE of R3 W-10): ``PUT /api/deck_source`` wrote
+    a bare-LF ``Moxfield=`` line into a CRLF deck and the replace regex's
+    ``.`` swallowed the CR. Insert, replace and clear all keep the file's
+    own ending; clear restores the original bytes."""
+    raw = (b"[metadata]\r\nName=[USER] Crlf [B3]\r\n\r\n[Commander]\r\n"
+           b"1 Test Cmdr\r\n\r\n[Main]\r\n1 Sol Ring\r\n98 Mountain\r\n")
+    p = deck_dir / "[USER] Crlf [B3].dck"
+    p.write_bytes(raw)
+
+    def _no_bare_lf(body: bytes) -> bool:
+        return body.count(b"\n") == body.count(b"\r\n")
+
+    resp = client.put("/api/deck_source?deck=[USER] Crlf [B3]",
+                      json={"moxfield_url": "https://moxfield.com/decks/abc123"})
+    assert resp.status_code == 200, resp.get_json()
+    body = p.read_bytes()
+    assert b"[metadata]\r\nMoxfield=abc123\r\nName=" in body and _no_bare_lf(body)
+    resp = client.put("/api/deck_source?deck=[USER] Crlf [B3]",
+                      json={"moxfield_url": "https://moxfield.com/decks/xyz789"})
+    assert resp.status_code == 200
+    body = p.read_bytes()
+    assert b"Moxfield=xyz789\r\n" in body and b"abc123" not in body and _no_bare_lf(body)
+    assert client.get("/api/deck_source?deck=[USER] Crlf [B3]").get_json()["moxfield_id"] == "xyz789"
+    resp = client.put("/api/deck_source?deck=[USER] Crlf [B3]", json={"moxfield_url": ""})
+    assert resp.status_code == 200
+    assert p.read_bytes() == raw
+
+
+def test_import_deck_via_url_writes_the_primer_sidecar(client, deck_dir, monkeypatch):
+    """R4 B-12: the UI import lane fetched the deck JSON and dropped its
+    ``description``, so every desktop-imported deck answered ``commander
+    adopt`` with "no primer sidecar" and had no ``stated`` intent. Same
+    writer and refused-handling as the CLI lanes (R3 F-06)."""
+    from tests.test_moxfield_import import _APPENDIX_C
+    from commander_builder.primer import read_primer_sidecar, sidecar_identity
+    fake_json = {
+        "name": "Magdanomicon", "publicId": "8Y4qOAcLN0O_HHYhOboV3Q",
+        "description": _APPENDIX_C,
+        "boards": {
+            "commanders": {"cards": {"k1": {"quantity": 1, "card": {
+                "name": "Magda, Brazen Outlaw", "set": "KHM", "cn": "142"}}}},
+            "mainboard": {"cards": {"k2": {"quantity": 1, "card": {
+                "name": "Sol Ring", "set": "C17", "cn": "260"}}}},
+        },
+    }
+    monkeypatch.setattr("commander_builder.moxfield_import.fetch_deck",
+                        lambda public_id: fake_json)
+    resp = client.post("/api/import_deck", json={
+        "moxfield_url": "https://moxfield.com/decks/8Y4qOAcLN0O_HHYhOboV3Q",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["primer"]["action"] == "written"
+    assert body["primer"]["words"] == len(_APPENDIX_C.split())
+    assert body["primer"]["warning"] is None
+    target = Path(body["path"])
+    assert read_primer_sidecar(target) == _APPENDIX_C
+    assert sidecar_identity(target)["source"] == "8Y4qOAcLN0O_HHYhOboV3Q"
+    # A paste import has no description: the field is present and null.
+    resp = client.post("/api/import_deck", json={
+        "name": "Pasted", "paste_text": "1 Sol Ring\n1 Forest\n"})
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["primer"] is None

@@ -9,11 +9,26 @@
 # provenance noted, and the capture file is deleted once consumed.
 name: fetch-archidekt-capture
 
-# Trigger: push-based rather than workflow_dispatch, because GitHub only
+# Trigger: push-based on the feature branch because GitHub only
 # registers dispatchable workflows from the DEFAULT branch, and this
-# helper lives on a feature branch. Committing a request file both
+# helper was born on a feature branch. Committing a request file both
 # triggers the run and carries the deck id.
+# workflow_dispatch added 2026-09-16 (R4 B-15, the R3 F-17 ask): once
+# this branch merges, the branch named below no longer exists and a
+# request.txt push to master would trigger nothing. The dispatch
+# trigger registers on master AT merge, so the lane survives the
+# branch. The optional `request` input is written to request.txt so
+# the fetch step below needs no second code path.
 on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: >-
+          Contents for tests/fixtures/_captures/request.txt (a deck id,
+          `commander:<name>`, `mode: primer-batch` or `url: https://...`).
+          Leave empty to use the committed request.txt.
+        required: false
+        default: ""
   push:
     branches: ["claude/ollama-code-analysis-ak77i1"]
     paths: ["tests/fixtures/_captures/request.txt"]
@@ -31,6 +46,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - name: Materialise a dispatch request
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.request != '' }}
+        run: |
+          mkdir -p tests/fixtures/_captures
+          printf '%s\n' "${{ github.event.inputs.request }}" > tests/fixtures/_captures/request.txt
       - name: Fetch deck JSON
         run: |
           # Deleting the request file (the consume step) also matches
