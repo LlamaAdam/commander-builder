@@ -1891,3 +1891,45 @@ deck-filter markup and the Replays section; `/api/health` ok with
 runs; `/api/dashboard/core?deck=…` → 200 advertising
 `deferred_sections: [lift_picks, pricing]`, and both
 `/api/dashboard/section/<name>?deck=…` fetches → 200 `status: ok`.
+
+## Round-4 follow-ups (2026-09-16)
+
+The 11 FOLLOW-UP items of negative-mode round 4
+(`docs/ollama-analysis/NEGATIVE_MODE_ROUND4.md` §4), plus two sweeps the
+FIX-NOW batch deliberately left out. Each is minor; none blocks the PR.
+
+- **A-04** — era-boundary report / `apply_era_shift`: select rows in
+  Python on `_row_instant_utc(created_at).date()` and print the UTC
+  instant; touch `measurement_era_for` only with a pinned offset table.
+- **A-08** — floor gate before the LLM verdict rung: return the
+  heuristic's `inconclusive` without escalating when decisive < floor;
+  treat a missing/unknown label as a parse failure.
+- **A-11** — dashboard price tile: label "N priced non-land cards" and
+  count trimmed-schema lands as unpriced rather than asserting
+  `partial: False`.
+- **A-12** — legacy era-4 AB-shaped rows: `margin = NULL WHERE margin = 0
+  AND win_rate_old IS NULL AND win_rate_new IS NULL` in the dry-run
+  backfill, or document the shape test.
+- **A-13** — explicit `--sim-fillers` seating `[REF]`/`[CONTROL]` decks:
+  one `NOTE:` line naming the excluded prefixes plus
+  `sim_report["fillers_overridden"] = True`.
+- **B-05** — `judge_agreement`: G1/G2/G3 per prompt version
+  (`{version: analyze(rows)}`), pooled block informational when mixed.
+- **B-06** — negation window: drop `against`/`nothing` as POST cues and
+  `drop*`/`skip*`/`nothing` as PRE cues; `but`/`only`/`except` as scope
+  breakers; the six sentences and the three appendix slug lists as pins.
+- **B-07** — win-heading rule: require a `fullmatch` short title (≤ 4
+  words) or a markdown marker before quoting the body.
+- **B-10** — Game Changers payload: trust only when all seven colour
+  entries matched with ≥ 1 name; never harvest the Info entry.
+- **B-11** — `atomic_write_text`: `os.path.realpath` first so a symlinked
+  `config.json` is written through, not replaced; document that an
+  existing parent's mode is not narrowed.
+- **B-18** — proposer cut guard: `match_key` at the two `lower()` sites so
+  a curly-apostrophe `Protect=` holds on `commander improve`/auto-curate.
+- **B-02 sweep** — migrate the remaining strict CLI deck readers to
+  `dck_utils.read_deck_text` (`archetype.py` first: its failure is
+  swallowed into a silent "midrange").
+- **B-14 diacritics** — NFKD/ASCII folding in `collection.match_key`
+  (`Lim-Dûl's` vs `Lim-Dul's`, `Æther` vs `Aether`); a matching-semantics
+  change, so separate.

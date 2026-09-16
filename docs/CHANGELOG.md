@@ -6,6 +6,70 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-09-16 — negative-mode round 4, FIX-NOW batch
+
+The 18 FIX-NOW items of the fourth negative-mode round
+(`docs/ollama-analysis/NEGATIVE_MODE_ROUND4.md` §2/§4), as adjudicated by
+the cross-examiner; every item carries a regression test. The 11
+FOLLOW-UP items are listed in `docs/future-plans.md` ("Round-4
+follow-ups"). No knowledge-log row is rewritten.
+
+#### Fixed
+
+- **B-15** — `fetch-archidekt-capture.yml` gains `workflow_dispatch:`
+  (with a `request` input) beside the push trigger, so the capture lane
+  registers on master at merge (the R3 F-17 ask).
+- **A-01** — `collect_deck_status` on a MISSING deck raised `ValueError`
+  (the C-08 routing passed a None fallback); it falls back to the
+  version-stripped stem again, per its own docstring.
+- **A-02** — `/api/verdict_breakdown` and `/api/pricing_series` merge rows
+  under the posted stem AND the stable id (new
+  `deck_identity.candidate_deck_ids`, shared with `/api/iterations`), so
+  the pills and the sparkline survive `backfill_deck_ids.py --apply`.
+- **A-03** — the web `save_iteration` writer stores the stable deck id
+  (provenance id, else version-stripped stem) for filename-shaped ids;
+  `deck_identity`'s "every writer" claim is now true. Landed after A-02.
+- **A-07** — `classify_swap_direction` gains the `intent_ward` mirror of
+  the C-12 `staple_ward` branch (intent-only + `both`, no staple-only).
+- **A-09** — `stats_summary` counts `inconclusive`; `commander-status`
+  prints it.
+- **A-10** — `POST /api/save_iteration` keeps `price_partial` on a
+  caller-supplied `pricing` block (400 when that block is not an object).
+- **A-05 / A-06** — Games radios: badge rule is `decisive > floor`, the
+  tooltip says "expected to reach" (never "cleared"), 1v1 mode uses one
+  pair (no pods, no filler fraction), the run-status line prints the run's
+  total, and labels recompute on a mode change.
+- **B-01** — primer sidecar readers decode tolerantly (`errors="replace"`
+  + one WARN naming the sidecar) and catch `(OSError, ValueError)`;
+  `sidecar_identity_warning` reads the deck through `read_deck_text`;
+  `judge`/`improve` keep `--preferences` on a bare `Intent` when
+  `learn_intent` fails (`intent.learn_intent_keeping_preferences`).
+- **B-02** — `improvement_advisor.advise` reads the deck through
+  `dck_utils.read_deck_text` at both sites; `/api/audit?source=heuristic`
+  no longer 503s on a cp1252 deck (W-04 completed for the advisor).
+- **B-03** — `--strategy bandit` threads the learned intent into
+  `advise()` (`intent_themes` / `free_text_themes`), so `--preferences`
+  steers the bandit's arms.
+- **B-04** — free-text fence: docstring no longer claims the fence cannot
+  be forged; in-band lines starting with `<<<FREE-TEXT` / `>>>END-FREE-TEXT`
+  are prefixed so no line inside the fence is fence-shaped
+  (`primer.fence_free_text`, moved beside `clip_for_prompt`).
+- **B-08** — header-less (pre-R3) sidecar on re-pull: text equal to or
+  starting with the new render keeps the old text (hand notes) under a
+  fresh header (`unchanged`, reason "identity header added"); differing
+  text is `replaced_headerless` and the import says so — never
+  "upstream changed".
+- **B-09** — `PUT /api/deck_source` keeps the deck's line ending
+  (`dck_meta.line_ending`) and uses `[^\r\n]` in every `Moxfield=` regex;
+  the GET also sees the line on a CRLF deck now.
+- **B-12** — `/api/import_deck` (UI/desktop lane) writes the primer sidecar
+  after the exclusive create and reports it in a `primer` reply field.
+- **B-13** — `parse_primer` strips C0/C1 controls and DEL on both branches
+  (tabs and newlines kept); the sidecar is the sanitised render.
+- **B-14** — adopt keys BOTH DFC faces (`_face_keys`) for `Protect=`,
+  auto-protection and the linked-present check, so a back-face
+  `Protect=` protects the card.
+
 ### 2026-09-09 — the three "Open bugs from the audit"
 
 All three items carried under "Open bugs from the audit" in
