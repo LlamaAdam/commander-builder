@@ -54,6 +54,16 @@ _FAKE_CARDS = {
 }
 
 
+# Every build here runs the steer stage, whose ``is_game_changer``
+# default is ``load_game_changers()`` → the WotC scrape. Tests that don't
+# inject the predicate were reaching magic.wizards.com on every build,
+# masked as 30-45 s of retries on a box that blocks it (audit open bug
+# 3, 2026-09-09). The shared seam makes the scrape fail like a dead
+# network so the loader serves the bundled fallback — the offline
+# production path.
+pytestmark = pytest.mark.usefixtures("offline_game_changers")
+
+
 def _fake_lookup(name):
     if name in _FAKE_CARDS:
         return _FAKE_CARDS[name]
@@ -247,7 +257,14 @@ def test_distribute_basics_zero_pips_even_split():
     assert out == {"Plains": 1, "Island": 1, "Swamp": 1}
 
 
-def test_two_color_build_splits_basics_by_pips():
+def test_two_color_build_splits_basics_by_pips(monkeypatch):
+    # Stages that resolve cards outside the injected ``lookup`` (the
+    # estimator's extra-turn scan, color-identity enforcement) read
+    # scryfall_client directly — patch it as the sibling tests do so
+    # a 99-card build never reaches Scryfall (audit open bug 3).
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _fake_lookup,
+    )
     cards = (
         ["Some Commander"]
         + [f"Goblin {i}" for i in range(30)]   # 30 red pips
@@ -895,9 +912,12 @@ def test_partner_union_color_identity(monkeypatch):
     assert "Plains" not in basics_present and "Swamp" not in basics_present
 
 
-def test_partner_combined_slug_both_orders_then_fallback(capsys):
+def test_partner_combined_slug_both_orders_then_fallback(capsys, monkeypatch):
     """Seeding tries <a>-<b>, then <b>-<a>, then falls back to the primary
     commander's own average deck with a printed note."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _partner_lookup,
+    )
     calls = []
 
     def fetch_avg(commander_or_slug, bracket):
@@ -925,9 +945,12 @@ def test_partner_combined_slug_both_orders_then_fallback(capsys):
     assert count_main_cards(result.text) == 98
 
 
-def test_partner_combined_slug_reverse_order_hit(capsys):
+def test_partner_combined_slug_reverse_order_hit(capsys, monkeypatch):
     """A hit on the REVERSED combined slug stops the walk — no fallback,
     no note (EDHREC's pair order isn't alphabetical, so both must be tried)."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _partner_lookup,
+    )
     calls = []
 
     def fetch_avg(commander_or_slug, bracket):
@@ -956,7 +979,10 @@ def test_partner_combined_slug_reverse_order_hit(capsys):
 # --- offline Partner-validation matrix -------------------------------------
 
 
-def test_partner_validation_both_detected_is_silent(capsys):
+def test_partner_validation_both_detected_is_silent(capsys, monkeypatch):
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card", _partner_lookup,
+    )
     _assemble(
         "Pako, Arcane Retriever", 3,
         partner="Haldan, Avid Arcanist",

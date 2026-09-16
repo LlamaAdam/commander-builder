@@ -39,7 +39,60 @@ reproduce the legacy name-collecting call sites exactly.
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
 from typing import Iterator, Optional
+
+#: U+FEFF. ``str.strip()`` does not remove it, so a BOM'd ``[metadata]``
+#: header never matched ``"[metadata]"`` and every ``[metadata]`` parser
+#: (``Protect=``, ``PoliticsGuard=``, ``BracketUnverified=``) silently
+#: read nothing while the card sections still loaded (R3 W-03,
+#: 2026-09-03). Nothing in this repo writes a BOM; PowerShell 5.1's
+#: ``Out-File -Encoding utf8`` and older Notepads do.
+BOM = "\ufeff"
+
+
+def strip_bom(text: Optional[str]) -> str:
+    """``text`` without a leading UTF-8 BOM (``""`` for ``None``)."""
+    if not text:
+        return ""
+    return text[1:] if text.startswith(BOM) else text
+
+
+#: Files already warned about, so a library scan warns once per file per
+#: process rather than once per route hit.
+_DECODE_WARNED: set[str] = set()
+
+
+def read_deck_text(path: Path, *, warn: bool = True) -> str:
+    """Read a ``.dck`` as text: UTF-8 with any BOM removed; a file that is
+    not valid UTF-8 decodes with ``errors="replace"`` and a LOUD per-file
+    warning on stderr instead of a ``UnicodeDecodeError`` (2026-09-03, R3
+    W-04 — one cp1252 re-save 500'd ``/api/library`` for the whole deck
+    library because the handlers caught ``OSError`` only).
+
+    ``OSError`` still propagates: a missing/unreadable file is the
+    caller's decision, only the ENCODING is degraded here. The tree
+    already read two files this way (``bubble_analysis``,
+    ``deck_library_analyzer``) and ~18 strictly; this is the one reader.
+    """
+    path = Path(path)
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        text = raw.decode("utf-8", errors="replace")
+        key = str(path)
+        if warn and key not in _DECODE_WARNED:
+            _DECODE_WARNED.add(key)
+            print(
+                f"[dck] WARN: {path.name} is not valid UTF-8 (byte "
+                f"{exc.start}: {exc.reason}); undecodable bytes were "
+                f"replaced with U+FFFD. Re-save the file as UTF-8 — card "
+                f"names with diacritics may not resolve until you do.",
+                file=sys.stderr, flush=True,
+            )
+    return strip_bom(text)
 
 # A legal Commander deck is exactly 100 cards TOTAL: mainboard plus
 # command zone. The mainboard target is therefore NOT a constant 99 —

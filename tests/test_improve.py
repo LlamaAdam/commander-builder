@@ -2052,3 +2052,129 @@ def test_default_judge_round_writes_beside_the_sim_verdict(tmp_path, monkeypatch
     assert stored.judge_verdict == "kept"
     assert stored.verdict == "neutral"      # the sim's column, untouched
     assert stored.judge_report["votes"]["b"] == 6
+
+
+# --- R3 C-02 (2026-09-03): a confirm sim that RUNS and FAILS ---------------
+#
+# R2-D3 said a confirming sim that could not run gets 'inconclusive'; the
+# code tested only ``ab is None`` (no fillers). A crashed JVM comes back as
+# ``ABResult(status='failed')`` with dataclass-default zeros, went through
+# _verdict_from_ab -> 'pending', and rewrote the COMPLETED row to pending
+# beside a structured replication record of fabricated zeros.
+
+@pytest.mark.parametrize("status", ["failed", "skipped"])
+def test_failed_confirmation_labels_the_row_inconclusive_not_pending(
+    tmp_path, monkeypatch, status,
+):
+    from commander_builder.knowledge_log import (
+        SIM_REPORT_REPLICATION_KEY, get_iteration,
+    )
+
+    db = tmp_path / "kl.sqlite"
+    iid = _seed_pending_row(db, notes=_RUN1_NOTE,
+                            sim_report=dict(_RUN1_SIM_REPORT))
+    failed = _RepAB(0, 0, status=status, games=0)
+    failed.error = "jvm died"
+    _patch_confirm_sim(monkeypatch, failed)   # two fillers: the sim STARTS
+    args = _replicate_args(db_path=str(db), sim_fillers=None)
+
+    rep = improve._default_replicate_fn(
+        tmp_path / "base.dck", tmp_path / "cand.dck", args, iid)
+    assert rep.verdict == "inconclusive"
+    assert rep.confirmed is False
+    assert "jvm died" in rep.notes
+
+    row = get_iteration(iid, db_path=db)
+    assert row.verdict == "inconclusive"
+    assert row.sim_report["status"] == "done"       # run 1 untouched
+    run2 = row.sim_report[SIM_REPORT_REPLICATION_KEY]
+    assert run2["ran"] is False
+    assert run2["status"] == status
+    # None, never fabricated zeros: nothing was measured.
+    assert run2["wins_old"] is None and run2["wins_new"] is None
+    assert run2["games"] is None and run2["decisive"] is None
+    assert run2["margin"] is None
+
+
+def test_bandit_failed_confirmation_is_inconclusive_too(
+    monkeypatch, tmp_path, capsys,
+):
+    """Same predicate on the bandit path: a confirm that came back
+    'failed' used to print "run 2 pending"."""
+    args = _eval_args(replicate=True)
+    state, base, _cand, _ = _make_eval(
+        monkeypatch, tmp_path, ab=None, args=args)
+    sims = iter([_AB(15, 30, games=45),
+                 _AB(0, 0, status="failed", error="jvm died", games=0)])
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation",
+        lambda deck_a_path, deck_b_path, games, fillers: next(sims),
+    )
+    monkeypatch.setattr(
+        "commander_builder._proposer_sim._pick_filler_decks",
+        lambda deck_dir, exclude_paths, count, target_bracket: ["f1.dck", "f2.dck"],
+    )
+    evaluate = improve._make_swap_evaluator(state, args)
+
+    out = evaluate(_arm())
+    assert out.accepted is False
+    assert out.verdict == "inconclusive"
+    assert state["deck"] == base
+    err = capsys.readouterr().err
+    assert "run 2 inconclusive" in err and "jvm died" in err
+
+
+# --- R4 B-03 / B-01 (2026-09-16): the bandit consumes the intent ------------
+
+def test_bandit_advise_receives_the_intent_slugs(monkeypatch):
+    """R4 B-03: ``--strategy bandit --preferences …`` was accepted and
+    printed but ``_build_arms_from_advice`` called ``advise()`` with no
+    intent at all. The learned intent now rides in on the same two
+    flags the greedy strategy uses; the no-intent call is unchanged."""
+    from commander_builder.intent import Intent
+    seen: dict = {}
+
+    def fake_advise(deck_path, bracket, source, **kw):
+        seen.clear()
+        seen.update(kw)
+        return _FakeReport(["A"], ["X"])
+
+    monkeypatch.setattr("commander_builder.improvement_advisor.advise", fake_advise)
+    intent = Intent(archetype="midrange", themes=["tokens", "sacrifice"],
+                    pilot_preferences="I love lifegain and tokens")
+    arms = improve._build_arms_from_advice(Path("/d.dck"), 3, "heuristic",
+                                           intent=intent)
+    assert len(arms) == 1
+    assert seen["intent_themes"] == ["tokens", "sacrifice"]
+    assert seen["free_text_themes"] == ["lifegain"]  # derived themes excluded
+    improve._build_arms_from_advice(Path("/d.dck"), 3, "heuristic")
+    assert seen == {}
+
+
+def test_improve_bandit_cli_keeps_preferences_when_intent_learning_fails(
+    tmp_path, monkeypatch, capsys,
+):
+    """R4 B-01 + B-03 through the CLI: a failed ``learn_intent`` (a cp1252
+    sidecar) used to drop the typed ``--preferences`` with "proceeding
+    without intent"; they now ride on a bare Intent that reaches the
+    bandit's arm builder."""
+    seen: dict = {}
+
+    def fake_arms(deck_path, bracket, source, intent=None):
+        seen["intent"] = intent
+        return []
+
+    def boom(path, **_kw):
+        raise UnicodeDecodeError("utf-8", b"\xfb", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(improve, "_build_arms_from_advice", fake_arms)
+    monkeypatch.setattr(improve, "learn_intent", boom)
+    deck = tmp_path / "[USER] Goblins [B4].dck"
+    deck.write_text("[metadata]\nName=Goblins\n[Commander]\n1 Krenko, Mob Boss\n"
+                    "[Main]\n1 Sol Ring\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "1", "--strategy", "bandit",
+                       "--preferences", "I love lifegain"])
+    assert rc == 0
+    assert seen["intent"] is not None
+    assert seen["intent"].pilot_preferences == "I love lifegain"
+    assert "--preferences only" in capsys.readouterr().out

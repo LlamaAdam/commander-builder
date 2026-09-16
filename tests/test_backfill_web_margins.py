@@ -302,3 +302,101 @@ def test_era_report_help_is_discoverable(capsys):
     out = capsys.readouterr().out
     assert "--era-boundary-report" in out
     assert "REPORT ONLY" in out
+
+
+# --- R3 C-05 (2026-09-03): the printed instructions actually work ----------
+#
+# The report told the owner to move _SIGNIFICANCE_START "or NULL the day".
+# Moving the constant never relabels a stamped row (the v3 backfill fills
+# NULL eras only); NULLing by hand is re-stamped era 4 by the next init_db.
+# --apply-era-shift is the write that lasts, and the report prints step 2.
+
+def _eras(db: Path) -> dict:
+    with closing(sqlite3.connect(str(db))) as conn:
+        return dict(conn.execute(
+            "SELECT id, measurement_era FROM iterations ORDER BY id"))
+
+
+def test_apply_era_shift_relabels_the_day_and_survives_init_db(era_db):
+    result = bwm.apply_era_shift(era_db)
+    assert sorted(result["changed"]) == [(401, 4, 3), (402, 4, 3)]
+    assert _eras(era_db) == {400: 3, 401: 3, 402: 3, 403: 4}
+    # The old "NULL the day" advice was undone by the next init_db; a
+    # stored stamp is not.
+    init_db(era_db)
+    init_db(era_db)
+    assert _eras(era_db) == {400: 3, 401: 3, 402: 3, 403: 4}
+    # Idempotent.
+    assert bwm.apply_era_shift(era_db)["changed"] == []
+
+
+def test_main_apply_era_shift_prints_both_steps(era_db, capsys):
+    rc = bwm.main(["--db", str(era_db), "--era-boundary-report",
+                   "--apply-era-shift"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "--apply-era-shift APPLIED: 2 row(s)" in out
+    assert "STEP 2" in out and '_SIGNIFICANCE_START = "2026-08-15"' in out
+    assert _eras(era_db)[401] == 3
+
+
+def test_report_without_the_shift_flag_still_writes_nothing(era_db):
+    before = _eras(era_db)
+    bwm.main(["--db", str(era_db), "--era-boundary-report"])
+    assert _eras(era_db) == before
+
+
+def test_report_advice_names_both_steps_and_not_null_the_day(era_db, capsys):
+    bwm.main(["--db", str(era_db), "--era-boundary-report"])
+    out = capsys.readouterr().out
+    assert "step 1" in out and "--apply-era-shift" in out
+    assert "step 2" in out and "_SIGNIFICANCE_START" in out
+    assert "NULL the day" not in out.split("Why both")[0]
+
+
+def test_apply_era_shift_without_the_report_flag_is_refused(era_db, capsys):
+    rc = bwm.main(["--db", str(era_db), "--apply-era-shift"])
+    assert rc == 2
+    assert "only applies to" in capsys.readouterr().err
+    assert _eras(era_db)[401] == 4
+
+
+# --- R3 C-07 (2026-09-03): UTC row time vs the commit's own offset --------
+
+def test_commit_time_offset_is_honored(era_db):
+    """Row 402 is 19:40Z. A commit at 16:00 local in UTC-4 is 20:00Z, so
+    the row is BEFORE it; the old lexical compare ('19:40' < '16:00' is
+    False) called it after."""
+    rows = {r["id"]: r for r in
+            bwm.era_boundary_report(era_db, commit_time="16:00-04:00")["rows"]}
+    assert rows[402]["side"].startswith("before")
+    assert rows[401]["side"].startswith("before")
+    rows = {r["id"]: r for r in
+            bwm.era_boundary_report(era_db, commit_time="16:00+00:00")["rows"]}
+    assert rows[402]["side"].startswith("after")
+
+
+def test_bare_commit_time_is_utc_and_the_report_says_so(era_db, capsys):
+    assert bwm.commit_instant_utc("14:00").isoformat() == "2026-08-14T14:00:00+00:00"
+    assert bwm.commit_instant_utc("14:32Z").isoformat() == "2026-08-14T14:32:00+00:00"
+    assert bwm.commit_instant_utc("08:58:35-04:00").isoformat() == "2026-08-14T12:58:35+00:00"
+    bwm.main(["--db", str(era_db), "--era-boundary-report",
+              "--commit-time", "12:58:35+00:00"])
+    out = capsys.readouterr().out
+    assert "(UTC); rows are compared in UTC" in out
+    assert "created_at (UTC)" in out
+
+
+@pytest.mark.parametrize("good", ["12:58:35+00:00", "08:58-04:00", "14:32Z"])
+def test_offset_commit_times_are_accepted(era_db, capsys, good):
+    rc = bwm.main(["--db", str(era_db), "--era-boundary-report",
+                   "--commit-time", good])
+    assert rc == 0
+    assert "unknown" not in capsys.readouterr().out
+
+
+def test_help_asks_for_iso_strict(capsys):
+    with pytest.raises(SystemExit):
+        bwm.main(["--help"])
+    out = capsys.readouterr().out
+    assert "iso-strict" in out and "--apply-era-shift" in out

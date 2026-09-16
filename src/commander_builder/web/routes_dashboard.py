@@ -64,7 +64,9 @@ from typing import Optional
 
 from flask import Blueprint, current_app, jsonify, request
 
+from ..dck_utils import read_deck_text
 from ..deck_dashboard import build_dashboard
+from ..deck_identity import candidate_deck_ids
 from ..knowledge_log import (
     MIN_COMPARABLE_VERDICT_ERA,
     audit_card_diff,
@@ -111,7 +113,7 @@ def _pricing_section(path: Path, deck_dir: Path, bracket: Optional[int]):
     try:
         return {
             "printing_savings": printing_savings_for_deck_text(
-                path.read_text(encoding="utf-8"),
+                read_deck_text(path),
             ),
         }, True
     except Exception as exc:  # noqa: BLE001 — dashboard must render regardless
@@ -293,7 +295,7 @@ def _sim_coverage(path: Path) -> dict:
     try:
         from .. import dck_utils
 
-        text = path.read_text(encoding="utf-8")
+        text = read_deck_text(path)
         names: list[str] = []
         seen: set[str] = set()
         for section in ("Commander", "Main"):
@@ -379,7 +381,7 @@ def _clear_verified_bracket_marker(
         return
     try:
         from .. import dck_meta
-        text = path.read_text(encoding="utf-8")
+        text = read_deck_text(path)
         if dck_meta.read_bracket_unverified(text) != declared:
             return
         atomic_write_text(path, dck_meta.clear_bracket_unverified(text))
@@ -387,6 +389,22 @@ def _clear_verified_bracket_marker(
         current_app.logger.warning(
             "bracket marker clear failed for %s: %s", path.name, exc,
         )
+
+
+def _merge_breakdown(into: dict, other: dict) -> None:
+    """Sum a ``verdict_breakdown_for_deck`` result into ``into`` (R4
+    A-02, 2026-09-16): per-version counters and their ``by_era`` buckets
+    add elementwise so the pills see rows under both deck ids."""
+    for version, bucket in other.items():
+        dst = into.setdefault(version, {"by_era": {}})
+        for key, val in bucket.items():
+            if key == "by_era":
+                for era, era_bucket in val.items():
+                    era_dst = dst["by_era"].setdefault(era, {})
+                    for k2, v2 in era_bucket.items():
+                        era_dst[k2] = era_dst.get(k2, 0) + v2
+            else:
+                dst[key] = dst.get(key, 0) + val
 
 
 def make_dashboard_blueprint(
@@ -403,6 +421,11 @@ def make_dashboard_blueprint(
     2026-05-14 cleanup).
     """
     bp = Blueprint("dashboard", __name__)
+
+    def _ids_for_stem(deck_id: str) -> list[str]:
+        # The stem the browser posts plus the stable id rows are keyed
+        # under (R4 A-02, 2026-09-16; see deck_identity.candidate_deck_ids).
+        return candidate_deck_ids(deck_id, deck_dir / f"{deck_id}.dck")
 
     @bp.route("/api/decks")
     def decks():
@@ -583,29 +606,20 @@ def make_dashboard_blueprint(
                 # collide so duplicate-row risk is zero. See
                 # ``iteration_loop.resolve_deck_id`` for the publicId
                 # lookup contract.
-                rows = list(iterations_for_deck(deck_id, db_path=knowledge_db))
-                public_id: Optional[str] = None
-                candidate = (deck_dir / f"{deck_id}.dck")
-                if candidate.exists():
-                    from ..iteration_loop import resolve_deck_id
-                    try:
-                        public_id = resolve_deck_id(
-                            candidate, fallback=None,
-                        )
-                    except Exception:
-                        public_id = None
-                if public_id and public_id != deck_id:
-                    extra = list(iterations_for_deck(
-                        public_id, db_path=knowledge_db,
-                    ))
-                    # Merge by id, preserving chronological order
-                    # (iterations_for_deck returns oldest-first).
-                    seen = {r.id for r in rows}
-                    for r in extra:
+                # 2026-09-16 (R4 A-02): the stem/stable-id pair comes
+                # from one helper shared with pricing_series and
+                # verdict_breakdown, which used to query the raw stem
+                # only and went blank after the C-08 backfill.
+                rows = []
+                seen: set = set()
+                for cand_id in _ids_for_stem(deck_id):
+                    for r in iterations_for_deck(cand_id, db_path=knowledge_db):
                         if r.id not in seen:
                             rows.append(r)
                             seen.add(r.id)
-                    rows.sort(key=lambda r: r.created_at or "")
+                # Merge by id, preserving chronological order
+                # (iterations_for_deck returns oldest-first).
+                rows.sort(key=lambda r: r.created_at or "")
             else:
                 rows = recent_iterations(limit=limit, db_path=knowledge_db)
         except Exception as exc:  # pragma: no cover - sqlite errors
@@ -631,9 +645,17 @@ def make_dashboard_blueprint(
         if not deck_id:
             return jsonify({"error": "deck is required"}), 400
         try:
-            points = pricing_series_for_deck(
-                deck_id, db_path=knowledge_db,
-            )
+            # R4 A-02 (2026-09-16): rows keyed under the stable id (CLI
+            # writers, the web writer, the backfill) AND the raw stem
+            # (pre-backfill web rows) both belong to this sparkline.
+            points = []
+            seen_ids: set = set()
+            for cand_id in _ids_for_stem(deck_id):
+                for pt in pricing_series_for_deck(cand_id, db_path=knowledge_db):
+                    if pt["iteration_id"] not in seen_ids:
+                        points.append(pt)
+                        seen_ids.add(pt["iteration_id"])
+            points.sort(key=lambda pt: pt["iteration_id"])
         except Exception as exc:  # pragma: no cover - sqlite errors
             return jsonify({"error": str(exc)}), 500
         return jsonify({
@@ -807,9 +829,13 @@ def make_dashboard_blueprint(
         if not deck_id:
             return jsonify({"error": "deck is required"}), 400
         try:
-            breakdown = verdict_breakdown_for_deck(
-                deck_id, db_path=knowledge_db,
-            )
+            # R4 A-02 (2026-09-16): sum the per-version buckets across
+            # the stem and the stable id (see _ids_for_stem).
+            breakdown = {}
+            for cand_id in _ids_for_stem(deck_id):
+                _merge_breakdown(breakdown, verdict_breakdown_for_deck(
+                    cand_id, db_path=knowledge_db,
+                ))
         except Exception as exc:  # pragma: no cover - sqlite errors
             return jsonify({"error": str(exc)}), 500
         total = sum(b.get("total", 0) for b in breakdown.values())

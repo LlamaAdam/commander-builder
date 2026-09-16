@@ -334,3 +334,56 @@ def test_json_mode_carries_the_per_pairing_rows(tmp_path, capsys):
     assert payload["pairings"][0]["sim_verdict"] == "reverted"
     assert payload["pairings"][0]["judge_verdict"] == "kept"
     assert payload["stats"]["agreements"] == 0
+
+
+# --- R3 C-13 (2026-09-03): inconclusive == inconclusive is not agreement ---
+
+def test_mutual_inconclusive_is_not_counted_as_agreement(tmp_path, capsys):
+    db = tmp_path / "kl.sqlite"
+    clean = {"order_flip": False, "discarded": 0}
+    _row(db, sim="inconclusive", judge="inconclusive", report=clean)
+    _row(db, sim="kept", judge="kept", report=clean)
+    _row(db, sim="inconclusive", judge="kept", report=clean)
+
+    stats = judge_agreement.analyze(judge_agreement.collect(db)["paired"])
+    assert stats["n"] == 3
+    assert stats["decided"] == 1
+    assert stats["undecided"] == 2
+    assert stats["both_inconclusive"] == 1
+    assert stats["agreements"] == 1
+    assert stats["agreement_rate"] == 1.0          # 1/1 decided, not 2/3
+
+    judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert "agree on the same label: 1/1" in out
+    assert "both inconclusive: 1 (not counted as agreement)" in out
+
+
+def test_agreement_rate_over_no_decided_pairs_is_zero_not_a_crash(tmp_path):
+    db = tmp_path / "kl.sqlite"
+    _row(db, sim="inconclusive", judge="inconclusive",
+         report={"order_flip": False, "discarded": 0})
+    stats = judge_agreement.analyze(judge_agreement.collect(db)["paired"])
+    assert stats["decided"] == 0 and stats["agreements"] == 0
+    assert stats["agreement_rate"] == 0.0
+
+
+def test_rows_are_tallied_per_prompt_version(tmp_path, capsys):
+    """R3 F-05 (2026-09-03): the free-text fence changed every judgment's
+    prompt bytes, so pooled rows must be separable by the prompt they were
+    judged under. Old rows carry no stamp and tally as ``unstamped``."""
+    db = tmp_path / "kl.sqlite"
+    _row(db, sim="kept", judge="kept",
+         report={"prompt_version": "2026-09-03.r3-fence"})
+    _row(db, sim="kept", judge="kept",
+         report={"prompt_version": "2026-09-03.r3-fence"})
+    _row(db, sim="kept", judge="reverted", report={})
+    collected = judge_agreement.collect(db_path=db)
+    stats = judge_agreement.analyze(collected["paired"])
+    assert stats["by_prompt_version"] == {
+        "2026-09-03.r3-fence": 2, "unstamped": 1,
+    }
+    rc = judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "prompt versions:" in out and "MIXED" in out

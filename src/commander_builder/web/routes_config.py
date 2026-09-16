@@ -55,6 +55,34 @@ def make_config_blueprint() -> Blueprint:
         cfg = config_store.load_config()
         return jsonify(config_store.redact_config(cfg))
 
+    @bp.route("/api/sim_settings", methods=["GET"])
+    def get_sim_settings():
+        """What the A/B "Games" radios actually buy (2026-09-03, R3 C-11).
+
+        ``/api/propose_swap`` runs ``games`` PER POD across
+        ``auto_filler_pairs()`` parallel pods, so the "40 (verdict floor)"
+        option is 40 x N pod games — 160 on a 4-core box, ~80 expected
+        decisive, +/-0.056 noise — while the static tooltip quoted the
+        40-TOTAL figures (~20 decisive, +/-0.11: 2x too pessimistic for
+        the run that happens). The pod count is a fact about THIS host,
+        so the page asks for it here and computes each option's total /
+        expected-decisive / noise from the same constants the CLI's
+        floor arithmetic uses. Wall time stays ~one pod's games (pods run
+        in parallel); the honesty gap is JVM/CPU cost and the quoted
+        noise, which is what the labels now state.
+        """
+        from .._proposer_sim import (
+            EXPECTED_DECISIVE_FRACTION,
+            MIN_DECISIVE_GAMES_FOR_VERDICT,
+        )
+        from ..compare_versions import auto_filler_pairs
+        return jsonify({
+            "games_are_per_pod": True,
+            "filler_pairs": auto_filler_pairs(),
+            "expected_decisive_fraction": EXPECTED_DECISIVE_FRACTION,
+            "min_decisive_games": MIN_DECISIVE_GAMES_FOR_VERDICT,
+        })
+
     @bp.route("/api/config", methods=["PUT"])
     def put_config():
         body = request.get_json(silent=True)

@@ -279,18 +279,18 @@ documented at `tests/fixtures/real_oracles.py`.
 > entries live in [CHANGELOG.md](CHANGELOG.md) and the FP sections of
 > [future-plans.md](future-plans.md)). Current queue:
 
-1. **FP-015 per-swap gated run — PENDING.** Tier-3 whole-ordering
-   validation concluded with a second gate fail (9 paired decks,
-   PR #61); the flag stays default-off. The per-swap harness
-   (`scripts/validate_card_score_perswap.py`, PR #63) is built with a
-   pre-registered gate but has run no sims yet — run the real 6-deck
-   pass and record the verdict in future-plans.md.
-   `COMMANDER_BUILDER_CARD_SCORE` flips only on a clear gate pass.
-2. **FP-012 live shakedown.** The `--search-budget` UCB1 search and
-   the `--screen` forge_py gate are unit-verified only. Once a box is
-   free, run a real searched improve round (with and without
-   `--screen`) against a plain greedy round; check the correlation log
-   for pruned-arm regret. Open questions in future-plans.md.
+1. **FP-015 — CLOSED (2026-08-05).** The per-swap pooled gate FAILED
+   (rho = −0.090, p = 0.70; box1 arm, 36 measured swaps); together
+   with the two whole-ordering gate fails the flag stays default-off
+   with nothing in flight. Only a replication of box2b's arm or a new
+   pre-registered design reopens it. (This entry said "PENDING" until
+   2026-09-09 — future-plans.md's FP-015 FINAL section is the record.)
+2. **FP-012 — shakedown COMPLETE (2026-08-02/03)**: the screen engaged
+   live, Forge judged the survivors, and the verdict machinery reverted
+   a losing swap. Still open are the three tuning questions in
+   future-plans.md (per-swap probing vs one large verdict sim, probe
+   size, screening thresholds / pruned-arm regret) — measurement
+   items, not blockers.
 3. **Corpus-norms A/B.** `COMMANDER_BUILDER_CORPUS_NORMS=1` steering
    (PR #49) has never been validated empirically — A/B sim
    norm-steered vs plain `commander-build` output before any thought

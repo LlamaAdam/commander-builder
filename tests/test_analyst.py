@@ -81,7 +81,11 @@ def test_heuristic_reverted_when_strong_regression():
 
 
 def test_heuristic_neutral_when_within_noise():
-    v = heuristic_verdict(_input(old_wins=5, new_wins=6, draws=0, total=11), AnalystConfig())
+    # 10-11 over 21 decisive: AT the trustworthy floor, within noise.
+    # (Re-pinned 2026-09-03, R3 C-01: the old 5-6 over 11 sat BELOW the
+    # 20-decisive floor and only read "neutral" because the floor branch
+    # mislabeled sub-floor sims; that case is now 'inconclusive'.)
+    v = heuristic_verdict(_input(old_wins=10, new_wins=11, draws=0, total=21), AnalystConfig())
     assert v.label == "neutral"
     assert v.confidence < 0.75
 
@@ -109,10 +113,12 @@ def test_heuristic_uses_head_to_head_decisive_not_total_minus_draws():
     half the games. Here 20 games completed with 0 draws but the A/B pair
     won only 3 between them (fillers took 17). The old
     ``decisive = total - draws`` computed 20 and passed the 8-game gate;
-    head-to-head decisive is 3 → the verdict must be the inconclusive
-    neutral, not a margin call on filler noise."""
+    head-to-head decisive is 3 → the verdict must be 'inconclusive', not
+    a margin call on filler noise. (Re-pinned 2026-09-03, R3 C-01: the
+    floor branch used to say "neutral", the schema's word for a
+    TRUSTWORTHY near-tie.)"""
     v = heuristic_verdict(_input(old_wins=2, new_wins=1, draws=0, total=20), AnalystConfig())
-    assert v.label == "neutral"
+    assert v.label == "inconclusive"
     assert v.confidence == 0.3
     assert "Inconclusive" in v.reasoning
     assert "3/20" in v.reasoning
@@ -121,7 +127,9 @@ def test_heuristic_uses_head_to_head_decisive_not_total_minus_draws():
 def test_heuristic_inconclusive_when_too_many_draws():
     # 18 of 20 games drew (matches the real Hakbal-vs-Hash smoke test).
     v = heuristic_verdict(_input(old_wins=1, new_wins=1, draws=18, total=20), AnalystConfig())
-    assert v.label == "neutral"
+    # R3 C-01 (2026-09-03): 'inconclusive', the knowledge_log label for
+    # "measured, not decided" — no longer a trustworthy-looking 'neutral'.
+    assert v.label == "inconclusive"
     assert "Inconclusive" in v.reasoning
     assert any("decks_drew_too_often" in lesson for lesson in v.lessons)
 
@@ -153,11 +161,12 @@ def test_min_decisive_floor_aligned_with_proposer_sim():
 
 def test_heuristic_inconclusive_below_aligned_floor():
     """14 decisive games (a lopsided 12-2, p ~= 0.013) sits below the
-    aligned 20-decisive floor: the verdict must be the inconclusive
-    neutral, not a confident kept — matching _verdict_from_ab, which
-    returns 'inconclusive' for the same outcome."""
+    aligned 20-decisive floor: the verdict must be 'inconclusive', not a
+    confident kept — matching _verdict_from_ab, which returns
+    'inconclusive' for the same outcome (and, since 2026-09-03 / R3
+    C-01, the same LABEL: the analyst used to write 'neutral' here)."""
     v = heuristic_verdict(_input(old_wins=2, new_wins=12, draws=0, total=14), AnalystConfig())
-    assert v.label == "neutral"
+    assert v.label == "inconclusive"
     assert v.confidence == 0.3
     assert "Inconclusive" in v.reasoning
 
@@ -426,8 +435,12 @@ def test_analyze_degrades_to_heuristic_on_garbage_claude_response(
     _mock_claude_sdk(monkeypatch, "Sorry, I cannot produce JSON today.")
 
     # Noise band: heuristic confidence is low → router escalates to claude.
+    # (10-11 over 21 decisive since 2026-09-03 / R3 C-01: the old 5-6
+    # over 11 was BELOW the decisive floor and is now 'inconclusive',
+    # which also escalates but is not the "within noise" case this
+    # test describes.)
     v = analyze(
-        _input(old_wins=5, new_wins=6, draws=0, total=11),
+        _input(old_wins=10, new_wins=11, draws=0, total=21),
         config=AnalystConfig(use_claude=True),
     )
     assert v.source == "heuristic"

@@ -657,6 +657,9 @@ def test_small_lists_are_low_confidence():
 # Dashboard payload shape
 # ---------------------------------------------------------------------------
 
+# build_dashboard's salt probe reached json.edhrec.com behind a degrade
+# guard (audit open bug 3, 2026-09-09); miss instantly at the seam instead.
+@pytest.mark.usefixtures("offline_edhrec")
 def test_dashboard_payload_gains_bracket_estimate(tmp_path, monkeypatch):
     from commander_builder.deck_dashboard import build_dashboard
 

@@ -855,3 +855,33 @@ def test_to_deck_json_omits_an_empty_description(real_deck):
     deck = dict(real_deck)
     del deck["description"]
     assert "description" not in ac.to_deck_json(deck)
+
+
+def test_parse_deck_id_refuses_non_numeric_ids():
+    """R3 W-06 (2026-09-03): the raw input used to pass through into the
+    ``/api/decks/<id>/`` path."""
+    import pytest as _pytest
+    for bad in ("https://evil.example/?archidekt.com", "abc", "12/34", ""):
+        with _pytest.raises(ValueError, match="not an Archidekt deck URL"):
+            ac.parse_deck_id(bad)
+
+
+def test_capture_workflow_is_dispatchable_after_merge():
+    """R4 B-15 (the R3 F-17 ask): the capture lane was push-triggered on a
+    feature branch only; GitHub registers ``workflow_dispatch`` from the
+    default branch AT merge, so the trigger must be on the branch before
+    it merges or a ``request.txt`` push to master triggers nothing."""
+    from pathlib import Path
+    wf = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "fetch-archidekt-capture.yml"
+    text = wf.read_text(encoding="utf-8")
+    on_block = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert "workflow_dispatch:" in on_block
+    assert "push:" in on_block and "tests/fixtures/_captures/request.txt" in on_block
+    try:
+        import yaml
+    except ImportError:  # the text pin above still holds
+        return
+    doc = yaml.safe_load(text)
+    triggers = doc.get(True, doc.get("on"))  # PyYAML reads a bare `on` as True
+    assert "workflow_dispatch" in triggers and "push" in triggers
+    assert "request" in triggers["workflow_dispatch"]["inputs"]

@@ -66,10 +66,18 @@ def test_deck_dir_is_allowed_config_key():
     assert "deck_dir" in config_store.ALLOWED_KEYS
 
 
-def test_validate_update_accepts_deck_dir():
-    norm, errors = config_store.validate_update({"deck_dir": r"C:\my\decks"})
+def test_validate_update_accepts_deck_dir(tmp_path):
+    # Since 2026-09-03 (R3 W-07) the validator refuses a deck_dir that is
+    # not an existing absolute directory on THIS machine -- a saved
+    # setting that pointed nowhere used to brick the next launch. The
+    # old literal `C:\my\decks` exists on no CI runner (and was
+    # relative on POSIX), so the pin now uses a real directory; the
+    # rejection cases live in test_config_store.
+    target = tmp_path / "decks"
+    target.mkdir()
+    norm, errors = config_store.validate_update({"deck_dir": str(target)})
     assert not errors
-    assert norm["deck_dir"] == r"C:\my\decks"
+    assert norm["deck_dir"] == str(target)
 
 
 def test_validate_update_clears_deck_dir_on_empty():

@@ -130,3 +130,52 @@ def test_apply_update_token_persists_but_redacts(cfg_file):
     assert stored["anthropic_api_key"] == "sk-ant-abcd1234efgh5678"
     red = config_store.redact_config(stored)
     assert "anthropic_api_key" not in red and red["anthropic_api_key_set"]
+
+
+# ---------------------------------------------------------------------------
+# R3 W-07 / W-08 (2026-09-03)
+# ---------------------------------------------------------------------------
+
+def test_deck_dir_must_be_an_existing_absolute_directory(tmp_path):
+    """R3 W-07: ``/etc``-style paths were fine, but ``"\\x00"`` bricked the
+    next launch (ValueError in the serve thread), a relative path was
+    CWD-relative, and a file path yielded an empty library silently."""
+    from commander_builder import config_store as cs
+
+    f = tmp_path / "some file.txt"
+    f.write_text("x", encoding="utf-8")
+    for bad in ("\x00", "relative/../../x", str(f), str(tmp_path / "missing")):
+        normalized, errors = cs.validate_update({"deck_dir": bad})
+        assert errors and errors[0].startswith("deck_dir:"), bad
+        assert "deck_dir" not in normalized
+    normalized, errors = cs.validate_update({"deck_dir": str(tmp_path)})
+    assert errors == [] and normalized["deck_dir"] == str(tmp_path.resolve())
+    # Clearing still works.
+    assert cs.validate_update({"deck_dir": ""}) == ({"deck_dir": None}, [])
+
+
+def test_save_config_is_atomic_and_owner_only_from_the_first_byte(
+        cfg_file, monkeypatch):
+    """R3 W-08: write_text-then-chmod left a 0o644 window and a
+    truncating write failure left '' (key gone)."""
+    import os
+    from commander_builder import config_store as cs
+
+    key = "sk-ant-" + "a" * 20
+    cs.save_config({"anthropic_api_key": key})
+    if os.name != "nt":
+        assert oct(cfg_file.stat().st_mode & 0o777) == "0o600"
+        assert oct(cfg_file.parent.stat().st_mode & 0o777) == "0o700"
+
+    real = os.fsync
+
+    def boom(fd):
+        raise OSError("ENOSPC simulated")
+
+    monkeypatch.setattr(os, "fsync", boom)
+    with pytest.raises(OSError):
+        cs.save_config({"anthropic_api_key": "sk-ant-" + "b" * 20})
+    monkeypatch.setattr(os, "fsync", real)
+    # The previous config survived the failed write, and no temp is left.
+    assert cs.load_config(cfg_file)["anthropic_api_key"] == key
+    assert not list(cfg_file.parent.glob(".*.tmp"))

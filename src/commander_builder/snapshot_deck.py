@@ -90,6 +90,13 @@ def snapshot(
     # the destination's own stem so log_parser._normalize(filename) equals
     # _normalize(Name=) again (invariant documented in dck_meta).
     rewrite_name_to_stem(dst)
+    # The primer sidecar travels with the snapshot (R3 F-07, 2026-09-03):
+    # a ` v2` copy used to answer `commander adopt` with "no primer" while
+    # the live file beside it had one. Same source id — same header.
+    from .primer import primer_sidecar_path
+    src_sidecar = primer_sidecar_path(src)
+    if src_sidecar.exists():
+        shutil.copy2(src_sidecar, primer_sidecar_path(dst))
     return dst
 
 

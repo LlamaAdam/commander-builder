@@ -102,14 +102,18 @@ def save_config(data: dict[str, Any], path: Optional[Path] = None) -> Path:
     """Write the full config dict to disk, owner-only. Creates the parent
     directory if needed. Only whitelisted keys are persisted."""
     target = path or config_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    # Parent owner-only too (R3 W-08): the directory holds the key file.
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     clean = {k: v for k, v in data.items() if k in ALLOWED_KEYS}
-    target.write_text(json.dumps(clean, indent=2, sort_keys=True), encoding="utf-8")
-    # Owner read/write only. Harmless no-op on Windows.
-    try:
-        target.chmod(0o600)
-    except OSError:
-        pass
+    # Atomic, and 0o600 from the first byte (R3 W-08, 2026-09-03): the
+    # old write_text-then-chmod left a 0o644 window and a truncating
+    # write failure left '' — load_config() then read {} and the key was
+    # gone. The temp file is created 0600 by mkstemp; ``mode`` pins the
+    # replacement to that regardless of what the old file had.
+    from .atomic_io import atomic_write_text
+    atomic_write_text(
+        target, json.dumps(clean, indent=2, sort_keys=True), mode=0o600,
+    )
     return target
 
 
@@ -189,12 +193,41 @@ def validate_update(updates: dict[str, Any]) -> tuple[dict[str, Any], list[str]]
         # String keys.
         if value is None or value == "":
             normalized[key] = None
-        elif isinstance(value, str):
-            normalized[key] = value
-        else:
+        elif not isinstance(value, str):
             errors.append(f"{key}: expected a string")
+        elif key == "deck_dir":
+            problem = deck_dir_problem(value)
+            if problem:
+                errors.append(f"deck_dir: {problem}")
+            else:
+                normalized[key] = str(Path(value).expanduser().resolve())
+        else:
+            normalized[key] = value
 
     return normalized, errors
+
+
+def deck_dir_problem(value: str) -> Optional[str]:
+    """Why ``value`` cannot be the deck directory, or ``None`` when it can
+    (2026-09-03, R3 W-07). ``PUT /api/config`` used to store anything —
+    ``"\x00"`` raised ValueError in the desktop's serve thread on the next
+    launch, a relative path resolved against whatever CWD the app started
+    in, and a FILE path yielded an empty library silently — with no way
+    back through the UI. Must be absolute, NUL-free, and an existing
+    directory (the app never creates it on a settings save)."""
+    if "\x00" in value:
+        return "contains a NUL byte"
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        return f"must be an absolute path, got {value!r}"
+    try:
+        if not candidate.exists():
+            return f"directory does not exist: {value}"
+        if not candidate.is_dir():
+            return f"not a directory: {value}"
+    except OSError as exc:
+        return f"cannot be checked ({type(exc).__name__}: {exc})"
+    return None
 
 
 def apply_update(

@@ -11,7 +11,17 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.slow
+pytestmark = [
+    pytest.mark.slow,
+    # Offline at the module seams (audit open bug 3, 2026-09-09): under
+    # the suite-wide network block the pipelines these tests drive were
+    # reaching Scryfall, EDHREC and Moxfield behind degrade guards. The
+    # shared fixtures make those upstreams miss instantly; a test wanting
+    # a specific answer patches over them.
+    pytest.mark.usefixtures(
+        "offline_scryfall", "offline_edhrec", "offline_moxfield",
+    ),
+]
 
 
 @pytest.fixture(autouse=True)

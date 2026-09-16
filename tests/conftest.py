@@ -17,8 +17,9 @@ at module level or use it as a def-time parameter default.
 Tests tagged ``@pytest.mark.slow`` are skipped by default so the
 inner-loop ``pytest`` run takes ~30s instead of ~3min. Run the full
 suite via ``pytest --run-slow`` (or ``pytest -m "slow or not slow"``
-if you prefer pure marker syntax). CI runs everything implicitly via
-``--run-slow``.
+if you prefer pure marker syntax). CI runs the offline integration lane via
+``--run-slow``. Tests marked ``live`` additionally require ``--run-live``;
+neither ``--run-slow`` nor a marker expression opts into external services.
 
 Tag a test ``slow`` when it:
 - exercises the full ``advise()`` pipeline (EDHREC fixtures, multi-
@@ -26,9 +27,28 @@ Tag a test ``slow`` when it:
 - shells out to the auto-curate CLI through argparse + Anthropic
   stubs — each costs ~2-4s.
 - otherwise dominates the ``--durations=20`` list with >1s runtime.
+
+## Network block (audit open bug 3, 2026-09-09)
+
+The suite is offline-only, but until 2026-09-09 nothing ENFORCED it:
+an unpatched lookup path quietly went to Scryfall / EDHREC / WotC and,
+on a machine where those hosts are unreachable, showed up as a 30-45 s
+test rather than a failure (three ``test_deck_builder`` tests measured
+at 34-44 s each). ``network_block`` below refuses every non-loopback
+socket connect with a ``NetworkBlockedError`` that names the test and
+the host, and fails the test at teardown if the attempt was swallowed
+by a degrade-don't-die guard. Loopback stays open (Flask's test client
+and the desktop tests bind real 127.0.0.1 servers). ``live`` tests run
+with ``--run-live`` are exempt.
 """
+import email.message
+import io
+import ipaddress
+import socket
 import sys
+import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,6 +69,16 @@ def pytest_addoption(parser):
             "Run tests marked @pytest.mark.slow (advisor + auto-curate "
             "integration). Off by default; the fast lane keeps inner-"
             "loop iteration under ~30s. CI runs with this flag set."
+        ),
+    )
+    parser.addoption(
+        "--run-live",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow tests marked @pytest.mark.live to contact real services "
+            "and consume subscription/API usage. Combine with --run-slow "
+            "for live tests that are also marked slow."
         ),
     )
 
@@ -83,6 +113,16 @@ def pytest_collection_modifyitems(config, items):
             if item.name.startswith(prefix):
                 item.add_marker(slow_marker)
                 break
+
+    # Live services need explicit consent even when slow tests or custom
+    # marker expressions are selected. Keep this before the early returns.
+    if not config.getoption("--run-live"):
+        skip_live = pytest.mark.skip(
+            reason="live-service test requires explicit --run-live opt-in",
+        )
+        for item in items:
+            if "live" in item.keywords:
+                item.add_marker(skip_live)
 
     # Pass 2: skip slow unless opted in.
     if config.getoption("--run-slow"):
@@ -219,3 +259,212 @@ def _isolate_collection_path(tmp_path, monkeypatch):
         "COMMANDER_BUILDER_COLLECTION",
         str(tmp_path / "_isolated_collection.txt"),
     )
+
+
+# --- Network block (audit open bug 3, 2026-09-09) -----------------------
+
+class NetworkBlockedError(RuntimeError):
+    """Raised by ``network_block`` on any non-loopback socket connect.
+
+    Deliberately NOT an ``OSError``: urllib only wraps OSError into
+    ``URLError``, and the repo's retry helpers (edhrec's backoff loop,
+    ``oracle_store._call_with_retry``) only retry URLError / OSError /
+    HTTPException / TimeoutError — so this escapes every backoff loop
+    instead of being slept on and reaches the test (or the teardown
+    check below) on the first attempt.
+    """
+
+
+# urllib reads these at every ``urlopen`` (``getproxies_environment``).
+# A dev box or sandbox that routes egress through a LOOPBACK proxy
+# (``HTTPS_PROXY=http://127.0.0.1:<port>``) would otherwise tunnel a
+# blocked request straight through the loopback allowance below.
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+)
+
+_CALL_REPORT = pytest.StashKey()
+
+
+def _is_local_host(host) -> bool:
+    """Loopback / unspecified hosts are local; everything else is not.
+
+    ``0.0.0.0`` / ``::`` are bind-side wildcards (werkzeug resolves them
+    via getaddrinfo when a test starts a server); ``localhost`` and the
+    empty host are what the stdlib passes for a loopback bind/connect.
+    """
+    if host is None or isinstance(host, bytes):
+        host = (host or b"").decode("ascii", "replace")
+    if host in ("", "localhost", "0.0.0.0", "::"):
+        return True
+    try:
+        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False  # a hostname — never trusted without resolution
+
+
+def _is_local_address(address) -> bool:
+    if not isinstance(address, tuple):
+        return True  # AF_UNIX path (str/bytes) — always local.
+    return _is_local_host(address[0])
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Stash the call-phase report so ``network_block``'s teardown can
+    tell "passed while a blocked connect was swallowed" (must fail) from
+    "already failed on the raise itself" (don't double-report)."""
+    rep = yield
+    if rep.when == "call":
+        item.stash[_CALL_REPORT] = rep
+    return rep
+
+
+@pytest.fixture(autouse=True)
+def network_block(request, monkeypatch):
+    """Refuse every non-loopback socket connect for the duration of a test.
+
+    Guards ``socket.socket.connect`` / ``connect_ex`` (the addresses
+    ``socket.create_connection`` and therefore ``http.client`` hand
+    over) and ``socket.getaddrinfo`` (the DNS step that precedes them,
+    so the error names the HOSTNAME and no resolver round-trip is paid
+    on a box whose DNS hangs). Loopback and AF_UNIX stay open.
+
+    A blocked attempt raises ``NetworkBlockedError`` immediately AND is
+    recorded; if the test then passes anyway — the raise was eaten by a
+    ``except Exception`` degrade guard, which is exactly how the three
+    30-45 s ``test_deck_builder`` cases hid for months — teardown fails
+    the test naming every host it reached for. Fix the test at the
+    boundary the module already exposes (a urllib patch, an injected
+    client, or a cached fixture); never loosen this fixture.
+
+    Tests marked ``live`` are exempt when ``--run-live`` was given.
+    Yields a namespace (``attempts``: the recorded ``host:port`` list)
+    so a test that deliberately provokes the block can assert on it and
+    clear it before teardown — see ``tests/test_network_block.py``.
+    In-process only by design: a subprocess a test spawns inherits the
+    stripped proxy env but not the socket guard.
+    """
+    state = SimpleNamespace(attempts=[], nodeid=request.node.nodeid)
+    if (request.node.get_closest_marker("live") is not None
+            and request.config.getoption("--run-live")):
+        yield state
+        return
+
+    def _refuse(host, port):
+        if isinstance(host, bytes):
+            host = host.decode("ascii", "replace")
+        where = f"{host}:{port}" if port is not None else str(host)
+        state.attempts.append(where)
+        raise NetworkBlockedError(
+            f"test {state.nodeid} attempted a network connection to {where} "
+            f"— the suite is offline-only. Mock at the boundary the module "
+            f"already exposes (a urllib patch, an injected client, or a "
+            f"cached fixture), or mark the test `live` and run with "
+            f"--run-live."
+        )
+
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_getaddrinfo = socket.getaddrinfo
+
+    def guarded_connect(self, address):
+        if not _is_local_address(address):
+            _refuse(address[0], address[1])
+        return real_connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        if not _is_local_address(address):
+            _refuse(address[0], address[1])
+        return real_connect_ex(self, address)
+
+    def guarded_getaddrinfo(host, port, *args, **kwargs):
+        if not _is_local_host(host):
+            _refuse(host, port)
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+    for var in _PROXY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+    yield state
+
+    if state.attempts:
+        rep = request.node.stash.get(_CALL_REPORT, None)
+        if rep is None or rep.passed:
+            pytest.fail(
+                f"test {state.nodeid} passed but a code path it exercised "
+                f"attempted {len(state.attempts)} network connection(s) "
+                f"that were swallowed by a degrade guard: "
+                f"{sorted(set(state.attempts))}. The suite is offline-only "
+                f"— mock at the boundary the module already exposes.",
+                pytrace=False,
+            )
+
+
+# --- Offline seams for the three upstream services -------------------------
+#
+# Opt-in companions to ``network_block``: a family of tests that
+# exercises a pipeline end-to-end (dashboard, audit route, deck build)
+# does not need the network — it needs the upstream to MISS instantly
+# so the degrade paths run as they would offline. Each fixture patches
+# the ONE function the module routes every request through — the same
+# seam the module's own unit tests already patch — and zeroes the
+# courtesy sleep that sits in front of it, so a 99-card deck costs
+# nothing instead of 99 × 0.1 s. A test that wants a different answer
+# from the upstream patches over these in its own body (test-level
+# monkeypatch runs after fixture setup).
+
+def _offline_404(url: str) -> urllib.error.HTTPError:
+    """A deterministic 404: propagates through every retry helper
+    without a backoff sleep (404 is never retried), and every client
+    turns it into a clean miss (None / {} / bundled fallback)."""
+    return urllib.error.HTTPError(
+        url, 404, "offline test suite", email.message.Message(), io.BytesIO(b""),
+    )
+
+
+@pytest.fixture
+def offline_scryfall(monkeypatch):
+    """Every Scryfall fetch misses instantly; disk snapshots still hit."""
+    from commander_builder import scryfall_client as _sc
+
+    def miss(url):
+        raise _offline_404(url)
+    monkeypatch.setattr(_sc, "_http_get_json", miss)
+    monkeypatch.setattr(_sc, "REQUEST_SLEEP_SEC", 0.0)
+
+
+@pytest.fixture
+def offline_edhrec(monkeypatch):
+    """Every EDHREC fetch misses instantly (no page → None / {})."""
+    from commander_builder import edhrec_client as _ec
+
+    def miss(url):
+        raise _offline_404(url)
+    monkeypatch.setattr(_ec, "_http_get_text", miss)
+    monkeypatch.setattr(_ec, "REQUEST_SLEEP_SEC", 0.0)
+
+
+@pytest.fixture
+def offline_game_changers(monkeypatch):
+    """The WotC scrape fails like a dead network → bundled fallback."""
+    from commander_builder import game_changers as _gc
+
+    def down(url, timeout=20):
+        raise urllib.error.URLError("offline test suite")
+    monkeypatch.setattr(_gc, "_http_get_text", down)
+
+
+@pytest.fixture
+def offline_moxfield(monkeypatch):
+    """Every Moxfield fetch misses instantly (404 → "deck absent")."""
+    from commander_builder import moxfield_import as _mx
+
+    def miss(url):
+        raise _offline_404(url)
+    monkeypatch.setattr(_mx, "_http_get_json", miss)
+

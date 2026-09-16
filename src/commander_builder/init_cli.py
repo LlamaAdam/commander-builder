@@ -282,8 +282,14 @@ def step_oracle(opts: InitOptions) -> StepResult:
         "Download the ~150 MB bulk file and write the snapshot store?",
         opts, default=False,
     ):
-        print("      - skipped. The store primes per-card on demand instead "
-              "(slower, 429-prone).")
+        # R3 F-09 (2026-09-03): the old line promised an on-demand prime
+        # that only the NETWORKED callers do; `commander adopt` and the
+        # judge are cache-only by design and never prime anything.
+        print("      - skipped. Networked commands (dashboard, advise) prime "
+              "per-card on demand instead (slower, 429-prone); the "
+              "cache-only ones (adopt, judge) treat every un-primed card "
+              "as unknown until you run: commander-oracle-refresh "
+              "--from-bulk --everything")
         return StepResult("oracle", "skipped", "declined")
 
     from . import oracle_store

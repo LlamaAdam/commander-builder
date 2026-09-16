@@ -12,65 +12,100 @@ from typing import Optional
 from ..dck_utils import iter_section_lines, parse_card_line
 
 
-def _total_price_for_deck_text(text: str) -> tuple[Optional[float], int]:
-    """Sum Scryfall USD prices across all cards (commander + main)
-    in a ``.dck`` blob. Returns ``(total_or_none, n_priced_cards)``.
+def price_deck_text(text: str) -> dict:
+    """Sum Scryfall USD prices across all cards (commander + main) in a
+    ``.dck`` blob, COUNTING every card that could not be priced.
 
-    ``total_or_none`` is None when zero cards in the deck have a
-    Scryfall price (e.g. all-digital-only deck, Scryfall down). The
-    UI distinguishes between "$0.00 priced" and "unpriced" via this
-    None signal so a budget-mode user doesn't get confused by a
-    zero total that's actually "no data."
+    Returns::
+
+        {"total_usd": float | None,   # None when zero cards priced
+         "n_priced": int,             # card copies that contributed
+         "n_unpriced": int,           # card copies that did not
+         "unpriced": [{"name", "qty", "reason"}, ...],
+         "partial": bool}             # n_unpriced > 0
+
+    ``total_usd`` is None when zero cards in the deck have a Scryfall
+    price (e.g. all-digital-only deck, Scryfall down). The UI
+    distinguishes between "$0.00 priced" and "unpriced" via this None
+    signal so a budget-mode user doesn't get confused by a zero total
+    that's actually "no data."
+
+    WHY the unpriced list exists (2026-09-09, audit open bug 2): the
+    oracle snapshot dir is shared with a trimmed writer whose snapshots
+    have no ``prices`` block, and until this change such cards were
+    silently skipped — a "$180" deck could really be a $180-plus-
+    whatever-was-trimmed deck with nothing on screen saying so. Every
+    card that contributes nothing is now named with a reason (see
+    ``price_status.REASON_*``), the total is flagged ``partial``, and
+    the trimmed-schema case additionally prints one stderr line so the
+    operator learns the dir needs a refresh.
 
     Quantities count: ``29 Mountain`` contributes 29× the Mountain
     price (which is ~$0.00 anyway, but consistent with the
-    dashboard's tile math).
-
-    Used by the audit endpoint to compute the post-swap deck price
-    so the UI can show "$X → $Y (Δ +$12.30)" alongside the diff
-    list. Tier-2 backlog item from STATUS.md.
+    dashboard's tile math) — and 29 to ``n_unpriced`` if unpriced.
     """
+    from ..price_status import price_status, report_unpriced
     from ..scryfall_client import lookup_card
     total = 0.0
     n_priced = 0
-    in_card_section = False
-    for raw in text.splitlines():
-        s = raw.strip()
-        if not s:
-            continue
-        if s.startswith("[") and s.endswith("]"):
-            # Count cards in [Main] and [Commander]; ignore
-            # [Sideboard], [Considering], [metadata], etc.
-            sl = s.lower()
-            in_card_section = sl in ("[main]", "[commander]")
-            continue
-        if not in_card_section:
-            continue
-        parsed = parse_card_line(s)
-        if parsed is None:
-            continue
-        qty, name = parsed
+    n_unpriced = 0
+    unpriced: list[dict] = []
+    for name, qty in _deck_card_quantities(text):
         try:
             card = lookup_card(name)
         except Exception:
             card = None
-        if not card:
-            continue
-        prices = card.get("prices") if isinstance(card, dict) else None
-        if not isinstance(prices, dict):
-            continue
-        raw_price = prices.get("usd")
-        if not raw_price:
-            continue
-        try:
-            price = float(raw_price)
-        except (TypeError, ValueError):
+        price, reason = price_status(card)
+        if price is None:
+            n_unpriced += qty
+            unpriced.append({"name": name, "qty": qty, "reason": reason})
             continue
         total += price * qty
         n_priced += qty
-    if n_priced == 0:
-        return (None, 0)
-    return (round(total, 2), n_priced)
+    report_unpriced(unpriced, where="deck total")
+    return {
+        "total_usd": round(total, 2) if n_priced else None,
+        "n_priced": n_priced,
+        "n_unpriced": n_unpriced,
+        "unpriced": unpriced,
+        "partial": n_unpriced > 0,
+    }
+
+
+def _total_price_for_deck_text(text: str) -> tuple[Optional[float], int]:
+    """``(total_or_none, n_priced_cards)`` — the historical two-tuple
+    over :func:`price_deck_text`, kept for the ``web/_helpers`` shim
+    and callers that only need the number. New code should read the
+    full result so it can surface the unpriced cards."""
+    result = price_deck_text(text)
+    return result["total_usd"], result["n_priced"]
+
+
+def audit_pricing_fields(original_text: str, proposed_text: str) -> dict:
+    """The audit payload's pricing block: original/proposed totals, the
+    delta, the priced counts, and — since 2026-09-09 — the unpriced
+    cards on each side plus a ``price_partial`` flag so the client can
+    label a short total instead of presenting it as authoritative.
+
+    Lives here rather than in ``routes_audit`` (which sits at the
+    800-line module ceiling) so the route composes it with ``**``.
+    """
+    original = price_deck_text(original_text)
+    proposed = price_deck_text(proposed_text)
+    if original["total_usd"] is not None and proposed["total_usd"] is not None:
+        price_delta = round(proposed["total_usd"] - original["total_usd"], 2)
+    else:
+        price_delta = None
+    return {
+        "original_price_usd": original["total_usd"],
+        "proposed_price_usd": proposed["total_usd"],
+        "price_delta_usd": price_delta,
+        "n_priced_cards_original": original["n_priced"],
+        "n_priced_cards_proposed": proposed["n_priced"],
+        "unpriced_cards_original": original["unpriced"],
+        "unpriced_cards_proposed": proposed["unpriced"],
+        "price_partial": original["partial"] or proposed["partial"],
+    }
 
 
 # --- Cheaper-printing savings (ManaFoundry parity) ---------------------

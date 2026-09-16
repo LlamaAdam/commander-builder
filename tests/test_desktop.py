@@ -13,6 +13,23 @@ import pytest
 from commander_builder import desktop
 
 
+@pytest.fixture(autouse=True)
+def _isolate_instance_lock(tmp_path, monkeypatch):
+    """R3 W-12 (2026-09-03): ``test_launch_wires_webview_to_served_url``
+    acquired the REAL ``~/.commander-builder/instance.lock`` (the test pid
+    landed in the developer's lock file, and a running desktop app made
+    the test fail). Every test in this module now sees a per-test lock
+    dir, and the launch test injects the lock outright."""
+    monkeypatch.setenv("COMMANDER_BUILDER_LOCK_DIR", str(tmp_path / "lock"))
+
+
+class _FakeLock:
+    closed = 0
+
+    def close(self):
+        _FakeLock.closed += 1
+
+
 def test_find_free_port_returns_bindable_port():
     port = desktop.find_free_port()
     assert isinstance(port, int) and 1024 < port < 65536
@@ -58,12 +75,17 @@ def test_launch_wires_webview_to_served_url(monkeypatch):
         def start():
             calls["started"] += 1
 
+    _FakeLock.closed = 0
     url = desktop.launch(
         deck_dir="C:/decks", host="127.0.0.1", port=5599,
         webview=FakeWebview, serve=fake_serve,
+        _acquire_lock=_FakeLock,  # R3 W-12: never the real instance lock
     )
 
     assert url == "http://127.0.0.1:5599/"
+    # The lock is released on the window's ``closing`` event, which the
+    # fake webview never fires — so it is still held here, by design.
+    assert _FakeLock.closed == 0
     assert served["args"] == ("C:/decks", "127.0.0.1", 5599)
     assert calls["create"]["title"] == desktop.APP_TITLE
     assert calls["create"]["url"] == "http://127.0.0.1:5599/"

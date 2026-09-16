@@ -24,6 +24,12 @@ _spec.loader.exec_module(vps)
 
 from commander_builder.card_score import CARD_SCORE_ENV_VAR  # noqa: E402
 
+# Offline at the module seams (audit open bug 3, 2026-09-09): under the suite-
+# wide network block the pipelines these tests drive were reaching Scryfall
+# behind degrade guards. The shared fixtures make those upstreams miss
+# instantly; a test wanting a specific answer patches over them.
+pytestmark = pytest.mark.usefixtures("offline_scryfall")
+
 DECK_TEXT = (
     "[metadata]\nName=PS\n\n[Commander]\n1 Test Cmdr\n\n[Main]\n"
     "1 Cut Me\n1 Keep Me\n" + "1 Forest\n" * 35

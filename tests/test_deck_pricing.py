@@ -209,3 +209,137 @@ def test_payload_survives_a_broken_snapshot_store(monkeypatch):
     assert out["count"] == 1
     assert out["price_data_age_days"] is None
     assert out["price_data_stale"] is False
+
+
+# ---------------------------------------------------------------------------
+# Mixed snapshot schema — audit open bug 2 (2026-09-09)
+# ---------------------------------------------------------------------------
+#
+# The oracle snapshot dir is shared with forge_py, whose trimmed writer
+# drops ``prices``. ``price_deck_text`` used to skip such cards without
+# a trace, so a deck total could be quietly short. These tests drive the
+# REAL reader (``lookup_card`` over a temp CACHE_DIR holding one full and
+# one trimmed snapshot) and pin: counted, named, reason given, total
+# flagged partial, one loud stderr line.
+
+import json  # noqa: E402
+
+from commander_builder import scryfall_client  # noqa: E402
+from commander_builder.price_status import (  # noqa: E402
+    REASON_NO_PRICES, REASON_NO_SNAPSHOT, REASON_NO_USD,
+)
+from commander_builder.web.deck_pricing import (  # noqa: E402
+    _total_price_for_deck_text, audit_pricing_fields, price_deck_text,
+)
+
+
+def _mixed_schema_dir(tmp_path, monkeypatch):
+    snap = tmp_path / "oracle_snapshots"
+    snap.mkdir()
+    monkeypatch.setattr(scryfall_client, "CACHE_DIR", snap)
+    scryfall_client._cache_path("Priced Card").write_text(json.dumps({
+        "name": "Priced Card", "type_line": "Instant",
+        "prices": {"usd": "4.00", "usd_foil": None},
+    }), encoding="utf-8")
+    # The trimmed writer's shape: oracle fields only, no prices block.
+    scryfall_client._cache_path("Trimmed Card").write_text(json.dumps({
+        "name": "Trimmed Card", "type_line": "Sorcery",
+        "oracle_text": "Draw a card.", "color_identity": ["U"],
+    }), encoding="utf-8")
+    return snap
+
+
+def test_mixed_schema_dir_counts_and_names_the_trimmed_card(
+    tmp_path, monkeypatch, capsys,
+):
+    _mixed_schema_dir(tmp_path, monkeypatch)
+    out = price_deck_text(_deck("2 Priced Card", "1 Trimmed Card"))
+    assert out == {
+        "total_usd": 8.0,
+        "n_priced": 2,
+        "n_unpriced": 1,
+        "unpriced": [
+            {"name": "Trimmed Card", "qty": 1, "reason": REASON_NO_PRICES},
+        ],
+        "partial": True,
+    }
+    err = capsys.readouterr().err
+    assert "[pricing] deck total" in err
+    assert "Trimmed Card" in err
+    assert "PARTIAL" in err
+    assert "commander-oracle-refresh" in err
+
+
+def test_fully_priced_deck_is_not_partial_and_stays_quiet(
+    tmp_path, monkeypatch, capsys,
+):
+    _mixed_schema_dir(tmp_path, monkeypatch)
+    out = price_deck_text(_deck("3 Priced Card"))
+    assert out["total_usd"] == 12.0
+    assert out["n_unpriced"] == 0 and out["unpriced"] == []
+    assert out["partial"] is False
+    assert "[pricing]" not in capsys.readouterr().err
+
+
+def test_legacy_tuple_helper_reads_the_same_numbers(tmp_path, monkeypatch):
+    """``_total_price_for_deck_text`` is the two-tuple older callers and
+    the ``_helpers`` shim still import — same total, same priced count."""
+    _mixed_schema_dir(tmp_path, monkeypatch)
+    assert _total_price_for_deck_text(
+        _deck("2 Priced Card", "1 Trimmed Card")) == (8.0, 2)
+
+
+def test_other_unpriced_reasons_are_named_too(monkeypatch, capsys):
+    """No snapshot at all and a null usd are ordinary Scryfall reality:
+    counted and named with their own reasons, but NOT the schema alarm
+    — the stderr line is reserved for the trimmed-schema case."""
+    cards = {
+        "Priced": {"prices": {"usd": "1.00"}},
+        "Digital Only": {"prices": {"usd": None, "tix": "0.5"}},
+    }
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: cards.get(name),
+    )
+    out = price_deck_text(_deck("1 Priced", "1 Digital Only", "4 Unknown"))
+    assert out["total_usd"] == 1.0 and out["n_priced"] == 1
+    assert out["n_unpriced"] == 5 and out["partial"] is True
+    assert out["unpriced"] == [
+        {"name": "Digital Only", "qty": 1, "reason": REASON_NO_USD},
+        {"name": "Unknown", "qty": 4, "reason": REASON_NO_SNAPSHOT},
+    ]
+    assert "[pricing]" not in capsys.readouterr().err
+
+
+def test_zero_priced_cards_still_reports_none_total(monkeypatch):
+    """The historical None-means-no-data signal survives — now with
+    the reason for every card alongside it."""
+    monkeypatch.setattr(
+        "commander_builder.scryfall_client.lookup_card",
+        lambda name, **_: {"type_line": "Sorcery"},
+    )
+    out = price_deck_text(_deck("1 Trimmed A", "1 Trimmed B"))
+    assert out["total_usd"] is None
+    assert out["n_priced"] == 0 and out["n_unpriced"] == 2
+    assert {u["reason"] for u in out["unpriced"]} == {REASON_NO_PRICES}
+
+
+def test_audit_pricing_fields_flags_partial_when_either_side_is(
+    tmp_path, monkeypatch,
+):
+    _mixed_schema_dir(tmp_path, monkeypatch)
+    fields = audit_pricing_fields(
+        _deck("1 Priced Card"),                    # original: whole
+        _deck("1 Priced Card", "1 Trimmed Card"),  # proposed: short
+    )
+    assert fields["original_price_usd"] == 4.0
+    assert fields["proposed_price_usd"] == 4.0
+    assert fields["price_delta_usd"] == 0.0
+    assert fields["n_priced_cards_original"] == 1
+    assert fields["n_priced_cards_proposed"] == 1
+    assert fields["unpriced_cards_original"] == []
+    assert fields["unpriced_cards_proposed"] == [
+        {"name": "Trimmed Card", "qty": 1, "reason": REASON_NO_PRICES},
+    ]
+    assert fields["price_partial"] is True
+
