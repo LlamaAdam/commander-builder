@@ -617,3 +617,50 @@ def test_another_decks_sidecar_is_refused_with_a_loud_note(tmp_path):
     assert "may belong to another deck" in payload["explanation"]["notes"][0]
     assert "Marginal Trinket" not in payload["personalize"]["protected"]
     assert "belongs to another deck" in payload["personalize"]["protection_note"]
+
+
+# --------------------------------------------------------------------------- #
+# R4 (2026-09-16) — B-14 back-face Protect=, B-01 cp1252 sidecar
+# --------------------------------------------------------------------------- #
+
+def test_back_face_protect_line_pins_the_dfc(tmp_path):
+    """R4 B-14: ``match_key`` folds to the FRONT face, so a ``Protect=``
+    written with the back face protected nothing while the comment said
+    either face works. Both faces of every name are keyed now."""
+    from commander_builder.adopt import _face_keys
+    assert _face_keys(["Starscream, Power Hungry // Starscream, Seeker Leader"]) == {
+        "starscream, power hungry", "starscream, seeker leader"}
+    deck = tmp_path / "[USER] Krenko [B3].dck"
+    deck.write_text(_deck_text(main=("Starscream, Power Hungry|BOT|1",
+                                     "Good Ramp", "Marginal Trinket"),
+                               protect=("Starscream, Seeker Leader",)),
+                    encoding="utf-8")
+    payload = adopt_deck(deck, preferences=None, lookup=_lookup2,
+                         matrix=_matrix())
+    assert "Starscream, Seeker Leader" in payload["personalize"]["protected"]
+    cut_names = {c if isinstance(c, str) else c.get("card") or c.get("name")
+                 for c in payload["personalize"].get("cuts", [])}
+    assert "Starscream, Power Hungry" not in cut_names
+    # The sidecar's "Front // Back" link shares a face with the back-face
+    # Protect= line, so auto-protection does not append it a second time.
+    primer.write_primer_sidecar(deck, _delta_with_links(
+        "Starscream, Power Hungry // Starscream, Seeker Leader"))
+    payload = adopt_deck(deck, preferences=None, lookup=_lookup2,
+                         matrix=_matrix())
+    assert payload["explanation"]["primer"]["linked_present"] == [
+        "Starscream, Power Hungry // Starscream, Seeker Leader"]
+    protected = payload["personalize"]["protected"]
+    assert protected.count("Starscream, Seeker Leader") == 1
+    assert not any(p.startswith("Starscream, Power Hungry") for p in protected)
+
+
+def test_cp1252_sidecar_does_not_crash_adopt(tmp_path, capsys):
+    """R4 B-01: one cp1252 byte in a hand-edited sidecar tracebacked
+    ``commander adopt`` (UnicodeDecodeError out of the strict read)."""
+    deck = _deck_file(tmp_path)
+    primer.primer_sidecar_path(deck).write_bytes(
+        "This deck wins with Lim-D\xfbl's Vault.\n".encode("cp1252"))
+    payload = adopt_deck(deck, preferences=None, lookup=_lookup2,
+                         matrix=_matrix())
+    assert payload["explanation"]["primer"]["present"] is True
+    assert "not valid UTF-8" in capsys.readouterr().err

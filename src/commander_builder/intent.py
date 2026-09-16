@@ -426,6 +426,28 @@ def free_text_theme_slugs(text: Optional[str]) -> list[str]:
 FREE_TEXT_SLUG_CAP = 2
 
 
+def learn_intent_keeping_preferences(
+    deck_path: Path, pilot_preferences: Optional[str], *, learner=None,
+) -> tuple[Optional["Intent"], Optional[Exception]]:
+    """:func:`learn_intent`, degraded rather than dropped (R4 B-01,
+    2026-09-16): when learning fails (a cp1252 sidecar was the trigger)
+    the pilot's typed preferences need no deck read, so they come back on
+    a bare :class:`Intent` instead of vanishing with the failed learn —
+    ``commander judge`` and ``commander improve`` both printed "without
+    intent" and silently included the ``--preferences`` in "it". Returns
+    ``(intent, None)`` on success and ``(bare intent or None, exc)`` on
+    failure; the caller prints the WARN in its own voice. ``learner``
+    lets a caller pass its OWN module-level ``learn_intent`` name so the
+    seam its tests already patch keeps working (``improve.learn_intent``).
+    """
+    learner = learner or learn_intent
+    try:
+        return learner(deck_path, pilot_preferences=pilot_preferences), None
+    except Exception as exc:  # noqa: BLE001 — the anchor is best-effort
+        prefs = (pilot_preferences or "").strip() or None
+        return (Intent(pilot_preferences=prefs) if prefs else None), exc
+
+
 def free_text_bias_slugs(intent: Optional["Intent"]) -> list[str]:
     """Slugs the intent's FREE TEXT adds beyond its derived themes, capped
     at :data:`FREE_TEXT_SLUG_CAP`. This is the advisor's

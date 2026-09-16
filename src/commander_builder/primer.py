@@ -129,9 +129,12 @@ class SidecarWrite:
     sidecar for the SAME source overwritten because the upstream words
     changed), ``unchanged`` (same source, same words — file left alone,
     hand edits survive), ``refused`` (an existing sidecar records a
-    DIFFERENT source: never clobbered, ``reason`` says which), ``empty``
-    (nothing to write). ``path`` is the sidecar path except for
-    ``empty``.
+    DIFFERENT source: never clobbered, ``reason`` says which),
+    ``replaced_headerless`` (a pre-R3 sidecar with no header whose text
+    differs from the new render was overwritten — R4 B-08; hand edits,
+    if any, could not be told apart), ``empty`` (nothing to write).
+    ``path`` is the sidecar path except for ``empty``. ``unchanged`` may
+    carry a ``reason`` when a header was added to a header-less file.
     """
 
     action: str
@@ -156,6 +159,18 @@ class ParsedPrimer:
     was_delta: bool = False
 
 
+#: C0/C1 control characters and DEL, minus ``\t``/``\n``/``\r`` (R4 B-13,
+#: 2026-09-16). A description is written by the upstream deck owner and
+#: ``commander adopt`` prints its win paragraphs verbatim, so an ESC
+#: sequence in it (screen clear, title set, colour) reached the
+#: operator's terminal. The sidecar on disk is the sanitised render.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _strip_controls(text: str) -> str:
+    return _CONTROL_CHARS_RE.sub("", text)
+
+
 def parse_primer(description: Optional[str]) -> ParsedPrimer:
     """Parse a ``description`` field from EITHER source.
 
@@ -175,18 +190,20 @@ def parse_primer(description: Optional[str]) -> ParsedPrimer:
     ``{'image': 'https://...'}`` is not primer text.
 
     ``None``/empty parses to an empty :class:`ParsedPrimer`. Never
-    raises.
+    raises. Control characters and terminal escape sequences are
+    stripped on both branches (R4 B-13) — the text is printed to a
+    terminal and stored as the sidecar, and neither wants them.
     """
     if not description:
         return ParsedPrimer()
     try:
         delta = json.loads(description)
     except (json.JSONDecodeError, TypeError):
-        return ParsedPrimer(text=description)
+        return ParsedPrimer(text=_strip_controls(description))
     if isinstance(delta, str):
         # Valid JSON but a bare string — plain text that happened to be
         # JSON-encoded; the decoded form is the readable one.
-        return ParsedPrimer(text=delta)
+        return ParsedPrimer(text=_strip_controls(delta))
     if not isinstance(delta, dict) or not isinstance(delta.get("ops"), list):
         # Valid JSON, not a Delta (a list, a number, ``null``, an alien
         # object): NOT primer text. It used to pass through verbatim, so
@@ -210,14 +227,54 @@ def parse_primer(description: Optional[str]) -> ParsedPrimer:
                 parts.append(name)
                 if name not in links:
                     links.append(name)
-    return ParsedPrimer(text="".join(parts), card_links=links,
-                        was_delta=True)
+    return ParsedPrimer(text=_strip_controls("".join(parts)),
+                        card_links=links, was_delta=True)
 
 
 def render_quill_delta(description: Optional[str]) -> str:
     """Text-only view of :func:`parse_primer` — kept as its own name so
     "give me the words" stays one call for prompt/report consumers."""
     return parse_primer(description).text
+
+
+#: Lines inside the quoted text that LOOK like a fence line (R4 B-04,
+#: 2026-09-16). The reader is the model, not a hash checker, so a closing
+#: line with any id already reads as a closing line; the only defence is
+#: to make sure no in-band line is fence-shaped at all.
+_FENCE_SHAPED_LINE_RE = re.compile(r"^(\s*)(<<<FREE-TEXT|>>>END-FREE-TEXT)")
+
+
+def fence_free_text(text: str) -> str:
+    """Wrap free text in a fence that is DISTINCT from any line the author
+    wrote without its hash (2026-09-03, R3 F-05; reworded 2026-09-16, R4
+    B-04 — the old wording claimed the fence could not be forged, which
+    overstated what a 48-bit id gives against the only reader, the model;
+    moved here from ``_deck_judge_prompt`` the same day, beside
+    :func:`clip_for_prompt`, to keep that module under the size ceiling).
+
+    The block used to splice primer text inside ``\"\"\"…\"\"\"`` with no
+    escaping, so a primer containing a triple quote could close the
+    quote and forge a second "deck's own primer" section. The fence id
+    is a hash of the text plus its length, so the two delimiter lines
+    differ from anything the author could write without knowing the
+    text's own hash. The reader is the model, which is told only text
+    OUTSIDE the fence carries instructions; it computes no hash, so a
+    fence-shaped line inside the text with a WRONG id would still read
+    as a delimiter. Therefore every in-band line that starts with
+    ``<<<FREE-TEXT`` or ``>>>END-FREE-TEXT`` is prefixed with ``· `` so
+    no line inside the fence is fence-shaped, whatever id it carries.
+    Both presentation orders receive the same text and therefore the
+    same fence.
+    """
+    text = "\n".join(
+        _FENCE_SHAPED_LINE_RE.sub(r"\1· \2", ln) for ln in text.split("\n")
+    )
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return (
+        f"    <<<FREE-TEXT id={digest} chars={len(text)}\n"
+        f"{text}\n"
+        f"    >>>END-FREE-TEXT id={digest}"
+    )
 
 
 def primer_word_count(text: str) -> int:
@@ -288,11 +345,16 @@ def store_primer_sidecar(
     to promise "refuse-clobber" and mean only stem-following naming):
 
     * no sidecar on disk → ``written``;
-    * existing sidecar whose header names the SAME source (or a pre-R3
-      sidecar with no header, which cannot be told apart) → ``refreshed``
+    * existing sidecar whose header names the SAME source → ``refreshed``
       when the upstream words changed (hash differs), ``unchanged`` when
       they did not — the file is left alone, so hand annotations survive
       until the author actually edits the primer upstream;
+    * pre-R3 sidecar with no header (R4 B-08): ``unchanged`` when its text
+      equals or STARTS WITH the new render (the header is added, the old
+      text — hand notes included — is kept verbatim; ``reason`` says so);
+      otherwise ``replaced_headerless`` — the words differ and no header
+      existed to tell hand edits from upstream edits, so the caller must
+      NOT attribute the overwrite to "upstream changed";
     * existing sidecar whose header names a DIFFERENT source → ``refused``:
       the file on disk is another deck's primer (a deleted deck's stem
       re-used by a colliding import) and is never overwritten; the caller
@@ -323,7 +385,33 @@ def store_primer_sidecar(
                 )
             if existing.get("sha256") == new_hash and recorded == incoming:
                 return SidecarWrite(action="unchanged", path=out)
-        action = "refreshed"
+            action = "refreshed"
+        else:
+            # Header-less (pre-R3) sidecar (R4 B-08, 2026-09-16): there
+            # is no hash to compare, so this branch used to fall straight
+            # to "refreshed" and the import lane printed "upstream
+            # changed" over a file whose upstream had NOT changed —
+            # clobbering hand notes on the first unchanged re-pull. Hand
+            # notes are only detectable as "the old text starts with the
+            # new render" (an equal text has none). Keep the old text
+            # verbatim under a fresh header in that case and say so;
+            # otherwise the words really differ and the honest message
+            # is that no header existed to protect any edits.
+            old_text = _strip_machine_blocks(_read_sidecar_text(dck_path) or "").strip()
+            if old_text == text or old_text.startswith(text):
+                blocks = [_source_header(source_id, description or "")]
+                if parsed.card_links:
+                    blocks.append("\n".join(
+                        [_CARD_LINKS_OPEN,
+                         *(_encode_link(n) for n in parsed.card_links),
+                         _CARD_LINKS_CLOSE]))
+                blocks.append(old_text)
+                out.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+                return SidecarWrite(
+                    action="unchanged", path=out,
+                    reason="identity header added; existing text kept",
+                )
+            action = "replaced_headerless"
     else:
         action = "written"
     blocks: list[str] = [_source_header(source_id, description or "")]
@@ -345,13 +433,52 @@ def write_primer_sidecar(dck_path: Path, description: Optional[str],
     an empty render AND for a refused write — check
     :func:`store_primer_sidecar` when the two must be told apart."""
     result = store_primer_sidecar(dck_path, description, source_id=source_id)
-    if result.action in ("written", "refreshed", "unchanged"):
+    if result.action in ("written", "refreshed", "unchanged",
+                         "replaced_headerless"):
         return result.path
     return None
 
 
 def _strip_machine_blocks(raw: str) -> str:
     return _CARD_LINKS_RE.sub("", _SOURCE_RE.sub("", raw))
+
+
+#: Sidecars already warned about (once per file per process, like
+#: ``dck_utils._DECODE_WARNED``).
+_SIDECAR_DECODE_WARNED: set[str] = set()
+
+
+def _read_sidecar_text(dck_path: Path) -> Optional[str]:
+    """The raw sidecar text beside ``dck_path``, or ``None`` when absent /
+    unreadable. UTF-8 strict first; a file that is not valid UTF-8 (the
+    user hand-edited it in a cp1252 editor — F-08 invites exactly that)
+    decodes with ``errors="replace"`` plus one stderr WARN naming the
+    sidecar, mirroring ``dck_utils.read_deck_text`` (R4 B-01,
+    2026-09-16). Before this every sidecar reader was a strict
+    ``read_text(encoding="utf-8")`` inside ``except OSError`` — a
+    ``UnicodeDecodeError`` is a ``ValueError`` — so one such file
+    tracebacked ``commander adopt`` and silently dropped the primer AND
+    the ``--preferences`` from ``judge`` / ``improve``.
+    """
+    path = primer_sidecar_path(Path(dck_path))
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        key = str(path)
+        if key not in _SIDECAR_DECODE_WARNED:
+            _SIDECAR_DECODE_WARNED.add(key)
+            import sys
+            print(
+                f"[primer] WARN: {path.name} is not valid UTF-8 (byte "
+                f"{exc.start}: {exc.reason}); undecodable bytes were "
+                f"replaced with U+FFFD. Re-save the sidecar as UTF-8.",
+                file=sys.stderr, flush=True,
+            )
+        return raw.decode("utf-8", errors="replace")
 
 
 def read_primer_sidecar(dck_path: Path) -> Optional[str]:
@@ -365,9 +492,8 @@ def read_primer_sidecar(dck_path: Path) -> Optional[str]:
     the COMMON case), and a permission blip must degrade to the
     no-primer path rather than abort an offline explanation.
     """
-    try:
-        raw = primer_sidecar_path(Path(dck_path)).read_text(encoding="utf-8")
-    except OSError:
+    raw = _read_sidecar_text(dck_path)  # tolerant (R4 B-01)
+    if raw is None:
         return None
     text = _strip_machine_blocks(raw).strip()
     return text or None
@@ -378,9 +504,8 @@ def sidecar_identity(dck_path: Path) -> Optional[dict]:
     or ``None`` when there is no sidecar or it predates the header
     (2026-09-03, R3 F-07). Callers must treat ``None`` as "identity
     unknown", never as "different"."""
-    try:
-        raw = primer_sidecar_path(Path(dck_path)).read_text(encoding="utf-8")
-    except OSError:
+    raw = _read_sidecar_text(dck_path)  # tolerant (R4 B-01)
+    if raw is None:
         return None
     m = _SOURCE_RE.search(raw)
     if not m:
@@ -415,8 +540,9 @@ def sidecar_identity_warning(dck_path: Path,
     if recorded == SOURCE_UNKNOWN:
         return None
     if deck_text is None:
+        from .dck_utils import read_deck_text
         try:
-            deck_text = Path(dck_path).read_text(encoding="utf-8")
+            deck_text = read_deck_text(Path(dck_path))  # tolerant (R4 B-01)
         except OSError:
             return None
     from .deck_identity import deck_id_from_text
@@ -439,9 +565,8 @@ def read_primer_card_links(dck_path: Path) -> list[str]:
     callers that must tell those apart (adopt's "auto-protection
     unavailable" disclosure) check :func:`read_primer_sidecar` first.
     """
-    try:
-        raw = primer_sidecar_path(Path(dck_path)).read_text(encoding="utf-8")
-    except OSError:
+    raw = _read_sidecar_text(dck_path)  # tolerant (R4 B-01)
+    if raw is None:
         return []
     m = _CARD_LINKS_RE.search(raw)
     if not m:

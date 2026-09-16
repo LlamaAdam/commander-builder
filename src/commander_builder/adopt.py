@@ -80,6 +80,19 @@ NO_AUTO_PROTECT_NOTE = (
 UNRESOLVED_REFUSE_SHARE = 0.25
 
 
+
+def _face_keys(names) -> set[str]:
+    """``match_key`` of EVERY face of every name (R4 B-14, 2026-09-16):
+    ``"Front // Back"`` keys as both ``front`` and ``back``, so a
+    ``Protect=`` line written with the back face still pins the card."""
+    keys: set[str] = set()
+    for name in names:
+        for face in str(name or "").split("//"):
+            face = face.strip()
+            if face:
+                keys.add(match_key(face))
+    return keys
+
 def _lookup_cache_only(name: str) -> Optional[dict]:
     """Default resolver: the on-disk oracle snapshot, never the network.
 
@@ -134,8 +147,9 @@ def explain_deck(
     main_cards = dck_utils.main_card_names(deck_text)
     # ONE key on both sides (R3 F-02): the sidecar's card-links carry a
     # DFC as "Front // Back" while the .dck carries the front face.
-    main_keys = {match_key(n) for n in main_cards}
-    all_keys = main_keys | {match_key(n) for n in commanders}
+    # Both faces of a DFC (R4 B-14) so a back-face spelling on either
+    # side still meets the list.
+    all_keys = _face_keys(main_cards) | _face_keys(commanders)
 
     # One resolve pass; every downstream section reads from it.
     cards: dict[str, dict] = {}
@@ -170,7 +184,7 @@ def explain_deck(
         theme_packages[slug] = members[:8]  # examples, not an inventory
 
     links = list(card_links or [])
-    linked_present = [n for n in links if match_key(n) in all_keys]
+    linked_present = [n for n in links if _face_keys([n]) & all_keys]
     # A linked name the list lacks is only a DRIFT signal when the oracle
     # cache knows the card (R3 F-11); a name nothing recognizes is
     # reported as unrecognized, never printed as a card the deck "does
@@ -179,7 +193,7 @@ def explain_deck(
     linked_absent: list[str] = []
     linked_unrecognized: list[str] = []
     for n in links:
-        if match_key(n) in all_keys:
+        if _face_keys([n]) & all_keys:
             continue
         card = lookup(n) or {}
         if card.get("oracle_text") or card.get("type_line"):
@@ -365,13 +379,15 @@ def personalize_suggestions(
         return float(len(slugs & set(pref_slugs)))
 
     # ONE key (R3 F-02 / F-10): ``Protect=Jeska’s Will`` (curly) must pin
-    # the list's ``Jeska's Will``; a DFC Protect= may carry either face
-    # spelling. Unresolved names join the set — see above.
-    protected_keys = {match_key(p) for p in protected}
-    protected_keys |= {match_key(n) for n in unresolved}
+    # the list's ``Jeska's Will``. A DFC ``Protect=`` may carry either
+    # face spelling: ``match_key`` folds to the FRONT face only, so a
+    # back-face ``Protect=`` protected nothing until every face of every
+    # name was keyed (R4 B-14, 2026-09-16 — the comment above promised
+    # this; the code did not). Unresolved names join the set — see above.
+    protected_keys = _face_keys(protected) | _face_keys(unresolved)
 
     def protect(nm: str) -> bool:
-        return match_key(nm) in protected_keys
+        return bool(_face_keys([nm]) & protected_keys)
 
     common = {
         "max_swaps": max_swaps, "tier": "polish",
@@ -481,8 +497,9 @@ def adopt_deck(
     # than silently protecting nothing.
     from .web._helpers import read_protected_cards
     protected = list(read_protected_cards(deck_text))
+    already = _face_keys(protected)  # both faces (R4 B-14)
     for name in explanation["primer"]["linked_present"]:
-        if match_key(name) not in {match_key(p) for p in protected}:
+        if not _face_keys([name]) & already:
             protected.append(name)
 
     protection_note: Optional[str] = None

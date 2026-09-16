@@ -1282,10 +1282,19 @@ def import_deck(
             # Word count over the TEXT read-back — the card-links block
             # is machine data, not the author's words.
             words = primer_word_count(read_primer_sidecar(out_path) or "")
+            # R4 B-08 (2026-09-16): a header-less (pre-R3) sidecar has
+            # no hash to compare, so its overwrite is never attributable
+            # to "upstream changed" — say what actually happened.
             verb = {"written": "captured", "refreshed": "refreshed "
                     "(overwrote the previous sidecar — upstream changed)",
                     "unchanged": "unchanged (upstream words identical; "
-                    "sidecar left as-is)"}[outcome.action]
+                    "sidecar left as-is)",
+                    "replaced_headerless": "replaced (old sidecar had no "
+                    "identity header and its text differs from upstream; "
+                    "hand edits, if any, were not preserved)",
+                    }[outcome.action]
+            if outcome.action == "unchanged" and outcome.reason:
+                verb = f"unchanged ({outcome.reason})"
             print(f"  primer {verb} ({words} words) -> {outcome.path.name}")
     else:
         # Upstream dropped its description (R3 F-07 §D): a sidecar that

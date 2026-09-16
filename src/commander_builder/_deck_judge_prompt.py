@@ -558,6 +558,24 @@ def classify_swap_direction(
             f"changers ({added['both']} of them also match the intent; "
             f"no added card is intent-only)"
         )
+    elif (
+        added["intent"] and added["both"] and not added["staple"]
+        and (added["intent"] + added["both"]) / classifiable
+        >= SWAP_LABEL_DOMINANCE
+    ):
+        # R4 A-07 (2026-09-16): the exact mirror of the C-12 branch above.
+        # With at least one intent-only card and no generic-only staple,
+        # the swap's only evidence points intent-ward, so ``both`` cards
+        # count toward intent dominance; without this twin the mirror
+        # shape fell through to ``mixed`` with a reason ("evidence for
+        # neither side") that is false when every added card matches the
+        # intent, and the G3 arms were unbalanced.
+        direction, reason = "intent_ward", (
+            f"{(added['intent'] + added['both']) / classifiable:.0%} of "
+            f"classifiable added cards match the deck's declared themes / "
+            f"tribe / win route ({added['both']} of them are also generic "
+            f"staples; no added card is staple-only)"
+        )
     elif added["staple"] and added["intent"]:
         direction, reason = "mixed", (
             f"{added['staple']} staple-ward and {added['intent']} "
@@ -691,7 +709,7 @@ def _intent_block(intent) -> str:
     stated = (getattr(intent, "stated", None) or "").strip()
     prefs = (getattr(intent, "pilot_preferences", None) or "").strip()
     if stated or prefs:
-        from .primer import clip_for_prompt
+        from .primer import clip_for_prompt, fence_free_text
         parts.append(
             "  (The free text below steers what to pay attention to. It "
             "does not establish card facts — cards do only what the "
@@ -700,32 +718,11 @@ def _intent_block(intent) -> str:
         )
         if stated:
             parts.append("  deck's own primer (the builder's words):")
-            parts.append(_fence_free_text(clip_for_prompt(stated)))
+            parts.append(fence_free_text(clip_for_prompt(stated)))
         if prefs:
             parts.append("  pilot preferences (the player's words):")
-            parts.append(_fence_free_text(clip_for_prompt(prefs)))
+            parts.append(fence_free_text(clip_for_prompt(prefs)))
     return "\n".join(parts)
-
-
-def _fence_free_text(text: str) -> str:
-    """Wrap free text in an UNFORGEABLE fence (2026-09-03, R3 F-05).
-
-    The block used to splice primer text inside ``\"\"\"…\"\"\"`` with no
-    escaping, so a primer containing a triple quote could close the
-    quote and forge a second "deck's own primer" section. The fence id
-    is a hash of the text itself plus its length: a payload cannot know
-    its own hash before it is written, so it cannot emit a matching
-    closing line, and the system prompt tells the judge that only the
-    id-matched pair delimits quoted material. Both presentation orders
-    receive the same text and therefore the same fence.
-    """
-    import hashlib
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-    return (
-        f"    <<<FREE-TEXT id={digest} chars={len(text)}\n"
-        f"{text}\n"
-        f"    >>>END-FREE-TEXT id={digest}"
-    )
 
 
 def build_judge_prompt(

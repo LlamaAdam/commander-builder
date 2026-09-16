@@ -92,6 +92,7 @@ from .intent import (
     intent_protect_cards,
     free_text_bias_slugs,
     learn_intent,
+    learn_intent_keeping_preferences,
     resolve_preferences,
 )
 # Imported (not duplicated) so the sub-threshold warning and the
@@ -843,17 +844,35 @@ def _print_summary(result: ImproveResult) -> None:
 # Bandit strategy (FP-012 slice 2) — treat candidate swaps as arms.
 # ---------------------------------------------------------------------------
 
-def _build_arms_from_advice(deck_path: Path, bracket: int, source: str) -> list:
+def _build_arms_from_advice(deck_path: Path, bracket: int, source: str,
+                            intent=None) -> list:
     """Run the advisor once and turn its candidate swaps into bandit arms.
 
     Each arm is a concrete ``(add, cut)`` swap: the i-th proposed add
     paired with a proposed cut (cuts cycled if fewer than adds). Returns
     an empty list when the advisor proposes no adds.
+
+    ``intent`` (R4 B-03, 2026-09-16): the learned ``Intent`` rides into
+    the advisor the same way ``_default_round_fn`` threads it for the
+    greedy strategy — derived themes as ``intent_themes``, free-text
+    (primer / ``--preferences``) slugs as ``free_text_themes``. Before
+    this the bandit never consumed an intent at all, so ``--preferences``
+    was printed as active and steered nothing. Each kwarg is passed only
+    when non-empty, so the no-intent call is unchanged.
     """
     from .bandit import Arm
     from .improvement_advisor import advise
 
-    report = advise(deck_path=deck_path, bracket=bracket, source=source)
+    kwargs: dict = {}
+    derived_slugs = [s.strip() for s in (getattr(intent, "themes", None)
+                                         or []) if s.strip()]
+    if derived_slugs:
+        kwargs["intent_themes"] = list(dict.fromkeys(derived_slugs))
+    free_text_slugs = free_text_bias_slugs(intent) if intent is not None else []
+    if free_text_slugs:
+        kwargs["free_text_themes"] = list(free_text_slugs)
+    report = advise(deck_path=deck_path, bracket=bracket, source=source,
+                    **kwargs)
     manifest = report.to_manifest()
     adds = list(manifest.get("added", []) or [])
     cuts = list(manifest.get("removed", []) or [])
@@ -1315,7 +1334,13 @@ def _run_bandit_strategy(deck_path: Path, deck_id: str, args) -> int:
     import random
     from .bandit import make_policy, run_bandit
 
-    arms = _build_arms_from_advice(deck_path, args.bracket, args.source)
+    # ``intent`` only when one was learned (R4 B-03) — the positional
+    # three-argument call is the pinned no-intent shape.
+    intent = getattr(args, "intent", None)
+    arms = _build_arms_from_advice(
+        deck_path, args.bracket, args.source,
+        **({"intent": intent} if intent is not None else {}),
+    )
     if not arms:
         msg = "no candidate swaps from the advisor; nothing to search."
         print(json.dumps({"error": msg}) if args.json else f"[improve] {msg}",
@@ -1787,15 +1812,17 @@ def improve_main(argv: Optional[list[str]] = None) -> int:
             return 2
         if not args.json:
             print(f"[improve] learning intent from {intent_src.name} ...", flush=True)
-        try:
-            args.intent = learn_intent(intent_src, pilot_preferences=preferences)
+        # R4 B-01 (2026-09-16): a failed learn keeps the typed --preferences
+        # on a bare Intent (see intent.learn_intent_keeping_preferences).
+        args.intent, err = learn_intent_keeping_preferences(
+            intent_src, preferences, learner=learn_intent)
+        if err is None:
             if not args.json:
                 _print_intent(args.intent)
-        except Exception as exc:  # noqa: BLE001 — intent is advisory
-            if not args.json:
-                print(f"[improve] intent learning failed ({exc}); "
-                      "proceeding without intent.", flush=True)
-            args.intent = None
+        elif not args.json:
+            print(f"[improve] intent learning failed ({err}); proceeding "
+                  + ("with --preferences only." if args.intent else "without intent."),
+                  flush=True)
 
     # LOUD up-front warning before any Forge/LLM time is spent, in the
     # RIGHT units: --sim-games is TOTAL pod games, the verdict gate

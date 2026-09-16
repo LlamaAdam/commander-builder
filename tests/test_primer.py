@@ -390,3 +390,83 @@ def test_quoted_win_lines_never_silence_prose_for_what_it_mentions():
     text = ("I keep Sol Ring in the maybeboard. We win with Kiki-Jiki and "
             "Zealous Conscripts.")
     assert quoted_win_lines(text) == [text]
+
+
+# --------------------------------------------------------------------------- #
+# R4 (2026-09-16) — B-01 sidecar encoding, B-08 header-less re-pull, B-13
+# --------------------------------------------------------------------------- #
+
+def test_cp1252_sidecar_is_read_tolerantly_with_a_warning(tmp_path, capsys):
+    """R4 B-01: every sidecar reader was a strict UTF-8 ``read_text`` inside
+    ``except OSError`` (a UnicodeDecodeError is a ValueError), so one
+    hand-edited cp1252 sidecar tracebacked ``commander adopt`` and dropped
+    the primer from ``judge`` / ``improve``. Same tolerant read + one WARN
+    naming the file as ``dck_utils.read_deck_text``."""
+    from commander_builder.primer import sidecar_identity, sidecar_identity_warning
+    deck = _deck(tmp_path)
+    sc = primer_sidecar_path(deck)
+    sc.write_bytes("Lim-D\xfbl's Vault wins the game.\n".encode("cp1252"))
+    text = read_primer_sidecar(deck)
+    assert text is not None and "wins the game" in text and "�" in text
+    assert read_primer_card_links(deck) == []
+    assert sidecar_identity(deck) is None            # no header, no crash
+    assert sidecar_identity_warning(deck) is None
+    err = capsys.readouterr().err
+    assert "not valid UTF-8" in err and sc.name in err
+    # Warned once per file per process.
+    read_primer_sidecar(deck)
+    assert "not valid UTF-8" not in capsys.readouterr().err
+
+
+def test_headerless_sidecar_with_hand_notes_survives_an_unchanged_repull(tmp_path):
+    """R4 B-08 (critic's E29): a pre-R3 sidecar has no hash to compare, so
+    an unchanged re-pull fell to ``refreshed`` and the import printed
+    "upstream changed" over a file whose hand notes it had just erased.
+    Text that equals or STARTS WITH the new render keeps the old text
+    verbatim under a fresh header; text that differs is replaced under
+    an honest action name."""
+    from commander_builder.primer import sidecar_identity, store_primer_sidecar
+    deck = _deck(tmp_path)
+    sc = primer_sidecar_path(deck)
+    delta = '{"ops": [{"insert": "Original primer words."}]}'
+    sc.write_text("Original primer words.\n\nMY NOTES: hand-added.\n",
+                  encoding="utf-8")
+    again = store_primer_sidecar(deck, delta, source_id="archidekt:1")
+    assert again.action == "unchanged"
+    assert "header added" in (again.reason or "")
+    assert read_primer_sidecar(deck) == "Original primer words.\n\nMY NOTES: hand-added."
+    assert sidecar_identity(deck)["source"] == "archidekt:1"
+    # Now headered: the next unchanged re-pull is the ordinary case.
+    third = store_primer_sidecar(deck, delta, source_id="archidekt:1")
+    assert third.action == "unchanged" and not third.reason
+    assert "MY NOTES" in read_primer_sidecar(deck)
+    # Exactly-equal header-less text: header added, nothing lost.
+    sc.write_text("Original primer words.\n", encoding="utf-8")
+    eq = store_primer_sidecar(deck, delta, source_id="archidekt:1")
+    assert eq.action == "unchanged" and sidecar_identity(deck) is not None
+    # Header-less text that DIFFERS is replaced — and says so, never
+    # "upstream changed".
+    sc.write_text("Totally different old words.\n", encoding="utf-8")
+    rep = store_primer_sidecar(deck, delta, source_id="archidekt:1")
+    assert rep.action == "replaced_headerless"
+    assert read_primer_sidecar(deck) == "Original primer words."
+    assert write_primer_sidecar(deck, delta, source_id="archidekt:1") == sc
+
+
+def test_parse_primer_strips_control_characters_on_both_branches():
+    """R4 B-13: a description is the upstream owner's bytes and
+    ``commander adopt`` prints its win paragraphs to the terminal; ESC
+    sequences (screen clear, title, colour) went straight through on
+    both the markdown and the Quill Delta branch. Tabs/newlines stay."""
+    esc = ("How it wins: \x1b[2Jcombo \x1b]0;pwned\x07 \x1b[31mfast\x1b[0m"
+           "\ttab\nnext line \x00 \x7f \x9b end")
+    plain = parse_primer(esc).text
+    for ch in ("\x1b", "\x07", "\x00", "\x7f", "\x9b"):
+        assert ch not in plain
+    assert "combo" in plain and "fast" in plain and "\ttab\nnext line" in plain
+    delta = json.dumps({"ops": [{"insert": esc},
+                                {"insert": {"card-link": "Sol Ring"}}]})
+    parsed = parse_primer(delta)
+    assert parsed.was_delta and parsed.card_links == ["Sol Ring"]
+    assert "\x1b" not in parsed.text and "\x07" not in parsed.text
+    assert "\x1b" not in json.dumps(quoted_win_lines(parsed.text))

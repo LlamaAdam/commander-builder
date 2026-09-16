@@ -2122,3 +2122,59 @@ def test_bandit_failed_confirmation_is_inconclusive_too(
     assert state["deck"] == base
     err = capsys.readouterr().err
     assert "run 2 inconclusive" in err and "jvm died" in err
+
+
+# --- R4 B-03 / B-01 (2026-09-16): the bandit consumes the intent ------------
+
+def test_bandit_advise_receives_the_intent_slugs(monkeypatch):
+    """R4 B-03: ``--strategy bandit --preferences …`` was accepted and
+    printed but ``_build_arms_from_advice`` called ``advise()`` with no
+    intent at all. The learned intent now rides in on the same two
+    flags the greedy strategy uses; the no-intent call is unchanged."""
+    from commander_builder.intent import Intent
+    seen: dict = {}
+
+    def fake_advise(deck_path, bracket, source, **kw):
+        seen.clear()
+        seen.update(kw)
+        return _FakeReport(["A"], ["X"])
+
+    monkeypatch.setattr("commander_builder.improvement_advisor.advise", fake_advise)
+    intent = Intent(archetype="midrange", themes=["tokens", "sacrifice"],
+                    pilot_preferences="I love lifegain and tokens")
+    arms = improve._build_arms_from_advice(Path("/d.dck"), 3, "heuristic",
+                                           intent=intent)
+    assert len(arms) == 1
+    assert seen["intent_themes"] == ["tokens", "sacrifice"]
+    assert seen["free_text_themes"] == ["lifegain"]  # derived themes excluded
+    improve._build_arms_from_advice(Path("/d.dck"), 3, "heuristic")
+    assert seen == {}
+
+
+def test_improve_bandit_cli_keeps_preferences_when_intent_learning_fails(
+    tmp_path, monkeypatch, capsys,
+):
+    """R4 B-01 + B-03 through the CLI: a failed ``learn_intent`` (a cp1252
+    sidecar) used to drop the typed ``--preferences`` with "proceeding
+    without intent"; they now ride on a bare Intent that reaches the
+    bandit's arm builder."""
+    seen: dict = {}
+
+    def fake_arms(deck_path, bracket, source, intent=None):
+        seen["intent"] = intent
+        return []
+
+    def boom(path, **_kw):
+        raise UnicodeDecodeError("utf-8", b"\xfb", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(improve, "_build_arms_from_advice", fake_arms)
+    monkeypatch.setattr(improve, "learn_intent", boom)
+    deck = tmp_path / "[USER] Goblins [B4].dck"
+    deck.write_text("[metadata]\nName=Goblins\n[Commander]\n1 Krenko, Mob Boss\n"
+                    "[Main]\n1 Sol Ring\n", encoding="utf-8")
+    rc = improve_main([str(deck), "--rounds", "1", "--strategy", "bandit",
+                       "--preferences", "I love lifegain"])
+    assert rc == 0
+    assert seen["intent"] is not None
+    assert seen["intent"].pilot_preferences == "I love lifegain"
+    assert "--preferences only" in capsys.readouterr().out

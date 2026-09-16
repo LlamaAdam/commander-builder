@@ -761,7 +761,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"commander-judge: no such deck: {path}", file=sys.stderr)
             return 2
 
-    from .intent import learn_intent, resolve_preferences
+    from .intent import learn_intent_keeping_preferences, resolve_preferences
     try:
         preferences = resolve_preferences(args.preferences, args.preferences_file)
     except OSError as exc:
@@ -773,11 +773,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     learned = None
     if not args.no_intent:
-        try:
-            learned = learn_intent(args.deck_a, pilot_preferences=preferences)
-        except Exception as exc:  # noqa: BLE001 — the anchor is best-effort
-            print(f"commander-judge: WARN: could not learn intent "
-                  f"({type(exc).__name__}: {exc}); judging without it.",
+        # R4 B-01 (2026-09-16): a failed learn keeps the typed --preferences.
+        learned, err = learn_intent_keeping_preferences(args.deck_a, preferences)
+        if err is not None:
+            print(f"commander-judge: WARN: could not learn intent ({type(err).__name__}: "
+                  f"{err}); judging {'with --preferences only' if learned else 'without it'}.",
                   file=sys.stderr)
 
     try:
