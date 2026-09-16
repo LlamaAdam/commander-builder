@@ -159,3 +159,29 @@ def stable_deck_id_for_row(
         return None
     new_id = deck_id_from_text(deck_snapshot or "") or stable_deck_stem(current)
     return new_id if new_id != current else None
+
+
+def candidate_deck_ids(deck_id: str, deck_path: Path) -> list[str]:
+    """Every ``deck_id`` under which rows for one deck may be stored.
+
+    2026-09-16 (R4 A-02/A-03). The browser only knows a deck by its
+    filename stem, but rows are keyed by the STABLE id (provenance id or
+    version-stripped stem) by every CLI writer, by the web writer since
+    A-03 and by ``scripts/backfill_deck_ids.py --apply`` for older web
+    rows. A per-deck reader must therefore query under both the posted
+    stem and the resolved id, or the verdict pills and the price
+    sparkline go blank for every imported / versioned deck. Returns the
+    posted id first, then the resolved id when the file exists and it
+    differs; the two schemes never collide, so merging by row id is
+    duplicate-free. Unreadable files (encoding, permissions) resolve to
+    the posted id alone — a reader must never 500 over the lookup.
+    """
+    ids = [deck_id]
+    try:
+        if deck_path.exists():
+            resolved = resolve_deck_id(deck_path, fallback=None)
+            if resolved and resolved != deck_id:
+                ids.append(resolved)
+    except (OSError, ValueError):
+        pass
+    return ids

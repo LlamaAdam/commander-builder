@@ -280,7 +280,9 @@ def format_text(report: StatusReport) -> str:
         lines.append(
             f"  total={s.get('total', 0)}  unique_decks={s.get('unique_decks', 0)}  "
             f"kept={s.get('kept', 0)}  reverted={s.get('reverted', 0)}  "
-            f"neutral={s.get('neutral', 0)}  pending={s.get('pending', 0)}"
+            f"neutral={s.get('neutral', 0)}  "
+            f"inconclusive={s.get('inconclusive', 0)}  "
+            f"pending={s.get('pending', 0)}"
         )
         recent = kl.get("recent", [])
         if recent:
@@ -478,8 +480,14 @@ def collect_deck_status(
     # Same identity every writer uses (2026-09-03, R3 C-08): provenance
     # id first, else the VERSION-STRIPPED stem — ``mox_id or stem`` missed
     # every Archidekt-lane deck and every versioned hand-built deck.
-    from .deck_identity import resolve_deck_id
-    deck_id = resolve_deck_id(deck_path, fallback=mox_id)
+    # 2026-09-16 (R4 A-01): the fallback must never be None here — a
+    # MISSING deck has ``mox_id is None`` and ``resolve_deck_id`` raises
+    # without a fallback, which broke this function's documented "fields
+    # go empty rather than crashing" contract. Mirrors _proposer_sim.
+    from .deck_identity import resolve_deck_id, stable_deck_stem
+    deck_id = resolve_deck_id(
+        deck_path, fallback=mox_id or stable_deck_stem(deck_path.name),
+    )
 
     # File mtime — UTC ISO so the JSON mode is unambiguous.
     if deck_path.exists():
@@ -651,8 +659,10 @@ def collect_user_decks_summary(
         bracket = _parse_bracket_from_filename(filename)
         name_meta, mox_id, commander_name = _parse_dck_metadata(path)
         # R3 C-08 (2026-09-03): see the same line in deck_status().
-        from .deck_identity import resolve_deck_id
-        deck_id = resolve_deck_id(path, fallback=mox_id)
+        from .deck_identity import resolve_deck_id, stable_deck_stem
+        deck_id = resolve_deck_id(
+            path, fallback=mox_id or stable_deck_stem(path.name),
+        )
         last_modified = datetime.fromtimestamp(
             path.stat().st_mtime, tz=timezone.utc,
         ).isoformat()

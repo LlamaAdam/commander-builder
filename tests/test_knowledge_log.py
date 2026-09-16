@@ -1304,3 +1304,15 @@ def test_init_db_refuses_a_two_row_schema_version_table(tmp_path):
     conn.close()
     with pytest.raises(RuntimeError, match="schema_version has 2 rows"):
         init_db(p)
+
+
+def test_stats_summary_counts_inconclusive(db):
+    """R4 A-09 (2026-09-16): the low-N label every writer emits (web era-4
+    rule, auto-curate, commander-iterate since R3 C-01) gets its own
+    bucket instead of hiding inside ``total``."""
+    rid = record_iteration(Iteration(deck_id="d", deck_name="x", bracket=3), db_path=db)
+    update_verdict(rid, "inconclusive", db_path=db)
+    record_iteration(Iteration(deck_id="d", deck_name="x", bracket=3), db_path=db)
+    s = stats_summary(db_path=db)
+    assert s["inconclusive"] == 1
+    assert s["pending"] == 1 and s["total"] == 2

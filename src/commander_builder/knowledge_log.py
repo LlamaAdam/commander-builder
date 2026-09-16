@@ -1095,6 +1095,11 @@ def stats_summary(db_path: Optional[Path] = None) -> dict:
             "kept": conn.execute("SELECT COUNT(*) FROM iterations WHERE verdict = 'kept'").fetchone()[0],
             "reverted": conn.execute("SELECT COUNT(*) FROM iterations WHERE verdict = 'reverted'").fetchone()[0],
             "neutral": conn.execute("SELECT COUNT(*) FROM iterations WHERE verdict = 'neutral'").fetchone()[0],
+            # R4 A-09 (2026-09-16): low-N rows carry 'inconclusive' (web
+            # era-4 rule, auto-curate, and since R3 C-01 commander-iterate);
+            # they used to sit only inside ``total`` and silently deflated
+            # every rate a reader derived from the four named buckets.
+            "inconclusive": conn.execute("SELECT COUNT(*) FROM iterations WHERE verdict = 'inconclusive'").fetchone()[0],
             "pending": conn.execute("SELECT COUNT(*) FROM iterations WHERE verdict = 'pending'").fetchone()[0],
             "unique_decks": conn.execute("SELECT COUNT(DISTINCT deck_id) FROM iterations").fetchone()[0],
         }

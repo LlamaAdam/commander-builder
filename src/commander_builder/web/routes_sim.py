@@ -38,6 +38,9 @@ from uuid import uuid4
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from ..dck_utils import read_deck_text
+from ..deck_identity import (
+    is_filename_shaped_deck_id, resolve_deck_id, stable_deck_stem,
+)
 from ..knowledge_log import (
     SIM_REPORT_VERDICT_PARAMS_KEY,
     Iteration,
@@ -824,6 +827,22 @@ def make_sim_blueprint(
             return jsonify({"error": "deck_id is required"}), 400
         if not deck_name:
             deck_name = deck_id
+        # 2026-09-16 (R4 A-03): the browser posts the filename stem; the
+        # row is keyed by the same STABLE id every other writer uses
+        # (provenance id, else the version-stripped stem) so the
+        # auto-curate parent lookup and the C-08 backfill see one chain.
+        # Only a filename-shaped id is resolved — an explicit id passes
+        # through untouched. The readers merge stem + stable id (A-02),
+        # so the UI still finds rows under either key.
+        if is_filename_shaped_deck_id(deck_id):
+            deck_file = _resolve_deck_path(deck_dir, deck_id, None)
+            if deck_file is not None:
+                try:
+                    deck_id = resolve_deck_id(
+                        deck_file, fallback=stable_deck_stem(deck_id),
+                    )
+                except (OSError, ValueError):
+                    pass
 
         try:
             bracket = int(payload.get("bracket", 3))
@@ -895,8 +914,19 @@ def make_sim_blueprint(
                     "total_price_usd": float(total_price_usd),
                     "captured_at": _dt.now(_tz.utc).isoformat(),
                 }
-                if price_partial:
-                    audit_manifest["pricing"]["partial"] = True
+            # 2026-09-16 (R4 A-10): the partial marker is a bool flag,
+            # not a computed value, so "caller-supplied pricing wins"
+            # has nothing to lose by carrying it — without this a caller
+            # that sent its own ``pricing`` block plus ``price_partial:
+            # true`` got a row status.py renders as a whole total. A
+            # non-object ``pricing`` cannot carry the flag: 400.
+            if price_partial:
+                if not isinstance(audit_manifest["pricing"], dict):
+                    return jsonify({
+                        "error": "audit_manifest.pricing must be an "
+                                 "object when price_partial is true",
+                    }), 400
+                audit_manifest["pricing"]["partial"] = True
 
         # Pull win-rate / margin out of sim_report if present so the
         # row is queryable without parsing the JSON blob every time.
