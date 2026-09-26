@@ -11,6 +11,26 @@
 
 # ── ACTIVE / WORK NEEDED ──────────────────────────────────────────────
 
+# FP-020 — Win routes: every deck needs a way to win, and the tool must know which
+
+**Status (2026-09-26): PROPOSED — scoping note + research in
+mtga-advisor (`docs/ollama-analysis/WIN_ROUTES_SCOPE.md`,
+`WINCON_RESEARCH.md`); five owner decisions open (FP20-D1…D5). No
+code yet.** Owner premise: "every deck needs a win on either an
+infinite combo or some other way." The research (58 most-liked primer
+decks, real oracle text + Spellbook top-1500 via the capture lane)
+found a win route in 53/58 and pilot agreement in 28/29 — while the
+current `ROLE_TARGETS["finisher"] = 3` reading fails 45/58 (19 at
+zero, every cEDH combo list among them). Plan: a `win_routes` module
+(nine routes; kill-vs-resource combos with outlets), a deck-health
+tile, the finisher target satisfied by any non-thin route,
+`Intent.key_wincons` from route pieces + outlets, stated-vs-detected
+on adopt, the judge's plan-coherence gloss naming the route. The
+capture lane gained `oracle-names:` and `combos:` request forms for
+this (2026-09-26); the captures were consumed into the mtga-advisor
+research record and deleted here per the lane discipline.
+
+
 # FP-018 — Adopt a deck: primer-guided understanding + gentle personalization
 
 **Status (2026-09-09): slices 018.1–018.3 SHIPPED 2026-08-27 (PR #83);
