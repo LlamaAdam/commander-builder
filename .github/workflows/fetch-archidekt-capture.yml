@@ -107,6 +107,91 @@ jobs:
           # WotC page and the sandbox cannot reach magic.wizards.com --
           # the fix must be pinned against the real page, never a
           # synthesized one. Same UA ladder as the deck fetch.
+          # Fifth + sixth forms (2026-09-26, win-condition research):
+          #   oracle-names: <path>  -- Scryfall's bulk oracle_cards file
+          #                            (~150 MB, fetched in the runner
+          #                            where egress is open) trimmed to
+          #                            the names listed one-per-line in
+          #                            <path> (front-face names match
+          #                            "Front // Back" cards). Written as
+          #                            a compact JSON so 3k cards of REAL
+          #                            oracle text can be reasoned over
+          #                            offline without inventing any.
+          #   combos: <top_n>       -- runs the repo's own
+          #                            combo_detection.refresh_combos
+          #                            (Commander Spellbook, ordering
+          #                            =-popularity) with the output
+          #                            redirected into _captures/, so
+          #                            the capture IS the production
+          #                            code path's output, not a copy of
+          #                            it. data/ is gitignored, which is
+          #                            why the sandbox never has it.
+          # Both may share one request.txt with each other and with
+          # url: lines; the url block below runs last.
+          if grep -qE '^(oracle-names|combos):' tests/fixtures/_captures/request.txt; then
+            pip install -q -e . 2>&1 | tail -1
+            python3 - <<'PYEXTRA'
+          import hashlib, json, time, urllib.request
+          from pathlib import Path
+          UA = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
+          cap = Path("tests/fixtures/_captures")
+          names_path = ""; top_n = 0
+          for line in open(cap / "request.txt"):
+              if line.startswith("oracle-names:"):
+                  names_path = line.split(":", 1)[1].strip()
+              elif line.startswith("combos:"):
+                  raw = line.split(":", 1)[1].strip()
+                  if not raw.isdigit() or not 1 <= int(raw) <= 5000:
+                      raise SystemExit(f"combos: must be an integer 1..5000, got {raw!r}")
+                  top_n = int(raw)
+          def fetch(url, accept="application/json"):
+              req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
+              with urllib.request.urlopen(req, timeout=300) as resp:
+                  return resp.read()
+          if names_path:
+              wanted = {l.strip() for l in open(names_path, encoding="utf-8") if l.strip()}
+              meta = json.loads(fetch("https://api.scryfall.com/bulk-data/oracle-cards"))
+              uri = meta["download_uri"]
+              t0 = time.time(); blob = fetch(uri); print(f"bulk oracle_cards: {len(blob)/1e6:.1f} MB in {time.time()-t0:.0f}s from {uri}")
+              cards = json.loads(blob)
+              def front(n): return n.split(" // ", 1)[0]
+              keep = {}
+              for c in cards:
+                  if c.get("layout") in ("token", "double_faced_token", "emblem", "art_series"):
+                      continue
+                  n = c.get("name", "")
+                  hit = n if n in wanted else (front(n) if front(n) in wanted else None)
+                  if hit is None or hit in keep:
+                      continue
+                  faces = c.get("card_faces") or []
+                  keep[hit] = {
+                      "name": n,
+                      "type_line": c.get("type_line") or " // ".join(f.get("type_line", "") for f in faces),
+                      "oracle_text": c.get("oracle_text") if c.get("oracle_text") is not None else "\n//\n".join(f.get("oracle_text", "") for f in faces),
+                      "mana_cost": c.get("mana_cost") if c.get("mana_cost") is not None else " // ".join(f.get("mana_cost", "") for f in faces),
+                      "cmc": c.get("cmc"), "color_identity": c.get("color_identity"),
+                      "keywords": c.get("keywords"), "layout": c.get("layout"),
+                      "power": c.get("power") or (faces[0].get("power") if faces else None),
+                      "toughness": c.get("toughness") or (faces[0].get("toughness") if faces else None),
+                      "produced_mana": c.get("produced_mana"),
+                      "legal_commander": (c.get("legalities") or {}).get("commander"),
+                      "game_changer": c.get("game_changer"),
+                  }
+              missing = sorted(wanted - set(keep))
+              tag = hashlib.sha256("\n".join(sorted(wanted)).encode()).hexdigest()[:8]
+              out = {"_provenance": {"source": "scryfall bulk oracle_cards", "download_uri": uri,
+                                     "updated_at": meta.get("updated_at"), "names_file": names_path,
+                                     "requested": len(wanted), "found": len(keep), "missing": missing},
+                     "cards": dict(sorted(keep.items()))}
+              (cap / f"oracle_{tag}.json").write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+              print(f"oracle_{tag}.json: {len(keep)}/{len(wanted)} names found; missing {len(missing)}: {missing[:20]}")
+          if top_n:
+              from commander_builder.combo_detection import refresh_combos
+              n = refresh_combos(top_n=top_n, out_path=cap / f"combos_top{top_n}.json")
+              print(f"combos_top{top_n}.json: {n} combos written")
+          PYEXTRA
+            if ! grep -q '^url: *https://' tests/fixtures/_captures/request.txt; then exit 0; fi
+          fi
           if grep -q '^url: *https://' tests/fixtures/_captures/request.txt; then
             python3 - <<'PYURL'
           import hashlib, json, urllib.error, urllib.request

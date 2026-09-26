@@ -1,0 +1,2 @@
+oracle-names: tests/fixtures/_captures/primer_corpus_names.txt
+combos: 1500
