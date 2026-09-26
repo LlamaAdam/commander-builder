@@ -150,8 +150,22 @@ jobs:
                   return resp.read()
           if names_path:
               wanted = {l.strip() for l in open(names_path, encoding="utf-8") if l.strip()}
-              meta = json.loads(fetch("https://api.scryfall.com/bulk-data/oracle-cards"))
-              uri = meta["download_uri"]
+              # First run (2026-09-26) died on KeyError 'download_uri':
+              # print what the endpoint actually returned before failing,
+              # and try the list endpoint (the entry is `type ==
+              # "oracle_cards"` there) so a renamed single-item route
+              # does not need a second round trip through the lane.
+              raw = fetch("https://api.scryfall.com/bulk-data/oracle-cards")
+              meta = json.loads(raw)
+              if "download_uri" not in meta:
+                  print("bulk-data/oracle-cards reply (first 600 bytes):", raw[:600])
+                  lst = json.loads(fetch("https://api.scryfall.com/bulk-data"))
+                  print("bulk-data list keys:", sorted(lst)[:10],
+                        "| entries:", [(e.get("type"), sorted(e)[:8]) for e in lst.get("data", [])][:6])
+                  meta = next((e for e in lst.get("data", []) if e.get("type") == "oracle_cards"), {})
+              uri = meta.get("download_uri") or meta.get("uri") or meta.get("permalink_uri")
+              if not uri:
+                  raise SystemExit(f"no download uri in bulk-data reply: {json.dumps(meta)[:600]}")
               t0 = time.time(); blob = fetch(uri); print(f"bulk oracle_cards: {len(blob)/1e6:.1f} MB in {time.time()-t0:.0f}s from {uri}")
               cards = json.loads(blob)
               def front(n): return n.split(" // ", 1)[0]
