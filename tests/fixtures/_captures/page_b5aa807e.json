@@ -1,0 +1,8 @@
+{
+ "url": "https://api.github.com/repos/Card-Forge/forge/releases/latest",
+ "final_url": "https://api.github.com/repos/Card-Forge/forge/releases/latest",
+ "status": 200,
+ "content_type": "application/json; charset=utf-8",
+ "user_agent": "commander-builder/0.2",
+ "bytes": 10254
+}
