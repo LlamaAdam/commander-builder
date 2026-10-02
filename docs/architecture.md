@@ -493,6 +493,52 @@ noted.
 
 ---
 
+## Browser test lanes (Playwright, `tests/e2e/`)
+
+Two lanes share one client (`@playwright/test`, pinned in `package.json`)
+and nothing else:
+
+| Lane | Config | Server | Scope | Runs where |
+|------|--------|--------|-------|------------|
+| **Web smokes** | `playwright.config.js` | `tests/e2e/server.py` — temp state, stubbed Scryfall/EDHREC, sockets blocked, six synthetic decks | ~10 regression pins over `app.js` (verdict default, editor save, error paths, SSE parser, era sub-line) | `web-smokes.yml` on PR/merge, ~2 min |
+| **Full walkthrough** (2026-10-02) | `playwright.full.config.js` | `tests/e2e/server_full.py` — temp state, live network, Forge-capable deck dir, four untagged filler seats; or `E2E_BASE_URL` = an app already running | `tests/e2e/full-walkthrough.spec.js`: two real decks, every route/page/action, one real Forge compare; writes `e2e-results/CHECKLIST.md` + `checklist.json` + one screenshot per row and never fails on a row | `e2e-full.yml` (dispatch), or the local runner below |
+
+**CI dispatch.** Actions → *e2e-full* → *Run workflow* on the branch.
+The job installs the app, Chromium, Temurin 17 and the weekly-cached
+Forge bundle, points Forge at `./userdata`, runs the spec with
+`CB_E2E_FULL_DECK_DIR=vendor/forge/userdata/decks/commander`, prints
+`CHECKLIST.md` into the job log and always uploads `e2e-results/` as
+the `e2e-results` artifact (45-minute budget; the compare alone may take
+10–20 minutes).
+
+**Local runner (owner's PC, installed Chrome, real `vendor/forge`).**
+Start the app (`python -m commander_builder.web`, port 5000 by default,
+or the desktop launcher — its window shows the port), then:
+
+```
+scripts\walkthrough_local.cmd                                     (Windows)
+E2E_BASE_URL=http://127.0.0.1:5000 scripts/walkthrough_local.sh   (macOS/Linux)
+```
+
+It refuses in one line if `E2E_BASE_URL/api/health` is not reachable,
+runs `npm ci` when `node_modules/` is missing, runs only the walkthrough
+spec headed in Chrome (`E2E_CHROME=1`), commits `e2e-results/` with
+`chore: local walkthrough results <date>` and pushes the current
+branch, then prints the checklist. The decks the run creates
+(`… E2E [B3]`) are deleted at the end unless `E2E_KEEP_DECKS=1`; the
+iteration rows it seeds through `/api/save_iteration` stay in the
+knowledge log. `e2e-results/` is a run artifact — delete it after
+reading (see its README).
+
+**Switches the spec honors.** `E2E_BASE_URL` (use a running app; no
+fixture server), `E2E_CHROME=1` (channel `chrome`, headed),
+`E2E_OFFLINE=1` (sandbox: network/Forge rows become SKIP and the fixture
+server stubs lookups), `E2E_KEEP_DECKS=1`, `E2E_PYTHON` (interpreter for
+the two CLI rows: the Archidekt import lane and `commander-adopt`),
+`E2E_FORGE_WAIT_MS` (compare budget, default 25 min).
+
+---
+
 ## Backend-swap seams
 
 Where the architecture allows swapping a backend without touching
