@@ -35,7 +35,7 @@
              style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); width: 150px;" />
       <button type="submit" class="topbar-btn" id="card-search-btn">Cards</button>
     </form>
-    <button class="topbar-btn primary" id="btn-new-deck" title="Import a deck from Moxfield URL or paste a list">
+    <button class="topbar-btn primary" id="btn-new-deck" title="Import a deck from a Moxfield or Archidekt URL, or paste a list">
       + New deck
     </button>
   </header>
@@ -237,7 +237,7 @@
         <button class="modal-close" data-close="new-deck-modal" aria-label="Close">&times;</button>
       </header>
       <div class="tabs" role="tablist" aria-label="Deck source">
-        <button class="tab active" role="tab" id="tab-btn-moxfield" aria-selected="true" aria-controls="tab-moxfield" data-tab="moxfield">Moxfield URL</button>
+        <button class="tab active" role="tab" id="tab-btn-moxfield" aria-selected="true" aria-controls="tab-moxfield" data-tab="moxfield">Moxfield / Archidekt URL</button>
         <button class="tab" role="tab" id="tab-btn-paste" aria-selected="false" aria-controls="tab-paste" data-tab="paste">Paste deck list</button>
         <button class="tab" role="tab" id="tab-btn-bulk" aria-selected="false" aria-controls="tab-bulk" data-tab="bulk">Bulk URLs</button>
         <button class="tab" role="tab" id="tab-btn-build" aria-selected="false" aria-controls="tab-build" data-tab="build">Build from scratch</button>
@@ -245,7 +245,7 @@
       <div class="tab-panel" id="tab-moxfield" role="tabpanel" aria-labelledby="tab-btn-moxfield">
         <label for="new-mox-name">Display name (optional — defaults to Moxfield deck name)</label>
         <input id="new-mox-name" type="text" placeholder="e.g. Hakbal Test">
-        <label for="new-mox-url">Moxfield URL or deck id</label>
+        <label for="new-mox-url">Moxfield or Archidekt URL (or Moxfield deck id)</label>
         <input id="new-mox-url" type="text" placeholder="https://moxfield.com/decks/abc123 or just abc123">
         <label for="new-mox-bracket">Bracket</label>
         <select id="new-mox-bracket">

@@ -485,7 +485,7 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
 
         if not url and not paste:
             return jsonify({
-                "error": "need moxfield_url or paste_text",
+                "error": "need moxfield_url (a Moxfield or Archidekt URL) or paste_text",
             }), 400
 
         deck_text_out: str
@@ -493,23 +493,25 @@ def make_decks_blueprint(deck_dir: Path) -> Blueprint:
         deck_json: Optional[dict] = None
         public_id: Optional[str] = None
         if url:
+            # Host-dispatched (2026-10-02, see _helpers.fetch_deck_from_url):
+            # an Archidekt URL used to be read as a Moxfield id.
+            from ._helpers import fetch_deck_from_url
+            source_label = "Moxfield"
             try:
-                from ..moxfield_import import (
-                    fetch_deck, parse_deck_id, to_dck,
-                )
+                from ..moxfield_import import _insert_metadata_lines, to_dck
                 try:
-                    public_id = parse_deck_id(url)
+                    deck_json, public_id, provenance, source_label = (
+                        fetch_deck_from_url(url))
                 except ValueError as exc:
-                    # R3 W-06: not a Moxfield URL / id — a client error,
+                    # R3 W-06: not a deck URL / id — a client error,
                     # never a fetch of a nonsense path.
                     return jsonify({"error": str(exc)}), 400
-                deck_json = fetch_deck(public_id)
-                deck_text_out = to_dck(deck_json)
+                deck_text_out = _insert_metadata_lines(to_dck(deck_json), provenance)
                 if not derived_name:
                     derived_name = deck_json.get("name", "Imported")
             except Exception as exc:
                 return jsonify({
-                    "error": "Moxfield fetch failed",
+                    "error": f"{source_label} fetch failed",
                     "detail": f"{type(exc).__name__}: {exc}",
                 }), 502
         else:

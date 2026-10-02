@@ -3974,10 +3974,10 @@ async function importMoxfield() {
   const bracket = parseInt($("new-mox-bracket").value, 10);
   const status = $("new-deck-status");
   if (!url) {
-    status.textContent = "Enter a Moxfield URL or deck id.";
+    status.textContent = "Enter a Moxfield or Archidekt deck URL (or a Moxfield id).";
     return;
   }
-  status.textContent = "Fetching from Moxfield…";
+  status.textContent = /archidekt\.com/i.test(url) ? "Fetching from Archidekt…" : "Fetching from Moxfield…";
   try {
     const resp = await fetch("/api/import_deck", {
       method: "POST",

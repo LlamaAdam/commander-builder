@@ -78,6 +78,7 @@ that fails without it.
   not reproduced in three full-suite runs and repeated random-order runs
   of `tests/test_web_app.py`; the backlog note stays.
 - **forge-canary actions.** The run annotations flagged `setup-java@v4` as deprecated and `setup-python@v5` / `upload-artifact@v4` as Node 20 builds; aligned on `setup-java@v5`, `setup-python@v6`, `upload-artifact@v5` (the versions the other workflows already use). `actions/cache@v4` kept: its warning is non-fatal and a newer major was not verified.
+- **Web import lane reads Archidekt URLs.** The desktop "Import" box handed any URL to the Moxfield id parser, so `https://archidekt.com/decks/60036` became Moxfield id `60036` (a 502, or a silently different deck). Found by the full-walkthrough e2e lane on its first live import. `web/_helpers.fetch_deck_from_url` dispatches by host like the CLI importer, stamps `Archidekt=`/`Source=archidekt` and keys the primer sidecar on `archidekt:<id>`; UI copy says Moxfield or Archidekt; pinned on the real Archidekt capture fixture.
 
 ### 2026-10-02 — canary profile; EDHREC inclusion drift
 

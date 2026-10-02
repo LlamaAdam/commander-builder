@@ -8633,3 +8633,42 @@ def test_import_deck_via_url_writes_the_primer_sidecar(client, deck_dir, monkeyp
         "name": "Pasted", "paste_text": "1 Sol Ring\n1 Forest\n"})
     assert resp.status_code == 200, resp.get_json()
     assert resp.get_json()["primer"] is None
+
+
+def test_import_deck_via_archidekt_url_uses_the_archidekt_lane(client, deck_dir, monkeypatch):
+    """2026-10-02 (found by the full-walkthrough e2e lane): the UI import
+    route handed an Archidekt URL to ``moxfield_import.parse_deck_id``,
+    which read ``https://archidekt.com/decks/60036`` as Moxfield id
+    ``60036`` and fetched Moxfield. The route now dispatches by host like
+    the CLI importer; pinned on the real Archidekt capture fixture."""
+    import json as _json
+    from pathlib import Path as _P
+    raw = _json.loads((_P(__file__).parent / "fixtures" / "archidekt_deck_shape.json")
+                      .read_text(encoding="utf-8"))
+    calls = {"archidekt": [], "moxfield": []}
+    monkeypatch.setattr("commander_builder.archidekt_client.fetch_deck",
+                        lambda deck_id, **kw: (calls["archidekt"].append(deck_id), raw)[1])
+    monkeypatch.setattr("commander_builder.moxfield_import.fetch_deck",
+                        lambda public_id: (calls["moxfield"].append(public_id), {})[1])
+    resp = client.post("/api/import_deck", json={
+        "moxfield_url": "https://archidekt.com/decks/24864897/hazel_demands_sacrifice",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert calls == {"archidekt": ["24864897"], "moxfield": []}
+    text = (deck_dir / body["filename"]).read_text(encoding="utf-8")
+    assert "Archidekt=24864897" in text and "Source=archidekt" in text
+    assert "Moxfield=" not in text
+    assert raw["name"].split()[0] in body["filename"]
+    # The primer sidecar is keyed on the namespaced source id, like the CLI lane.
+    assert body["primer"]["action"] == "written"
+    from commander_builder.primer import sidecar_identity
+    ident = sidecar_identity(deck_dir / body["filename"])
+    assert ident and ident.get("source") == "archidekt:24864897"
+
+
+def test_import_deck_unrecognised_url_is_a_400_not_a_fetch(client, monkeypatch):
+    monkeypatch.setattr("commander_builder.moxfield_import.fetch_deck",
+                        lambda public_id: (_ for _ in ()).throw(AssertionError("fetched")))
+    resp = client.post("/api/import_deck", json={"moxfield_url": "https://example.com/not-a-deck"})
+    assert resp.status_code == 400

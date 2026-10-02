@@ -408,3 +408,36 @@ def read_protected_cards(deck_text: str) -> list[str]:
 # ``config_store``) needed it and cannot import from ``web``. Re-exported
 # here so every existing importer keeps working unchanged.
 from ..atomic_io import atomic_write_text  # noqa: E402,F401
+
+
+# --- URL import dispatch (2026-10-02) ---------------------------------------
+# WHY: the desktop "Import" box said "Moxfield URL or deck id" and the route
+# handed whatever was typed to ``moxfield_import.parse_deck_id``, whose
+# ``/decks/<id>`` regex happily reads ``https://archidekt.com/decks/60036``
+# as Moxfield id ``60036`` -- a 502 from Moxfield, or a silently different
+# deck if that id exists there. The CLI importer has routed by host since
+# the Archidekt lane shipped (``moxfield_import.resolve_source``); the web
+# route never reached it. Found by the full-walkthrough e2e lane on its
+# first live import. One dispatcher, both lanes, same provenance lines.
+def fetch_deck_from_url(url: str) -> tuple[dict, str, list[str], str]:
+    """``(deck_json, source_id, provenance_lines, source_label)`` for a
+    Moxfield or Archidekt deck URL / id.
+
+    Raises ``ValueError`` for an unrecognisable URL (a client error) and
+    lets fetch failures propagate (the caller maps them to 502).
+    ``source_id`` is the namespaced id the on-disk ``Moxfield=`` /
+    ``Archidekt=`` lines and the primer sidecar header are keyed on.
+    """
+    from ..moxfield_import import fetch_deck, parse_deck_id, SOURCE_ARCHIDEKT
+    from .. import archidekt_client
+    if archidekt_client.is_archidekt_url(url):
+        deck_id = archidekt_client.parse_deck_id(url)
+        raw = archidekt_client.fetch_deck(deck_id)
+        return (
+            archidekt_client.to_deck_json(raw),
+            f"archidekt:{deck_id}",
+            [f"Archidekt={deck_id}", f"Source={SOURCE_ARCHIDEKT}"],
+            "Archidekt",
+        )
+    public_id = parse_deck_id(url)
+    return fetch_deck(public_id), public_id, [], "Moxfield"
