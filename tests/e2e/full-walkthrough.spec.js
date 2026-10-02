@@ -844,7 +844,7 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
       if (result.error) throw new Error(`stream error — ${base}; ${short(result.error, 200)}`);
       if (!result.complete) throw new Error(`no complete frame — ${base}; last frame: ${short(result.lastFrame, 160)}`);
       const warning = String(result.complete.warning || "");
-      if (!/no API key/i.test(warning)) {
+      if (!/no API key|requires ANTHROPIC_API_KEY/i.test(warning)) {
         throw new Error(`complete frame lacks the no-key warning — ${base}; source=${result.complete.source}; warning=${short(warning, 160) || "(none)"}`);
       }
       return `${base}; effective source=${result.complete.source}; warning: ${short(warning, 160)}`;

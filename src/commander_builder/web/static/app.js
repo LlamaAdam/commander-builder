@@ -4415,8 +4415,15 @@ function renderPricingSavings(slot, savings) {
     ));
   }
   details.appendChild(ul);
-  tl.appendChild(details);
-  return tl;
+  // WHY (2026-10-02, found by the full-walkthrough lane on a live
+  // compare): this renderer was extracted from priceTile() and kept
+  // appending to that function's local ``tl`` -- a ReferenceError the
+  // moment live pricing reported any cheaper printing, which no
+  // offline fixture ever did. The disclosure belongs in ``slot``, the
+  // element this function documents itself as rendering into; the
+  // error also aborted the caller, which is why the compare's
+  // save-iteration block never appeared after it.
+  slot.appendChild(details);
 }
 
 function panel(title, content) {

@@ -45,11 +45,18 @@
     $("settings-moxfield").value = cfg.moxfield_user || "";
   }
 
-  // Reflect the server-side collection registration. The textarea is
-  // always cleared (blank = keep current — the list itself is never
-  // echoed back); only the "(N cards)" headline changes.
+  // Reflect the server-side collection registration: only the
+  // "(N cards)" headline changes (the list itself is never echoed back).
+  //
+  // WHY the textarea is NOT cleared here (2026-10-02, found by the
+  // full-walkthrough lane, CI run 37051424339): openSettings() refreshes
+  // this state asynchronously, and this function used to blank the
+  // textarea on every refresh -- so a paste made before that GET
+  // returned was silently wiped and Save saw an empty box, i.e. the
+  // collection was never imported. The textarea is cleared only after
+  // a successful import or clear (``clearCollectionText``), when the
+  // text has actually been consumed.
   function fillCollectionState(state) {
-    $("settings-collection").value = "";
     var stateEl = $("settings-collection-state");
     if (state && state.configured) {
       stateEl.textContent = "(" + state.count + " cards)";
@@ -120,6 +127,7 @@
           setStatus(res.body.error || "collection import failed", true);
           return false;
         }
+        $("settings-collection").value = "";  // consumed -- see fillCollectionState
         fillCollectionState(res.body);
         return true;
       })
@@ -138,6 +146,7 @@
     })
       .then(function (r) { return r.json(); })
       .then(function (body) {
+        $("settings-collection").value = "";
         fillCollectionState(body);
         setStatus("collection cleared", false);
       })
