@@ -302,7 +302,7 @@ def _parse_main_card_names(deck_path: Path) -> list[str]:
     Thin wrapper over ``dck_utils.main_card_names``."""
     if not deck_path.exists():
         return []
-    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
+    return dck_utils.main_card_names(dck_utils.read_deck_text(deck_path))
 
 
 def _fetch_edhrec_average_deck(

@@ -1006,3 +1006,67 @@ def test_resolve_preferences_is_one_reader_for_three_clis(tmp_path):
     assert resolve_preferences("", None) is None
     with pytest.raises(OSError):
         resolve_preferences(None, str(tmp_path / "missing.txt"))
+
+
+# --------------------------------------------------------------------------- #
+# R4-FU B-06 (2026-10-02) — the negation window no longer eats affirmatives
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("sentence, slugs", [
+    # ``against`` as a POST cue ate "great against control".
+    ("tokens are great against control", ["tokens"]),
+    # ``drop*`` / ``skip*`` as PRE cues ate ordinary verbs.
+    ("I drop tokens every turn", ["tokens"]),
+    ("skip ahead to landfall", ["landfall"]),
+    # ``nothing`` as a PRE cue, and ``but`` is now a scope breaker.
+    ("nothing but make tokens", ["tokens"]),
+    # ``nothing`` as a POST cue reached across the comma.
+    ("I love lifegain, nothing beats a big life total", ["lifegain"]),
+    # ``not`` cannot reach past ``only``.
+    ("not only tokens but also +1/+1 counters",
+     ["tokens", "plus-1-plus-1-counters"]),
+])
+def test_free_text_slugs_keep_affirmative_mentions_near_trimmed_cues(sentence, slugs):
+    """R4-FU B-06: six affirmative sentences the R3 F-04 window dropped.
+    A dropped mention is not the inversion's class of harm, but the four
+    cues were doing nothing on the real corpus (next test) and cost
+    these."""
+    from commander_builder.intent import free_text_theme_slugs
+    assert free_text_theme_slugs(sentence) == slugs
+
+
+def test_free_text_slugs_still_read_object_position_nothing_as_negation():
+    """``sacrifice nothing`` (the R3 pin above) is the verb's object: the
+    deck does NOT sacrifice. Kept — ``nothing`` survives only in that
+    position, straight after the mention with no punctuation between."""
+    from commander_builder.intent import free_text_theme_slugs
+    assert free_text_theme_slugs("I want to sacrifice nothing; I keep my board") == []
+    assert free_text_theme_slugs("we make tokens; nothing else matters") == ["tokens"]
+
+
+def _appendix(letter: str) -> str:
+    names = {"a": "a_baba_lysaga", "b": "b_vivi_ornitier", "c": "c_magdanomicon"}
+    text = (Path(__file__).parent / "fixtures"
+            / f"primer_corpus_appendix_{names[letter]}.txt").read_text(encoding="utf-8")
+    return "\n".join(l for l in text.splitlines() if not l.startswith("# "))
+
+
+@pytest.mark.parametrize("letter, slugs", [
+    # Baba Lysaga (Archidekt 1585124): aristocrats/landfall/reanimator by
+    # the author's own first sentence; tokens and artifacts from the win
+    # lines; "Lifegain is brutal against this deck" is dropped by ``is
+    # brutal`` while "Lifegain payoffs - I'm strongly considering" counts.
+    ("a", ["tokens", "sacrifice", "landfall", "lifegain", "reanimator", "artifacts"]),
+    # Vivi Ornitier (Archidekt 13765265): a spellslinger-storm shell.
+    ("b", ["spellslinger"]),
+    # The Magdanomicon (Moxfield): "artifact combo" is a card description,
+    # not an artifacts theme (singular + no theme word).
+    ("c", []),
+])
+def test_free_text_slugs_on_the_real_primer_corpus(letter, slugs):
+    """R4-FU B-06: the three PRIMER_CORPUS.md appendices (22.7k chars, 39
+    theme mentions) — the cue trim moves none of these lists. Pinned so a
+    future cue change is measured against real prose, not synthetic
+    sentences."""
+    from commander_builder.intent import free_text_theme_slugs
+    assert free_text_theme_slugs(_appendix(letter)) == slugs

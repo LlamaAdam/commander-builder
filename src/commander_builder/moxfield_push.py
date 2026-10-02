@@ -81,7 +81,8 @@ def parse_dck_lines(deck_path: Path) -> dict[str, list[str]]:
         raise FileNotFoundError(f"deck not found: {deck_path}")
     out: dict[str, list[str]] = {}
     current: Optional[str] = None
-    for raw in deck_path.read_text(encoding="utf-8").splitlines():
+    from .dck_utils import read_deck_text
+    for raw in read_deck_text(deck_path).splitlines():
         line = raw.strip()
         if not line:
             continue

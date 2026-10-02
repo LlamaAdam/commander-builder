@@ -1,0 +1,6 @@
+# Provenance: PRIMER_CORPUS.md (FP-018.4 primer corpus study, 2026-08-27),
+# Appendix C — The Magdanomicon (Moxfield 8Y4qOAcLN0O_HHYhOboV3Q); verbatim blockquote with the '> ' prefix removed, [[name]] marks a
+# card-link embed, image embeds elided. Pinned 2026-10-02 (R4-FU B-06) as the
+# real-prose corpus the negation window is measured on.
+
+[Last Update: 8/09/26 - Blood Moon Variant Moved To New List (in primer intro section) - Turbo Slanted in Considering] This deck seeks to control the game with its diverse interaction package and tutorable silver bullet targets, eventually finding an artifact combo to leverage your commander abilites ability to win. Comprehensive primer for new and experienced players aimed to help players make their own changes based on playstyle preferences or meta requirements.  Essentially this functions as the Magda CEDH community's Megaprimer. Shodokan's list is current front facing & test/active list in the opening section of the primer, Rust_ITG's decklist link is also in the opening section of the primer. Come chat, ask questions and hang out in the Magda discord server: Discord.gg/magda

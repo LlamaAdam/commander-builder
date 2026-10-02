@@ -722,7 +722,13 @@ def auto_propose(
     candidates_removed = list(advice_report.get("removed", []) or [])
     advisor_rationale = str(advice_report.get("rationale", ""))
     protected_list = list(protected_cards)
-    protected_lower = {p.lower() for p in protected_list}
+    # R4-FU B-18 (2026-10-02): keyed with ``match_key``, not ``lower()`` —
+    # WHY: a curly-apostrophe ``Protect=Jeska’s Will`` keyed ``lower()``
+    # never equalled the proposal's ``Jeska's Will``, so the one path that
+    # actually CUTS (``commander improve`` / auto-curate) ignored the lock
+    # that ``adopt`` (R3 F-10) already honoured. Same key both sides.
+    from .collection import match_key as _match_key
+    protected_lower = {_match_key(p) for p in protected_list}
 
     # Curation-intensity hint to Claude. The hard caps (max_adds /
     # max_cuts) clip the output; this block tells the curator how
@@ -903,7 +909,7 @@ def auto_propose(
     kept_cuts: list[str] = []
     dropped_for_protection: list[str] = []
     for c in raw_cuts:
-        if c.lower() in protected_lower:
+        if _match_key(c) in protected_lower:
             dropped_for_protection.append(c)
         else:
             kept_cuts.append(c)
@@ -1099,11 +1105,15 @@ def apply_proposal_to_deck(
     # list lives in the deck's [metadata] section so we read it
     # straight from disk -- no extra arg-passing needed.
     from .web._helpers import read_protected_cards
+    from .collection import match_key as _match_key
     src_text_for_protect = src_path.read_text(encoding="utf-8")
-    protected_lower = {p.lower() for p in read_protected_cards(src_text_for_protect)}
+    # ``match_key`` on both sides (R4-FU B-18, 2026-10-02; see auto_propose).
+    protected_lower = {
+        _match_key(p) for p in read_protected_cards(src_text_for_protect)
+    }
     cuts_to_apply: list[str] = []
     for c in proposal.cuts:
-        if c.lower() in protected_lower:
+        if _match_key(c) in protected_lower:
             if c not in proposal.dropped_for_protection:
                 proposal.dropped_for_protection.append(c)
         else:

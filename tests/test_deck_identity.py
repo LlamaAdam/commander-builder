@@ -139,3 +139,16 @@ def test_auto_curate_writer_keeps_one_id_and_threads_parent(tmp_path):
     rows = iterations_for_deck("[USER] Hand Deck [B3]", db_path=db)
     assert [r.id for r in rows] == [first, second]
     assert get_iteration(second, db_path=db).parent_id == first
+
+
+def test_resolve_deck_id_reads_a_cp1252_deck(tmp_path, capsys):
+    """R4-FU B-02 sweep (2026-10-02): ``resolve_deck_id`` read the deck
+    strictly, so a cp1252 re-save raised ``UnicodeDecodeError`` out of
+    every status / proposer caller instead of resolving the ``Moxfield=``
+    id that is plainly there."""
+    from commander_builder.deck_identity import resolve_deck_id
+    p = tmp_path / "[USER] Jötun [B3].dck"
+    p.write_bytes("[metadata]\nMoxfield=abc123\n[Main]\n1 Jötun Grunt\n"
+                  .encode("cp1252"))
+    assert resolve_deck_id(p, fallback="fb") == "abc123"
+    assert "not valid UTF-8" in capsys.readouterr().err

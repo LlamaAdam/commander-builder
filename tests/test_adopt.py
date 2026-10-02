@@ -664,3 +664,28 @@ def test_cp1252_sidecar_does_not_crash_adopt(tmp_path, capsys):
                          matrix=_matrix())
     assert payload["explanation"]["primer"]["present"] is True
     assert "not valid UTF-8" in capsys.readouterr().err
+
+
+def test_diacritic_protect_line_pins_the_card(tmp_path):
+    """R4-FU B-14 (2026-10-02): ``Protect=Lim-Dul's Vault`` (ASCII, as a
+    Forge file or a hand edit spells it) against the list's Scryfall
+    spelling ``Lim-Dûl's Vault`` — one key after diacritic folding, so
+    the lock holds. Same shape as the R3 F-10 apostrophe pin above."""
+    deck = tmp_path / "[USER] Krenko [B3].dck"
+    deck.write_text(_deck_text(main=("Lim-Dûl's Vault", "Good Ramp", "A Draw"),
+                               protect=("Lim-Dul's Vault",)),
+                    encoding="utf-8")
+    matrix = _matrix()
+    matrix["names"]["lim-dûl's vault"] = "Lim-Dûl's Vault"
+    matrix["counts"]["lim-dûl's vault"] = 3
+    payload = adopt_deck(deck, preferences=None, lookup=_lookup2,
+                         matrix=matrix)
+    assert "Lim-Dul's Vault" in payload["personalize"]["protected"]
+    assert all(s["out"] != "Lim-Dûl's Vault"
+               for s in payload["personalize"]["suggestions"])
+    out = personalize_suggestions(
+        deck.read_text(encoding="utf-8"), preferences=None,
+        protected=["Aether Vial"], lookup=_lookup2, matrix=matrix)
+    # And the other direction of the other pair: the deck is unchanged,
+    # so this only checks the call accepts the ASCII spelling cleanly.
+    assert isinstance(out["suggestions"], list)

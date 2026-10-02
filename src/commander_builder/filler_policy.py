@@ -87,3 +87,68 @@ def describe_exclusions(by_prefix: "dict[str, int]") -> str:
         f"{pre} {by_prefix[pre]}"
         for pre in FILLER_EXCLUDED_PREFIXES if by_prefix.get(pre)
     ) or "none"
+
+
+def split_filler_arg(sim_fillers: "str | None") -> "list[str]":
+    """``--sim-fillers "a.dck, b.dck"`` -> ``["a.dck", "b.dck"]`` (the one
+    parser every explicit-filler site uses)."""
+    if not sim_fillers:
+        return []
+    return [f.strip() for f in str(sim_fillers).split(",") if f.strip()]
+
+
+def filler_override_note(sim_fillers: "str | None") -> "str | None":
+    """A ``NOTE:`` line when an EXPLICIT ``--sim-fillers`` list seats a
+    prefix-excluded deck, else ``None`` (R4-FU A-13, 2026-10-02).
+
+    WHY a note and not a refusal: the explicit list is the operator's
+    escape hatch (the census message above tells them to use it), so the
+    exclusion is legitimately bypassed — but the row did not SAY so,
+    while the CHANGELOG claimed the policy covered every filler path.
+    The seated decks are named by prefix so a ``[REF]`` baseline in a
+    verdict's A/B is visible in the log instead of indistinguishable
+    from an auto-picked pod. Callers also stamp
+    ``sim_report["fillers_overridden"] = True`` (see
+    :func:`mark_fillers_overridden`).
+    """
+    seated: dict[str, list[str]] = {}
+    for name in split_filler_arg(sim_fillers):
+        base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        for pre in FILLER_EXCLUDED_PREFIXES:
+            if base.startswith(pre):
+                seated.setdefault(pre, []).append(base)
+                break
+    if not seated:
+        return None
+    parts = ", ".join(
+        f"{pre} ({', '.join(seated[pre])})"
+        for pre in FILLER_EXCLUDED_PREFIXES if pre in seated
+    )
+    return (
+        f"NOTE: --sim-fillers seats prefix-excluded deck(s) as fillers: "
+        f"{parts}. The filler policy (C1) was bypassed by the explicit "
+        f"list; the verdict's baseline is whatever these decks are, and "
+        f"the row is stamped fillers_overridden."
+    )
+
+
+def mark_fillers_overridden(sim_report, sim_fillers: "str | None") -> "str | None":
+    """Stamp ``sim_report["fillers_overridden"] = True`` when the explicit
+    list seats an excluded prefix; returns the ``NOTE:`` line (or None)
+    so the caller can print it once. ``sim_report`` may be ``None``
+    (sim did not complete) — then only the note is returned."""
+    note = filler_override_note(sim_fillers)
+    if note is not None and isinstance(sim_report, dict):
+        sim_report["fillers_overridden"] = True
+    return note
+
+
+def print_filler_override_note(sim_fillers: "str | None") -> None:
+    """Print the A-13 ``NOTE:`` for an explicit list that seats an
+    excluded prefix — on stderr, because ``--json`` keeps stdout
+    machine-readable and ``commander-improve`` captures auto-curate's
+    stdout per round (the same channel the sim warnings use)."""
+    import sys
+    note = filler_override_note(sim_fillers)
+    if note:
+        print(f"[sim] {note}", file=sys.stderr, flush=True)

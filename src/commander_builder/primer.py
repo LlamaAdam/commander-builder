@@ -595,7 +595,42 @@ _WIN_HEADING_RE = re.compile(
     r"finishers?)\b",
     re.IGNORECASE,
 )
+#: A bare (unmarked) win title is the WHOLE line (R4-FU B-07, 2026-10-02):
+#: "Win Conditions", "How it wins", "Combos:", "Game plan" — never a
+#: sentence fragment that merely starts with a win word.
+_WIN_TITLE_RE = re.compile(
+    r"\W*(?:how (?:it|we|i|this deck) wins?|win(?:ning)?|"
+    r"win[- ]?cons?|win[- ]?conditions?|combos?|infinite(?: combos?)?|"
+    r"game ?plan|finishers?)\W*",
+    re.IGNORECASE,
+)
+#: Markdown heading markers: ``## Title``, ``**Title**``, ``__Title__``.
+_MARKDOWN_HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s+\S|\*\*.+\*\*\s*$|__.+__\s*$)")
 _HEADING_MAX_WORDS = 6
+_WIN_TITLE_MAX_WORDS = 4
+
+
+def _is_win_heading(line: str) -> bool:
+    """Does ``line`` NAME the win section, so the block under it is the
+    author's win line even without a keyword?
+
+    R4-FU B-07 (2026-10-02). WHY stricter than ``_WIN_HEADING_RE.match``:
+    ``_is_heading_line`` is shape-only, so ``Combo pieces I cut`` (four
+    punctuation-free words) was a heading, the prefix regex saw "Combo",
+    and the REMOVED list under it was quoted as "how it wins". A bare
+    title must now be the whole line (``fullmatch``, at most four words);
+    a longer or sentence-shaped line counts only when the author marked
+    it as a heading in markdown (``## ...`` / ``**...**``), where the
+    leading win word is enough.
+    """
+    t = line.strip()
+    if not t or not _is_heading_line(t):
+        return False
+    if _MARKDOWN_HEADING_RE.match(t):
+        bare = t.strip("#* _")
+        return _WIN_HEADING_RE.match(bare) is not None
+    return (len(t.split()) <= _WIN_TITLE_MAX_WORDS
+            and _WIN_TITLE_RE.fullmatch(t) is not None)
 
 
 def _is_heading_line(line: str) -> bool:
@@ -644,14 +679,10 @@ def quoted_win_lines(text: Optional[str], limit: int = 3) -> list[str]:
         # first line — "A game winning combo is" in the Hazel capture —
         # is prose and stays in the paragraph. A one-line bare win title
         # ("Win Conditions" alone) is a title, not a win line.
-        under_win_heading = (
-            len(lines) > 1 and _is_heading_line(lines[0])
-            and _WIN_HEADING_RE.match(lines[0]) is not None
-        )
+        under_win_heading = len(lines) > 1 and _is_win_heading(lines[0])
         if under_win_heading:
             body = "\n".join(lines[1:]).strip()
-        elif (_is_heading_line(p) and len(p.split()) <= 3
-              and _WIN_HEADING_RE.match(p)):
+        elif len(lines) == 1 and _is_win_heading(p):
             continue
         else:
             body = p

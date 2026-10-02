@@ -86,6 +86,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from .filler_policy import mark_fillers_overridden, print_filler_override_note
 from .forge_runner import VENDOR_FORGE
 from .intent import (
     Intent,
@@ -339,6 +340,7 @@ def _run_confirm_sim(base_path: Path, candidate_path: Path, args):
     deck_dir = base_path.parent
     if getattr(args, "sim_fillers", None):
         fillers = [f.strip() for f in args.sim_fillers.split(",") if f.strip()]
+        print_filler_override_note(args.sim_fillers)  # R4-FU A-13
     else:
         # Fillers are RE-DRAWN (same bracket-matched rule, fresh shuffle)
         # rather than replayed. The pairing under test -- old deck vs new
@@ -1015,6 +1017,7 @@ def _log_bandit_pull(
 
     sim_fields = _ab_to_iteration_fields(ab)
     report = dict(sim_fields.get("sim_report") or {})
+    mark_fillers_overridden(report, getattr(args, "sim_fillers", None))  # R4-FU A-13
     report[SIM_REPORT_VERDICT_PARAMS_KEY] = verdict_provenance(
         margin=args.sim_margin,
         alpha=VERDICT_ALPHA,
@@ -1193,6 +1196,7 @@ def _make_swap_evaluator(state: dict, args):
         deck_dir = base.parent
         if args.sim_fillers:
             fillers = [f.strip() for f in args.sim_fillers.split(",") if f.strip()]
+            print_filler_override_note(args.sim_fillers)  # R4-FU A-13
         else:
             fillers = _pick_filler_decks(
                 deck_dir, exclude_paths=[base, candidate], count=2,

@@ -1355,7 +1355,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             report = _bubble.apply_verdict_to_report(
                 report,
-                deck_text=_verdict_deck.read_text(encoding="utf-8"),
+                deck_text=dck_utils.read_deck_text(_verdict_deck),
                 corpus=_corpus,
                 bracket=args.bracket,
             )
@@ -1374,7 +1374,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     bracket_estimate = None
     try:
         from .bracket_estimator import derive_signals, estimate_bracket
-        _deck_text = Path(args.user).read_text(encoding="utf-8")
+        _deck_text = dck_utils.read_deck_text(Path(args.user))
         _avg_cmc, _archetype = derive_signals(
             _deck_text, deck_path=Path(args.user),
         )
@@ -1394,7 +1394,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         from .deck_health import compute_health_grade
         health_grade = compute_health_grade(
-            Path(args.user).read_text(encoding="utf-8"),
+            dck_utils.read_deck_text(Path(args.user)),
         )
     except Exception:  # noqa: BLE001 — advice must print regardless
         health_grade = None

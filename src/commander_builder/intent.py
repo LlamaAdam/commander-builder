@@ -362,26 +362,65 @@ _FREE_TEXT_THEME_KEYWORDS: tuple[tuple[str, str], ...] = tuple(
 #: AFFIRMATIVE keywords; a negated mention simply contributes nothing
 #: (there is no "anti-theme" channel to steer away from — see
 #: ``adopt.main``'s ``--preferences`` help).
+#
+#: Cue trim (R4-FU B-06, 2026-10-02). WHY four cues left: ``drop*`` /
+#: ``skip*`` / ``nothing`` as PRE cues and ``against`` / ``nothing`` as POST
+#: cues read AFFIRMATIVE prose as negation — "I drop tokens every turn",
+#: "nothing but make tokens", "tokens are great against control" all
+#: emitted no slug. Measured on the real corpus (the three PRIMER_CORPUS
+#: appendices, pinned under ``tests/fixtures/primer_corpus_appendix_*``)
+#: the trim moves no slug list: the four genuine negations the window
+#: drops there ride on cues that stay (``is brutal``, ``not``, ``no``).
+#: ``against`` stays a PRE cue ("against lifegain" is a complaint).
+#: ``nothing`` survives in ONE position — the word straight after the
+#: mention ("sacrifice nothing"), where it is the verb's object and the
+#: sentence says the deck does not do the thing; separated by a comma it
+#: opens a new thought ("lifegain, nothing beats it") and is not a cue.
 _NEGATION_PRE = re.compile(
-    r"\b(?:no|not|never|nothing|without|avoid\w*|hate\w*|dislike\w*|"
+    r"\b(?:no|not|never|without|avoid\w*|hate\w*|dislike\w*|"
     r"don'?t|doesn'?t|isn'?t|aren'?t|can'?t|won'?t|wouldn'?t|"
-    r"against|anti|tired of|sick of|bored of|skip\w*|drop\w*|zero|"
+    r"against|anti|tired of|sick of|bored of|zero|"
     r"afraid of|scared of|fear\w*|weak to|lose\w* to)\b"
 )
 _NEGATION_POST = re.compile(
-    r"\b(?:against|boring|bad|weak|nothing|not (?:my|for me|fun|"
+    r"\b(?:boring|bad|weak|not (?:my|for me|fun|"
     r"interesting)|isn'?t (?:my|for me)|aren'?t (?:my|for me)|"
     r"is brutal|are brutal)\b"
 )
+#: ``nothing`` as the mention's direct object: whitespace only between.
+_NEGATION_OBJECT_NOTHING = re.compile(r"^\s+nothing\b")
+#: Scope breakers (R4-FU B-06): a negation does not reach across these.
+#: "not only tokens but also counters" affirms tokens; "nothing but make
+#: tokens" affirms tokens; "I like everything except ..." is cut off
+#: before the mention so a cue on the far side cannot negate it.
+_SCOPE_BREAKERS = frozenset({"but", "only", "except"})
 _NEGATION_WINDOW = 4
 _CLAUSE_SPLIT = re.compile(r"[.;!?\n]+")
 
 
+def _scoped_before(words: list[str]) -> list[str]:
+    """The words after the LAST scope breaker (the negation's reach)."""
+    for i in range(len(words) - 1, -1, -1):
+        if words[i].strip(",:\"'()") in _SCOPE_BREAKERS:
+            return words[i + 1:]
+    return words
+
+
+def _scoped_after(words: list[str]) -> list[str]:
+    """The words before the FIRST scope breaker."""
+    for i, w in enumerate(words):
+        if w.strip(",:\"'()") in _SCOPE_BREAKERS:
+            return words[:i]
+    return words
+
+
 def _mention_is_negated(clause: str, start: int, end: int) -> bool:
     """Is the match at ``clause[start:end]`` inside a negation window?"""
-    before = clause[:start].split()[-_NEGATION_WINDOW:]
-    after = clause[end:].split()[:_NEGATION_WINDOW + 1]
+    before = _scoped_before(clause[:start].split()[-_NEGATION_WINDOW:])
+    after = _scoped_after(clause[end:].split()[:_NEGATION_WINDOW + 1])
     if _NEGATION_PRE.search(" ".join(before)):
+        return True
+    if _NEGATION_OBJECT_NOTHING.match(clause[end:]):
         return True
     return bool(_NEGATION_POST.search(" ".join(after)))
 

@@ -240,7 +240,7 @@ def _read_main_section(deck_path: Path) -> list[str]:
     Thin wrapper over ``dck_utils.iter_section_lines``."""
     if not deck_path.exists():
         return []
-    text = deck_path.read_text(encoding="utf-8")
+    text = dck_utils.read_deck_text(deck_path)  # tolerant (R4-FU B-02)
     return list(dck_utils.iter_section_lines(text, "Main"))
 
 

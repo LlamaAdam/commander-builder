@@ -2570,3 +2570,14 @@ def test_compare_only_warns_when_a_deck_has_no_name_line(tmp_path, monkeypatch, 
     with pytest.raises(RuntimeError):
         cv.compare(old_deck=old, new_deck=new, bracket=3, runner=runner)
     assert "has no Name= line" in capsys.readouterr().out
+
+
+def test_read_main_section_tolerates_a_cp1252_deck(tmp_path, capsys):
+    """R4-FU B-02 sweep (2026-10-02): the compare lane's main-section
+    reader was a strict UTF-8 read."""
+    from commander_builder.compare_versions import _read_main_section
+    p = tmp_path / "x.dck"
+    p.write_bytes("[Main]\n1 Sol Ring\n1 Jötun Grunt\n".encode("cp1252"))
+    lines = _read_main_section(p)
+    assert len(lines) == 2 and lines[0].endswith("Sol Ring")
+    assert "not valid UTF-8" in capsys.readouterr().err

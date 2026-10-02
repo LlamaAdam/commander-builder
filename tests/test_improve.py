@@ -2178,3 +2178,79 @@ def test_improve_bandit_cli_keeps_preferences_when_intent_learning_fails(
     assert seen["intent"] is not None
     assert seen["intent"].pilot_preferences == "I love lifegain"
     assert "--preferences only" in capsys.readouterr().out
+
+
+def test_log_bandit_pull_stamps_fillers_overridden_for_explicit_excluded_fillers(
+    tmp_path, monkeypatch,
+):
+    """R4-FU A-13 (2026-10-02): the bandit's logged row carries
+    ``sim_report["fillers_overridden"] = True`` when the operator's
+    explicit ``--sim-fillers`` seated a prefix-excluded deck, and no
+    such key otherwise."""
+    import argparse
+    from commander_builder.forge_runner import ABResult
+    from commander_builder.knowledge_log import init_db, iterations_for_deck
+    from commander_builder.proposer import Proposal
+
+    db = tmp_path / "kl.sqlite"
+    init_db(db)
+    base = tmp_path / "[USER] Goblins [B4].dck"
+    base.write_text("[metadata]\nName=Goblins\nMoxfield=gob1\n[Main]\n1 B\n",
+                    encoding="utf-8")
+    cand = tmp_path / "[USER] Goblins v2 [B4].dck"
+    cand.write_text("[metadata]\nName=Goblins\nMoxfield=gob1\n[Main]\n1 A\n",
+                    encoding="utf-8")
+    proposal = Proposal(adds=["A"], cuts=["B"], rationale="x", source="bandit")
+    proposal.applied_adds = ["A"]
+    proposal.applied_cuts = ["B"]
+    ab = ABResult(deck_a=base.name, deck_b=cand.name, wins_a=8, wins_b=24,
+                  games=40, avg_turns_a=11.0, avg_turns_b=10.0, status="done")
+
+    def args_with(fillers):
+        return argparse.Namespace(db_path=str(db), sim_margin=1, bracket=4,
+                                  sim_fillers=fillers, bandit_policy="ucb1")
+
+    row_id = improve._log_bandit_pull(
+        {}, base, cand, proposal, ab, "kept",
+        args_with("[REF] Top [B4].dck,Filler B.dck"),
+    )
+    assert row_id is not None
+    rows = {it.id: it for it in iterations_for_deck("gob1", db_path=db)}
+    assert rows[row_id].sim_report["fillers_overridden"] is True
+
+    row_id2 = improve._log_bandit_pull(
+        {}, base, cand, proposal, ab, "kept", args_with("Filler A.dck,Filler B.dck"),
+    )
+    rows = {it.id: it for it in iterations_for_deck("gob1", db_path=db)}
+    assert "fillers_overridden" not in rows[row_id2].sim_report
+
+
+def test_run_confirm_sim_prints_the_filler_override_note(tmp_path, monkeypatch, capsys):
+    """R4-FU A-13 (2026-10-02): the replication's confirming A/B hands the
+    operator's explicit ``--sim-fillers`` straight to the harness too; it
+    prints the same NOTE: line (stderr) when that list seats an excluded
+    prefix, and stays silent for an eligible list."""
+    from commander_builder.forge_runner import ABResult
+    seated: list = []
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, fillers=(), **kw):
+        seated.append(list(fillers))
+        return ABResult(deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+                        wins_a=8, wins_b=24, games=40,
+                        avg_turns_a=11.0, avg_turns_b=10.0, status="done")
+    monkeypatch.setattr("commander_builder.forge_runner.run_ab_simulation", fake_ab_sim)
+    base = tmp_path / "[USER] G [B3].dck"
+    cand = tmp_path / "[USER] G v2 [B3].dck"
+    for p in (base, cand):
+        p.write_text("[Main]\n", encoding="utf-8")
+
+    ab, fillers, err = improve._run_confirm_sim(
+        base, cand, _replicate_args(sim_fillers="[REF] Top [B3].dck, [CONTROL] C [B3].dck"))
+    assert err is None and ab.status == "done"
+    assert fillers == ["[REF] Top [B3].dck", "[CONTROL] C [B3].dck"] == seated[-1]
+    err_out = capsys.readouterr().err
+    assert err_out.count("NOTE: --sim-fillers seats prefix-excluded") == 1
+    assert "[CONTROL] ([CONTROL] C [B3].dck)" in err_out
+
+    improve._run_confirm_sim(base, cand, _replicate_args(sim_fillers="F1.dck,F2.dck"))
+    assert "NOTE: --sim-fillers" not in capsys.readouterr().err

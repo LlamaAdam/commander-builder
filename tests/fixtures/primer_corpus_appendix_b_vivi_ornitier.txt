@@ -1,0 +1,80 @@
+# Provenance: PRIMER_CORPUS.md (FP-018.4 primer corpus study, 2026-08-27),
+# Appendix B — Vivi Ornitier, semi-budget EDH (Archidekt 13765265); verbatim blockquote with the '> ' prefix removed, [[name]] marks a
+# card-link embed, image embeds elided. Pinned 2026-10-02 (R4-FU B-06) as the
+# real-prose corpus the negation window is measured on.
+
+Core Concept
+ The deck functions as a linear Izzit spellslinger–storm shell. Your plan is to ramp and reduce spell costs early, ensure that [[Vivi Ornitier]]  can safely enter the battlefield and survive one turn, and then untap and combo off. You run a very high density of replacement spells, cantrips, and pseudo-draw, which continuously grow [[Vivi Ornitier]] while keeping your hand full. Once your engines are online, every spell you cast essentially replaces itself or generates additional value.
+1. Early Game: Ramp, Setup, Cost Reduction
+Goal: Assemble mana engines and cost reducers. Do not cast [[Vivi Ornitier]] yet.
+Key pieces:
+
+Cost Reduction: [[Ruby Medallion]], [[Helm of Awakening]], [[Stormcatch Mentor]], [[Artist's Talent]], [[Case of the Ransacked Lab]], [[Ral, Monsoon Mage // Ral, Leyline Prodigy]].
+Mana Engines: [[Runaway Steam-Kin]], [[Storm-Kiln Artist]], [[Brass's Bounty]], [[Mana Geyser]], [[Seething Song]].
+Card Advantage Engines: [[Rhystic Study]], [[Archmage of Runes]], [[Niv-Mizzet, Visionary]], [[Niv-Mizzet, Parun]].
+Use counters to stop real threats, not to protect value engines. Save protection for [[Vivi Ornitier]].
+2. [[Vivi Ornitier]] Enters: “Stick Turn”
+Cast [[Vivi Ornitier]] only when you can leave meaningful interaction open.
+Typical sequence:
+Cost reducers + mana engines in place.
+Cast [[Vivi Ornitier]].
+Keep up protection: [[Fierce Guardianship]], [[Deflecting Swat]], [[Dispel]], [[Negate]], [[Counterspell]], [[Shore Up]], [[Magic Damper]], [[Swiftfoot Boots]] Fierce Guardianship, Deflecting Swat, Dispel, Negate, Counterspell, Shore Up, Magic Damper, Swiftfoot Boots.
+If Vivi survives a full rotation, the setup is complete.
+ Once Vivi untaps, you usually win.
+3. Combo Turn: Draw Chain, Storm Line, Pump Line
+Start chaining your massive number of cheap spells.
+
+Replacement / Draw Spells
+[[Crimson Wisps]], [[Expedite]], [[Opt]], [[Preordain]], [[Gitaxian Probe]], [[Brainstorm]], [[Frantic Search]], etc.
+ → They replace themselves.
+ → Vivi triggers and grows.
+ → With cost reduction, many of them cost 0 mana during the combo turn.
+Copy Effects
+[[Reiterate]], [[Bonus Round]], [[Display of Power]], [[Flare of Duplication]], [[Harmonic Prodigy]], [[Marvin, Murderous Mimic]], [[Veyran, Voice of Duality]]
+ → Multiply value, triggers, and mana.
+
+Mana Explosion
+[[Storm-Kiln Artist]], [[Runaway Steam-Kin]], [[Seething Song]], [[Mana Geyser]], 
+ → Practical unlimited mana during the combo turn.
+
+Convergence Points: Actual Win Paths
+A. Storm Finish
+
+[[Mind's Desire]]
+[[Bonus Round]] + [[Reiterate]] loops
+[[Mizzix's Mastery]] as pseudo-storm
+B. Draw Loops → Direct Damage
+
+[[Niv-Mizzet, Parun]] kills the table once loops start
+[[Curiosity]] / [[Ophidian Eye]] / [[Tandem Takedown]]  = infinite triggers
+C. [[Vivi Ornitier]]  Becomes the Wincon
+ Dozens of spell triggers → Vivi grows to lethal damage output.
+D. [[Ojer Axonil, Deepest Might // Temple of Power]] Shortcut
+ All [[Vivi Ornitier]]  damage becomes minimum 4.
+ 20+ [[Vivi Ornitier]]  triggers = lethal for the entire table.
+E. Omniscience
+ Once resolved, you simply unload your entire hand/library.
+4. Concrete Win Lines
+1. [[Bonus Round]]  → cantrip chain → exponential Vivi scaling.
+2. [[Reiterate]]  + [[Seething Song]] = Infinite Mana
+ → Infinite spells for [[Vivi Ornitier]] 
+ → Infinite [[Storm-Kiln Artist]]  triggers
+ → Infinite [[Vivi Ornitier]]  or [[Niv-Mizzet, Parun]]  damage.
+3. Display of Power into a Bonus Round stack
+ → Triple copies → massive storm → [[Mind's Desire]]  
+4. [[Vivi Ornitier]]  + [[Curiosity]] / [[Ophidian Eye]] / [[Tandem Lookout]]
+ → Damage draws cards → draws cast spells → spells deal damage
+ → Fully self-sustaining loop.
+5. Playstyle
+This is a control-storm hybrid:
+
+You don’t need mass removal; [[Cyclonic Rift]] is your only real reset.
+You wait for the exact turn cycle where nobody can meaningfully interact.
+Then you unload, generate storm/mana/card advantage, and win in one go.
+The deck is designed to avoid “forced” storm turns; your engines make the combo turn naturally self-sustaining.
+
+
+EDIT: I have recently decided to cut some of the fetchlands. This is due to me not playing many important fetchable lands, thus the use of the cards is rather limited. I instead opted for adding them to my [[Sméagol, Helpful Guide]]  Deck, which I also play a lot more frequent. 
+
+You call this SEMI-BUDGET?!
+I specifically addressed this in a comment below. I hope that this is reasonable.

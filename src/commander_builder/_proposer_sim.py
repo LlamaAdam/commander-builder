@@ -511,6 +511,15 @@ def _run_sim_and_record(
             alpha=VERDICT_ALPHA,
             min_decisive=MIN_DECISIVE_GAMES_FOR_VERDICT,
         )
+    # Explicit --sim-fillers that seat a prefix-excluded deck: say so on
+    # the row and on stderr (R4-FU A-13, 2026-10-02; stderr for the same
+    # three-invocation-mode reason as the warnings below).
+    from .filler_policy import mark_fillers_overridden
+    override_note = mark_fillers_overridden(
+        sim_fields.get("sim_report"), args.sim_fillers,
+    )
+    if override_note:
+        print(f"[sim] {override_note}", file=sys.stderr, flush=True)
 
     # Post-sim honesty: the pre-sim warning above is an ESTIMATE
     # (expected fraction 0.5); this reports the MEASURED outcome. When

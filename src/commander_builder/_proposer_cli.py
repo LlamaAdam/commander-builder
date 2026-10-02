@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .dck_utils import read_deck_text  # tolerant (R4-FU B-02 sweep)
 from .proposer import (
     auto_propose,
     apply_proposal_to_deck,
@@ -433,7 +434,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     if args.mode == "auto":
         from .change_budget import format_auto_mode_line, resolve_tier_for_deck
         auto_tier = resolve_tier_for_deck(
-            args.deck_path.read_text(encoding="utf-8"),
+            read_deck_text(args.deck_path),  # tolerant (R4-FU B-02 sweep)
         )
         args.mode = auto_tier.mode
         print(
@@ -543,7 +544,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                 )
             report = _bubble.apply_verdict_to_report(
                 report,
-                deck_text=args.deck_path.read_text(encoding="utf-8"),
+                deck_text=read_deck_text(args.deck_path),
                 corpus=_corpus,
                 bracket=args.bracket,
             )
@@ -582,7 +583,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         seen_lower.add(key)
         protected_combined.append(n)
 
-    deck_text_for_protect = args.deck_path.read_text(encoding="utf-8")
+    deck_text_for_protect = read_deck_text(args.deck_path)
     for c in read_protected_cards(deck_text_for_protect):
         _add_protected(c)
     for c in args.protect:
@@ -630,7 +631,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         try:
             from .change_budget import plan_manabase_rebuild
             _mb_plan = plan_manabase_rebuild(
-                args.deck_path.read_text(encoding="utf-8"),
+                read_deck_text(args.deck_path),
             )
         except Exception:  # noqa: BLE001 — the step is optional by design
             _mb_plan = None

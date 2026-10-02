@@ -470,3 +470,36 @@ def test_parse_primer_strips_control_characters_on_both_branches():
     assert parsed.was_delta and parsed.card_links == ["Sol Ring"]
     assert "\x1b" not in parsed.text and "\x07" not in parsed.text
     assert "\x1b" not in json.dumps(quoted_win_lines(parsed.text))
+
+
+# --------------------------------------------------------------------------- #
+# R4-FU B-07 (2026-10-02) — a win "heading" is a whole title or a marked one
+# --------------------------------------------------------------------------- #
+
+def test_short_prose_line_starting_with_a_win_word_is_not_a_heading():
+    """R4-FU B-07: ``Combo pieces I cut`` is four punctuation-free words,
+    so the shape test called it a heading, the prefix regex saw "Combo",
+    and the REMOVED list under it was quoted as "how it wins". A bare
+    title must now be the whole line (at most four words)."""
+    body = "Food Chain, Squee and Misthollow Griffin were removed for budget."
+    text = "Combo pieces I cut\n" + body
+    quotes = quoted_win_lines(text)
+    assert quotes != [body]
+    # The paragraph still mentions "combo", so the keyword path quotes it
+    # WHOLE — with its first line, which tells the reader it is a cut list.
+    assert quotes == [text]
+    # No keyword at all: nothing is quoted from under a prose line.
+    assert quoted_win_lines("Finisher count I run\nThree, down from five.") == []
+
+
+@pytest.mark.parametrize("heading", [
+    "Win Conditions", "How it wins", "Combos:", "Game plan", "Infinite combos",
+    "## Combo pieces that win", "**How this deck wins**",
+])
+def test_whole_title_or_markdown_marked_win_heading_still_quotes_the_body(heading):
+    """Bare whole-line titles and markdown-marked headings keep quoting the
+    paragraph under them even when no keyword recurs inside it."""
+    body = "Jolrael makes Cat tokens as Baba draws; Bogbeast pumps the team."
+    assert quoted_win_lines(f"{heading}\n{body}") == [body]
+    # A lone title is a title, not a win line.
+    assert quoted_win_lines(heading) == []

@@ -92,6 +92,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from .dck_utils import read_deck_text  # tolerant (R4-FU B-02 sweep)
 from .bandit import Arm, UCB1, update_arm
 from .improve import RoundResult
 
@@ -406,7 +407,7 @@ def _resolve_protected(deck_path: Path, args) -> list[str]:
             combined.append(n)
 
     try:
-        for c in read_protected_cards(deck_path.read_text(encoding="utf-8")):
+        for c in read_protected_cards(read_deck_text(deck_path)):
             _add(c)
     except OSError:
         pass

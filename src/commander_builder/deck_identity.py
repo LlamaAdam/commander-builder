@@ -127,7 +127,8 @@ def resolve_deck_id(deck_path: Path, fallback: Optional[str] = None) -> str:
         if fallback is not None:
             return fallback
         raise ValueError(f"deck not found and no fallback: {deck_path}")
-    provenance = deck_id_from_text(deck_path.read_text(encoding="utf-8"))
+    from .dck_utils import read_deck_text  # tolerant (R4-FU B-02 sweep)
+    provenance = deck_id_from_text(read_deck_text(deck_path))
     if provenance is not None:
         return provenance
     if fallback is not None:

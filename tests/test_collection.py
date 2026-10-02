@@ -833,3 +833,30 @@ def test_web_audit_payload_owned_null_when_feature_unused(
     body = web_client.get("/api/audit?deck=Alpha&bracket=3").get_json()
     assert body["added"][0]["owned"] is None
     assert body["skipped_for_ownership"] == []
+
+
+# --------------------------------------------------------------------------- #
+# R4-FU B-14 (2026-10-02) — diacritic folding in match_key
+# --------------------------------------------------------------------------- #
+
+def test_match_key_folds_diacritics_lim_dul_and_aether():
+    """R4-FU B-14: Scryfall spells ``Lim-Dûl's`` and ``Aether``; Forge,
+    older exports and hand-typed ``Protect=`` lines carry ``Lim-Dul's``
+    and ``Æther``. Round 4 executed both pairs through ``match_key`` and
+    found them unequal. NFKD + ASCII folding makes each pair one key."""
+    from commander_builder.collection import fold_diacritics, match_key, name_key
+    assert match_key("Lim-Dûl's Vault") == match_key("Lim-Dul's Vault") == "lim-dul's vault"
+    assert match_key("Æther Vial") == match_key("Aether Vial") == "aether vial"
+    assert match_key("Jötun Grunt") == match_key("Jotun Grunt")
+    assert match_key("Juzám Djinn") == "juzam djinn"
+    # The folds compose with the R3 F-10 apostrophe fold and the DFC front face.
+    assert match_key("Lim-Dûl\u2019s Vault") == "lim-dul's vault"
+    assert match_key("Æther Tide // Nothing") == "aether tide"
+    # ``name_key`` is NOT folded: the collection and the lift matrix store
+    # their keys unfolded, and changing it would orphan every existing key.
+    assert name_key("Lim-Dûl's Vault") == "lim-dûl's vault"
+    assert name_key("Æther Vial") == "æther vial"
+    # The fold keeps case for its callers and never drops a non-Latin char.
+    assert fold_diacritics("Æther") == "AEther"
+    assert fold_diacritics("Dandân") == "Dandan"
+    assert fold_diacritics("魔法") == "魔法"

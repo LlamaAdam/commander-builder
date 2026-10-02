@@ -43,8 +43,23 @@ def atomic_write_text(path: Path, text: str, *,
     silently narrowing a deck file to owner-only on every save would be
     an invisible side effect of an unrelated fix. Raises ``OSError`` like
     ``write_text``.
+
+    SYMLINKS (R4-FU B-11, 2026-10-02): the target is resolved with
+    ``os.path.realpath`` first, so a symlinked ``config.json`` (a dotfiles
+    checkout) or deck file is written THROUGH — the link stays a link and
+    the file it points at gets the new bytes. Before this, ``os.replace``
+    swapped the link itself for a regular file, which is what the bare
+    ``write_text`` it replaced never did. The temp file therefore lands
+    beside the REAL file, the only directory ``os.replace`` can rename
+    into atomically.
+
+    PARENT-DIRECTORY MODE is deliberately not touched here: ``config_store``
+    creates its directory ``0o700`` at creation and nothing narrows an
+    existing parent — a pre-existing directory's permissions are the
+    operator's choice, and silently tightening them would break a shared
+    deck directory the same way narrowing the file mode would.
     """
-    path = Path(path)
+    path = Path(os.path.realpath(path))
     if mode is None:
         try:
             mode = path.stat().st_mode & 0o777

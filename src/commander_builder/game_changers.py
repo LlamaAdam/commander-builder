@@ -201,19 +201,50 @@ def _decode_js_string(value: str) -> str:
                  .replace("\\n", "\n"))
 
 
-def _parse_card_names_from_payload(html: str) -> set[str]:
-    """Card names from the client-rendered payload (see the block comment
-    above). Returns an empty set when the page carries no such payload --
-    the caller then falls back to the legacy ``<li>`` scan, which keeps
-    the pre-refresh page shape (and its tests) working."""
+#: The seven colour entries the list is split across (R4-FU B-10,
+#: 2026-10-02), as the ``entryTitle`` suffix after "Game Changer Wiki ".
+#: Pinned by the verbatim fixture. The eighth "Game Changers Info" entry
+#: is prose about the list and is never harvested.
+_PAYLOAD_COLOUR_ENTRIES: tuple[str, ...] = (
+    "W", "U", "B", "R", "G", "Multi", "Colorless",
+)
+_PAYLOAD_COLOUR_TITLE_RE = re.compile(r"Game Changer Wiki (\w+)\s*$")
+
+
+def _parse_payload_entries(html: str) -> dict[str, set[str]]:
+    """``{colour: names}`` for every ``Game Changer Wiki <colour>`` entry
+    in the payload. Entries whose title is not a colour entry (the Info
+    entry, any future "Game Changer ..." prose block) are skipped."""
     import html as _html_mod
-    names: set[str] = set()
+    entries: dict[str, set[str]] = {}
     for m in _PAYLOAD_ENTRY_RE.finditer(html):
+        title_m = _PAYLOAD_COLOUR_TITLE_RE.search(m.group(1))
+        if title_m is None:
+            continue
+        colour = title_m.group(1)
         copy = _decode_js_string(m.group(2))
+        names = entries.setdefault(colour, set())
         for raw_name in _AUTO_CARD_RE.findall(copy):
             text = _html_mod.unescape(_TAG_RE.sub("", raw_name)).strip()
             if _looks_like_card_name(text):
                 names.add(text)
+    return entries
+
+
+def _payload_missing_entries(entries: dict[str, set[str]]) -> list[str]:
+    """The colour entries that are absent or carry no name (R4-FU B-10)."""
+    return [c for c in _PAYLOAD_COLOUR_ENTRIES if not entries.get(c)]
+
+
+def _parse_card_names_from_payload(html: str) -> set[str]:
+    """Card names from the client-rendered payload (see the block comment
+    above). Returns an empty set when the page carries no such payload --
+    the caller then falls back to the legacy ``<li>`` scan, which keeps
+    the pre-refresh page shape (and its tests) working. Only the seven
+    colour entries are read; the Info entry never is (R4-FU B-10)."""
+    names: set[str] = set()
+    for entry_names in _parse_payload_entries(html).values():
+        names |= entry_names
     return names
 
 
@@ -225,10 +256,34 @@ def _parse_card_names_from_html(html: str) -> set[str]:
     current page the ``<li>`` scan finds ONLY chrome ("Accounts", "Card
     Database", ...) -- five names, zero overlap with the list -- and the
     trust gate then rejected the scrape in every process for months.
+
+    COMPLETENESS (R4-FU B-10, 2026-10-02). WHY a first line before the
+    80 % gate: the seven colour entries carry W 7 · U 10 · B 10 · R 3 ·
+    G 7 · Multi 4 · Colorless 12 = 53 names, so a page that lost any ONE
+    entry except Colorless still clears the overlap gate (43-50 names,
+    0.81-0.94), is cached for seven days and served as the list — ten
+    Game Changers silently gone from every bracket audit. A payload is
+    trusted only when all seven entries matched with at least one name
+    each; otherwise it is rejected here, by name, and nothing is cached.
+    The 80 % gate stays as the second line (a parser regression that
+    returns junk in all seven entries).
     """
-    payload = _parse_card_names_from_payload(html)
-    if payload:
-        return payload
+    entries = _parse_payload_entries(html)
+    if entries:
+        missing = _payload_missing_entries(entries)
+        if missing:
+            print(
+                f"[game_changers] rejecting the WotC payload: colour "
+                f"entr{'y' if len(missing) == 1 else 'ies'} "
+                f"{', '.join(missing)} missing or empty (need all "
+                f"{len(_PAYLOAD_COLOUR_ENTRIES)}: "
+                f"{', '.join(_PAYLOAD_COLOUR_ENTRIES)}) — the page layout "
+                f"moved or the fetch was cut short; using the bundled "
+                f"fallback, not caching.",
+                file=sys.stderr, flush=True,
+            )
+            return set()
+        return _parse_card_names_from_payload(html)
     return _parse_card_names_from_li_html(html)
 
 
