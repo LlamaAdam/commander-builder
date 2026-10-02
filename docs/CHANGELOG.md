@@ -77,6 +77,7 @@ that fails without it.
   `test_build_deck_defaults_bracket_to_3` flake noted in the backlog was
   not reproduced in three full-suite runs and repeated random-order runs
   of `tests/test_web_app.py`; the backlog note stays.
+- **forge-canary actions.** The run annotations flagged `setup-java@v4` as deprecated and `setup-python@v5` / `upload-artifact@v4` as Node 20 builds; aligned on `setup-java@v5`, `setup-python@v6`, `upload-artifact@v5` (the versions the other workflows already use). `actions/cache@v4` kept: its warning is non-fatal and a newer major was not verified.
 
 ### 2026-10-02 — canary profile; EDHREC inclusion drift
 
