@@ -1,4 +1,1 @@
-url: https://json.edhrec.com/pages/cards/krenko-mob-boss.json
-url: https://json.edhrec.com/pages/commanders/krenko-mob-boss.json
-url: https://edhrec.com/recs
-url: https://json.edhrec.com/pages/recs.json
+url: https://cloudflare.edhrec.com/_next/static/chunks/pages/recs-d87dc4ad181f70ac.js
