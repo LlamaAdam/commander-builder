@@ -234,7 +234,10 @@ async function row(page, deck, name, opts, fn) {
     // Run 1: one timed-out row left the settings <dialog> open and five
     // later rows failed on click timeouts. Whatever a row leaves behind
     // is closed here so each row starts from a clean page.
-    await recoverUi(page);
+    // keepUi (2026-10-02, run 3): the compare row must leave the propose
+    // modal open for the save-iteration row that follows it -- the
+    // recovery added after run 1 was closing it, hiding the block.
+    if (!opts.keepUi) await recoverUi(page);
   }
   r.ms = Date.now() - t0;
   if (!(r.status === "SKIP" && !opts.shotOnSkip)) {
@@ -1219,7 +1222,7 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
   // ----- Phase 4: ONE real Forge compare --------------------------------
   let simJobId = null;
   let simDone = false;
-  await row(page, "A", "forge: A/B compare (deck A vs deck B text, 10 games per pod, pod mode) reaches a terminal status", { forge: true }, async () => {
+  await row(page, "A", "forge: A/B compare (deck A vs deck B text, 10 games per pod, pod mode) reaches a terminal status", { forge: true, keepUi: true }, async () => {
     if (!decks.A || !decks.B) throw new Error("both decks are required");
     const bText = (await api(request, "GET", `/api/deck_text?deck=${encodeURIComponent(decks.B)}`)).body.text;
     await gotoApp(page);
