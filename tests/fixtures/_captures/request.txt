@@ -1,1 +1,2 @@
-url: https://cloudflare.edhrec.com/_next/static/chunks/pages/recs-d87dc4ad181f70ac.js
+url: https://raw.githubusercontent.com/Card-Forge/forge/master/forge-gui/forge.profile.properties.example
+url: https://raw.githubusercontent.com/Card-Forge/forge/master/forge-gui/release-files/forge.profile.properties.example
