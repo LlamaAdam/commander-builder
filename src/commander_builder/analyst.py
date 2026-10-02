@@ -64,7 +64,7 @@ import math
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
-from ._llm_json import extract_json_object
+from ._llm_json import LLMJsonError, extract_json_object
 
 
 # --- Verdict statistics ----------------------------------------------------
@@ -199,6 +199,19 @@ def analyze(input_: AnalystInput, config: Optional[AnalystConfig] = None) -> Ver
     heuristic = heuristic_verdict(input_, config)
     # Strong signal from heuristic — stop here.
     if heuristic.confidence >= 0.75:
+        return heuristic
+    # Decisive floor gate BEFORE any LLM rung (R4-FU A-08, 2026-10-02).
+    # WHY: the floor was enforced on the heuristic rung only. Below
+    # ``min_decisive_games`` the heuristic says ``inconclusive`` at 0.3,
+    # which is under the escalation bar, so with the LLM flag set the
+    # router handed the sub-floor sim to the model and accepted whatever
+    # label it chose — a "kept" rendered on 11 decisive games, written to
+    # the log as if measured. No sample size is something a model can
+    # reason past; the floor is a property of the data, not of the rung.
+    sim = input_.sim_report
+    decisive = (sim.get("old_stats", {}).get("wins", 0)
+                + sim.get("new_stats", {}).get("wins", 0))
+    if heuristic.label == "inconclusive" and decisive < config.min_decisive_games:
         return heuristic
 
     # Heuristic is uncertain; try the configured LLM backend.
@@ -528,12 +541,21 @@ def claude_verdict(input_: AnalystInput, config: AnalystConfig) -> Verdict:
         raise NotImplementedError("claude_verdict: empty response from API")
 
     parsed = _parse_verdict_payload(text, "claude_verdict")
-    label = parsed.get("label", "neutral")
+    label = parsed.get("label")
     # "inconclusive" accepted since 2026-09-03 (R3 C-01) — the LLM rung
     # is asked for it on sub-floor sims, and coercing it to "neutral"
     # would reintroduce exactly the mislabel the heuristic just lost.
+    # A MISSING or unknown label is a parse failure (R4-FU A-08,
+    # 2026-10-02), not "neutral": ``neutral`` means "measured, no
+    # significant difference", and a label the model never gave is no
+    # measurement. ``LLMJsonError`` reaches ``analyze()``'s loud arm,
+    # which warns and degrades to the heuristic — the same path garbage
+    # JSON already takes.
     if label not in {"kept", "reverted", "neutral", "inconclusive"}:
-        label = "neutral"
+        raise LLMJsonError(
+            f"claude_verdict: label {label!r} is not one of "
+            f"kept/reverted/neutral/inconclusive"
+        )
     return Verdict(
         label=label,
         confidence=_safe_confidence(parsed.get("confidence", 0.5)),

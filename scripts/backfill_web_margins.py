@@ -195,11 +195,12 @@ def backfill(db_path: Path, apply: bool = False) -> dict:
     skipped = 0
     unchanged = 0
     changes: list[dict] = []
+    legacy_zero: list[int] = []
 
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, margin, sim_report FROM iterations "
-            "WHERE id >= ? ORDER BY id ASC",
+            "SELECT id, margin, sim_report, win_rate_old, win_rate_new "
+            "FROM iterations WHERE id >= ? ORDER BY id ASC",
             (MIN_ROW_ID,),
         ).fetchall()
         for row in rows:
@@ -211,7 +212,19 @@ def backfill(db_path: Path, apply: bool = False) -> dict:
                 report = None
             recognized, new_margin = recompute_margin(report)
             if not recognized:
-                skipped += 1
+                # R4-FU A-12 (2026-10-02): the legacy era-4 shape — an
+                # AB-shaped row (no ``old_wins``/``new_wins``, so never
+                # recomputed) whose writer stored ``margin = 0`` with NO
+                # win rates. ``margin = 0`` means "measured, tied"; with
+                # both rates NULL nothing was measured, so the honest
+                # value is NULL (R3 C-14's convention). The shape test is
+                # ``margin = 0 AND win_rate_old IS NULL AND win_rate_new
+                # IS NULL`` and nothing else qualifies.
+                if (row["margin"] == 0 and row["win_rate_old"] is None
+                        and row["win_rate_new"] is None):
+                    legacy_zero.append(row["id"])
+                else:
+                    skipped += 1
                 continue
             if new_margin == row["margin"]:
                 unchanged += 1
@@ -229,12 +242,23 @@ def backfill(db_path: Path, apply: bool = False) -> dict:
                     "UPDATE iterations SET margin = ? WHERE id = ?",
                     (change["new_margin"], change["id"]),
                 )
+            if legacy_zero:
+                # The one UPDATE for A-12, under the full shape predicate
+                # (not just the ids) so a row that changed between the
+                # scan and the write cannot be NULLed by mistake.
+                conn.execute(
+                    "UPDATE iterations SET margin = NULL WHERE id >= ? "
+                    "AND margin = 0 AND win_rate_old IS NULL "
+                    "AND win_rate_new IS NULL",
+                    (MIN_ROW_ID,),
+                )
 
     return {
         "scanned": scanned,
         "skipped": skipped,
         "unchanged": unchanged,
         "changes": changes,
+        "legacy_zero_margin_ids": legacy_zero,
         "applied": apply,
     }
 
@@ -253,8 +277,15 @@ def print_report(summary: dict) -> None:
           f"skipped (not compare-shaped): {summary['skipped']}   "
           f"already correct: {summary['unchanged']}   "
           f"to change: {len(summary['changes'])}")
-    if not summary["changes"]:
+    legacy = summary.get("legacy_zero_margin_ids") or []
+    if legacy:
+        print(f"  legacy era-4 rows with margin = 0 and NO win rates "
+              f"(AB-shaped, nothing measured): {len(legacy)} -> margin "
+              f"NULL: ids {', '.join(str(i) for i in legacy)}")
+    if not summary["changes"] and not legacy:
         print("  nothing to do.")
+        return
+    if not summary["changes"]:
         return
     print(f"  {'id':>6}  {'old_wins':>8}  {'new_wins':>8}  "
           f"{'margin before':>13}  {'margin after':>12}")
@@ -345,18 +376,33 @@ def era_boundary_report(
     is running this to find.
     """
     rows: list[dict] = []
+    boundary = date.fromisoformat(ERA_BOUNDARY_DATE)
     with _connect(db_path) as conn:
         # SELECT only. This function performs no writes of any kind.
+        # R4-FU A-04 (2026-10-02): the day is decided in Python on the
+        # row's UTC instant, not by the raw string's prefix — WHY: a row
+        # carrying a non-UTC offset (an ``export.py`` import, a hand
+        # edit) sits on a different UTC day than its first ten characters
+        # say, and ``_side_of_landing`` already compared instants while
+        # the listing itself still trusted the prefix. The SQL window is
+        # the three lexical days around the boundary (an offset moves a
+        # stamp by at most one calendar day); the UTC date filters inside.
         found = conn.execute(
             "SELECT id, created_at, verdict, measurement_era FROM iterations "
-            "WHERE created_at LIKE ? ORDER BY created_at ASC, id ASC",
-            (f"{ERA_BOUNDARY_DATE}%",),
+            "WHERE substr(created_at, 1, 10) BETWEEN ? AND ? "
+            "ORDER BY created_at ASC, id ASC",
+            ((boundary - timedelta(days=1)).isoformat(),
+             (boundary + timedelta(days=1)).isoformat()),
         ).fetchall()
     for row in found:
         created_at = row["created_at"] or ""
+        instant = _row_instant_utc(created_at)
+        if instant is None or instant.date() != boundary:
+            continue
         rows.append({
             "id": row["id"],
             "created_at": created_at,
+            "created_at_utc": instant.isoformat(),
             "verdict": row["verdict"],
             "era": row["measurement_era"],
             "era_if_shifted": measurement_era_for(
@@ -452,7 +498,12 @@ def print_era_boundary_report(report: dict) -> None:
         era = "NULL" if r["era"] is None else str(r["era"])
         shifted = ("NULL" if r["era_if_shifted"] is None
                    else str(r["era_if_shifted"]))
-        print(f"  {r['id']:>6}  {r['created_at']:<32}  "
+        # The UTC instant is printed (R4-FU A-04); a stored stamp that
+        # carried an offset is shown beside it so the owner sees both.
+        shown = r["created_at_utc"]
+        if r["created_at"] != shown:
+            shown += f"  (stored {r['created_at']})"
+        print(f"  {r['id']:>6}  {shown:<32}  "
               f"{str(r['verdict']):<13}  {era:>4}  {shifted:>10}  "
               f"{r['side']}")
     print("\n  Decide on your own data: if every row above was written "

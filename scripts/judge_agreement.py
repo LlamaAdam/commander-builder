@@ -285,7 +285,33 @@ def collect(db_path: Optional[Path] = None) -> dict:
 
 
 def analyze(paired: list) -> dict:
-    """Agreement counts + the G1/G2 tallies, from the paired rows alone.
+    """Agreement counts + the G1/G2/G3 tallies, from the paired rows alone.
+
+    Per prompt version (R4-FU B-05, 2026-10-02): ``per_version`` carries
+    ``{version: <the same stats over that version's rows>}`` and
+    ``pooled_informational`` is True when more than one version is
+    present. WHY: the prompt-version stamp exists because the R3 fence
+    changed every judgment's prompt bytes, so rows judged under
+    different prompts are different instruments and the kill criteria
+    are declared per instrument (``_deck_judge_prompt`` §versioning) —
+    yet every gate was computed over the pooled rows and the render only
+    SAID "read the gates per version" with nothing per version to read.
+    """
+    stats = _analyze_rows(paired)
+    versions = sorted(stats["by_prompt_version"])
+    stats["per_version"] = {
+        v: _analyze_rows([
+            row for row in paired
+            if (row.get("prompt_version") or "unstamped") == v
+        ])
+        for v in versions
+    }
+    stats["pooled_informational"] = len(versions) > 1
+    return stats
+
+
+def _analyze_rows(paired: list) -> dict:
+    """The gate tallies over ONE set of paired rows (pooled or one version).
 
     ``agreements`` / ``agreement_rate`` are computed over ``decided``
     pairings only — rows where BOTH instruments returned a label in
@@ -400,8 +426,9 @@ def _render(collected: dict, stats: dict) -> str:
         f"(not counted as agreement)",
         "  prompt versions: " + ", ".join(
             f"{v} x{c}" for v, c in sorted(stats["by_prompt_version"].items())
-        ) + ("   (MIXED — read the gates per version, not pooled)"
-             if len(stats["by_prompt_version"]) > 1 else ""),
+        ) + ("   (MIXED — the pooled gates below are INFORMATIONAL; "
+             "the per-version block is the read)"
+             if stats.get("pooled_informational") else ""),
         "",
         "  Agreement table — rows: sim verdict, columns: judge opinion",
     ]
@@ -446,6 +473,23 @@ def _render(collected: dict, stats: dict) -> str:
         "universal-staples + Game Changers lists, a coarse proxy for "
         "EDHREC inclusion% — G3 is an alarm, not a measurement of it.)"
     )
+    if stats.get("pooled_informational"):
+        lines += ["", "  Per prompt version (each version is its own "
+                      "instrument; the gates are declared per version):"]
+        for version, vs in stats["per_version"].items():
+            g3 = ("FAILED" if vs["g3_failed"]
+                  else "passing" if vs["g3_computed"] else "NOT COMPUTED")
+            lines += [
+                f"    [{version}] n={vs['n']}  agree "
+                f"{vs['agreements']}/{vs['decided']}",
+                f"      G1 order-flip {vs['g1_order_flips']}/{vs['n']} "
+                f"({vs['g1_order_flip_rate']:.0%}) => "
+                f"{'FAILED' if vs['g1_failed'] else 'passing'}",
+                f"      G2 kept {vs['g2_kept']}/{vs['n']} "
+                f"({vs['g2_kept_rate']:.0%}) => "
+                f"{'FAILED' if vs['g2_failed'] else 'passing'}",
+                f"      G3 {g3} — {vs['g3_reason']}",
+            ]
     lines += [
         "",
         "  Agreement is not truth: both instruments can be wrong together.",

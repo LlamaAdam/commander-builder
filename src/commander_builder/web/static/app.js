@@ -4345,12 +4345,14 @@ function priceTile(t, savings, deferred) {
   // cache that is cold for a freshly imported deck — so it lives in its
   // own progressive slot underneath.
   // A short total is labeled, never presented as the whole deck:
-  // "N priced cards · M unpriced (partial)" with the unpriced names
-  // in the tooltip and a muted list under the tile.
+  // "N priced non-land cards · M unpriced (partial)" with the unpriced
+  // names in the tooltip and a muted list under the tile. "non-land"
+  // because the tile's price math skips lands by construction (R4-FU
+  // A-11, 2026-10-02): the count must say what it counts.
   const unpriced = t.unpriced_cards || [];
   const partial = !!t.price_partial;
   const sub = t.n_priced_cards != null
-    ? `${t.n_priced_cards} priced cards`
+    ? `${t.n_priced_cards} priced non-land cards`
       + (partial ? ` · ${t.n_unpriced_cards} unpriced (partial)` : "")
     : null;
   const tl = tile(

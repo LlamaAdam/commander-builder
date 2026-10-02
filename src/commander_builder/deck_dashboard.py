@@ -17,7 +17,8 @@ Public API:
     #     "deck_progress": {"current": 99, "target": 100},
     #     "stat_tiles": {"avg_cmc": 2.84, "lands": 37,
     #                    "power_level": 7, "est_price_usd": 284.0,
-    #                    "n_priced_cards": 60, "n_unpriced_cards": 2,
+    #                    "n_priced_cards": 60,   # NON-LAND cards priced
+    #                    "n_unpriced_cards": 2,
     #                    "unpriced_cards": [{"name": ..., "qty": 1,
     #                                        "reason": ...}],
     #                    "price_partial": True},
@@ -58,7 +59,7 @@ from typing import Optional
 
 from . import dck_utils  # R3 W-04: the one tolerant .dck reader
 from .archetype import classify as _classify_archetype_path
-from .price_status import price_status, report_unpriced
+from .price_status import REASON_NO_PRICES, price_status, report_unpriced
 from .scryfall_client import lookup_card, _parse_commander_names_from_dck
 from .staples import (
     UNIVERSAL_STAPLES_LC,
@@ -371,6 +372,19 @@ def build_dashboard(
         is_land = "land" in (type_line or "").lower()
         if is_land:
             lands += qty
+            # R4-FU A-11 (2026-10-02): lands stay out of the tile's price
+            # math (pricing them is a product change), but a land whose
+            # snapshot carries NO prices block is the trimmed-schema
+            # signal the partial flag exists for — before this it was
+            # skipped here before the price step and ``price_partial``
+            # read False "by construction" while ``price_deck_text``
+            # (which prices lands) said partial for the same deck.
+            land_price, land_reason = price_status(data)
+            if land_price is None and land_reason == REASON_NO_PRICES:
+                cards_without_price += qty
+                unpriced_cards.append(
+                    {"name": name, "qty": qty, "reason": land_reason},
+                )
             continue
         # CMC bucketing for non-lands.
         cmc = (data or {}).get("cmc") if data else None
@@ -647,6 +661,8 @@ def build_dashboard(
             ),
             "n_game_changers": n_game_changers,
             "est_price_usd": round(total_price, 2),
+            # Non-land cards only (lands are excluded from the tile's price
+            # math above); the UI labels it "N priced non-land cards".
             "n_priced_cards": cards_with_price,
             # Partial-total signal (2026-09-09): the UI labels the tile
             # "partial" and lists these names when any is unpriced.

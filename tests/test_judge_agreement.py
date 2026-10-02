@@ -387,3 +387,53 @@ def test_rows_are_tallied_per_prompt_version(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "prompt versions:" in out and "MIXED" in out
+
+
+def test_gates_are_computed_per_prompt_version(tmp_path, capsys):
+    """R4-FU B-05 (2026-10-02): the gates were pooled across prompt
+    versions while the render said "read the gates per version" with
+    nothing per version to read. Each version is its own instrument."""
+    db = tmp_path / "kl.sqlite"
+    v_old, v_new = "2026-08-27.r2", "2026-09-03.r3-fence"
+    # old prompt: judge says kept 3/3 -> G2 FAILED for that version
+    for _ in range(3):
+        _row(db, sim="kept", judge="kept",
+             report={"prompt_version": v_old, "order_flip": False})
+    # new prompt: judge says kept 1/4 -> G2 passing for that version
+    _row(db, sim="kept", judge="kept",
+         report={"prompt_version": v_new, "order_flip": False})
+    for _ in range(3):
+        _row(db, sim="kept", judge="reverted",
+             report={"prompt_version": v_new, "order_flip": True})
+    paired = judge_agreement.collect(db_path=db)["paired"]
+    stats = judge_agreement.analyze(paired)
+
+    assert stats["pooled_informational"] is True
+    assert set(stats["per_version"]) == {v_old, v_new}
+    old, new = stats["per_version"][v_old], stats["per_version"][v_new]
+    assert old["n"] == 3 and old["g2_kept"] == 3 and old["g2_failed"] is True
+    assert new["n"] == 4 and new["g2_kept"] == 1 and new["g2_failed"] is False
+    assert old["g1_order_flips"] == 0 and new["g1_order_flips"] == 3
+    # the pooled numbers are still there, as an informational block
+    assert stats["n"] == 7 and stats["g2_kept"] == 4
+    # a per-version block does not nest further
+    assert "per_version" not in old
+
+    rc = judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "INFORMATIONAL" in out and "Per prompt version" in out
+    assert f"[{v_old}] n=3" in out and f"[{v_new}] n=4" in out
+    assert "G2 kept 3/3 (100%) => FAILED" in out
+    assert "G2 kept 1/4 (25%) => passing" in out
+
+
+def test_single_prompt_version_keeps_the_pooled_read(tmp_path, capsys):
+    db = tmp_path / "kl.sqlite"
+    _row(db, sim="kept", judge="kept", report={"prompt_version": "v1"})
+    stats = judge_agreement.analyze(judge_agreement.collect(db_path=db)["paired"])
+    assert stats["pooled_informational"] is False
+    assert list(stats["per_version"]) == ["v1"]
+    judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert "INFORMATIONAL" not in out and "Per prompt version" not in out

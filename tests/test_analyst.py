@@ -180,6 +180,14 @@ def test_analyze_returns_heuristic_when_strong_signal():
     assert v.label == "kept"
 
 
+# NOTE on the inputs below (R4-FU A-08, 2026-10-02): the escalation tests
+# used 5-6 over 11, which is BELOW the 20-decisive floor. Since the floor
+# gate moved ahead of the LLM rung, a sub-floor sim never escalates, so
+# the "noise band" they describe is now 10-11 over 21 — above the floor,
+# not significant, heuristic confidence 0.4 — the same band the
+# garbage-JSON test moved to on 2026-09-03.
+
+
 def test_analyze_falls_back_to_heuristic_when_llm_unwired(monkeypatch):
     """Even with use_claude=True, claude_verdict raises NotImplementedError
     when unwired (no API key); the router falls back to the heuristic. The
@@ -192,7 +200,7 @@ def test_analyze_falls_back_to_heuristic_when_llm_unwired(monkeypatch):
 
     config = AnalystConfig(use_claude=True, use_ollama=True)
     # Noise band: heuristic confidence is low, would normally escalate.
-    v = analyze(_input(old_wins=5, new_wins=6, draws=0, total=11), config=config)
+    v = analyze(_input(old_wins=10, new_wins=11, draws=0, total=21), config=config)
     assert v.source == "heuristic"
 
 
@@ -299,7 +307,13 @@ def test_claude_verdict_parses_valid_json_response(monkeypatch):
 
 
 def test_claude_verdict_normalizes_invalid_label(monkeypatch):
-    """Bad label from the model gets coerced to 'neutral' rather than crashing."""
+    """RE-PINNED 2026-10-02 (R4-FU A-08): a label outside the four-word
+    set is a PARSE FAILURE (``LLMJsonError``), no longer coerced to
+    'neutral'. WHY: 'neutral' means "measured, no significant
+    difference"; a label the model never gave is no measurement, and
+    the coercion wrote one into the log. ``analyze()`` catches the error
+    on its loud arm and degrades to the heuristic, so nothing crashes —
+    the next test pins that path."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
     fake_payload = json.dumps({"label": "garbage", "confidence": 0.5, "reasoning": "x"})
 
@@ -316,9 +330,26 @@ def test_claude_verdict_normalizes_invalid_label(monkeypatch):
     fake_module = types.ModuleType("anthropic")
     fake_module.Anthropic = FakeClient
     monkeypatch.setitem(sys.modules, "anthropic", fake_module)
-    v = claude_verdict(_input(), AnalystConfig())
-    assert v.label == "neutral"
+    from commander_builder._llm_json import LLMJsonError
+    with pytest.raises(LLMJsonError, match="garbage"):
+        claude_verdict(_input(), AnalystConfig())
     # monkeypatch.setitem auto-cleans up; no manual pop needed.
+
+
+def test_llm_verdict_missing_label_is_a_parse_failure_not_neutral(
+        monkeypatch, capsys):
+    """R4-FU A-08 (2026-10-02): a payload with NO label used to become
+    'neutral' silently. Through ``analyze()`` it is now a loud degrade to
+    the heuristic, the same path garbage JSON takes."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _mock_claude_sdk(monkeypatch, json.dumps({"confidence": 0.9,
+                                              "reasoning": "no label"}))
+    v = analyze(_input(old_wins=10, new_wins=11, draws=0, total=21),
+                config=AnalystConfig(use_claude=True))
+    assert v.source == "heuristic"
+    assert v.label == "neutral"          # the HEURISTIC's own noise-band call
+    out = capsys.readouterr().out
+    assert "claude_verdict failed" in out and "label None" in out
 
 
 def test_claude_verdict_handles_empty_response(monkeypatch):
@@ -461,7 +492,7 @@ def test_analyze_degrades_to_heuristic_on_claude_api_error(
     monkeypatch.setattr("commander_builder.analyst.claude_verdict", boom)
 
     v = analyze(
-        _input(old_wins=5, new_wins=6, draws=0, total=11),
+        _input(old_wins=10, new_wins=11, draws=0, total=21),
         config=AnalystConfig(use_claude=True),
     )
     assert v.source == "heuristic"
@@ -506,7 +537,7 @@ def test_analyze_with_use_ollama_makes_no_network_call(monkeypatch, capsys):
 
     # Noise band: heuristic confidence is 0.4, below the 0.75 bar, so the
     # router DOES reach the retired rung rather than short-circuiting.
-    v = analyze(_input(old_wins=5, new_wins=6, draws=0, total=11),
+    v = analyze(_input(old_wins=10, new_wins=11, draws=0, total=21),
                 config=AnalystConfig(use_ollama=True))
     assert v.source == "heuristic"
     printed = capsys.readouterr().out
@@ -531,7 +562,7 @@ def test_analyze_does_not_swallow_the_retirement_note(monkeypatch, capsys):
     monkeypatch.setattr("commander_builder.analyst.ollama_verdict", spy)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    analyze(_input(old_wins=5, new_wins=6, draws=0, total=11),
+    analyze(_input(old_wins=10, new_wins=11, draws=0, total=21),
             config=AnalystConfig(use_ollama=True))
     assert calls == []
     assert "retired" in capsys.readouterr().out
@@ -560,7 +591,7 @@ def test_analyze_retired_rung_still_escalates_to_claude(monkeypatch, capsys):
     fake_module.Anthropic = FakeClient
     monkeypatch.setitem(sys.modules, "anthropic", fake_module)
 
-    v = analyze(_input(old_wins=5, new_wins=6, draws=0, total=11),
+    v = analyze(_input(old_wins=10, new_wins=11, draws=0, total=21),
                 config=AnalystConfig(use_claude=True, use_ollama=True))
     assert v.source == "claude"
     assert "retired" in capsys.readouterr().out
@@ -710,8 +741,33 @@ def test_analyze_uses_claude_when_heuristic_uncertain(monkeypatch):
 
     # Noise band: heuristic confidence is low → escalate.
     v = analyze(
-        _input(old_wins=5, new_wins=6, draws=0, total=11),
+        _input(old_wins=10, new_wins=11, draws=0, total=21),
         config=AnalystConfig(use_claude=True),
     )
     assert v.source == "claude"
     # monkeypatch.setitem auto-cleans up; no manual pop needed.
+
+
+def test_analyze_never_escalates_a_sub_floor_sim_to_the_llm(monkeypatch, capsys):
+    """R4-FU A-08 (2026-10-02): below the decisive floor the heuristic's
+    ``inconclusive`` is the verdict, full stop. The LLM rung used to be
+    reached (0.3 < 0.75) and its "kept" accepted verbatim on 11 decisive
+    games. The client here would answer "kept" — it must not be asked."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    calls: list = []
+
+    def spy(input_, config):
+        calls.append(input_)
+        return Verdict(label="kept", confidence=0.9, reasoning="x",
+                       lessons=[], source="claude")
+    monkeypatch.setattr("commander_builder.analyst.claude_verdict", spy)
+    v = analyze(_input(old_wins=5, new_wins=6, draws=0, total=11),
+                config=AnalystConfig(use_claude=True, use_ollama=True))
+    assert v.label == "inconclusive" and v.source == "heuristic"
+    assert calls == []
+    # The gate sits ahead of the retired rung's note too: nothing is printed.
+    assert capsys.readouterr().out == ""
+    # Above the floor and in the noise band, the rung IS consulted.
+    v = analyze(_input(old_wins=10, new_wins=11, draws=0, total=21),
+                config=AnalystConfig(use_claude=True))
+    assert v.source == "claude" and len(calls) == 1
