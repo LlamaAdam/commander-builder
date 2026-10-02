@@ -1914,6 +1914,15 @@ runs; `/api/dashboard/core?deck=…` → 200 advertising
 
 ## Round-4 follow-ups (2026-09-16)
 
+- **Intermittent setup ERROR in
+  `tests/test_web_app.py::test_build_deck_defaults_bracket_to_3`**
+  (seen 2026-09-16 by the round-4 fixer and 2026-09-28, each once in a
+  full-suite run; never in isolation, never in the module alone; clean
+  on the next full run both times). Cross-module ordering/timing on the
+  `client` + `deck_dir` fixtures around the async build job. Reproduce
+  under random ordering or repeated runs, then pin. Not caused by either
+  change that surfaced it.
+
 The 11 FOLLOW-UP items of negative-mode round 4
 (`docs/ollama-analysis/NEGATIVE_MODE_ROUND4.md` §4), plus two sweeps the
 FIX-NOW batch deliberately left out. Each is minor; none blocks the PR.

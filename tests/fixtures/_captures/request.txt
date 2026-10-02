@@ -1,2 +1,0 @@
-probe: https://github.com/Card-Forge/forge/releases/download/forge-2.0.14/forge-installer-2.0.14.tar.bz2
-url: https://api.github.com/repos/Card-Forge/forge/releases?per_page=8

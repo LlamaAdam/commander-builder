@@ -6,6 +6,28 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-09-28 — forge-canary: Forge releases ship a bundle, not a fat jar
+
+- **Bug.** `forge-canary.yml` was red on every weekly run since it was
+  written (5/5, 2026-08-31 to 09-28): `bootstrap.download_forge` looked
+  for a `forge-gui-desktop-<ver>-jar-with-dependencies.jar` release
+  asset. The real release (captured through the lane, pinned in
+  `tests/fixtures/forge_release_latest_2026-09-28.json`) ships
+  `forge-installer-<ver>.jar` (IzPack) and `forge-installer-<ver>.tar.bz2`;
+  no release since 2.0.08 (2026-01-01) has carried a standalone fat jar,
+  so the canary never had a release it could download. The picker's
+  test fixture had been a guess at the shape.
+- **Fix.** `_pick_forge_asset` prefers a standalone fat jar if one ever
+  returns and otherwise takes the bundle; `download_forge` verifies the
+  GitHub-published sha256, extracts the bundle flat into `vendor/forge`
+  (the jar sits at the archive root next to `res/`, pinned by
+  `tests/fixtures/forge_bundle_2.0.14_listing.json` — a listing made in
+  the runner, the 302 MB asset itself never committed) with the same
+  zip-slip guards as the JRE path, and deletes the archive. The error
+  for a release with neither shape now names the assets it saw.
+- **Lane.** New `probe: <url>` request form: download an asset in the
+  runner, print size + sha256, commit only its member listing.
+
 ### 2026-09-16 — negative-mode round 4, FIX-NOW batch
 
 The 18 FIX-NOW items of the fourth negative-mode round
