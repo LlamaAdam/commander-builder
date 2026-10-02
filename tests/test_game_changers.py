@@ -584,3 +584,135 @@ def test_offline_game_changers_survives_a_corrupt_cache(monkeypatch, tmp_path):
     cache.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(gc, "CACHE_PATH", cache)
     assert gc.offline_game_changers() == gc._FALLBACK
+
+
+# --- Client-rendered WotC page (audit open bug 1, 2026-09-09) ---------------
+# tests/fixtures/wotc_commander_page_2026-09-09.txt is VERBATIM payload cut
+# from a CI capture of the live page (provenance in the file). It pins the
+# shape that broke the scraper: the list lives in escaped JS strings, not
+# in <li> HTML, so the legacy scan saw only chrome and the trust gate
+# rejected every fetch -- every process served the bundled fallback.
+
+def _real_wotc_page() -> str:
+    from pathlib import Path
+    path = Path(__file__).parent / "fixtures" / "wotc_commander_page_2026-09-09.txt"
+    return path.read_text(encoding="utf-8")
+
+
+def test_real_wotc_payload_parses_to_the_full_trusted_list():
+    from commander_builder.game_changers import _FALLBACK
+    names = _parse_card_names_from_html(_real_wotc_page())
+    assert len(names) == 53
+    # On 2026-09-09 the live list and the bundled fallback were identical;
+    # a future divergence is a real WotC revision (and the trust gate's
+    # divergence log exists for exactly that), not a parser regression.
+    assert names == set(_FALLBACK)
+    trusted, overlap = _scrape_is_trustworthy(names)
+    assert trusted and overlap == 1.0
+
+
+def test_real_wotc_page_legacy_li_scan_sees_no_cards():
+    """WHY the scraper was broken: the pre-refresh <li> scan finds nothing
+    that is a card on the current page (the five <li> hits are chrome)."""
+    from commander_builder.game_changers import _parse_card_names_from_li_html, _FALLBACK
+    legacy = _parse_card_names_from_li_html(_real_wotc_page())
+    assert not (legacy & set(_FALLBACK))
+    trusted, _ = _scrape_is_trustworthy(legacy)
+    assert not trusted
+
+
+def test_payload_parser_selects_only_game_changer_entries():
+    # Constructed minimal payload (NOT a capture): a nav entry that also
+    # uses auto-card must not leak into the list -- the entryTitle is the
+    # selector, and only "Game Changer" entries count.
+    from commander_builder.game_changers import _parse_card_names_from_payload
+    payload = (
+        'entryTitle:"Site Nav | Formats | Commander",copy:"\\u003Cli\\u003E'
+        '\\u003Cauto-card\\u003ESol Ring\\u003C\\u002Fauto-card\\u003E\\u003C\\u002Fli\\u003E"'
+        ',entryTitle:"Formats | Commander Refresh | Game Changer Wiki R",'
+        'copy:"\\u003Cli\\u003E\\u003Cauto-card\\u003EJeska\'s Will\\u003C\\u002F'
+        'auto-card\\u003E\\u003C\\u002Fli\\u003E"'
+    )
+    assert _parse_card_names_from_payload(payload) == {"Jeska's Will"}
+
+
+def test_plain_li_html_still_parses_when_no_payload_is_present():
+    # The legacy shape keeps working: with no payload entries the parser
+    # falls through to the <li> scan (the older tests above rely on it).
+    html = "<ul><li>Rhystic Study</li><li>Smothering Tithe</li></ul>"
+    assert _parse_card_names_from_html(html) == {"Rhystic Study", "Smothering Tithe"}
+
+
+# --------------------------------------------------------------------------- #
+# R4-FU B-10 (2026-10-02) — payload completeness: all seven colour entries
+# --------------------------------------------------------------------------- #
+
+def _page_without_entry(colour: str) -> str:
+    """The real capture with ONE colour entry's title changed, as a CMS
+    layout drift would present it (the names are still on the page, under
+    a title the selector no longer matches)."""
+    page = _real_wotc_page()
+    needle = f'entryTitle:"Formats | Commander Refresh | Game Changer Wiki {colour}"'
+    assert page.count(needle) == 1
+    return page.replace(needle, 'entryTitle:"Formats | Commander Refresh | Moved"')
+
+
+def test_real_payload_carries_all_seven_colour_entries():
+    from commander_builder.game_changers import (
+        _PAYLOAD_COLOUR_ENTRIES, _parse_payload_entries, _payload_missing_entries,
+    )
+    entries = _parse_payload_entries(_real_wotc_page())
+    assert set(entries) == set(_PAYLOAD_COLOUR_ENTRIES)
+    assert {c: len(n) for c, n in entries.items()} == {
+        "W": 7, "U": 10, "B": 10, "R": 3, "G": 7, "Multi": 4, "Colorless": 12,
+    }
+    assert _payload_missing_entries(entries) == []
+    assert "Info" not in entries           # the Info entry is never harvested
+
+
+@pytest.mark.parametrize("colour", ["W", "U", "B", "R", "G", "Multi"])
+def test_payload_missing_one_colour_entry_is_rejected_by_name(colour, capsys):
+    """R4-FU B-10: losing any one entry except Colorless left 43-50 names
+    (overlap 0.81-0.94) — PAST the 80 % gate, cached for a week and served
+    with ten Game Changers gone. The completeness check rejects it first,
+    naming the entry, so the gate is only the second line."""
+    from commander_builder.game_changers import _FALLBACK, _parse_card_names_from_payload
+    names = _parse_card_names_from_html(_page_without_entry(colour))
+    assert names == set()
+    err = capsys.readouterr().err
+    assert f"colour entry {colour} missing or empty" in err
+    # The property that made this necessary: without the check the
+    # truncated list would have been trusted.
+    partial = _parse_card_names_from_payload(_page_without_entry(colour))
+    trusted, overlap = _scrape_is_trustworthy(partial)
+    assert trusted and 0.80 <= overlap < 1.0
+    assert partial < set(_FALLBACK)
+
+
+def test_info_entry_names_are_never_harvested():
+    """The eighth entry ("Game Changers Info") is prose about the list. On
+    the capture it carries no card; if WotC ever auto-cards a name inside
+    it, that name must still not join the list."""
+    page = _real_wotc_page()
+    needle = 'entryTitle:"Formats | Commander Refresh | Game Changers Info"'
+    assert page.count(needle) == 1
+    start = page.index(needle)
+    copy_at = page.index('copy:"', start) + len('copy:"')
+    doctored = (page[:copy_at]
+                + "\\u003Cli\\u003E\\u003Cauto-card\\u003ESol Ring\\u003C\\u002Fauto-card\\u003E\\u003C\\u002Fli\\u003E"
+                + page[copy_at:])
+    names = _parse_card_names_from_html(doctored)
+    assert len(names) == 53 and "Sol Ring" not in names
+
+
+def test_fetch_rejects_an_incomplete_payload_and_does_not_cache(tmp_path, monkeypatch, capsys):
+    from commander_builder import game_changers
+    cache = tmp_path / "game_changers.json"
+    monkeypatch.setattr(game_changers, "CACHE_PATH", cache)
+    monkeypatch.setattr(game_changers, "_http_get_text",
+                        lambda url, timeout=None: _page_without_entry("U"))
+    result = game_changers.fetch_game_changers(use_cache=True)
+    assert result == set(game_changers._FALLBACK)
+    assert not cache.exists()
+    assert game_changers._LAST_FETCH_DEGRADED is True
+    assert "colour entry U missing" in capsys.readouterr().err

@@ -36,14 +36,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       # forge_runner falls back to `shutil.which("java")` when
       # vendor/jre is absent, so PATH java from setup-java is enough —
       # no Temurin download via bootstrap.ensure_jre needed here.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -75,6 +75,16 @@ jobs:
               print(f"downloaded: {jar}")
           PY
 
+      # 2026-10-02: a freshly extracted bundle ships only
+      # forge.profile.properties.example, and with the keys empty Forge
+      # reads decks from ~/.forge on Linux -- the first green download
+      # produced a 4-game pod with 0 wins on both sides because nothing
+      # it was asked to load existed where it looked. ensure_forge_profile
+      # pins userDir=./userdata (never overwriting an existing profile).
+      - name: Point Forge at ./userdata
+        run: |
+          python -c "from commander_builder.bootstrap import ensure_forge_profile as e; print(e().read_text())"
+
       - name: Seed the golden deck
         run: |
           mkdir -p vendor/forge/userdata/decks/commander
@@ -87,16 +97,29 @@ jobs:
             --good "vendor/forge/userdata/decks/commander/[USER] Canary Golden [B3].dck" \
             --games 4 --timeout 360
 
+      # On red, say where Forge actually put things before the artifact
+      # step looks for them (2026-10-02: the first post-fix run uploaded
+      # nothing because the log was under ~/.forge, not userdata/).
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "== profile"; cat vendor/forge/forge.profile.properties 2>/dev/null || echo "(no profile)"
+          echo "== userdata"; find vendor/forge/userdata -maxdepth 3 2>/dev/null | head -40
+          echo "== home dirs"; ls -la ~/.forge ~/.cache/forge 2>/dev/null | head -20
+          echo "== every forge.log"; find vendor/forge ~/.forge -name 'forge.log' 2>/dev/null
+          for f in $(find vendor/forge ~/.forge -name 'forge.log' 2>/dev/null); do echo "== tail $f"; tail -n 60 "$f"; done
+
       # Keep the raw sim evidence around for a week of debugging when
       # the canary goes red — the log is the artifact that says whether
       # Forge changed its output or our parser lost the plot.
       - name: Upload Forge logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: forge-canary-logs
           path: |
             vendor/forge/userdata/**/*.log
             vendor/forge/forge.log
+            ~/.forge/**/*.log
           if-no-files-found: ignore
           retention-days: 14

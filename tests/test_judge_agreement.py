@@ -334,3 +334,106 @@ def test_json_mode_carries_the_per_pairing_rows(tmp_path, capsys):
     assert payload["pairings"][0]["sim_verdict"] == "reverted"
     assert payload["pairings"][0]["judge_verdict"] == "kept"
     assert payload["stats"]["agreements"] == 0
+
+
+# --- R3 C-13 (2026-09-03): inconclusive == inconclusive is not agreement ---
+
+def test_mutual_inconclusive_is_not_counted_as_agreement(tmp_path, capsys):
+    db = tmp_path / "kl.sqlite"
+    clean = {"order_flip": False, "discarded": 0}
+    _row(db, sim="inconclusive", judge="inconclusive", report=clean)
+    _row(db, sim="kept", judge="kept", report=clean)
+    _row(db, sim="inconclusive", judge="kept", report=clean)
+
+    stats = judge_agreement.analyze(judge_agreement.collect(db)["paired"])
+    assert stats["n"] == 3
+    assert stats["decided"] == 1
+    assert stats["undecided"] == 2
+    assert stats["both_inconclusive"] == 1
+    assert stats["agreements"] == 1
+    assert stats["agreement_rate"] == 1.0          # 1/1 decided, not 2/3
+
+    judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert "agree on the same label: 1/1" in out
+    assert "both inconclusive: 1 (not counted as agreement)" in out
+
+
+def test_agreement_rate_over_no_decided_pairs_is_zero_not_a_crash(tmp_path):
+    db = tmp_path / "kl.sqlite"
+    _row(db, sim="inconclusive", judge="inconclusive",
+         report={"order_flip": False, "discarded": 0})
+    stats = judge_agreement.analyze(judge_agreement.collect(db)["paired"])
+    assert stats["decided"] == 0 and stats["agreements"] == 0
+    assert stats["agreement_rate"] == 0.0
+
+
+def test_rows_are_tallied_per_prompt_version(tmp_path, capsys):
+    """R3 F-05 (2026-09-03): the free-text fence changed every judgment's
+    prompt bytes, so pooled rows must be separable by the prompt they were
+    judged under. Old rows carry no stamp and tally as ``unstamped``."""
+    db = tmp_path / "kl.sqlite"
+    _row(db, sim="kept", judge="kept",
+         report={"prompt_version": "2026-09-03.r3-fence"})
+    _row(db, sim="kept", judge="kept",
+         report={"prompt_version": "2026-09-03.r3-fence"})
+    _row(db, sim="kept", judge="reverted", report={})
+    collected = judge_agreement.collect(db_path=db)
+    stats = judge_agreement.analyze(collected["paired"])
+    assert stats["by_prompt_version"] == {
+        "2026-09-03.r3-fence": 2, "unstamped": 1,
+    }
+    rc = judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "prompt versions:" in out and "MIXED" in out
+
+
+def test_gates_are_computed_per_prompt_version(tmp_path, capsys):
+    """R4-FU B-05 (2026-10-02): the gates were pooled across prompt
+    versions while the render said "read the gates per version" with
+    nothing per version to read. Each version is its own instrument."""
+    db = tmp_path / "kl.sqlite"
+    v_old, v_new = "2026-08-27.r2", "2026-09-03.r3-fence"
+    # old prompt: judge says kept 3/3 -> G2 FAILED for that version
+    for _ in range(3):
+        _row(db, sim="kept", judge="kept",
+             report={"prompt_version": v_old, "order_flip": False})
+    # new prompt: judge says kept 1/4 -> G2 passing for that version
+    _row(db, sim="kept", judge="kept",
+         report={"prompt_version": v_new, "order_flip": False})
+    for _ in range(3):
+        _row(db, sim="kept", judge="reverted",
+             report={"prompt_version": v_new, "order_flip": True})
+    paired = judge_agreement.collect(db_path=db)["paired"]
+    stats = judge_agreement.analyze(paired)
+
+    assert stats["pooled_informational"] is True
+    assert set(stats["per_version"]) == {v_old, v_new}
+    old, new = stats["per_version"][v_old], stats["per_version"][v_new]
+    assert old["n"] == 3 and old["g2_kept"] == 3 and old["g2_failed"] is True
+    assert new["n"] == 4 and new["g2_kept"] == 1 and new["g2_failed"] is False
+    assert old["g1_order_flips"] == 0 and new["g1_order_flips"] == 3
+    # the pooled numbers are still there, as an informational block
+    assert stats["n"] == 7 and stats["g2_kept"] == 4
+    # a per-version block does not nest further
+    assert "per_version" not in old
+
+    rc = judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "INFORMATIONAL" in out and "Per prompt version" in out
+    assert f"[{v_old}] n=3" in out and f"[{v_new}] n=4" in out
+    assert "G2 kept 3/3 (100%) => FAILED" in out
+    assert "G2 kept 1/4 (25%) => passing" in out
+
+
+def test_single_prompt_version_keeps_the_pooled_read(tmp_path, capsys):
+    db = tmp_path / "kl.sqlite"
+    _row(db, sim="kept", judge="kept", report={"prompt_version": "v1"})
+    stats = judge_agreement.analyze(judge_agreement.collect(db_path=db)["paired"])
+    assert stats["pooled_informational"] is False
+    assert list(stats["per_version"]) == ["v1"]
+    judge_agreement.main(["--db-path", str(db)])
+    out = capsys.readouterr().out
+    assert "INFORMATIONAL" not in out and "Per prompt version" not in out

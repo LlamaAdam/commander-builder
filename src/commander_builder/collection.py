@@ -57,6 +57,7 @@ collection would be pure noise.
 from __future__ import annotations
 
 import os
+import unicodedata
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -88,6 +89,78 @@ def name_key(name: str) -> str:
     collide two distinct cards.
     """
     return name.split("//", 1)[0].strip().lower()
+
+
+# Typographic apostrophes / quotes a site or a hand edit may carry where
+# Scryfall and Forge write ASCII ``'`` (R3 F-10: ``Protect=Jeska’s Will``
+# protected nothing against the list's ``Jeska's Will``).
+_APOSTROPHE_VARIANTS = str.maketrans({
+    "\u2019": "'", "\u2018": "'", "\u02bc": "'", "\u2032": "'", "`": "'",
+})
+
+
+# Letters NFKD cannot decompose into base + combining mark, mapped to the
+# ASCII spelling Scryfall and Forge use (R4-FU B-14, 2026-10-02): the
+# ligatures and the Nordic/German letters that occur in printed card names.
+_ASCII_LETTER_FOLDS = str.maketrans({
+    "\u00e6": "ae", "\u00c6": "AE",   # æ Æ  ("Æther Vial" vs "Aether Vial")
+    "\u0153": "oe", "\u0152": "OE",   # œ Œ
+    "\u00f8": "o", "\u00d8": "O",     # ø Ø
+    "\u00df": "ss",                    # ß
+    "\u00f0": "d", "\u00d0": "D",     # ð Ð
+    "\u00fe": "th", "\u00de": "TH",   # þ Þ
+    "\u0142": "l", "\u0141": "L",     # ł Ł
+})
+
+
+def fold_diacritics(name: str) -> str:
+    """``name`` with accents stripped and non-decomposable letters spelled
+    in ASCII (R4-FU B-14, 2026-10-02): ``Lim-Dûl's`` -> ``Lim-Dul's``,
+    ``Æther`` -> ``AEther``, ``Jötun`` -> ``Jotun``. NFKD splits each
+    accented letter into base + combining mark and the marks (Unicode
+    category ``Mn``) are dropped; the ligature table above covers the
+    letters NFKD leaves whole. Case is NOT touched here — callers fold it
+    themselves — and anything else non-ASCII is kept rather than dropped,
+    so two different non-Latin names cannot collapse into one key."""
+    decomposed = unicodedata.normalize("NFKD", name or "")
+    stripped = "".join(
+        ch for ch in decomposed if unicodedata.category(ch) != "Mn"
+    )
+    return stripped.translate(_ASCII_LETTER_FOLDS)
+
+
+def match_key(name: str) -> str:
+    """The SHARED matching key for card names across the primer / adopt
+    lane (2026-09-03, R3 F-02): :func:`name_key` (case-folded front face)
+    plus apostrophe folding, diacritic folding and whitespace collapse.
+
+    WHY DIACRITICS FOLD HERE (R4-FU B-14, 2026-10-02). Scryfall spells
+    ``Lim-Dûl's Vault`` and ``Aether Vial`` (it de-ligatured ``Æther`` in
+    2016); Forge's card files, EDHREC slugs, older Moxfield exports and a
+    hand-typed ``Protect=`` line carry the other spelling of each. Round
+    4 executed both pairs through this key and found them unequal, so a
+    ``Protect=Lim-Dul's Vault`` protected nothing against a deck that
+    spells the û. Folding lives in THIS key and not in :func:`name_key`
+    because ``name_key`` feeds the collection and the lift matrix, whose
+    stored keys were written unfolded — changing it would orphan every
+    existing key, whereas ``match_key`` is only ever compared against
+    another ``match_key`` of the same run. A matching-semantics change,
+    so it shipped separately from the R4 fix-now batch.
+
+    WHY A SECOND KEY. Archidekt's card-link embeds carry a double-faced
+    card as ``"Front // Back"`` while the ``.dck`` written by
+    ``archidekt_client._entry_name`` carries the front face alone — two
+    spellings of one card, compared casefold-only on both sides, so every
+    DFC the author linked reported as "NOT in the list" and was never
+    auto-protected. ``name_key`` already exists for exactly the front-face
+    fold; this adds the two prose-side normalizations the primer lane
+    needs (curly apostrophes, doubled spaces) without changing what
+    ``name_key``'s existing callers see.
+    """
+    folded = name_key(
+        fold_diacritics((name or "").translate(_APOSTROPHE_VARIANTS))
+    )
+    return " ".join(folded.split())
 
 
 def _is_basic_land_key(key: str) -> bool:

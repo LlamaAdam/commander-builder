@@ -211,10 +211,15 @@ def _touch_deck(d: Path, name: str) -> None:
 
 
 def test_fallback_opponents_exclude_premade_and_user(tmp_path, monkeypatch):
+    """Extended 2026-09-03 (R3 C-03): the fallback now applies decision
+    C1's whole list via ``filler_policy`` — ``[REF]`` (same popularity
+    selection as ``[PREMADE]``) and ``[CONTROL]`` (a do-nothing deck
+    inflates decisive counts) are turned away too."""
     from commander_builder import run_match
     monkeypatch.setattr(run_match, "DECK_DIR", tmp_path)
     for n in ("Alpha [B3].dck", "Beta [B3].dck",
-              "[USER] Mine [B3].dck", "[PREMADE] Hot [B3].dck"):
+              "[USER] Mine [B3].dck", "[PREMADE] Hot [B3].dck",
+              "[REF] TopLikes [B3].dck", "[CONTROL] do-nothing [B3].dck"):
         _touch_deck(tmp_path, n)
     got = run_match._fallback_opponents(3, exclude="", n=10)
     assert got == ["Alpha [B3].dck", "Beta [B3].dck"]

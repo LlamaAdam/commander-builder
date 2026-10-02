@@ -5,7 +5,13 @@ sub-cEDH brackets). The audit prompt's hardcoded fallback can drift; this
 module fetches the canonical list and caches it locally.
 
 Authoritative source: WotC's Commander Brackets page. Format isn't a JSON
-API — it's an HTML list — so we parse the page and extract card names.
+API. Since the 2026 site refresh the page is CLIENT-RENDERED: the list is
+not in the HTML body at all but inside a JavaScript payload as escaped
+strings (``entryTitle:"... Game Changer Wiki <color>" ... copy:"\u003Cli
+\u003E\u003Cauto-card\u003ENAME..."``). The ``<li>`` scan that used to
+work could only ever see site chrome, which is why every process served
+the bundled fallback (audit open bug 1, fixed 2026-09-09 against a real
+capture -- ``tests/fixtures/wotc_commander_page_2026-09-09.txt``).
 
 Cache: 7-day TTL since WotC updates are infrequent. On fetch failure, return
 the bundled fallback so audits keep running.
@@ -168,8 +174,121 @@ def _looks_like_card_name(text: str) -> bool:
     return True
 
 
+# --- Client-rendered payload (2026-09-09) -----------------------------------
+# The current page ships its content as a JavaScript object literal. Each
+# content entry carries ``entryTitle:"..."`` and a ``copy:"..."`` string
+# whose value is HTML with JS-style escapes (``\u003C`` for ``<``,
+# ``\u002F`` for ``/``). The Game Changers live in eight entries titled
+# "Formats | Commander Refresh | Game Changer Wiki <W|U|B|R|G|Multi|
+# Colorless>" as ``<li><auto-card>NAME</auto-card></li>`` items. Other
+# entries on the same page (nav, footer, product carousels) never carry
+# "Game Changer" in their title, which is the selector -- pinned by the
+# verbatim fixture, not assumed.
+_PAYLOAD_ENTRY_RE = re.compile(
+    r'entryTitle:"([^"]*Game Changer[^"]*)"[^{}]*?copy:"((?:[^"\\]|\\.)*)"',
+)
+_AUTO_CARD_RE = re.compile(r"<auto-card>(.*?)</auto-card>", re.DOTALL)
+_JS_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _decode_js_string(value: str) -> str:
+    """Undo the JS string escapes the payload uses (``\\uXXXX``, ``\\/``,
+    ``\\"``, ``\\n``). Only these four occur in the captured page; anything
+    else is left alone rather than guessed at."""
+    value = _JS_UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), value)
+    return (value.replace("\\/", "/").replace('\\"', '"')
+                 .replace("\\n", "\n"))
+
+
+#: The seven colour entries the list is split across (R4-FU B-10,
+#: 2026-10-02), as the ``entryTitle`` suffix after "Game Changer Wiki ".
+#: Pinned by the verbatim fixture. The eighth "Game Changers Info" entry
+#: is prose about the list and is never harvested.
+_PAYLOAD_COLOUR_ENTRIES: tuple[str, ...] = (
+    "W", "U", "B", "R", "G", "Multi", "Colorless",
+)
+_PAYLOAD_COLOUR_TITLE_RE = re.compile(r"Game Changer Wiki (\w+)\s*$")
+
+
+def _parse_payload_entries(html: str) -> dict[str, set[str]]:
+    """``{colour: names}`` for every ``Game Changer Wiki <colour>`` entry
+    in the payload. Entries whose title is not a colour entry (the Info
+    entry, any future "Game Changer ..." prose block) are skipped."""
+    import html as _html_mod
+    entries: dict[str, set[str]] = {}
+    for m in _PAYLOAD_ENTRY_RE.finditer(html):
+        title_m = _PAYLOAD_COLOUR_TITLE_RE.search(m.group(1))
+        if title_m is None:
+            continue
+        colour = title_m.group(1)
+        copy = _decode_js_string(m.group(2))
+        names = entries.setdefault(colour, set())
+        for raw_name in _AUTO_CARD_RE.findall(copy):
+            text = _html_mod.unescape(_TAG_RE.sub("", raw_name)).strip()
+            if _looks_like_card_name(text):
+                names.add(text)
+    return entries
+
+
+def _payload_missing_entries(entries: dict[str, set[str]]) -> list[str]:
+    """The colour entries that are absent or carry no name (R4-FU B-10)."""
+    return [c for c in _PAYLOAD_COLOUR_ENTRIES if not entries.get(c)]
+
+
+def _parse_card_names_from_payload(html: str) -> set[str]:
+    """Card names from the client-rendered payload (see the block comment
+    above). Returns an empty set when the page carries no such payload --
+    the caller then falls back to the legacy ``<li>`` scan, which keeps
+    the pre-refresh page shape (and its tests) working. Only the seven
+    colour entries are read; the Info entry never is (R4-FU B-10)."""
+    names: set[str] = set()
+    for entry_names in _parse_payload_entries(html).values():
+        names |= entry_names
+    return names
+
+
 def _parse_card_names_from_html(html: str) -> set[str]:
-    """Best-effort extraction of card names from the WotC announcement page.
+    """Card names from the WotC page: payload first, legacy ``<li>`` scan
+    second (2026-09-09).
+
+    The payload parser wins whenever it finds anything, because on the
+    current page the ``<li>`` scan finds ONLY chrome ("Accounts", "Card
+    Database", ...) -- five names, zero overlap with the list -- and the
+    trust gate then rejected the scrape in every process for months.
+
+    COMPLETENESS (R4-FU B-10, 2026-10-02). WHY a first line before the
+    80 % gate: the seven colour entries carry W 7 · U 10 · B 10 · R 3 ·
+    G 7 · Multi 4 · Colorless 12 = 53 names, so a page that lost any ONE
+    entry except Colorless still clears the overlap gate (43-50 names,
+    0.81-0.94), is cached for seven days and served as the list — ten
+    Game Changers silently gone from every bracket audit. A payload is
+    trusted only when all seven entries matched with at least one name
+    each; otherwise it is rejected here, by name, and nothing is cached.
+    The 80 % gate stays as the second line (a parser regression that
+    returns junk in all seven entries).
+    """
+    entries = _parse_payload_entries(html)
+    if entries:
+        missing = _payload_missing_entries(entries)
+        if missing:
+            print(
+                f"[game_changers] rejecting the WotC payload: colour "
+                f"entr{'y' if len(missing) == 1 else 'ies'} "
+                f"{', '.join(missing)} missing or empty (need all "
+                f"{len(_PAYLOAD_COLOUR_ENTRIES)}: "
+                f"{', '.join(_PAYLOAD_COLOUR_ENTRIES)}) — the page layout "
+                f"moved or the fetch was cut short; using the bundled "
+                f"fallback, not caching.",
+                file=sys.stderr, flush=True,
+            )
+            return set()
+        return _parse_card_names_from_payload(html)
+    return _parse_card_names_from_li_html(html)
+
+
+def _parse_card_names_from_li_html(html: str) -> set[str]:
+    """Legacy extraction: ``<li>`` items of the pre-refresh server-rendered page.
 
     Two defenses against polluting the result with site-chrome links (the
     prior scraper let "About", "Privacy Policy", "Wizards Play Network",
@@ -250,15 +369,39 @@ def offline_game_changers() -> frozenset[str]:
     immutable answer cannot be mutated back into the module's caches).
     Never raises: a corrupt cache degrades to the bundled list.
     """
+    global _FALLBACK_USED
+    why: str
     try:
         data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
         cached = {c for c in data.get("cards", []) if _looks_like_card_name(c)}
-        trusted, _overlap = _scrape_is_trustworthy(cached)
+        trusted, overlap = _scrape_is_trustworthy(cached)
         if trusted:
+            _FALLBACK_USED = False
             return frozenset(cached)
-    except (OSError, ValueError, AttributeError):
-        pass
+        why = (f"cache at {CACHE_PATH} failed the trust bar "
+               f"({len(cached)} names, {overlap:.0%} overlap with the "
+               f"bundled list)")
+    except (OSError, ValueError, AttributeError) as exc:
+        why = f"cache at {CACHE_PATH} unreadable ({type(exc).__name__}: {exc})"
+    # Loud once per process (2026-09-03, R3 F-15): this used to degrade
+    # with no output and no flag, so which list labeled a G3 row was
+    # unrecorded. The flag is what ``_deck_judge_prompt`` stamps into
+    # ``swap_label["staple_list_source"]``.
+    _FALLBACK_USED = True
+    if why not in _FALLBACK_WARNED:
+        _FALLBACK_WARNED.add(why)
+        print(f"[game_changers] WARN: using the BUNDLED Game Changers list "
+              f"({len(_FALLBACK)} cards, hand-synced) — {why}. Run "
+              f"load_game_changers() online to refresh.",
+              file=sys.stderr, flush=True)
     return _FALLBACK
+
+
+#: True when the last ``offline_game_changers()`` call served the bundled
+#: list instead of a trusted cache (R3 F-15). Read by the judge's swap
+#: labeling so the agreement table can separate rows by list source.
+_FALLBACK_USED: bool = False
+_FALLBACK_WARNED: set[str] = set()
 
 
 def _log_divergence(names: set[str]) -> None:

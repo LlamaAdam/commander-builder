@@ -40,6 +40,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 # keys or wiping one mid-API-call. The web layer must NEVER write
 # per-request secrets into ``os.environ``.
 
+from ..dck_utils import read_deck_text
 from ..edhrec_client import fetch_salt_list
 from ._helpers import (
     _apply_swaps_to_dck,
@@ -48,7 +49,7 @@ from ._helpers import (
     _match_pct_from_evidence,
     _pad_main_to_target,
     _resolve_deck_path,
-    _total_price_for_deck_text,
+    audit_pricing_fields,
     project_average_deck_preview,
     project_salt_warning,
     read_protected_cards,
@@ -324,12 +325,8 @@ def _build_audit_payload(
     proposed_text, padded_count, padded_breakdown = _pad_main_to_target(
         proposed_text, post_swap_main,
     )
-    original_total, original_priced = _total_price_for_deck_text(original)
-    proposed_total, proposed_priced = _total_price_for_deck_text(proposed_text)
-    if original_total is not None and proposed_total is not None:
-        price_delta = round(proposed_total - original_total, 2)
-    else:
-        price_delta = None
+    # Totals + delta + the unpriced cards on each side (2026-09-09).
+    pricing_fields = audit_pricing_fields(original, proposed_text)
     # EDHREC salt list once per audit (cached 7 days). Best-effort:
     # empty dict on fetch failure → no salt annotations, no warning.
     try:
@@ -420,11 +417,7 @@ def _build_audit_payload(
         "bracket_peer_ref_count": int(
             getattr(report, "bracket_peer_ref_count", 0) or 0,
         ),
-        "original_price_usd": original_total,
-        "proposed_price_usd": proposed_total,
-        "price_delta_usd": price_delta,
-        "n_priced_cards_original": original_priced,
-        "n_priced_cards_proposed": proposed_priced,
+        **pricing_fields,
         "average_deck_preview": project_average_deck_preview(
             getattr(report, "average_deck", None),
             getattr(report, "edhrec_categories", {}) or {},
@@ -582,7 +575,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                 "detail": f"{type(exc).__name__}: {exc}",
             }), 503
 
-        original = path.read_text(encoding="utf-8")
+        original = read_deck_text(path)
         return jsonify(_build_audit_payload(
             report,
             original=original,
@@ -723,7 +716,7 @@ def make_audit_blueprint(deck_dir: Path) -> Blueprint:
                         # both paths go through _build_audit_payload so the
                         # warning logic + field names never diverge again.
                         report = phase.data["report"]
-                        original = path.read_text(encoding="utf-8")
+                        original = read_deck_text(path)
                         yield _sse("complete", _build_audit_payload(
                             report,
                             original=original,

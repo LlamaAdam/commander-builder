@@ -39,6 +39,13 @@ from commander_builder.lift_analysis import (
     top_deck_pairs,
 )
 
+# Offline at the module seams (audit open bug 3, 2026-09-09): under the suite-
+# wide network block the pipelines these tests drive were reaching Scryfall,
+# EDHREC and the WotC scrape behind degrade guards. The shared fixtures make
+# those upstreams miss instantly; a test wanting a specific answer patches
+# over them.
+pytestmark = pytest.mark.usefixtures("offline_scryfall", "offline_edhrec", "offline_game_changers")
+
 
 @pytest.fixture(autouse=True)
 def _isolate_lift_cache(tmp_path, monkeypatch):

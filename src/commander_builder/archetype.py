@@ -385,7 +385,9 @@ def _read_main_card_names(deck_path: Path) -> list[str]:
     Thin wrapper over ``dck_utils.main_card_names``."""
     if not deck_path.exists():
         return []
-    return dck_utils.main_card_names(deck_path.read_text(encoding="utf-8"))
+    # Tolerant read (R4-FU B-02 sweep, 2026-10-02): a cp1252 re-save used
+    # to raise here and be swallowed into a silent "midrange" by classify.
+    return dck_utils.main_card_names(dck_utils.read_deck_text(deck_path))
 
 
 # ---------------------------------------------------------------------------
@@ -865,8 +867,12 @@ def classify(deck_path: Path) -> Archetype:
         return hint
 
     try:
-        deck_text = deck_path.read_text(encoding="utf-8")
-    except (OSError, ValueError, UnicodeDecodeError):
+        # R4-FU B-02 sweep (2026-10-02): tolerant decode — WHY: a strict
+        # read's UnicodeDecodeError landed in this except and became a
+        # silent "midrange", so one cp1252 deck lost its archetype with
+        # no message. OSError (missing/unreadable) still degrades here.
+        deck_text = dck_utils.read_deck_text(deck_path)
+    except (OSError, ValueError):
         return "midrange"
 
     # Rung 2 — oracle-backed signals. When the rung abstained because the

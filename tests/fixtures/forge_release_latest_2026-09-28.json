@@ -1,0 +1,56 @@
+{
+ "_provenance": {
+  "source": "https://api.github.com/repos/Card-Forge/forge/releases/latest",
+  "captured": "2026-09-28 via the capture lane url: form (run 36440831251)",
+  "trimmed": "top-level metadata + assets[name,size,content_type,digest,browser_download_url,state]; body, author, reactions and per-asset uploader dropped",
+  "why": "forge-canary was red 5/5 weekly runs: bootstrap._pick_forge_jar_asset expected a standalone forge-gui-desktop-*-jar-with-dependencies.jar; the release ships only forge-installer-<ver>.jar (IzPack) and forge-installer-<ver>.tar.bz2 (flat bundle). Release history (releases?per_page=8, same capture run): 2.0.08 (2026-01-01) through 2.0.14 all ship exactly this asset set; the fat jar has not been a release asset in any of them."
+ },
+ "tag_name": "forge-2.0.14",
+ "name": "The Hobbit Release",
+ "published_at": "2026-08-08T23:02:10Z",
+ "prerelease": false,
+ "draft": false,
+ "html_url": "https://github.com/Card-Forge/forge/releases/tag/forge-2.0.14",
+ "assets": [
+  {
+   "name": "build.txt",
+   "size": 19,
+   "content_type": "raw",
+   "digest": "sha256:6d8de629a10ced03a308bee2294de1160734ff1c1a7d72225e73a9bf04cb9e16",
+   "browser_download_url": "https://github.com/Card-Forge/forge/releases/download/forge-2.0.14/build.txt",
+   "state": "uploaded"
+  },
+  {
+   "name": "forge-installer-2.0.14.jar",
+   "size": 313353576,
+   "content_type": "raw",
+   "digest": "sha256:0f6754a0204df40873b56692422ed9e43ce663a3afba6d87051a0f547b95b17b",
+   "browser_download_url": "https://github.com/Card-Forge/forge/releases/download/forge-2.0.14/forge-installer-2.0.14.jar",
+   "state": "uploaded"
+  },
+  {
+   "name": "forge-installer-2.0.14.tar.bz2",
+   "size": 301832993,
+   "content_type": "raw",
+   "digest": "sha256:e71749376945177d603d52a21a089bc1574330cf34599544b6bae1a04c83da41",
+   "browser_download_url": "https://github.com/Card-Forge/forge/releases/download/forge-2.0.14/forge-installer-2.0.14.tar.bz2",
+   "state": "uploaded"
+  },
+  {
+   "name": "forge-ios-unsigned-ipa.zip",
+   "size": 239778657,
+   "content_type": "application/x-zip-compressed",
+   "digest": "sha256:9414e29bd55f697e03e02ae0372df2e7693febfb46fa1fa67a9163d427997d09",
+   "browser_download_url": "https://github.com/Card-Forge/forge/releases/download/forge-2.0.14/forge-ios-unsigned-ipa.zip",
+   "state": "uploaded"
+  },
+  {
+   "name": "version.txt",
+   "size": 21,
+   "content_type": "raw",
+   "digest": "sha256:4492ddba8dba120ada3aec3cf3184c04d37900042b14b352486d29ae0cd29b62",
+   "browser_download_url": "https://github.com/Card-Forge/forge/releases/download/forge-2.0.14/version.txt",
+   "state": "uploaded"
+  }
+ ]
+}

@@ -425,6 +425,13 @@ def normalize_color_identity(colors: list[str]) -> str:
     return "".join(c for c in _WUBRG if c in seen)
 
 
+def _read_dck(path) -> str:
+    """The one tolerant .dck reader (R3 W-04, 2026-09-03): a cp1252 byte
+    in a deck used to raise UnicodeDecodeError out of the dashboard."""
+    from .dck_utils import read_deck_text
+    return read_deck_text(path)
+
+
 def _parse_commander_names_from_dck(dck_path: Path) -> list[str]:
     """Extract commander names from a Forge .dck file's [Commander] section.
 
@@ -434,7 +441,7 @@ def _parse_commander_names_from_dck(dck_path: Path) -> list[str]:
     Thin wrapper over ``dck_utils.section_card_names``."""
     if not dck_path.exists():
         return []
-    text = dck_path.read_text(encoding="utf-8")
+    text = _read_dck(dck_path)
     return dck_utils.section_card_names(text, "Commander")
 
 

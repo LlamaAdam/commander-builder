@@ -1679,3 +1679,47 @@ def test_direct_url_with_twin_still_probes_json_first(tmp_path, monkeypatch):
         "https://json.edhrec.com/pages/average-decks/foo/upgraded.json",
     ]
     assert len(_polite(slept)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Live-shape drift (2026-10-02): cardviews carry num_decks/potential_decks,
+# synergy, lift, trend_zscore -- and NO "inclusion" key. Pinned on a trimmed
+# capture of the Krenko commander page (tests/fixtures/
+# edhrec_commander_page_krenko_2026-10-02.json). Before the fix every
+# CardEntry.inclusion_pct parsed to 0.0, which silently emptied the
+# heuristic advisor's MIN_INCLUSION_PCT_FOR_ADD gates.
+# --------------------------------------------------------------------------- #
+_KRENKO_PAGE = json.loads(
+    (Path(__file__).parent / "fixtures" / "edhrec_commander_page_krenko_2026-10-02.json")
+    .read_text(encoding="utf-8"))
+
+
+def test_live_cardviews_carry_no_inclusion_key():
+    from commander_builder import edhrec_client as e
+    views = [cv for cl in _KRENKO_PAGE["container"]["json_dict"]["cardlists"]
+             for cv in cl["cardviews"]]
+    assert views and all("inclusion" not in cv for cv in views)
+    assert all({"num_decks", "potential_decks", "lift", "synergy"} <= set(cv) for cv in views)
+
+
+def test_inclusion_pct_is_num_decks_over_potential_decks_on_the_live_shape():
+    from commander_builder import edhrec_client as e
+    out: dict = {}
+    e._walk_for_cardlists(_KRENKO_PAGE, out)
+    top = out["top_cards"]
+    warchief = next(c for c in top if c.name == "Goblin Warchief")
+    cv = next(cv for cl in _KRENKO_PAGE["container"]["json_dict"]["cardlists"]
+              for cv in cl["cardviews"] if cv["name"] == "Goblin Warchief")
+    assert warchief.inclusion_pct == pytest.approx(100.0 * cv["num_decks"] / cv["potential_decks"])
+    assert 50.0 < warchief.inclusion_pct <= 100.0          # a Krenko staple, not 0
+    assert warchief.lift == pytest.approx(cv["lift"])
+    assert warchief.synergy_pct == pytest.approx(cv["synergy"] * 100)
+    assert all(c.inclusion_pct > 0 for bucket in out.values() for c in bucket)
+
+
+def test_entry_from_cardview_honors_an_explicit_inclusion_first():
+    from commander_builder.edhrec_client import _entry_from_cardview
+    e = _entry_from_cardview({"name": "X", "inclusion": 42.5, "num_decks": 1, "potential_decks": 100})
+    assert e.inclusion_pct == 42.5
+    e2 = _entry_from_cardview({"name": "Y", "num_decks": 3, "potential_decks": 0})
+    assert e2.inclusion_pct == 0.0 and e2.lift == 0.0

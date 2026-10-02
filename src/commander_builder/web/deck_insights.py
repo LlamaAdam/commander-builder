@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..dck_utils import read_deck_text
 from ..dck_utils import CARD_LINE_RE
 
 
@@ -263,7 +264,7 @@ def decks_containing_card(deck_dir: Path, card_name: str) -> list[str]:
     matches: list[str] = []
     for path in deck_dir.glob("*.dck"):
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_deck_text(path)
         except OSError:
             continue
         in_card_section = False

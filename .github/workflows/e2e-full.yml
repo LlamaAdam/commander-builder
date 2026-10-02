@@ -1,0 +1,140 @@
+# Full walkthrough lane (2026-10-02): two real decks, every page and
+# action in the web UI, a per-row checklist + screenshots as the output.
+#
+# WHY A SEPARATE WORKFLOW. ``web-smokes.yml`` is hermetic by design
+# (stubbed lookups, blocked sockets, no Forge) and finishes in ~2 min.
+# This lane is the opposite — it imports a deck live, audits over
+# EDHREC, builds a deck from scratch and runs ONE real Forge compare —
+# so it is dispatch-only (plus a push on the feature branch filtered to
+# the lane's own files, mirroring the capture lane's trigger) and never
+# gates a PR. A red row here is a finding for the owner to read in the
+# checklist, not a merge blocker; the job itself only goes red when the
+# server never came up.
+#
+# OUTPUT. ``e2e-results/`` (CHECKLIST.md, checklist.json, one PNG per
+# row) is always uploaded, and CHECKLIST.md is printed into the job log
+# so the results are readable without downloading anything.
+name: e2e-full
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: ["claude/ollama-code-analysis-ak77i1"]
+    paths:
+      - "tests/e2e/full-walkthrough.spec.js"
+      - "tests/e2e/server_full.py"
+      - "playwright.full.config.js"
+      - ".github/workflows/e2e-full.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-full-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  walkthrough:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+
+      # forge_runner falls back to `shutil.which("java")` when
+      # vendor/jre is absent, so PATH java from setup-java is enough.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install the app (dev + web extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,web]"
+
+      - name: Install Playwright + Chromium
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      # Forge: same weekly-cached download the canary uses, so a cache
+      # hit costs nothing and a miss fetches the latest release.
+      - name: Compute cache week
+        id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: vendor/forge
+          key: forge-jar-${{ steps.week.outputs.week }}
+
+      - name: Ensure latest Forge
+        run: |
+          python - <<'PY'
+          from commander_builder.bootstrap import check_dependencies, download_forge
+          status = check_dependencies()
+          if status.forge_jar:
+              print(f"cached jar: {status.forge_jar}")
+          else:
+              jar = download_forge()
+              print(f"downloaded: {jar}")
+          PY
+
+      # A freshly extracted bundle reads decks from ~/.forge unless the
+      # profile pins userDir=./userdata (see forge-canary.yml, 2026-10-02).
+      - name: Point Forge at ./userdata
+        run: |
+          python -c "from commander_builder.bootstrap import ensure_forge_profile as e; print(e().read_text())"
+          mkdir -p vendor/forge/userdata/decks/commander
+
+      # The spec seeds its two decks through the app's own import route;
+      # the fixture server seeds the untagged filler seats the pod
+      # compare needs. The deck dir has to be Forge's own folder because
+      # Forge resolves decks by name inside its userdata.
+      - name: Run the full walkthrough
+        env:
+          CB_E2E_FULL_DECK_DIR: ${{ github.workspace }}/vendor/forge/userdata/decks/commander
+          E2E_FORGE_WAIT_MS: "1500000"
+        run: npx playwright test --config playwright.full.config.js
+
+      - name: Print the checklist
+        if: always()
+        run: |
+          if [ -f e2e-results/CHECKLIST.md ]; then
+            cat e2e-results/CHECKLIST.md
+          else
+            echo "no e2e-results/CHECKLIST.md — the server never came up"; exit 1
+          fi
+
+      - name: Upload the checklist + screenshots
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-results
+          path: e2e-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Forge's own log explains a failed compare row far better than
+      # the checklist can; keep it when something went wrong.
+      - name: Upload Forge logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-full-forge-logs
+          path: |
+            vendor/forge/userdata/**/*.log
+            vendor/forge/forge.log
+          if-no-files-found: ignore
+          retention-days: 7

@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .dck_utils import read_deck_text  # tolerant (R4-FU B-02 sweep)
 from .proposer import (
     auto_propose,
     apply_proposal_to_deck,
@@ -343,6 +344,15 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                         "deck's learned intent (e.g. 'tokens,aristocrats'). "
                         "Soft-biases candidate adds toward those archetypes. "
                         "Empty / absent = no bias.")
+    # R3 F-03 (2026-09-03): slugs the intent's FREE TEXT mentions travel
+    # on their own flag so the advisor can fetch them as EXTRA pages
+    # (never evicting the tribe / derived-theme pages) and keep them out
+    # of cut-protection.
+    p.add_argument("--free-text-themes", default=None, metavar="SLUGS",
+                   help="Comma-separated EDHREC tag-page slugs the deck's "
+                        "primer / pilot preferences mention. Fetched in "
+                        "addition to --intent-themes; ranks adds only, "
+                        "never protects cuts.")
     args = p.parse_args(argv)
 
     # Resolve --sim-games from its sentinel (2026-08-17). Precedence:
@@ -424,7 +434,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     if args.mode == "auto":
         from .change_budget import format_auto_mode_line, resolve_tier_for_deck
         auto_tier = resolve_tier_for_deck(
-            args.deck_path.read_text(encoding="utf-8"),
+            read_deck_text(args.deck_path),  # tolerant (R4-FU B-02 sweep)
         )
         args.mode = auto_tier.mode
         print(
@@ -478,6 +488,10 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
     _intent_themes: list[str] = [
         s.strip() for s in _raw_intent_themes.split(",") if s.strip()
     ]
+    _free_text_themes: list[str] = [
+        s.strip() for s in (args.free_text_themes or "").split(",")
+        if s.strip()
+    ]
 
     # Ownership resolution (ManaFoundry parity). Load ONCE here and
     # thread to both pipeline stages: the advisor (owned_only=True →
@@ -508,6 +522,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         intent_themes=_intent_themes if _intent_themes else None,
         collection_path=_coll_path,
         owned_only=collection_keys is not None,
+        free_text_themes=_free_text_themes if _free_text_themes else None,
     )
     # FP-015 verdict pass (flag-gated, fail-quiet — same contract as the
     # commander-advise and web-audit wirings): when the card-score flag
@@ -529,7 +544,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
                 )
             report = _bubble.apply_verdict_to_report(
                 report,
-                deck_text=args.deck_path.read_text(encoding="utf-8"),
+                deck_text=read_deck_text(args.deck_path),
                 corpus=_corpus,
                 bracket=args.bracket,
             )
@@ -568,7 +583,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         seen_lower.add(key)
         protected_combined.append(n)
 
-    deck_text_for_protect = args.deck_path.read_text(encoding="utf-8")
+    deck_text_for_protect = read_deck_text(args.deck_path)
     for c in read_protected_cards(deck_text_for_protect):
         _add_protected(c)
     for c in args.protect:
@@ -616,7 +631,7 @@ def auto_curate_main(argv: Optional[list[str]] = None) -> int:
         try:
             from .change_budget import plan_manabase_rebuild
             _mb_plan = plan_manabase_rebuild(
-                args.deck_path.read_text(encoding="utf-8"),
+                read_deck_text(args.deck_path),
             )
         except Exception:  # noqa: BLE001 — the step is optional by design
             _mb_plan = None
@@ -1111,7 +1126,13 @@ def _process_one_deck(
         # without bloating the NDJSON stream.
         err_text = errbuf.getvalue().strip()
         if len(err_text) > 1000:
-            err_text = err_text[:1000] + " …[truncated; full text on stderr]"
+            # Keep the TAIL as well as the head (2026-09-03): argparse
+            # prints usage first and the actual "error: unrecognized
+            # arguments: ..." line LAST, so a head-only cut dropped the
+            # one line that identifies the failure once the usage text
+            # grew past the cap (it did, with the round-3 flags).
+            err_text = (err_text[:650] + " …[truncated; full text on stderr]… "
+                        + err_text[-300:])
         return {
             "deck": str(deck_path),
             "status": "error",

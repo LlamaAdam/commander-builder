@@ -302,3 +302,207 @@ def test_era_report_help_is_discoverable(capsys):
     out = capsys.readouterr().out
     assert "--era-boundary-report" in out
     assert "REPORT ONLY" in out
+
+
+# --- R3 C-05 (2026-09-03): the printed instructions actually work ----------
+#
+# The report told the owner to move _SIGNIFICANCE_START "or NULL the day".
+# Moving the constant never relabels a stamped row (the v3 backfill fills
+# NULL eras only); NULLing by hand is re-stamped era 4 by the next init_db.
+# --apply-era-shift is the write that lasts, and the report prints step 2.
+
+def _eras(db: Path) -> dict:
+    with closing(sqlite3.connect(str(db))) as conn:
+        return dict(conn.execute(
+            "SELECT id, measurement_era FROM iterations ORDER BY id"))
+
+
+def test_apply_era_shift_relabels_the_day_and_survives_init_db(era_db):
+    result = bwm.apply_era_shift(era_db)
+    assert sorted(result["changed"]) == [(401, 4, 3), (402, 4, 3)]
+    assert _eras(era_db) == {400: 3, 401: 3, 402: 3, 403: 4}
+    # The old "NULL the day" advice was undone by the next init_db; a
+    # stored stamp is not.
+    init_db(era_db)
+    init_db(era_db)
+    assert _eras(era_db) == {400: 3, 401: 3, 402: 3, 403: 4}
+    # Idempotent.
+    assert bwm.apply_era_shift(era_db)["changed"] == []
+
+
+def test_main_apply_era_shift_prints_both_steps(era_db, capsys):
+    rc = bwm.main(["--db", str(era_db), "--era-boundary-report",
+                   "--apply-era-shift"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "--apply-era-shift APPLIED: 2 row(s)" in out
+    assert "STEP 2" in out and '_SIGNIFICANCE_START = "2026-08-15"' in out
+    assert _eras(era_db)[401] == 3
+
+
+def test_report_without_the_shift_flag_still_writes_nothing(era_db):
+    before = _eras(era_db)
+    bwm.main(["--db", str(era_db), "--era-boundary-report"])
+    assert _eras(era_db) == before
+
+
+def test_report_advice_names_both_steps_and_not_null_the_day(era_db, capsys):
+    bwm.main(["--db", str(era_db), "--era-boundary-report"])
+    out = capsys.readouterr().out
+    assert "step 1" in out and "--apply-era-shift" in out
+    assert "step 2" in out and "_SIGNIFICANCE_START" in out
+    assert "NULL the day" not in out.split("Why both")[0]
+
+
+def test_apply_era_shift_without_the_report_flag_is_refused(era_db, capsys):
+    rc = bwm.main(["--db", str(era_db), "--apply-era-shift"])
+    assert rc == 2
+    assert "only applies to" in capsys.readouterr().err
+    assert _eras(era_db)[401] == 4
+
+
+# --- R3 C-07 (2026-09-03): UTC row time vs the commit's own offset --------
+
+def test_commit_time_offset_is_honored(era_db):
+    """Row 402 is 19:40Z. A commit at 16:00 local in UTC-4 is 20:00Z, so
+    the row is BEFORE it; the old lexical compare ('19:40' < '16:00' is
+    False) called it after."""
+    rows = {r["id"]: r for r in
+            bwm.era_boundary_report(era_db, commit_time="16:00-04:00")["rows"]}
+    assert rows[402]["side"].startswith("before")
+    assert rows[401]["side"].startswith("before")
+    rows = {r["id"]: r for r in
+            bwm.era_boundary_report(era_db, commit_time="16:00+00:00")["rows"]}
+    assert rows[402]["side"].startswith("after")
+
+
+def test_bare_commit_time_is_utc_and_the_report_says_so(era_db, capsys):
+    assert bwm.commit_instant_utc("14:00").isoformat() == "2026-08-14T14:00:00+00:00"
+    assert bwm.commit_instant_utc("14:32Z").isoformat() == "2026-08-14T14:32:00+00:00"
+    assert bwm.commit_instant_utc("08:58:35-04:00").isoformat() == "2026-08-14T12:58:35+00:00"
+    bwm.main(["--db", str(era_db), "--era-boundary-report",
+              "--commit-time", "12:58:35+00:00"])
+    out = capsys.readouterr().out
+    assert "(UTC); rows are compared in UTC" in out
+    assert "created_at (UTC)" in out
+
+
+@pytest.mark.parametrize("good", ["12:58:35+00:00", "08:58-04:00", "14:32Z"])
+def test_offset_commit_times_are_accepted(era_db, capsys, good):
+    rc = bwm.main(["--db", str(era_db), "--era-boundary-report",
+                   "--commit-time", good])
+    assert rc == 0
+    assert "unknown" not in capsys.readouterr().out
+
+
+def test_help_asks_for_iso_strict(capsys):
+    with pytest.raises(SystemExit):
+        bwm.main(["--help"])
+    out = capsys.readouterr().out
+    assert "iso-strict" in out and "--apply-era-shift" in out
+
+
+# --------------------------------------------------------------------------- #
+# R4-FU A-04 (2026-10-02) — the boundary day is a UTC day, not a prefix
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def offset_db(tmp_path) -> Path:
+    """Rows whose stored offset puts their UTC day on the other side of
+    the prefix: an import / hand edit shape (every in-tree writer stamps
+    UTC)."""
+    db = tmp_path / "offset_klog.sqlite"
+    init_db(db)
+    _insert_dated_row(db, 500, "2026-08-14T12:00:00+00:00", "kept", era=4)
+    # prefix says the 15th; UTC instant is 2026-08-14T21:30 -> ON the day
+    _insert_dated_row(db, 501, "2026-08-15T01:30:00+04:00", "kept", era=4)
+    # prefix says the 14th; UTC instant is 2026-08-15T02:30 -> NOT on the day
+    _insert_dated_row(db, 502, "2026-08-14T22:30:00-04:00", "neutral", era=4)
+    # prefix says the 13th; UTC instant is 2026-08-14T03:00 -> ON the day
+    _insert_dated_row(db, 503, "2026-08-13T23:00:00-04:00", "reverted", era=3)
+    return db
+
+
+def test_era_report_selects_the_day_on_the_utc_instant(offset_db):
+    report = bwm.era_boundary_report(offset_db, commit_time="12:58:35+00:00")
+    rows = {r["id"]: r for r in report["rows"]}
+    assert sorted(rows) == [500, 501, 503]
+    assert rows[501]["created_at_utc"] == "2026-08-14T21:30:00+00:00"
+    assert rows[503]["created_at_utc"] == "2026-08-14T03:00:00+00:00"
+    assert rows[501]["side"].startswith("after")
+    assert rows[503]["side"].startswith("before")
+    # the stored stamp is still carried verbatim beside the instant
+    assert rows[501]["created_at"] == "2026-08-15T01:30:00+04:00"
+
+
+def test_era_report_prints_the_utc_instant_and_the_stored_stamp(offset_db, capsys):
+    rc = bwm.main(["--db", str(offset_db), "--era-boundary-report"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "3 row(s) on 2026-08-14 (UTC)" in out
+    assert "2026-08-14T21:30:00+00:00  (stored 2026-08-15T01:30:00+04:00)" in out
+    assert "   502  " not in out
+
+
+def test_apply_era_shift_relabels_the_utc_day_only(offset_db):
+    result = bwm.apply_era_shift(offset_db)
+    changed = {row_id: (before, after) for row_id, before, after in result["changed"]}
+    # The classifier is untouched (it still reads the stored prefix), so
+    # only the rows whose STORED stamp it labels differently move.
+    assert 502 not in changed
+    assert set(changed) <= {500, 501, 503}
+    assert _eras(offset_db)[502] == 4
+
+
+# --------------------------------------------------------------------------- #
+# R4-FU A-12 (2026-10-02) — legacy era-4 AB-shaped rows with margin = 0
+# --------------------------------------------------------------------------- #
+
+def _insert_legacy_row(db: Path, row_id: int, margin, win_old, win_new,
+                       sim_report) -> None:
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute(
+            "INSERT INTO iterations (id, deck_id, deck_name, bracket, verdict, "
+            "margin, win_rate_old, win_rate_new, sim_report, created_at) "
+            "VALUES (?, 'd', 'D', 3, 'neutral', ?, ?, ?, ?, "
+            "'2026-08-20T10:00:00+00:00')",
+            (row_id, margin, win_old, win_new, json.dumps(sim_report)),
+        )
+        conn.commit()
+
+
+@pytest.fixture
+def legacy_db(tmp_path) -> Path:
+    db = tmp_path / "legacy_klog.sqlite"
+    init_db(db)
+    # The legacy shape: AB-shaped report, margin stored as 0, no win rates.
+    _insert_legacy_row(db, 600, 0, None, None, {"wins_a": 0, "wins_b": 0, "games": 20})
+    # Measured tie: margin 0 WITH win rates -> stays 0.
+    _insert_legacy_row(db, 601, 0, 0.5, 0.5, {"wins_a": 10, "wins_b": 10, "games": 20})
+    # Not margin 0 -> untouched even with NULL rates.
+    _insert_legacy_row(db, 602, 3, None, None, {"wins_a": 2, "wins_b": 5, "games": 20})
+    # Below the fence -> never touched.
+    _insert_legacy_row(db, 300, 0, None, None, {"wins_a": 0, "wins_b": 0, "games": 20})
+    return db
+
+
+def test_dry_run_lists_the_legacy_zero_margin_rows_without_writing(legacy_db, capsys):
+    summary = bwm.backfill(legacy_db, apply=False)
+    assert summary["legacy_zero_margin_ids"] == [600]
+    assert summary["changes"] == []
+    assert _margin_of(legacy_db, 600) == 0
+    bwm.print_report(summary)
+    out = capsys.readouterr().out
+    assert "legacy era-4 rows with margin = 0 and NO win rates" in out
+    assert "ids 600" in out and "nothing to do" not in out
+
+
+def test_apply_nulls_only_the_legacy_shape(legacy_db):
+    summary = bwm.backfill(legacy_db, apply=True)
+    assert summary["legacy_zero_margin_ids"] == [600]
+    assert _margin_of(legacy_db, 600) is None
+    assert _margin_of(legacy_db, 601) == 0
+    assert _margin_of(legacy_db, 602) == 3
+    assert _margin_of(legacy_db, 300) == 0
+    # idempotent: a NULLed row no longer matches the shape
+    assert bwm.backfill(legacy_db, apply=True)["legacy_zero_margin_ids"] == []

@@ -1,0 +1,7 @@
+Ezuri Elves — primer
+
+A classic go-wide elf deck. Mana elves (Llanowar Elves, Priest of Titania, Elvish Archdruid) turn into a lot of mana very quickly; Ezuri, Renegade Leader spends it on overrun activations once the board is wide, or regenerates the team through a wrath.
+
+How it wins. Draw engines (Glimpse of Nature, Beast Whisperer, Guardian Project, Regal Force) keep the elves flowing. The finish is either repeated Ezuri activations, Craterhoof Behemoth off Natural Order or Finale of Devastation, or an Eldrazi Monument board that cannot be blocked profitably. Triumph of the Hordes ends a stalled table on infect.
+
+Protection and recovery. Heroic Intervention and Ezuri's regeneration answer board wipes; Wirewood Symbiote and Quirion Ranger re-use the enters-the-battlefield elves. Keep hands with two mana elves and a draw engine; mulligan hands with no early elf.

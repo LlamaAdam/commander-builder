@@ -280,7 +280,9 @@ def format_text(report: StatusReport) -> str:
         lines.append(
             f"  total={s.get('total', 0)}  unique_decks={s.get('unique_decks', 0)}  "
             f"kept={s.get('kept', 0)}  reverted={s.get('reverted', 0)}  "
-            f"neutral={s.get('neutral', 0)}  pending={s.get('pending', 0)}"
+            f"neutral={s.get('neutral', 0)}  "
+            f"inconclusive={s.get('inconclusive', 0)}  "
+            f"pending={s.get('pending', 0)}"
         )
         recent = kl.get("recent", [])
         if recent:
@@ -425,10 +427,14 @@ def _iteration_summary(
 
     pricing = manifest.get("pricing") if isinstance(manifest, dict) else None
     current_price: Optional[float] = None
+    price_partial = False
     if isinstance(pricing, dict):
         p = pricing.get("total_price_usd")
         if isinstance(p, (int, float)):
             current_price = float(p)
+        # Set by save_iteration when the client priced the deck with
+        # some cards unpriced (2026-09-09) — rendered as "(partial)".
+        price_partial = pricing.get("partial") is True
 
     price_delta: Optional[float] = None
     if current_price is not None and prior_price is not None:
@@ -447,6 +453,7 @@ def _iteration_summary(
         "win_rate_new": it.win_rate_new,
         "price_usd": current_price,
         "price_delta_usd": price_delta,
+        "price_partial": price_partial,
     }, current_price
 
 
@@ -470,7 +477,17 @@ def collect_deck_status(
 
     # Stable deck identity: Moxfield publicId if present, else filename
     # stem (matches `iteration_loop.resolve_deck_id`).
-    deck_id = mox_id or deck_path.stem
+    # Same identity every writer uses (2026-09-03, R3 C-08): provenance
+    # id first, else the VERSION-STRIPPED stem — ``mox_id or stem`` missed
+    # every Archidekt-lane deck and every versioned hand-built deck.
+    # 2026-09-16 (R4 A-01): the fallback must never be None here — a
+    # MISSING deck has ``mox_id is None`` and ``resolve_deck_id`` raises
+    # without a fallback, which broke this function's documented "fields
+    # go empty rather than crashing" contract. Mirrors _proposer_sim.
+    from .deck_identity import resolve_deck_id, stable_deck_stem
+    deck_id = resolve_deck_id(
+        deck_path, fallback=mox_id or stable_deck_stem(deck_path.name),
+    )
 
     # File mtime — UTC ISO so the JSON mode is unambiguous.
     if deck_path.exists():
@@ -567,6 +584,8 @@ def _render_deck_text_plain(report: DeckStatusReport) -> str:
             delta_s = ""
             if row.get("price_delta_usd") is not None:
                 delta_s = f"  Δ${row['price_delta_usd']:+.2f}"
+                if row.get("price_partial"):
+                    delta_s += " (partial)"
             lines.append(
                 f"  #{row['id']:<4} {row.get('audit_version', '?'):<3} "
                 f"verdict={row['verdict']:<8} "
@@ -639,7 +658,11 @@ def collect_user_decks_summary(
         display_name = _strip_deck_display_name(filename)
         bracket = _parse_bracket_from_filename(filename)
         name_meta, mox_id, commander_name = _parse_dck_metadata(path)
-        deck_id = mox_id or path.stem
+        # R3 C-08 (2026-09-03): see the same line in deck_status().
+        from .deck_identity import resolve_deck_id, stable_deck_stem
+        deck_id = resolve_deck_id(
+            path, fallback=mox_id or stable_deck_stem(path.name),
+        )
         last_modified = datetime.fromtimestamp(
             path.stat().st_mtime, tz=timezone.utc,
         ).isoformat()

@@ -6,6 +6,456 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-10-02 — round-4 follow-up batch
+
+The 11 FOLLOW-UP items of negative-mode round 4 (`NEGATIVE_MODE_ROUND4.md`
+§4) plus the two sweeps the FIX-NOW batch left out. Each carries a pin
+that fails without it.
+
+- **A-04** — `backfill_web_margins --era-boundary-report` selects the
+  boundary day on each row's UTC instant (`_row_instant_utc(...).date()`)
+  instead of the raw `created_at` prefix, and prints the instant (with
+  the stored stamp beside it when they differ). `measurement_era_for` is
+  untouched.
+- **A-08** — `analyst.analyze` returns the heuristic's `inconclusive`
+  without escalating when decisive games are below the floor, so no LLM
+  rung can render a verdict on a sub-floor sim; the LLM verdict rung treats
+  a missing or unknown label as a parse failure (`LLMJsonError`, the loud
+  degrade path) instead of coercing it to `neutral`. Four analyst pins
+  moved from 5-6/11 (sub-floor) to 10-11/21 (noise band above the floor).
+- **A-11** — dashboard price tile: subtitle reads "N priced non-land
+  cards"; a land whose snapshot has no `prices` block now counts as
+  unpriced (named, `price_partial: True`) instead of being skipped before
+  the price step. Priced lands stay out of the tile's math.
+- **A-12** — `backfill_web_margins` lists and (with `--apply`) NULLs the
+  legacy era-4 shape `margin = 0 AND win_rate_old IS NULL AND
+  win_rate_new IS NULL` on AB-shaped rows above the fence; a measured tie
+  (margin 0 with win rates) is untouched.
+- **A-13** — an explicit `--sim-fillers` list that seats a `[REF]` /
+  `[CONTROL]` / `[PREMADE]` / `[USER]` deck prints one `NOTE:` line naming
+  the prefixes seated and stamps `sim_report["fillers_overridden"] = True`
+  on the auto-curate row and the bandit row; the confirm sim prints the
+  note. Helpers in `filler_policy` (`filler_override_note`,
+  `mark_fillers_overridden`, `print_filler_override_note`).
+- **B-05** — `judge_agreement.analyze` carries `per_version`
+  (`{prompt_version: gates over that version's rows}`) and
+  `pooled_informational`; the render prints a per-version G1/G2/G3 block
+  and marks the pooled gates informational when versions are mixed.
+- **B-06** — negation window: `drop*` / `skip*` / `nothing` dropped as
+  PRE cues, `against` dropped as a POST cue (kept as PRE); `but` / `only` /
+  `except` break the window's scope. `nothing` survives only as the
+  mention's direct object ("sacrifice nothing"). Six affirmative sentences
+  pinned, and the three PRIMER_CORPUS appendices are now fixtures
+  (`tests/fixtures/primer_corpus_appendix_*.txt`) with their slug lists
+  pinned — the trim moves none of them.
+- **B-07** — a win "heading" is a bare whole-line title (`fullmatch`, at
+  most four words) or a markdown-marked line (`## …`, `**…**`); "Combo
+  pieces I cut" no longer makes the cut list under it "how it wins".
+- **B-10** — the WotC payload is trusted only when all seven
+  `Game Changer Wiki <colour>` entries matched with at least one name;
+  a missing entry is rejected by name on stderr before the 80 % gate and
+  nothing is cached. The "Game Changers Info" entry is never harvested.
+- **B-11** — `atomic_write_text` resolves `os.path.realpath` first, so a
+  symlinked `config.json` / deck is written through (the link survives);
+  the docstring records that an existing parent's mode is never narrowed.
+- **B-18** — the proposer's two cut guards (`auto_propose`,
+  `apply_proposal_to_deck`) key `Protect=` with `collection.match_key`
+  instead of `lower()`, so a curly-apostrophe or accented `Protect=`
+  holds on `commander improve` / auto-curate.
+- **B-02 sweep** — the remaining strict CLI deck readers migrated to
+  `dck_utils.read_deck_text`: `archetype` (its decode failure used to be
+  swallowed into a silent "midrange"), `_proposer_cli`, `improve_search`,
+  `meta_test`, `compare_versions`, `combo_detection`, `deck_identity`,
+  `lift_analysis` (deck and corpus reads), `oracle_store`,
+  `moxfield_push`, `improvement_advisor` (CLI reads).
+- **B-14 diacritics** — `collection.match_key` folds diacritics (NFKD,
+  combining marks dropped, ligatures spelled in ASCII) on top of the R3
+  apostrophe fold: `Lim-Dûl's` = `Lim-Dul's`, `Æther` = `Aether`.
+  `name_key` is deliberately unchanged (the collection and lift matrix
+  store unfolded keys). New `collection.fold_diacritics`.
+- **Tests** — new `tests/test_atomic_io.py`; the
+  `test_build_deck_defaults_bracket_to_3` flake noted in the backlog was
+  not reproduced in three full-suite runs and repeated random-order runs
+  of `tests/test_web_app.py`; the backlog note stays.
+- **forge-canary actions.** The run annotations flagged `setup-java@v4` as deprecated and `setup-python@v5` / `upload-artifact@v4` as Node 20 builds; aligned on `setup-java@v5`, `setup-python@v6`, `upload-artifact@v5` (the versions the other workflows already use). `actions/cache@v4` kept: its warning is non-fatal and a newer major was not verified.
+- **Web import lane reads Archidekt URLs.** The desktop "Import" box handed any URL to the Moxfield id parser, so `https://archidekt.com/decks/60036` became Moxfield id `60036` (a 502, or a silently different deck). Found by the full-walkthrough e2e lane on its first live import. `web/_helpers.fetch_deck_from_url` dispatches by host like the CLI importer, stamps `Archidekt=`/`Source=archidekt` and keys the primer sidecar on `archidekt:<id>`; UI copy says Moxfield or Archidekt; pinned on the real Archidekt capture fixture.
+- **Two UI bugs found by the full two-deck walkthrough (CI runs 37047209262 / 37051424339).** (1) The cheaper-printings disclosure under the price tile appended to a variable from the function it was extracted from (`tl`), a ReferenceError the moment live pricing reported any cheaper printing; the error also aborted the compare result's rendering, so the save-iteration block never appeared after a real Forge compare. Renders into its own slot now. (2) Opening Settings refreshes the collection state asynchronously and that refresh blanked the textarea, so a list pasted before the GET returned was wiped and Save imported nothing while saying "saved". The textarea is cleared only after a successful import or clear; Playwright smoke `settings-collection.spec.js` forces the race.
+- **Walkthrough lane.** `tests/e2e/full-walkthrough.spec.js` + `.github/workflows/e2e-full.yml` (dispatch or push on the lane's files): two real decks, 75 rows across every route, page and action, live EDHREC/Scryfall, one real Forge compare, per-page screenshots and a PASS/FAIL checklist printed into the job log. `scripts/walkthrough_local.cmd` runs the same lane in the owner's installed Chrome against the running app and pushes the results.
+
+### 2026-10-02 — canary profile; EDHREC inclusion drift
+
+- **forge-canary, second cause.** With the bundle fix in, the canary ran a
+  4-game pod to completion with 0 wins on both sides. A freshly extracted
+  bundle ships only `forge.profile.properties.example`, and with its keys
+  empty Forge reads decks from `~/.forge` on Linux (pinned from the real
+  example file, `tests/fixtures/forge_profile_properties_example_2026-10-02.txt`),
+  so nothing the workflow seeded into `vendor/forge/userdata` existed where
+  Forge looked. New `bootstrap.ensure_forge_profile` writes `userDir=./userdata`
+  (never over an existing profile); `download_forge` calls it after a bundle
+  extraction and the canary calls it before seeding. On red the workflow now
+  prints where Forge actually put things and uploads `~/.forge` logs too.
+- **EDHREC inclusion was 0 for every card.** Live `json.edhrec.com`
+  cardviews carry `num_decks`, `potential_decks`, `synergy`, `lift` and
+  `trend_zscore` and no `inclusion` key (0 of 221 on the captured Krenko
+  page, `tests/fixtures/edhrec_commander_page_krenko_2026-10-02.json`); the
+  parser read `inclusion` and produced `inclusion_pct == 0.0` throughout,
+  which silently emptied the heuristic advisor's inclusion gates. One
+  `_entry_from_cardview` builder now derives inclusion as
+  `num_decks / potential_decks` (EDHREC's own displayed number), honours an
+  explicit `inclusion` first, and carries EDHREC's `lift` on `CardEntry`.
+- **Lane.** `url:` captures every url line in a request; one failing URL no
+  longer aborts the rest.
+
+### 2026-09-28 — forge-canary: Forge releases ship a bundle, not a fat jar
+
+- **Bug.** `forge-canary.yml` was red on every weekly run since it was
+  written (5/5, 2026-08-31 to 09-28): `bootstrap.download_forge` looked
+  for a `forge-gui-desktop-<ver>-jar-with-dependencies.jar` release
+  asset. The real release (captured through the lane, pinned in
+  `tests/fixtures/forge_release_latest_2026-09-28.json`) ships
+  `forge-installer-<ver>.jar` (IzPack) and `forge-installer-<ver>.tar.bz2`;
+  no release since 2.0.08 (2026-01-01) has carried a standalone fat jar,
+  so the canary never had a release it could download. The picker's
+  test fixture had been a guess at the shape.
+- **Fix.** `_pick_forge_asset` prefers a standalone fat jar if one ever
+  returns and otherwise takes the bundle; `download_forge` verifies the
+  GitHub-published sha256, extracts the bundle flat into `vendor/forge`
+  (the jar sits at the archive root next to `res/`, pinned by
+  `tests/fixtures/forge_bundle_2.0.14_listing.json` — a listing made in
+  the runner, the 302 MB asset itself never committed) with the same
+  zip-slip guards as the JRE path, and deletes the archive. The error
+  for a release with neither shape now names the assets it saw.
+- **Lane.** New `probe: <url>` request form: download an asset in the
+  runner, print size + sha256, commit only its member listing.
+
+### 2026-09-16 — negative-mode round 4, FIX-NOW batch
+
+The 18 FIX-NOW items of the fourth negative-mode round
+(`docs/ollama-analysis/NEGATIVE_MODE_ROUND4.md` §2/§4), as adjudicated by
+the cross-examiner; every item carries a regression test. The 11
+FOLLOW-UP items are listed in `docs/future-plans.md` ("Round-4
+follow-ups"). No knowledge-log row is rewritten.
+
+#### Fixed
+
+- **B-15** — `fetch-archidekt-capture.yml` gains `workflow_dispatch:`
+  (with a `request` input) beside the push trigger, so the capture lane
+  registers on master at merge (the R3 F-17 ask).
+- **A-01** — `collect_deck_status` on a MISSING deck raised `ValueError`
+  (the C-08 routing passed a None fallback); it falls back to the
+  version-stripped stem again, per its own docstring.
+- **A-02** — `/api/verdict_breakdown` and `/api/pricing_series` merge rows
+  under the posted stem AND the stable id (new
+  `deck_identity.candidate_deck_ids`, shared with `/api/iterations`), so
+  the pills and the sparkline survive `backfill_deck_ids.py --apply`.
+- **A-03** — the web `save_iteration` writer stores the stable deck id
+  (provenance id, else version-stripped stem) for filename-shaped ids;
+  `deck_identity`'s "every writer" claim is now true. Landed after A-02.
+- **A-07** — `classify_swap_direction` gains the `intent_ward` mirror of
+  the C-12 `staple_ward` branch (intent-only + `both`, no staple-only).
+- **A-09** — `stats_summary` counts `inconclusive`; `commander-status`
+  prints it.
+- **A-10** — `POST /api/save_iteration` keeps `price_partial` on a
+  caller-supplied `pricing` block (400 when that block is not an object).
+- **A-05 / A-06** — Games radios: badge rule is `decisive > floor`, the
+  tooltip says "expected to reach" (never "cleared"), 1v1 mode uses one
+  pair (no pods, no filler fraction), the run-status line prints the run's
+  total, and labels recompute on a mode change.
+- **B-01** — primer sidecar readers decode tolerantly (`errors="replace"`
+  + one WARN naming the sidecar) and catch `(OSError, ValueError)`;
+  `sidecar_identity_warning` reads the deck through `read_deck_text`;
+  `judge`/`improve` keep `--preferences` on a bare `Intent` when
+  `learn_intent` fails (`intent.learn_intent_keeping_preferences`).
+- **B-02** — `improvement_advisor.advise` reads the deck through
+  `dck_utils.read_deck_text` at both sites; `/api/audit?source=heuristic`
+  no longer 503s on a cp1252 deck (W-04 completed for the advisor).
+- **B-03** — `--strategy bandit` threads the learned intent into
+  `advise()` (`intent_themes` / `free_text_themes`), so `--preferences`
+  steers the bandit's arms.
+- **B-04** — free-text fence: docstring no longer claims the fence cannot
+  be forged; in-band lines starting with `<<<FREE-TEXT` / `>>>END-FREE-TEXT`
+  are prefixed so no line inside the fence is fence-shaped
+  (`primer.fence_free_text`, moved beside `clip_for_prompt`).
+- **B-08** — header-less (pre-R3) sidecar on re-pull: text equal to or
+  starting with the new render keeps the old text (hand notes) under a
+  fresh header (`unchanged`, reason "identity header added"); differing
+  text is `replaced_headerless` and the import says so — never
+  "upstream changed".
+- **B-09** — `PUT /api/deck_source` keeps the deck's line ending
+  (`dck_meta.line_ending`) and uses `[^\r\n]` in every `Moxfield=` regex;
+  the GET also sees the line on a CRLF deck now.
+- **B-12** — `/api/import_deck` (UI/desktop lane) writes the primer sidecar
+  after the exclusive create and reports it in a `primer` reply field.
+- **B-13** — `parse_primer` strips C0/C1 controls and DEL on both branches
+  (tabs and newlines kept); the sidecar is the sanitised render.
+- **B-14** — adopt keys BOTH DFC faces (`_face_keys`) for `Protect=`,
+  auto-protection and the linked-present check, so a back-face
+  `Protect=` protects the card.
+
+### 2026-09-09 — the three "Open bugs from the audit"
+
+All three items carried under "Open bugs from the audit" in
+`docs/future-plans.md` since 2026-07-25.
+
+#### Fixed
+
+- **Bug 1 — the Game Changers scraper reads the current WotC page.**
+  Since the site refresh the list is not in the HTML body but inside a
+  JavaScript payload as escaped strings, grouped under eight "Game
+  Changer Wiki <color>" entries as `<auto-card>` items; the `<li>` scan
+  saw only chrome (five names, zero overlap), the trust gate rejected
+  every fetch, and every process served the bundled fallback. A
+  payload parser now runs first (the legacy scan stays as the fallback
+  shape), pinned against a VERBATIM capture of the live page fetched
+  through the CI lane's new `url:` form
+  (`tests/fixtures/wotc_commander_page_2026-09-09.txt`): 53 names,
+  identical to the bundled list, trusted. The capture was consumed and
+  deleted per the lane discipline.
+- **Bug 3 — the test suite now ENFORCES offline.** `tests/conftest.py`
+  gains an autouse `network_block` fixture: every non-loopback socket
+  connect (and the `getaddrinfo` step before it) raises
+  `NetworkBlockedError` naming the test and the host; a blocked attempt
+  that a degrade guard swallows fails the test at teardown instead.
+  Loopback / AF_UNIX stay open (Flask test client, desktop tests'
+  127.0.0.1 servers) and the loopback egress proxy some sandboxes set
+  (`HTTPS_PROXY=http://127.0.0.1:…`) is stripped so it cannot tunnel
+  through that allowance. The error is deliberately not an `OSError`,
+  so urllib does not wrap it and the retry helpers do not back off on
+  it. `live` marker + `--run-live` registered (text identical to PR #85's
+  hunks) for the explicit-consent lane. Three shared opt-in seams
+  (`offline_scryfall`, `offline_edhrec`, `offline_game_changers`) make
+  the upstreams miss instantly for pipeline-level test families.
+  Measured: the three `test_deck_builder` cases that reached WotC and
+  Scryfall behind degrade guards went from 44 s / 35 s / 34 s to under
+  10 ms each; the whole file from 57 s to 0.6 s. Pinned by
+  `tests/test_network_block.py`.
+- **Bug 2 — an unpriced card is counted and named, never dropped.**
+  The oracle snapshot dir is shared with `forge_py`, whose trimmed
+  writer stores no `prices` block; `deck_pricing` and the dashboard
+  tile silently skipped such cards, so a deck total could be quietly
+  short. New core `price_status` module (shared by both readers)
+  classifies every card as priced or unpriced-with-reason
+  (`no snapshot` / `snapshot has no prices block` / `no usd price`);
+  `deck_pricing.price_deck_text` returns the total plus
+  `n_unpriced` / `unpriced[]` / `partial`, the audit payload carries
+  `unpriced_cards_original|proposed` and `price_partial`, the dashboard
+  tile carries `n_unpriced_cards` / `unpriced_cards` / `price_partial`,
+  and the trimmed-schema case prints one loud `[pricing]` stderr line
+  pointing at `commander-oracle-refresh`. The UI labels a short total
+  "≥ $X · N unpriced (partial)" with the names; `save_iteration` accepts
+  a `price_partial` bool that lands as `pricing.partial` on the row, and
+  `commander-status` renders "(partial)" next to that row's Δ. Every
+  writer in this repo (`lookup_card`, `refresh_card`,
+  `write_snapshots_from_bulk`) already persisted the full object — the
+  trimmed writer is the sibling project's — so the writer-side fix is a
+  pin (`tests/test_snapshot_writers_keep_prices.py`) that this repo
+  never becomes a second source of price-less snapshots. Reader
+  regression: `tests/test_deck_pricing.py` drives the real reader over
+  a mixed-schema temp dir. The dashboard's full-payload pin
+  (`_PIN_EXPECTED`) gained the three new keys deliberately.
+
+### 2026-09-03 — round-3 fixes (core)
+
+The statistics / simulation findings of the third negative-mode round
+(`NEGATIVE_MODE_ROUND3.md` §2, C-01…C-14 and S-1…S-4), as adjudicated
+by the cross-examiner. Every fix carries a regression test that fails
+without it; no knowledge-log row is rewritten by library code — the two
+backfills are dry-run-by-default scripts.
+
+#### Fixed
+
+- **C-08 — one `deck_id` per deck, across versions.** New
+  `deck_identity` module: `resolve_deck_id` reads `Moxfield=` (bare
+  publicId, unchanged), then `Archidekt=` (namespaced
+  `archidekt:<id>` — the C3 lane was stem-keyed before), then the
+  VERSION-STRIPPED filename stem via the proposer's own version regexes.
+  The two unattended writers (`_log_auto_curate_iteration`,
+  `_log_bandit_pull`) and `iteration_loop` pass `stable_deck_stem`
+  instead of the raw stem, so a hand-built deck's v2/v3/v4 rows are one
+  deck again and the auto-curate writer threads `parent_id` (it looked
+  up "prior iterations" by the just-bumped stem and found none).
+  `status` reads through the same function. Existing rows: new
+  `scripts/backfill_deck_ids.py` (dry-run by default, `--apply`), which
+  re-keys only filename-shaped ids and never touches `parent_id` or a
+  measurement column.
+- **C-03 — decision C1 on every filler path.** New `filler_policy`
+  module owns the `[USER]`/`[CONTROL]`/`[PREMADE]`/`[REF]` exclusion;
+  `compare_versions._pick_filler_pairs` (web A/B, `commander-compare`,
+  `commander-iterate`, `meta_test`) now filters the curated pool through
+  it — the pool is a *candidate* list and legitimately carries `[REF]`
+  decks, which were being seated as fillers — and
+  `run_match._fallback_opponents` applies the same list (it skipped only
+  `[USER]`/`[PREMADE]`). Exclusions are printed; a pool that cannot seat
+  a pod after them raises naming the counts by prefix.
+- **C-01 — sub-floor sims are `inconclusive`, not `neutral`.**
+  `analyst.heuristic_verdict`'s decisive-floor branch now returns the
+  schema's own label for "measured, not decided"; `iteration_loop` maps
+  it to `stop`; the LLM rung's schema and accepted labels include it.
+  Default `commander-iterate` runs (20 pod games) no longer land in
+  per-deck tallies as trustworthy near-ties, and sub-floor ≥40-game runs
+  no longer count toward the FP-013 gate. Four pinned tests re-pinned
+  deliberately.
+- **C-02 — a confirm sim that runs and FAILS is `inconclusive`.** Both
+  replication sites (`_default_replicate_fn`, the bandit evaluator) test
+  one predicate, `_confirm_sim_completed` (`status == 'done'`), instead
+  of `ab is None`; a crashed-JVM/skipped confirm no longer rewrites the
+  completed row to `pending` beside a `replication` record of fabricated
+  zeros — counts are `None`, `ran: False`, error carried.
+- **C-05 / C-07 — the era-boundary instructions work.**
+  `backfill_web_margins.py --era-boundary-report --apply-era-shift`
+  relabels the boundary day's stored stamps (the write that survives
+  `init_db`; NULLing by hand was re-stamped era 4, moving the constant
+  alone touched nothing) and the report prints both steps. Row times
+  and `--commit-time` are compared in UTC, the zone `created_at` is
+  written in; the flag accepts the offset `git log --date=iso-strict`
+  prints, a bare time is UTC and the header says so.
+- **C-06 — `measurement_era_for` fails closed.** A non-ISO stamp
+  (`garbage`, `2026-8-14`, `08/14/2026`) is treated like a missing one
+  (era 1 by id only, else NULL) instead of sorting lexically into era 4.
+- **C-09 — verdict provenance on the last two writers.**
+  `improve_search`'s round and `iteration_loop`'s analyst writer stamp
+  `verdict_params`; the `_proposer_sim` comment claiming it was the last
+  writer without it is corrected.
+- **C-10 — web provenance is server-computed.** `save_iteration` always
+  recomputes `suggested_verdict` from the row's own split; a client copy
+  that differs is kept under `client_suggested_verdict` and never read.
+- **C-11 — "40" is 40 per pod, and the page says so.** New
+  `GET /api/sim_settings` reports this host's pod count and the decisive
+  constants; `app.js` rewrites each Games option's label and tooltip
+  with the real total, expected decisive count and binomial noise
+  (40×4 = 160 games, ~80 decisive, ±0.06 — not the 40-total ~20 / ±0.11
+  the static tooltip quoted).
+- **C-12 — all-staple swaps with some intent fits are `staple_ward`.**
+  With at least one generic-only staple and no intent-only card,
+  `both` cards count toward staple dominance; any remaining swap with a
+  `both` card that reaches no dominance is `mixed`, never `neither`.
+- **C-13 — `inconclusive == inconclusive` is not agreement.**
+  `judge_agreement` computes the agreement rate over pairings both
+  instruments decided and reports undecided / both-inconclusive counts
+  separately.
+- **C-14 — one `margin` convention.** New `knowledge_log.
+  decisive_margin` (NULL when no game was decisive) is the helper every
+  writer and the margin backfill route through; `_ab_to_iteration_fields`
+  and `iteration_loop` no longer store `0` where the web writer stored
+  NULL. Readers migrated, history untouched.
+- **C-04 — sim-time guard on the `Name=`/stem invariant.** `compare()`
+  preflights both decks through `dck_meta.check_compare_name_alignment`:
+  a `Name=` that does not normalize to its own stem (a hand-copied
+  pair) or two stems that normalize alike are refused with the
+  `rewrite_name_to_stem` remedy before a game is spent; a nameless deck
+  only warns.
+- **S-1 / S-2 / S-3 / S-4.** Tribal intent match is whole-word
+  (`Elf` no longer matches `yourself`); the punisher-tax comment no
+  longer names a card the pattern does not cover; `init_db` refuses a
+  hand-edited two-row `schema_version` with the remedy instead of a bare
+  UNIQUE traceback; judge dimension scores must be integers (`1.5` is
+  discarded, `2.0` accepted).
+
+### 2026-09-03 — round-3 fixes (FP-018 + web)
+
+The FP-018 and web/CLI findings of the third negative-mode round
+(`NEGATIVE_MODE_ROUND3.md` §3–§4, F-01…F-18 and W-01…W-10, W-12, W-13),
+as adjudicated by the cross-examiner. Every fix carries a regression
+test that fails without it. Two FP-018 sentences in the 2026-08-27
+block below were proved false by the review and are corrected here
+rather than rewritten in place: "the adopt flow routinely builds
+free-text-only intents" (nothing in production built an `Intent` with
+free text — see F-01) and "Imports write a `<deckstem>.primer.md`
+sidecar (never empty, refuse-clobber semantics)" (Archidekt lane only,
+and "refuse-clobber" meant stem-following naming, not overwrite
+protection — see F-06/F-07/F-08).
+
+#### Fixed
+
+- **F-01 — free-text intent has a production writer.** `learn_intent`
+  reads the deck's `<stem>.primer.md` into `Intent.stated` (refusing a
+  sidecar whose header names another deck) and takes
+  `pilot_preferences` from the caller; `commander judge` and `commander
+  improve` gain `--preferences` / `--preferences-file` (one reader,
+  `intent.resolve_preferences`, shared with `adopt`). 018.2's judge
+  block and advisor bias are reachable from production for the first
+  time.
+- **F-03 — the free-text bias is additive.** Free-text slugs travel on
+  a new `--free-text-themes` flag (`improve` → `_proposer_cli` →
+  `advise(free_text_themes=)`), capped at 2, fetched IN ADDITION to the
+  advisor's 4 derived pages and marked `CommanderPage.soft_bias` so they
+  rank adds but never join the cut-protection known-set. The tribe page
+  is no longer evicted.
+- **F-05 — free text is fenced data.** The judge's intent block wraps
+  each quote in `<<<FREE-TEXT id=<hash> chars=N` … `>>>END-FREE-TEXT
+  id=<hash>` (the id is a hash of the text, so a payload cannot close
+  its own fence); the system prompt says only fenced text is quoted
+  data. `JudgeReport.prompt_version` (`2026-09-03.r3-fence`) is stamped
+  on every report and `judge_agreement` tallies rows per version so a
+  prompt change is never read as a change in the decks.
+- **F-04 — negation-aware, word-bounded preference matching.**
+  `free_text_theme_slugs` uses word-bounded patterns and drops a mention
+  inside a negation window ("no tokens", "not a lifegain deck", "afraid
+  of lifegain players", the real "Lifegain is brutal against this
+  deck"); a bare singular "artifact"/"enchantment" is a card
+  description, not a theme. `--preferences` help says preferences are
+  read as affirmative keywords.
+- **F-02 / F-10 / F-16 — one front-face key.** New
+  `collection.match_key` (case-folded front face + apostrophe fold +
+  whitespace collapse) on both sides of adopt's card-link cross-check,
+  the protection union, `Protect=` matching and `prose_mentions` (now
+  word-bounded). DFC embeds (`Front // Back`) match the `.dck`'s front
+  face and are auto-protected; a curly-apostrophe `Protect=` pins the
+  card; `Opt` no longer matches `option`.
+- **F-06 — the Moxfield lane writes the sidecar too** (plain text per
+  the corpus study, Appendix C pinned); the false "no capture in this
+  repo" comment is gone.
+- **F-07 / F-08 — sidecar identity and honest overwrite.** The sidecar
+  carries a `primer-source` header (source id + description hash).
+  `store_primer_sidecar` reports written / refreshed / unchanged /
+  refused: same source with changed words refreshes, same words leaves
+  the file (hand edits survive), another source's sidecar is never
+  overwritten (loud WARN). Readers (`adopt`, `learn_intent`) refuse a
+  header that does not match the deck's `Moxfield=`/`Archidekt=` id;
+  the web DELETE route removes the sidecar with the deck;
+  `snapshot_deck` copies it; a re-pull whose upstream dropped its
+  description removes the deck's own stale sidecar.
+- **F-09 — unresolved cards are never proposed as cuts**; past 25%
+  unresolved the suggestion pass is refused naming the remedy; the
+  "never touch … lands" sentence is printed only when every card
+  resolved; `commander-init`'s decline text no longer promises an
+  on-demand prime the cache-only commands cannot do.
+- **F-11** unrecognized card-links are reported separately from
+  oracle-resolved drift; **F-12** `quoted_win_lines` is word-bounded
+  and heading-aware (the paragraph under a "Win Conditions" heading is
+  quoted; no exclusion word list); **F-13** the two "rebuild
+  unreachable" pins are load-bearing (8-swap corpus, AST subscript
+  check); **F-14** non-Delta JSON is refused as a primer and card-link
+  lines are JSON-encoded; **F-15** `offline_game_changers` warns once on
+  stderr, sets `_FALLBACK_USED`, and `swap_label` records
+  `staple_list_source`; **F-18** `main_count` counts cards.
+- **W-01** `PUT /api/deck_source` accepts only a Moxfield URL / id and
+  writes atomically; **W-02** the request gate refuses any `/api/`
+  request whose `Sec-Fetch-Site` is neither `same-origin` nor `none`
+  (side-effecting GETs were outside the CSRF gate); **W-03** a UTF-8
+  BOM no longer disables the `[metadata]` parsers (`dck_utils.strip_bom`
+  at the three sites); **W-04** one `.dck` reader
+  (`dck_utils.read_deck_text`: BOM-stripped, non-UTF-8 decoded with
+  replacement + a loud per-file warning) replaces the strict reads in
+  the web routes and the intent/adopt/judge readers; out-of-dir symlinks
+  are not listed; **W-05** the web import uses the CLI's
+  `safe_filename`, NUL / over-long names are 400s, NUL in a deck id is
+  a 404, `MAX_CONTENT_LENGTH` is 8 MB; **W-06** `parse_deck_id` (both
+  lanes) raises on anything but a deck URL / id, `fetch_deck` validates
+  and URL-quotes, `verify_against_source` refuses a non-id `Moxfield=`
+  line; **W-07** `deck_dir` must be an absolute, NUL-free, existing
+  directory; **W-08** `save_config` writes atomically at 0o600 (parent
+  0o700); **W-09** new core `atomic_io.atomic_write_text` (re-exported
+  by `web._helpers`) backs the build worker, `deck_source`,
+  `rewrite_name_to_stem`, and the import route creates exclusively;
+  **W-10** `rewrite_name` / `set_bracket_unverified` keep a CRLF deck's
+  line endings and the atomic writer writes bytes verbatim, so an
+  unchanged GET→PUT is byte-identical; **W-12** the desktop launch test
+  injects the instance lock and every desktop test runs under a
+  per-test `COMMANDER_BUILDER_LOCK_DIR`; **W-13** a Playwright spec
+  drives `/api/audit/stream` through the real SSE client against a
+  stubbed stream.
+
 ### 2026-08-27 — FP-018 "Adopt a deck" (slices 018.1–018.3)
 
 #### Added
@@ -19,7 +469,11 @@ applies once we tag a 1.0.
   fixture `archidekt_primer_delta_86888.json`). Imports write a
   `<deckstem>.primer.md` sidecar (never empty, refuse-clobber
   semantics) with the card-links block preserved; `.dck` format
-  untouched. Prompt use goes through `clip_for_prompt` — explicit
+  untouched. *(Corrected 2026-09-03, R3 F-06/F-07/F-08: this was the
+  Archidekt lane only, and "refuse-clobber" meant stem-following naming
+  — the file was overwritten on every re-pull. Both lanes write it now,
+  with an identity header and honest overwrite rules; see the round-3
+  block above.)* Prompt use goes through `clip_for_prompt` — explicit
   truncation marker, never silent.
 - **Free-text intent (018.2).** `Intent` gains `stated` (the deck's
   own primer) and `pilot_preferences` (the adopter's words). Both flow
@@ -33,7 +487,10 @@ applies once we tag a 1.0.
   adopt flow routinely builds free-text-only intents, and without the
   guard those pairings would enter G3's population with a fabricated
   `staple_ward` direction). The two judge boundary tests moved with
-  the boundary, deliberately.
+  the boundary, deliberately. *(Corrected 2026-09-03, R3 F-01: no
+  production code built an `Intent` with free text at the time — the
+  guard was right, its stated rationale was not; `learn_intent` and the
+  `--preferences` flags are the writers, see the round-3 block above.)*
 - **`commander adopt` (018.3).** Deterministic, offline, read-only:
   (1) a grounded explanation — the primer's plan cross-checked against
   the actual list (cards it names that are/aren't present, packages by

@@ -83,7 +83,9 @@ def names_from_deck(deck_path: Path) -> list[str]:
     ``|SET|CN`` suffix is handled consistently."""
     from .deck_library_analyzer import iter_deck_cards
 
-    text = Path(deck_path).read_text(encoding="utf-8")
+    from .dck_utils import read_deck_text
+
+    text = read_deck_text(Path(deck_path))  # tolerant (R4-FU B-02 sweep)
     seen: set[str] = set()
     out: list[str] = []
     for _qty, name in iter_deck_cards(text):

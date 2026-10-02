@@ -9,11 +9,26 @@
 # provenance noted, and the capture file is deleted once consumed.
 name: fetch-archidekt-capture
 
-# Trigger: push-based rather than workflow_dispatch, because GitHub only
+# Trigger: push-based on the feature branch because GitHub only
 # registers dispatchable workflows from the DEFAULT branch, and this
-# helper lives on a feature branch. Committing a request file both
+# helper was born on a feature branch. Committing a request file both
 # triggers the run and carries the deck id.
+# workflow_dispatch added 2026-09-16 (R4 B-15, the R3 F-17 ask): once
+# this branch merges, the branch named below no longer exists and a
+# request.txt push to master would trigger nothing. The dispatch
+# trigger registers on master AT merge, so the lane survives the
+# branch. The optional `request` input is written to request.txt so
+# the fetch step below needs no second code path.
 on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: >-
+          Contents for tests/fixtures/_captures/request.txt (a deck id,
+          `commander:<name>`, `mode: primer-batch` or `url: https://...`).
+          Leave empty to use the committed request.txt.
+        required: false
+        default: ""
   push:
     branches: ["claude/ollama-code-analysis-ak77i1"]
     paths: ["tests/fixtures/_captures/request.txt"]
@@ -31,6 +46,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - name: Materialise a dispatch request
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.request != '' }}
+        run: |
+          mkdir -p tests/fixtures/_captures
+          printf '%s\n' "${{ github.event.inputs.request }}" > tests/fixtures/_captures/request.txt
       - name: Fetch deck JSON
         run: |
           # Deleting the request file (the consume step) also matches
@@ -80,6 +100,204 @@ jobs:
           # Number parsing: FIRST number, not all digits concatenated -- a
           # retry marker like '24864897 retry-1' must not become 248648971
           # (exactly what happened on attempt 2).
+          # Fourth form (2026-09-09, audit open bug 1): `url: <https://...>`
+          # captures an arbitrary page VERBATIM (bytes untouched) plus a
+          # sidecar JSON with status/final URL/content-type. Exists because
+          # the Game Changers scraper's parser broke against the current
+          # WotC page and the sandbox cannot reach magic.wizards.com --
+          # the fix must be pinned against the real page, never a
+          # synthesized one. Same UA ladder as the deck fetch.
+          # Fifth + sixth forms (2026-09-26, win-condition research):
+          #   oracle-names: <path>  -- Scryfall's bulk oracle_cards file
+          #                            (~150 MB, fetched in the runner
+          #                            where egress is open) trimmed to
+          #                            the names listed one-per-line in
+          #                            <path> (front-face names match
+          #                            "Front // Back" cards). Written as
+          #                            a compact JSON so 3k cards of REAL
+          #                            oracle text can be reasoned over
+          #                            offline without inventing any.
+          #   combos: <top_n>       -- runs the repo's own
+          #                            combo_detection.refresh_combos
+          #                            (Commander Spellbook, ordering
+          #                            =-popularity) with the output
+          #                            redirected into _captures/, so
+          #                            the capture IS the production
+          #                            code path's output, not a copy of
+          #                            it. data/ is gitignored, which is
+          #                            why the sandbox never has it.
+          # Both may share one request.txt with each other and with
+          # url: lines; the url block below runs last.
+          # Seventh form (2026-09-28, forge-canary 5/5 red): `probe: <url>`
+          # downloads a release asset in the runner, prints size + sha256
+          # and LISTS its archive members (tar.bz2 / zip / jar) into a
+          # small probe_<sha8>.json. The asset itself is never committed
+          # (300 MB). Exists because the Forge release shape changed and
+          # the fix must be pinned against the real bundle layout.
+          if grep -q '^probe: *https://' tests/fixtures/_captures/request.txt; then
+            python3 - <<'PYPROBE'
+          import hashlib, json, tarfile, time, urllib.request, zipfile
+          from pathlib import Path
+          UA = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
+          urls = [l.split(":", 1)[1].strip() for l in open("tests/fixtures/_captures/request.txt") if l.startswith("probe:")]
+          for url in urls:
+              tag = hashlib.sha256(url.encode()).hexdigest()[:8]
+              dest = Path("/tmp") / f"probe_{tag}.bin"
+              req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
+              t0 = time.time(); h = hashlib.sha256(); n = 0
+              with urllib.request.urlopen(req, timeout=600) as resp, open(dest, "wb") as fh:
+                  final = resp.geturl(); ctype = resp.headers.get("Content-Type")
+                  for chunk in iter(lambda: resp.read(1 << 20), b""):
+                      fh.write(chunk); h.update(chunk); n += len(chunk)
+              print(f"{url}: {n/1e6:.1f} MB in {time.time()-t0:.0f}s sha256={h.hexdigest()}")
+              members = []; kind = "unknown"
+              try:
+                  if tarfile.is_tarfile(dest):
+                      kind = "tar"
+                      with tarfile.open(dest) as tf:
+                          for m in tf:
+                              members.append({"name": m.name, "size": m.size, "type": "dir" if m.isdir() else "file"})
+                  elif zipfile.is_zipfile(dest):
+                      kind = "zip"
+                      with zipfile.ZipFile(dest) as zf:
+                          for i in zf.infolist():
+                              members.append({"name": i.filename, "size": i.file_size, "type": "dir" if i.is_dir() else "file"})
+              except Exception as e:
+                  print(f"listing failed: {type(e).__name__}: {e}")
+              top = sorted({m["name"].split("/")[0] for m in members})
+              jars = [m for m in members if m["name"].endswith(".jar")]
+              print(f"kind={kind} members={len(members)} top-level={top[:30]}")
+              print("jars:", [(j["name"], j["size"]) for j in jars[:40]])
+              depth2 = sorted({"/".join(m["name"].split("/")[:2]) for m in members})
+              out = {"_provenance": {"url": url, "final_url": final, "content_type": ctype, "bytes": n,
+                                     "sha256": h.hexdigest(), "captured": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+                     "kind": kind, "member_count": len(members), "top_level": top, "depth2": depth2[:400],
+                     "jars": jars, "largest": sorted(members, key=lambda m: -m["size"])[:40]}
+              Path("tests/fixtures/_captures", f"probe_{tag}.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
+              dest.unlink()
+          PYPROBE
+            if ! grep -qE '^(oracle-names|combos|url):' tests/fixtures/_captures/request.txt; then exit 0; fi
+          fi
+          if grep -qE '^(oracle-names|combos):' tests/fixtures/_captures/request.txt; then
+            pip install -q -e . 2>&1 | tail -1
+            python3 - <<'PYEXTRA'
+          import hashlib, json, time, urllib.request
+          from pathlib import Path
+          UA = "commander-builder/0.2 (+https://github.com/LlamaAdam/commander-builder)"
+          cap = Path("tests/fixtures/_captures")
+          names_path = ""; top_n = 0
+          for line in open(cap / "request.txt"):
+              if line.startswith("oracle-names:"):
+                  names_path = line.split(":", 1)[1].strip()
+              elif line.startswith("combos:"):
+                  raw = line.split(":", 1)[1].strip()
+                  if not raw.isdigit() or not 1 <= int(raw) <= 5000:
+                      raise SystemExit(f"combos: must be an integer 1..5000, got {raw!r}")
+                  top_n = int(raw)
+          def fetch(url, accept="application/json"):
+              req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
+              with urllib.request.urlopen(req, timeout=300) as resp:
+                  return resp.read()
+          if names_path:
+              wanted = {l.strip() for l in open(names_path, encoding="utf-8") if l.strip()}
+              # Scryfall drift, pinned by the lane's own first two runs
+              # (2026-09-26): /bulk-data/oracle-cards no longer carries
+              # `download_uri` at all -- only `jsonl_download_uri`, a
+              # gzipped JSONL (~24 MB compressed). Stream-decode it.
+              import gzip, io
+              meta = json.loads(fetch("https://api.scryfall.com/bulk-data/oracle-cards"))
+              uri = meta.get("jsonl_download_uri") or meta.get("download_uri")
+              if not uri:
+                  raise SystemExit(f"no download uri in bulk-data reply: {json.dumps(meta)[:600]}")
+              t0 = time.time(); blob = fetch(uri, accept="*/*")
+              print(f"bulk oracle_cards: {len(blob)/1e6:.1f} MB in {time.time()-t0:.0f}s from {uri}")
+              if uri.endswith(".gz") or blob[:2] == b"\x1f\x8b":
+                  blob = gzip.decompress(blob)
+              text = blob.decode("utf-8")
+              if uri.split("?")[0].endswith((".jsonl", ".jsonl.gz")) or not text.lstrip().startswith("["):
+                  cards = [json.loads(l) for l in text.splitlines() if l.strip()]
+              else:
+                  cards = json.loads(text)
+              print(f"parsed {len(cards)} oracle cards")
+              def front(n): return n.split(" // ", 1)[0]
+              keep = {}
+              for c in cards:
+                  if c.get("layout") in ("token", "double_faced_token", "emblem", "art_series"):
+                      continue
+                  n = c.get("name", "")
+                  hit = n if n in wanted else (front(n) if front(n) in wanted else None)
+                  if hit is None or hit in keep:
+                      continue
+                  faces = c.get("card_faces") or []
+                  keep[hit] = {
+                      "name": n,
+                      "type_line": c.get("type_line") or " // ".join(f.get("type_line", "") for f in faces),
+                      "oracle_text": c.get("oracle_text") if c.get("oracle_text") is not None else "\n//\n".join(f.get("oracle_text", "") for f in faces),
+                      "mana_cost": c.get("mana_cost") if c.get("mana_cost") is not None else " // ".join(f.get("mana_cost", "") for f in faces),
+                      "cmc": c.get("cmc"), "color_identity": c.get("color_identity"),
+                      "keywords": c.get("keywords"), "layout": c.get("layout"),
+                      "power": c.get("power") or (faces[0].get("power") if faces else None),
+                      "toughness": c.get("toughness") or (faces[0].get("toughness") if faces else None),
+                      "produced_mana": c.get("produced_mana"),
+                      "legal_commander": (c.get("legalities") or {}).get("commander"),
+                      "game_changer": c.get("game_changer"),
+                  }
+              missing = sorted(wanted - set(keep))
+              tag = hashlib.sha256("\n".join(sorted(wanted)).encode()).hexdigest()[:8]
+              out = {"_provenance": {"source": "scryfall bulk oracle_cards", "download_uri": uri,
+                                     "updated_at": meta.get("updated_at"), "names_file": names_path,
+                                     "requested": len(wanted), "found": len(keep), "missing": missing},
+                     "cards": dict(sorted(keep.items()))}
+              (cap / f"oracle_{tag}.json").write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+              print(f"oracle_{tag}.json: {len(keep)}/{len(wanted)} names found; missing {len(missing)}: {missing[:20]}")
+          if top_n:
+              from commander_builder.combo_detection import refresh_combos
+              n = refresh_combos(top_n=top_n, out_path=cap / f"combos_top{top_n}.json")
+              print(f"combos_top{top_n}.json: {n} combos written")
+          PYEXTRA
+            if ! grep -q '^url: *https://' tests/fixtures/_captures/request.txt; then exit 0; fi
+          fi
+          if grep -q '^url: *https://' tests/fixtures/_captures/request.txt; then
+            python3 - <<'PYURL'
+          import hashlib, json, urllib.error, urllib.request
+          # 2026-10-02: every url: line is captured, not just the first
+          # (the EDHREC build-assist probe needs three pages in one run).
+          urls = [line.split(":", 1)[1].strip()
+                  for line in open("tests/fixtures/_captures/request.txt")
+                  if line.startswith("url:")]
+          for url in urls:
+              uas = [
+                  "commander-builder/0.2",
+                  "commander-builder/0.1 (+https://github.com/LlamaAdam/commander-builder)",
+                  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+              ]
+              last = None
+              for ua in uas:
+                  req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "text/html,*/*"})
+                  try:
+                      with urllib.request.urlopen(req, timeout=60) as resp:
+                          body = resp.read()
+                          meta = {"url": url, "final_url": resp.geturl(), "status": resp.status,
+                                  "content_type": resp.headers.get("Content-Type"),
+                                  "user_agent": ua, "bytes": len(body)}
+                      break
+                  except urllib.error.HTTPError as e:
+                      print(f"UA {ua!r}: HTTP {e.code}"); last = e
+                  except Exception as e:
+                      print(f"UA {ua!r}: {type(e).__name__}: {e}"); last = e
+              else:
+                  print(f"every UA failed for {url}: {last}"); continue
+              tag = hashlib.sha256(url.encode()).hexdigest()[:8]
+              open(f"tests/fixtures/_captures/page_{tag}.html", "wb").write(body)
+              json.dump(meta, open(f"tests/fixtures/_captures/page_{tag}.json", "w"), indent=1)
+              text = body.decode("utf-8", errors="replace")
+              print(json.dumps(meta))
+              print("contains 'Game Changers':", "Game Changers" in text,
+                    "| <li> count:", text.lower().count("<li"),
+                    "| looks client-rendered:", ("__NEXT_DATA__" in text) or ("window.__" in text))
+          PYURL
+            exit 0
+          fi
           if grep -q '^mode: *primer-batch' tests/fixtures/_captures/request.txt; then
             python3 - <<'PYBATCH'
           import hashlib, json, time, urllib.error, urllib.parse, urllib.request
@@ -96,7 +314,15 @@ jobs:
 
           for line in open("tests/fixtures/_captures/request.txt"):
               if line.startswith("per-site:"):
-                  KEEP_PER_SITE = int(line.split(":", 1)[1].strip())
+                  # R3 F-17 (2026-09-03): a non-integer used to crash the
+                  # run red and a negative silently kept nothing; bound it
+                  # and say why, in the same loud-failure idiom as the
+                  # deck-id path.
+                  raw = line.split(":", 1)[1].strip()
+                  if not raw.isdigit() or not 1 <= int(raw) <= 100:
+                      raise SystemExit(
+                          f"per-site: must be an integer 1..100, got {raw!r}")
+                  KEEP_PER_SITE = int(raw)
 
           def get_json(url, retry_429=True):
               req = urllib.request.Request(url, headers={

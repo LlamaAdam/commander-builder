@@ -231,8 +231,11 @@ def test_run_one_iteration_persists_reverted_verdict(tmp_path, staged_decks, mon
 
 def test_run_one_iteration_handles_inconclusive_draw_heavy_sim(tmp_path, staged_decks, monkeypatch):
     """The Hakbal-vs-Hash case: 18 of 20 games drew. Heuristic returns
-    'neutral' (low confidence), iteration_loop should map that to 'stop' so
-    the caller knows to ask the user."""
+    'inconclusive' (low confidence), iteration_loop must map that to
+    'stop' so the caller knows to ask the user. (Re-pinned 2026-09-03,
+    R3 C-01: the persisted label was 'neutral', which the schema defines
+    as a trustworthy near-tie; a default commander-iterate run landed in
+    every per-deck tally looking decided.)"""
     canned = _make_canned_comparison(old_wins=1, new_wins=1, draws=18, total=20)
     monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
 
@@ -244,9 +247,11 @@ def test_run_one_iteration_handles_inconclusive_draw_heavy_sim(tmp_path, staged_
         audit_manifest={"added": [], "removed": []},
         db_path=db,
     )
-    assert result.verdict.label == "neutral"
+    assert result.verdict.label == "inconclusive"
     assert result.next_action == "stop"
     assert "decks_drew_too_often" in str(result.verdict.lessons)
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    assert fetched.verdict == "inconclusive"
 
 
 def test_run_one_iteration_chains_via_parent_id(tmp_path, staged_decks, monkeypatch):
@@ -709,3 +714,91 @@ def test_run_one_iteration_refuses_verdict_on_zero_attributed_games(
     assert "no attributed games" in (fetched.verdict_notes or "")
     # Loud warning on the console.
     assert "WARNING" in capsys.readouterr().out
+
+
+# --- R3 C-08 (2026-09-03): legacy decks share one deck_id across versions --
+
+@pytest.fixture
+def legacy_decks(tmp_path, monkeypatch):
+    """Two versions of a hand-built deck: NO Moxfield= line."""
+    deck_dir = tmp_path / "decks" / "commander"
+    deck_dir.mkdir(parents=True)
+    names = ["[USER] Legacy v1 [B3].dck", "[USER] Legacy v2 [B3].dck",
+             "[USER] Legacy v3 [B3].dck"]
+    for n in names:
+        (deck_dir / n).write_text(
+            f"[metadata]\nName={n[:-4]}\n[Commander]\n1 Cmdr\n[Main]\n1 Sol Ring\n",
+            encoding="utf-8")
+    monkeypatch.setattr("commander_builder.iteration_loop.DECK_DIR", deck_dir)
+    return names
+
+
+def test_run_one_iteration_keys_a_legacy_deck_stably(tmp_path, legacy_decks, monkeypatch):
+    """v1->v2 and v2->v3 used to be two deck_ids ('... v1 [B3].dck' and
+    '... v2 [B3].dck'); the version-stripped stem keys both."""
+    canned = _make_canned_comparison(old_wins=4, new_wins=16, draws=0, total=20)
+    monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
+    db = tmp_path / "kl.sqlite"
+    first = run_one_iteration(
+        deck_filename=legacy_decks[0], new_deck_filename=legacy_decks[1],
+        bracket=3, audit_manifest={"added": [], "removed": []}, db_path=db)
+    second = run_one_iteration(
+        deck_filename=legacy_decks[1], new_deck_filename=legacy_decks[2],
+        bracket=3, audit_manifest={"added": [], "removed": []}, db_path=db)
+    a = get_iteration(first.iteration_id, db_path=db)
+    b = get_iteration(second.iteration_id, db_path=db)
+    assert a.deck_id == b.deck_id == "[USER] Legacy [B3]"
+
+
+# --- R3 C-09 (2026-09-03): the analyst writer stamps verdict provenance ----
+
+def test_run_one_iteration_stamps_verdict_provenance(tmp_path, staged_decks, monkeypatch):
+    from commander_builder.analyst import AnalystConfig
+    from commander_builder.knowledge_log import SIM_REPORT_VERDICT_PARAMS_KEY
+    canned = _make_canned_comparison(old_wins=4, new_wins=16, draws=0, total=20)
+    monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
+    db = tmp_path / "kl.sqlite"
+    result = run_one_iteration(
+        deck_filename=staged_decks["v1"], new_deck_filename=staged_decks["v2"],
+        bracket=3, audit_manifest={"added": ["A"], "removed": ["B"]}, db_path=db,
+        analyst_config=AnalystConfig(alpha=0.01),
+    )
+    params = get_iteration(result.iteration_id, db_path=db).sim_report[
+        SIM_REPORT_VERDICT_PARAMS_KEY]
+    assert params["alpha"] == 0.01
+    assert params["min_decisive"] == 20
+    assert params["margin"] == 1
+    assert params["rule"].startswith("analyst.heuristic")
+
+
+def test_zero_game_row_carries_no_provenance(tmp_path, staged_decks, monkeypatch):
+    """No verdict rule ran on an empty sim — nothing to claim."""
+    from commander_builder.knowledge_log import SIM_REPORT_VERDICT_PARAMS_KEY
+    canned = _make_canned_comparison(old_wins=0, new_wins=0, draws=0, total=0)
+    monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
+    db = tmp_path / "kl.sqlite"
+    result = run_one_iteration(
+        deck_filename=staged_decks["v1"], new_deck_filename=staged_decks["v2"],
+        bracket=3, audit_manifest={"added": [], "removed": []}, db_path=db)
+    assert SIM_REPORT_VERDICT_PARAMS_KEY not in get_iteration(
+        result.iteration_id, db_path=db).sim_report
+
+
+# --- R3 C-14 (2026-09-03): a 0-0 compare stores NULL margin ---------------
+
+def test_run_one_iteration_null_margin_when_no_game_was_decisive(
+    tmp_path, staged_decks, monkeypatch,
+):
+    """Every game went to a filler (total 20, pair won 0): this writer
+    stored margin=0 while the web writer stored NULL for the same
+    outcome. The verdict is 'inconclusive' (0 < 20 decisive)."""
+    canned = _make_canned_comparison(old_wins=0, new_wins=0, draws=0, total=20)
+    monkeypatch.setattr("commander_builder.iteration_loop.compare", lambda **kw: canned)
+    db = tmp_path / "kl.sqlite"
+    result = run_one_iteration(
+        deck_filename=staged_decks["v1"], new_deck_filename=staged_decks["v2"],
+        bracket=3, audit_manifest={"added": [], "removed": []}, db_path=db)
+    fetched = get_iteration(result.iteration_id, db_path=db)
+    assert fetched.verdict == "inconclusive"
+    assert fetched.margin is None
+    assert fetched.win_rate_old is None and fetched.win_rate_new is None

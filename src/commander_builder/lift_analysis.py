@@ -218,7 +218,11 @@ def build_corpus(deck_dir: Path) -> list[CorpusDeck]:
         if not _is_corpus_file(f.name):
             continue
         try:
-            text = f.read_text(encoding="utf-8")
+            # Tolerant (R4-FU B-02 sweep, 2026-10-02): a strict read's
+            # UnicodeDecodeError is a ValueError, which the OSError arm
+            # never caught — one cp1252 corpus deck aborted the whole
+            # corpus build instead of degrading that one file.
+            text = dck_utils.read_deck_text(f)
         except OSError:
             continue
         keys, display = _deck_vocab_keys(text)
@@ -416,7 +420,7 @@ def deck_keys_for_path(deck_path: Path) -> set[str]:
     name_key'd, staples/basics dropped — same convention as the corpus
     so membership tests line up exactly)."""
     try:
-        text = Path(deck_path).read_text(encoding="utf-8")
+        text = dck_utils.read_deck_text(Path(deck_path))
     except OSError:
         return set()
     keys, _display_map = _deck_vocab_keys(text)

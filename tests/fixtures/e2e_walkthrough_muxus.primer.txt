@@ -1,0 +1,9 @@
+Muxus Goblins — primer
+
+The plan is simple: make a lot of goblins, make them bigger, and swing. Muxus, Goblin Grandee is the top of the curve — cast him once the board has a few bodies and the six-card dig refills the hand while the +1/+1 for each other goblin turns a wide board into lethal.
+
+How it wins. Early turns are about cheap goblins and the lords (Goblin Chieftain, Goblin Warchief, Goblin King) so the team attacks with haste. Krenko, Mob Boss doubles the board every turn he survives; Skirk Prospector turns a dead board into mana for Muxus. Impact Tremors and Purphoros, God of the Forge punish the table for every token that enters, so even a wrath only resets the clock. Coat of Arms and Shared Animosity close the game once the board is wide.
+
+Protection and recovery. Swiftfoot Boots and Lightning Greaves keep Muxus or Krenko around; Skullclamp turns chump tokens into cards. Blasphemous Act and Chaos Warp are the only real answers — the deck would rather race than interact.
+
+Mulligan for a land-light hand with at least one two-drop goblin. Keep the token makers; cut the equipment when the table is low on removal.

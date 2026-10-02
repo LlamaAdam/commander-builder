@@ -365,6 +365,16 @@ from ._advisor_claude import (  # noqa: E402
 
 # --- Public entry ----------------------------------------------------------
 
+#: Tag pages fetched from the deck's OWN evidence (intent themes, tribe,
+#: detected themes), in that priority. Free-text pages are extra — see
+#: ``_fetch_tag_pages_lazy`` (R3 F-03).
+DERIVED_TAG_PAGE_CAP = 4
+#: Additional pages for slugs an intent's free text mentions. Matches
+#: ``intent.FREE_TEXT_SLUG_CAP`` — the two bound the same list from either
+#: end so a longer free-text list can never cost more round-trips.
+FREE_TEXT_TAG_PAGE_CAP = 2
+
+
 def advise(
     deck_path: Path,
     bracket: int,
@@ -378,6 +388,7 @@ def advise(
     api_key: Optional[str] = None,
     collection_path: Optional[Path] = None,
     owned_only: bool = False,
+    free_text_themes: Optional[list[str]] = None,
 ) -> AdviceReport:
     """Generate swap recommendations for one deck.
 
@@ -438,6 +449,7 @@ def advise(
         api_key=api_key,
         collection_path=collection_path,
         owned_only=owned_only,
+        free_text_themes=free_text_themes,
     ):
         if phase.phase == "complete":
             final_report = phase.data.get("report")
@@ -474,6 +486,7 @@ def _advise_steps(
     api_key: Optional[str] = None,
     collection_path: Optional[Path] = None,
     owned_only: bool = False,
+    free_text_themes: Optional[list[str]] = None,
 ) -> Iterator[AdvicePhase]:
     """Generator version of :func:`advise` — yields ``AdvicePhase``
     events as each stage of the pipeline completes.
@@ -550,8 +563,12 @@ def _advise_steps(
     # lines ("27 Mountain") to 1x — phantom color deficits, inflated mana
     # producers. Existence was validated above, so a read failure here is
     # a real I/O error worth degrading quietly on (empty set, no audit).
+    # ``read_deck_text`` (R4 B-02, 2026-09-16): the web routes above this
+    # call already read tolerantly (R3 W-04), but this strict re-read
+    # 503'd ``/api/audit`` and put an error frame on ``/api/audit/stream``
+    # for the same cp1252 deck they had just accepted.
     try:
-        deck_text = deck_path.read_text(encoding="utf-8")
+        deck_text = dck_utils.read_deck_text(deck_path)
     except OSError:
         deck_text = ""
     main_cards = set(dck_utils.main_card_names(deck_text))
@@ -687,7 +704,7 @@ def _advise_steps(
         # Cap at 4 pages — each is a ~1-2s HTTP round-trip on a
         # cold cache, and beyond ~3 the signal diminishes quickly
         # (themes overlap heavily on staples).
-        slugs = slugs[:4]
+        slugs = slugs[:DERIVED_TAG_PAGE_CAP]
         out: list[CommanderPage] = []
         for s in slugs:
             try:
@@ -696,6 +713,24 @@ def _advise_steps(
                 p = None
             if p is not None:
                 out.append(p)
+        # Free-text slugs (``free_text_themes`` — R3 F-03, 2026-09-03)
+        # are fetched IN ADDITION to the derived cap, never inside it:
+        # as part of one list, three derived themes plus one primer
+        # slug filled the four slots before the tribe's, and the tribe
+        # page is what exempts in-tribe cards from absence-cuts. They
+        # are marked ``soft_bias`` so the heuristic ranks adds from
+        # them but never folds them into that known-set.
+        import dataclasses as _dc
+        extra = [s.strip() for s in (free_text_themes or [])
+                 if s.strip() and s.strip() not in seen_slugs]
+        for s in extra[:FREE_TEXT_TAG_PAGE_CAP]:
+            seen_slugs.add(s)
+            try:
+                p = fetch_tag_page(s)
+            except Exception:  # noqa: BLE001
+                p = None
+            if p is not None:
+                out.append(_dc.replace(p, soft_bias=True))
         tag_pages = out
         return tag_pages
 
@@ -847,7 +882,7 @@ def _advise_steps(
     # since this is the post-processing step.
     deck_id: Optional[str] = None
     try:
-        text = deck_path.read_text(encoding="utf-8")
+        text = dck_utils.read_deck_text(deck_path)  # tolerant (R4 B-02)
         m = re.search(r"^Moxfield=(.+)$", text, re.MULTILINE)
         if m:
             deck_id = m.group(1).strip()
@@ -1320,7 +1355,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             report = _bubble.apply_verdict_to_report(
                 report,
-                deck_text=_verdict_deck.read_text(encoding="utf-8"),
+                deck_text=dck_utils.read_deck_text(_verdict_deck),
                 corpus=_corpus,
                 bracket=args.bracket,
             )
@@ -1339,7 +1374,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     bracket_estimate = None
     try:
         from .bracket_estimator import derive_signals, estimate_bracket
-        _deck_text = Path(args.user).read_text(encoding="utf-8")
+        _deck_text = dck_utils.read_deck_text(Path(args.user))
         _avg_cmc, _archetype = derive_signals(
             _deck_text, deck_path=Path(args.user),
         )
@@ -1359,7 +1394,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         from .deck_health import compute_health_grade
         health_grade = compute_health_grade(
-            Path(args.user).read_text(encoding="utf-8"),
+            dck_utils.read_deck_text(Path(args.user)),
         )
     except Exception:  # noqa: BLE001 — advice must print regardless
         health_grade = None

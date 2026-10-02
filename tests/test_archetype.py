@@ -1106,3 +1106,42 @@ def test_oracle_scan_with_coverage_reports_blindness():
     )
     assert available is True
     assert label == "stax"
+
+
+# --------------------------------------------------------------------------- #
+# R4-FU B-02 sweep (2026-10-02) — tolerant CLI deck readers
+# --------------------------------------------------------------------------- #
+
+def _write_cp1252_dck(tmp_path, name: str, body: str):
+    p = tmp_path / name
+    p.write_bytes(body.encode("cp1252"))
+    return p
+
+
+def test_read_main_card_names_tolerates_a_cp1252_deck(tmp_path, capsys):
+    """R4-FU B-02: ``_read_main_card_names`` was a strict UTF-8 read, so a
+    cp1252 re-save raised through every CLI caller."""
+    p = _write_cp1252_dck(tmp_path, "x.dck",
+                          "[Main]\n1 Sol Ring\n1 Jötun Grunt|CSP|1\n")
+    names = _read_main_card_names(p)
+    assert names[0] == "Sol Ring" and names[1].startswith("J")
+    assert "not valid UTF-8" in capsys.readouterr().err
+
+
+def test_classify_cp1252_deck_is_not_a_silent_midrange(tmp_path, monkeypatch, capsys):
+    """R4-FU B-02, the sweep's first target: ``classify`` caught the strict
+    read's ``UnicodeDecodeError`` and returned "midrange" with no message,
+    so one cp1252 deck lost its archetype silently. The content rungs
+    now RUN on the decoded text."""
+    from commander_builder import archetype
+    seen: list = []
+
+    def spy_oracle(deck_text):
+        seen.append(deck_text)
+        return "combo", True
+    monkeypatch.setattr(archetype, "_oracle_scan_with_coverage", spy_oracle)
+    p = _write_cp1252_dck(tmp_path, "mydeck.dck",
+                          "[Commander]\n1 Jötun Grunt\n[Main]\n1 Sol Ring\n")
+    assert archetype.classify(p) == "combo"
+    assert len(seen) == 1 and "Sol Ring" in seen[0]
+    assert "not valid UTF-8" in capsys.readouterr().err

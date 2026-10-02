@@ -113,6 +113,9 @@ def _cleanup_stale_staged_files(
 # browsers and curl disagree about which one lands in the header.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
 
+#: See the ``MAX_CONTENT_LENGTH`` note in ``create_app`` (R3 W-05).
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+
 
 def _is_loopback_host(host_header: Optional[str]) -> bool:
     """True when a ``Host`` header names a loopback address (any port).
@@ -166,7 +169,15 @@ def _list_decks(deck_dir: Path, user_only: bool = True) -> list[dict]:
         return []
     out: list[dict] = []
     import re as _re
+    resolved_dir = deck_dir.resolve()
     for p in sorted(deck_dir.glob("*.dck")):
+        # A symlink pointing OUTSIDE the deck dir is listed here but 404s
+        # in ``_resolve_deck_path`` (R3 W-04, 2026-09-03): skip it so the
+        # sidebar never offers a deck no route can open.
+        try:
+            p.resolve().relative_to(resolved_dir)
+        except (ValueError, OSError):
+            continue
         if p.stem.startswith("[USER]"):
             role = "user"
         elif p.stem.startswith("[PREMADE]"):
@@ -334,6 +345,37 @@ def create_app(
                 ),
                 "received": _request.host or None,
             }), 403
+        # R3 W-02 (2026-09-03): the method gate left GET side effects
+        # open — ``/api/audit?source=claude`` (spends the stored key),
+        # ``/api/audit/stream``, ``/api/verify_against_source`` and
+        # ``/api/card_image`` (upstream fetch + disk write), the
+        # dashboard's marker-clearing rewrite — reachable from any page
+        # via ``<img src="http://127.0.0.1:5000/api/...">``, which carries
+        # the accepted Host. Browsers stamp every request with
+        # ``Sec-Fetch-Site``; the page's own fetches are ``same-origin``
+        # and a typed URL is ``none``. Anything else on ``/api/`` is a
+        # cross-site request and is refused. Non-browser clients (curl,
+        # the test client) send no header and pass — the gate exists for
+        # drive-by pages, not for the operator's own tools.
+        fetch_site = (_request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if (_request.path.startswith("/api/")
+                and fetch_site not in ("", "same-origin", "none")):
+            return _jsonify({
+                "error": "cross-site requests to /api/ are refused "
+                         "(Sec-Fetch-Site must be same-origin or none)",
+                "received": fetch_site,
+            }), 403
+        # Belt to that brace: a scripted cross-origin fetch carries an
+        # ``Origin`` header even when a client omits Sec-Fetch-Site. Only
+        # a loopback origin may talk to /api/.
+        origin = (_request.headers.get("Origin") or "").strip()
+        if _request.path.startswith("/api/") and origin and origin.lower() != "null":
+            from urllib.parse import urlsplit
+            if not _is_loopback_host(urlsplit(origin).netloc):
+                return _jsonify({
+                    "error": "cross-origin requests to /api/ are refused",
+                    "received": origin,
+                }), 403
         if _request.method not in ("POST", "PUT", "PATCH", "DELETE"):
             return None
         if _request.mimetype != "application/json":
@@ -350,6 +392,12 @@ def create_app(
     # (e.g. a missing Mode radio while the template clearly has it).
     import secrets as _secrets
     _ASSET_VERSION = _secrets.token_hex(4)
+
+    # Request-body ceiling (R3 W-05, 2026-09-03): it was None (unbounded).
+    # The largest legitimate body is a pasted collection (tens of
+    # thousands of lines, ~2 MB); 8 MB leaves headroom and turns a
+    # runaway paste into a clean 413 instead of an exhausted worker.
+    app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
     # Per-process SECRET_KEY: nothing uses sessions/signed cookies today,
     # but Flask's default is None — any future flash()/CSRF addition

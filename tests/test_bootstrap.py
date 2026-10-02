@@ -97,7 +97,7 @@ def test_download_forge_writes_asset(tmp_path):
 
 
 def test_download_forge_raises_when_no_asset(tmp_path):
-    with pytest.raises(RuntimeError, match="no forge-gui-desktop"):
+    with pytest.raises(RuntimeError, match="no forge-gui-desktop fat jar and no forge-installer"):
         bootstrap.download_forge(
             forge_dir=tmp_path / "forge",
             _get_release=lambda: {"assets": []},
@@ -403,3 +403,189 @@ def test_prime_card_cache_uses_default_list_when_names_none():
 def test_temurin_releases_api_constant():
     assert "adoptium" in bootstrap.TEMURIN_RELEASES_API
     assert "temurin17" in bootstrap.TEMURIN_RELEASES_API
+
+
+# --------------------------------------------------------------------------- #
+# The real release shape (2026-09-28): forge-installer-<ver>.tar.bz2 bundle
+# --------------------------------------------------------------------------- #
+# Why these exist: forge-canary.yml was red on every weekly run since it
+# was written (5/5, 2026-08-31..09-28) with "no forge-gui-desktop fat jar
+# found in the latest GitHub release". The picker's fixture above was a
+# guess at the release shape; the real one, captured through the lane,
+# has never carried a standalone fat jar in any release since 2.0.08.
+import hashlib
+import io
+from pathlib import Path
+import json
+import tarfile
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_REAL_RELEASE = json.loads(
+    (_FIXTURES / "forge_release_latest_2026-09-28.json").read_text(encoding="utf-8"))
+_REAL_LISTING = json.loads(
+    (_FIXTURES / "forge_bundle_2.0.14_listing.json").read_text(encoding="utf-8"))
+_REAL_JAR_NAME = next(
+    j["name"] for j in _REAL_LISTING["jars"]
+    if j["name"].startswith("forge-gui-desktop-") and "jar-with-dependencies" in j["name"])
+
+
+def _bundle_bytes(members: dict[str, bytes]) -> bytes:
+    """A tar.bz2 with the given files (dirs implied), flat like the real one."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:bz2") as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _real_layout_bundle() -> bytes:
+    # Member names taken from the captured listing: the fat jar at the
+    # archive ROOT, next to res/ and the launcher scripts (no wrapper dir).
+    return _bundle_bytes({
+        _REAL_JAR_NAME: b"PK\x03\x04",
+        "forge.sh": b"#!/bin/sh\n",
+        "res/cardsfolder/cardsfolder.zip": b"PK\x03\x04",
+        "res/ai/AiProfiles.txt": b"",
+    })
+
+
+def test_real_release_carries_no_standalone_fat_jar():
+    assert bootstrap._pick_forge_jar_asset(_REAL_RELEASE) is None
+    names = [a["name"] for a in _REAL_RELEASE["assets"]]
+    assert "forge-installer-2.0.14.tar.bz2" in names
+
+
+def test_pick_forge_asset_takes_the_bundle_from_the_real_release():
+    asset, kind = bootstrap._pick_forge_asset(_REAL_RELEASE)
+    assert kind == "bundle"
+    assert asset["name"] == "forge-installer-2.0.14.tar.bz2"
+    assert asset["digest"].startswith("sha256:")
+
+
+def test_pick_forge_asset_prefers_a_standalone_fat_jar_when_present():
+    release = {"assets": list(_REAL_RELEASE["assets"]) + [
+        {"name": "forge-gui-desktop-2.0.14-jar-with-dependencies.jar",
+         "browser_download_url": "u-jar"}]}
+    asset, kind = bootstrap._pick_forge_asset(release)
+    assert kind == "fat_jar" and asset["browser_download_url"] == "u-jar"
+
+
+def test_bundle_listing_has_the_jar_at_the_root_next_to_res():
+    # The layout assumption _extract_forge_bundle relies on, pinned on
+    # the captured listing rather than on the test's own tar.
+    assert _REAL_JAR_NAME in _REAL_LISTING["top_level"]
+    assert "res" in _REAL_LISTING["top_level"]
+    assert "res/cardsfolder" in _REAL_LISTING["res_subdirs"]
+
+
+def test_download_forge_extracts_the_bundle_and_returns_the_jar(tmp_path):
+    forge = tmp_path / "forge"
+    data = _real_layout_bundle()
+    digest = hashlib.sha256(data).hexdigest()
+    release = {"assets": [{
+        "name": "forge-installer-2.0.14.tar.bz2",
+        "browser_download_url": "https://example/forge-installer-2.0.14.tar.bz2",
+        "digest": f"sha256:{digest}",
+    }]}
+    jar = bootstrap.download_forge(
+        forge_dir=forge,
+        _get_release=lambda: release,
+        _download=lambda url, dest: dest.write_bytes(data),
+    )
+    assert jar == forge / _REAL_JAR_NAME and jar.exists()
+    assert (forge / "res" / "cardsfolder" / "cardsfolder.zip").exists()
+    assert not (forge / "forge-installer-2.0.14.tar.bz2").exists(), "archive kept"
+    # check_dependencies finds it the same way the canary's step does.
+    assert bootstrap._find_forge_jar(forge) == jar
+
+
+def test_download_forge_bundle_digest_mismatch_leaves_nothing(tmp_path):
+    forge = tmp_path / "forge"
+    release = {"assets": [{
+        "name": "forge-installer-2.0.14.tar.bz2",
+        "browser_download_url": "u",
+        "digest": "sha256:" + "0" * 64,
+    }]}
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        bootstrap.download_forge(
+            forge_dir=forge, _get_release=lambda: release,
+            _download=lambda url, dest: dest.write_bytes(_real_layout_bundle()))
+    assert not list(forge.glob("*.jar"))
+
+
+def test_download_forge_bundle_without_the_jar_is_loud(tmp_path):
+    data = _bundle_bytes({"forge.sh": b"", "res/ai/AiProfiles.txt": b""})
+    release = {"assets": [{"name": "forge-installer-2.0.14.tar.bz2",
+                           "browser_download_url": "u"}]}
+    with pytest.raises(RuntimeError, match="contains no forge-gui-desktop"):
+        bootstrap.download_forge(
+            forge_dir=tmp_path / "forge", _get_release=lambda: release,
+            _download=lambda url, dest: dest.write_bytes(data))
+
+
+def test_extract_forge_bundle_refuses_traversal(tmp_path):
+    data = _bundle_bytes({"../escape.txt": b"x", _REAL_JAR_NAME: b"PK"})
+    archive = tmp_path / "forge-installer-2.0.14.tar.bz2"
+    archive.write_bytes(data)
+    with pytest.raises(Exception):  # filter="data" (3.12+) or the manual guard
+        bootstrap._extract_forge_bundle(archive, tmp_path / "forge")
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_download_forge_error_names_the_assets_it_saw(tmp_path):
+    with pytest.raises(RuntimeError, match="forge-installer-<ver>.tar.bz2.*assets: build.txt"):
+        bootstrap.download_forge(
+            forge_dir=tmp_path / "forge",
+            _get_release=lambda: {"assets": [{"name": "build.txt", "browser_download_url": "u"}]},
+            _download=lambda url, dest: None,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# forge.profile.properties (2026-10-02): a fresh bundle has only the .example
+# --------------------------------------------------------------------------- #
+_PROFILE_EXAMPLE = (_FIXTURES / "forge_profile_properties_example_2026-10-02.txt").read_text(encoding="utf-8")
+
+
+def test_captured_example_leaves_every_dir_key_empty():
+    # The drift the canary hit: with userDir empty Forge uses ~/.forge on
+    # Linux, so decks seeded into vendor/forge/userdata are invisible.
+    keys = dict(l.split("=", 1) for l in _PROFILE_EXAMPLE.splitlines()
+                if l and not l.startswith("#") and "=" in l)
+    assert keys["userDir"] == "" and keys["cacheDir"] == "" and keys["decksDir"] == ""
+    assert "Linux: <your home directory>/.forge/" in _PROFILE_EXAMPLE
+
+
+def test_ensure_forge_profile_writes_userdata_profile_and_deck_dir(tmp_path):
+    forge = tmp_path / "forge"
+    profile = bootstrap.ensure_forge_profile(forge)
+    assert profile == forge / "forge.profile.properties"
+    keys = dict(l.split("=", 1) for l in profile.read_text(encoding="utf-8").splitlines()
+                if l and not l.startswith("#") and "=" in l)
+    assert keys["userDir"] == "./userdata"
+    assert keys["cacheDir"] == "./userdata/cache"
+    # Only keys the real example file defines, so Forge parses it as its own.
+    example_keys = {l.split("=", 1)[0] for l in _PROFILE_EXAMPLE.splitlines()
+                    if l and not l.startswith("#") and "=" in l}
+    assert set(keys) <= example_keys
+    assert (forge / "userdata" / "decks" / "commander").is_dir()
+
+
+def test_ensure_forge_profile_never_overwrites_an_owner_profile(tmp_path):
+    forge = tmp_path / "forge"; forge.mkdir()
+    (forge / "forge.profile.properties").write_text("userDir=D:/ForgeData\n", encoding="utf-8")
+    bootstrap.ensure_forge_profile(forge)
+    assert (forge / "forge.profile.properties").read_text(encoding="utf-8") == "userDir=D:/ForgeData\n"
+
+
+def test_download_forge_bundle_also_writes_the_profile(tmp_path):
+    forge = tmp_path / "forge"
+    data = _real_layout_bundle()
+    release = {"assets": [{"name": "forge-installer-2.0.14.tar.bz2",
+                           "browser_download_url": "u",
+                           "digest": "sha256:" + hashlib.sha256(data).hexdigest()}]}
+    bootstrap.download_forge(forge_dir=forge, _get_release=lambda: release,
+                             _download=lambda url, dest: dest.write_bytes(data))
+    assert "userDir=./userdata" in (forge / "forge.profile.properties").read_text(encoding="utf-8")

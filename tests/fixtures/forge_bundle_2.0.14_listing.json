@@ -1,0 +1,152 @@
+{
+ "_provenance": {
+  "url": "https://github.com/Card-Forge/forge/releases/download/forge-2.0.14/forge-installer-2.0.14.tar.bz2",
+  "final_url": "<signed release-assets.githubusercontent.com URL, dropped>",
+  "content_type": "application/octet-stream",
+  "bytes": 301832993,
+  "sha256": "e71749376945177d603d52a21a089bc1574330cf34599544b6bae1a04c83da41",
+  "captured": "2026-09-28T15:06:36Z",
+  "captured_via": "capture lane probe: form (run 36440906xxx, 2026-09-28); the 302 MB asset was listed in the runner and never committed"
+ },
+ "kind": "tar",
+ "member_count": 22126,
+ "top_level": [
+  "CHANGES.txt",
+  "CONTRIBUTORS.txt",
+  "INSTALLATION.txt",
+  "ISSUES.txt",
+  "LICENSE.txt",
+  "adventure-editor-jar-with-dependencies.jar",
+  "adventure-editor.cmd",
+  "adventure-editor.command",
+  "adventure-editor.sh",
+  "build.txt",
+  "docs",
+  "forge-adventure.cmd",
+  "forge-adventure.command",
+  "forge-adventure.exe",
+  "forge-adventure.sh",
+  "forge-gui-desktop-2.0.14-jar-with-dependencies.jar",
+  "forge-gui-mobile-dev-2.0.14-jar-with-dependencies.jar",
+  "forge.cmd",
+  "forge.command",
+  "forge.exe",
+  "forge.profile.properties.example",
+  "forge.sh",
+  "gdx-particle-editor.jar",
+  "res"
+ ],
+ "jars": [
+  {
+   "name": "adventure-editor-jar-with-dependencies.jar",
+   "size": 31616570,
+   "type": "file"
+  },
+  {
+   "name": "forge-gui-desktop-2.0.14-jar-with-dependencies.jar",
+   "size": 39383858,
+   "type": "file"
+  },
+  {
+   "name": "forge-gui-mobile-dev-2.0.14-jar-with-dependencies.jar",
+   "size": 55618075,
+   "type": "file"
+  },
+  {
+   "name": "gdx-particle-editor.jar",
+   "size": 19427719,
+   "type": "file"
+  }
+ ],
+ "res_subdirs": [
+  "res/adventure",
+  "res/ai",
+  "res/blockdata",
+  "res/cardsfolder",
+  "res/conquest",
+  "res/cube",
+  "res/deckgendecks",
+  "res/defaults",
+  "res/draft",
+  "res/editions",
+  "res/effects",
+  "res/fonts",
+  "res/formats",
+  "res/geneticaidecks",
+  "res/howto.txt",
+  "res/languages",
+  "res/licenses",
+  "res/lists",
+  "res/music",
+  "res/puzzle",
+  "res/quest",
+  "res/sealed",
+  "res/setlookup",
+  "res/skins",
+  "res/sound",
+  "res/tokenscripts",
+  "res/tutorial"
+ ],
+ "largest": [
+  {
+   "name": "forge-gui-mobile-dev-2.0.14-jar-with-dependencies.jar",
+   "size": 55618075,
+   "type": "file"
+  },
+  {
+   "name": "forge-gui-desktop-2.0.14-jar-with-dependencies.jar",
+   "size": 39383858,
+   "type": "file"
+  },
+  {
+   "name": "adventure-editor-jar-with-dependencies.jar",
+   "size": 31616570,
+   "type": "file"
+  },
+  {
+   "name": "gdx-particle-editor.jar",
+   "size": 19427719,
+   "type": "file"
+  },
+  {
+   "name": "res/cardsfolder/cardsfolder.zip",
+   "size": 16439459,
+   "type": "file"
+  },
+  {
+   "name": "res/languages/cardnames-ko-KR.txt",
+   "size": 8977911,
+   "type": "file"
+  },
+  {
+   "name": "res/languages/cardnames-ja-JP.txt",
+   "size": 7869558,
+   "type": "file"
+  },
+  {
+   "name": "res/languages/cardnames-de-DE.txt",
+   "size": 7519834,
+   "type": "file"
+  },
+  {
+   "name": "res/languages/cardnames-fr-FR.txt",
+   "size": 7102759,
+   "type": "file"
+  },
+  {
+   "name": "res/languages/cardnames-es-ES.txt",
+   "size": 6976164,
+   "type": "file"
+  },
+  {
+   "name": "res/deckgendecks/Commander.dat",
+   "size": 6904880,
+   "type": "file"
+  },
+  {
+   "name": "res/languages/cardnames-it-IT.txt",
+   "size": 6503880,
+   "type": "file"
+  }
+ ]
+}

@@ -307,3 +307,11 @@ def test_render_recent_respects_limit(tmp_path):
     assert "Recent iterations (last 3)" in md
     assert "D9" in md
     assert "D0" not in md
+
+
+def test_verdict_badge_knows_inconclusive():
+    """R3 C-01 (2026-09-03): the analyst writer now emits 'inconclusive';
+    commander-history must render it as a label, not '? INCONCLUSIVE'."""
+    from commander_builder.report import _verdict_badge
+    assert _verdict_badge("inconclusive") == "~ INCONCLUSIVE"
+    assert _verdict_badge("bogus") == "? BOGUS"

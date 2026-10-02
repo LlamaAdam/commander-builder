@@ -561,7 +561,8 @@ def main(argv=None) -> int:
         if not args.deck.exists():
             print(f"ERROR: deck not found: {args.deck}")
             return 2
-        found = detect_combos_in_deck(args.deck.read_text(encoding="utf-8"))
+        from .dck_utils import read_deck_text
+        found = detect_combos_in_deck(read_deck_text(args.deck))
         src = "data/combos.json" if COMBO_DATA_PATH.exists() else "fallback list"
         print(f"combos found in {args.deck.name} (DB: {src}): {len(found)}")
         for c in found:

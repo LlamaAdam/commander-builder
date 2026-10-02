@@ -68,6 +68,13 @@ from commander_builder.deck_judge import (  # noqa: E402
 #: The verdict labels both instruments draw from, in report order.
 VERDICTS: tuple[str, ...] = ("kept", "reverted", "neutral", "inconclusive")
 
+#: The labels that carry a reading. ``inconclusive`` means "this
+#: instrument could not read the pairing" — a sim with too few decisive
+#: games, a panel that split — and two of them are not an agreement
+#: (2026-09-03, R3 C-13): mutual silence for unrelated reasons said
+#: nothing about whether the instruments see the same thing.
+DECIDED_VERDICTS: tuple[str, ...] = ("kept", "reverted", "neutral")
+
 #: FP-016 §7, declared 2026-08-17 before any results existed. The sample
 #: the gates are evaluated over.
 KILL_CRITERIA_SAMPLE = 50
@@ -259,6 +266,11 @@ def collect(db_path: Optional[Path] = None) -> dict:
                 # guess, not None) so those rows land outside G3's
                 # population instead of inside one of its arms.
                 "swap_direction": _direction_of(report),
+                # Which prompt bytes the panel judged under (R3 F-05,
+                # 2026-09-03). None on rows older than the stamp; the
+                # summary tallies rows per version so a prompt change is
+                # never mistaken for a change in the decks.
+                "prompt_version": report.get("prompt_version"),
             })
         elif has_judge:
             judged_only += 1
@@ -273,21 +285,74 @@ def collect(db_path: Optional[Path] = None) -> dict:
 
 
 def analyze(paired: list) -> dict:
-    """Agreement counts + the G1/G2 tallies, from the paired rows alone."""
+    """Agreement counts + the G1/G2/G3 tallies, from the paired rows alone.
+
+    Per prompt version (R4-FU B-05, 2026-10-02): ``per_version`` carries
+    ``{version: <the same stats over that version's rows>}`` and
+    ``pooled_informational`` is True when more than one version is
+    present. WHY: the prompt-version stamp exists because the R3 fence
+    changed every judgment's prompt bytes, so rows judged under
+    different prompts are different instruments and the kill criteria
+    are declared per instrument (``_deck_judge_prompt`` §versioning) —
+    yet every gate was computed over the pooled rows and the render only
+    SAID "read the gates per version" with nothing per version to read.
+    """
+    stats = _analyze_rows(paired)
+    versions = sorted(stats["by_prompt_version"])
+    stats["per_version"] = {
+        v: _analyze_rows([
+            row for row in paired
+            if (row.get("prompt_version") or "unstamped") == v
+        ])
+        for v in versions
+    }
+    stats["pooled_informational"] = len(versions) > 1
+    return stats
+
+
+def _analyze_rows(paired: list) -> dict:
+    """The gate tallies over ONE set of paired rows (pooled or one version).
+
+    ``agreements`` / ``agreement_rate`` are computed over ``decided``
+    pairings only — rows where BOTH instruments returned a label in
+    ``DECIDED_VERDICTS``. Pairings where either side is ``inconclusive``
+    are reported separately (``undecided``, and ``both_inconclusive``
+    for the mutual-silence case) and never counted as agreement
+    (2026-09-03, R3 C-13; the headline used to count
+    ``inconclusive == inconclusive`` as the instruments agreeing).
+    """
     n = len(paired)
     matrix: Counter = Counter(
         (row["sim_verdict"], row["judge_verdict"]) for row in paired
     )
+    decided_rows = [
+        row for row in paired
+        if row["sim_verdict"] in DECIDED_VERDICTS
+        and row["judge_verdict"] in DECIDED_VERDICTS
+    ]
+    decided = len(decided_rows)
     agreements = sum(
-        count for (sim, judge), count in matrix.items() if sim == judge
+        1 for row in decided_rows if row["sim_verdict"] == row["judge_verdict"]
+    )
+    both_inconclusive = sum(
+        1 for row in paired
+        if row["sim_verdict"] == "inconclusive"
+        and row["judge_verdict"] == "inconclusive"
     )
     order_flips = sum(1 for row in paired if row["order_flip"])
     judge_kept = sum(1 for row in paired if row["judge_verdict"] == "kept")
+    by_prompt: Counter = Counter(
+        row.get("prompt_version") or "unstamped" for row in paired
+    )
     return {
         "n": n,
+        "by_prompt_version": dict(by_prompt),
         "matrix": {f"{sim}|{judge}": count for (sim, judge), count in matrix.items()},
+        "decided": decided,
+        "undecided": n - decided,
+        "both_inconclusive": both_inconclusive,
         "agreements": agreements,
-        "agreement_rate": _pct(agreements, n),
+        "agreement_rate": _pct(agreements, decided),
         "g1_order_flips": order_flips,
         "g1_order_flip_rate": _pct(order_flips, n),
         "g1_threshold": G1_ORDER_FLIP_MAX,
@@ -353,8 +418,17 @@ def _render(collected: dict, stats: dict) -> str:
         f"  not joinable: {collected['simmed_only']} sim-only, "
         f"{collected['judged_only']} judge-only "
         f"(of {collected['rows_total']} rows in the log)",
-        f"  agree on the same label: {stats['agreements']}/{n}"
-        f"  ({stats['agreement_rate']:.0%})",
+        f"  agree on the same label: {stats['agreements']}/{stats['decided']}"
+        f"  ({stats['agreement_rate']:.0%}) over pairings both instruments "
+        f"decided",
+        f"  undecided (either side inconclusive): {stats['undecided']}"
+        f"  — of which both inconclusive: {stats['both_inconclusive']} "
+        f"(not counted as agreement)",
+        "  prompt versions: " + ", ".join(
+            f"{v} x{c}" for v, c in sorted(stats["by_prompt_version"].items())
+        ) + ("   (MIXED — the pooled gates below are INFORMATIONAL; "
+             "the per-version block is the read)"
+             if stats.get("pooled_informational") else ""),
         "",
         "  Agreement table — rows: sim verdict, columns: judge opinion",
     ]
@@ -399,6 +473,23 @@ def _render(collected: dict, stats: dict) -> str:
         "universal-staples + Game Changers lists, a coarse proxy for "
         "EDHREC inclusion% — G3 is an alarm, not a measurement of it.)"
     )
+    if stats.get("pooled_informational"):
+        lines += ["", "  Per prompt version (each version is its own "
+                      "instrument; the gates are declared per version):"]
+        for version, vs in stats["per_version"].items():
+            g3 = ("FAILED" if vs["g3_failed"]
+                  else "passing" if vs["g3_computed"] else "NOT COMPUTED")
+            lines += [
+                f"    [{version}] n={vs['n']}  agree "
+                f"{vs['agreements']}/{vs['decided']}",
+                f"      G1 order-flip {vs['g1_order_flips']}/{vs['n']} "
+                f"({vs['g1_order_flip_rate']:.0%}) => "
+                f"{'FAILED' if vs['g1_failed'] else 'passing'}",
+                f"      G2 kept {vs['g2_kept']}/{vs['n']} "
+                f"({vs['g2_kept_rate']:.0%}) => "
+                f"{'FAILED' if vs['g2_failed'] else 'passing'}",
+                f"      G3 {g3} — {vs['g3_reason']}",
+            ]
     lines += [
         "",
         "  Agreement is not truth: both instruments can be wrong together.",

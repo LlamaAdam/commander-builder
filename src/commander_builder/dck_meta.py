@@ -57,7 +57,12 @@ from typing import Optional
 # and synthesized a second one under [metadata] — leaving BOTH the empty
 # line and the new one in the file, and which of the two Forge honors is
 # parser-dependent. Replacing the empty line keeps exactly one.
-_NAME_LINE = re.compile(r"^Name=.*$", re.MULTILINE)
+# ``[^\r\n]*(?=\r?$)`` rather than ``.*$`` (R3 W-10, 2026-09-03): ``.``
+# matches a carriage return, so on a CRLF deck the ``Name=`` substitution
+# swallowed the line's CR and left the file with mixed endings. The
+# lookahead keeps the CR OUT of the match (so a substitution leaves it in
+# place) while still anchoring at the line's end.
+_NAME_LINE = re.compile(r"^Name=[^\r\n]*(?=\r?$)", re.MULTILINE)
 
 # `[metadata]` section header (usually the first line of the file). Used to
 # synthesize a Name= line right below it when the deck has none.
@@ -90,15 +95,24 @@ def rewrite_name(dck_text: str, new_name: str) -> str:
     """
     if _NAME_LINE.search(dck_text):
         return _NAME_LINE.sub(lambda _m: f"Name={new_name}", dck_text, count=1)
+    nl = line_ending(dck_text)
     m = _METADATA_HEADER.search(dck_text)
     if m:
         head = dck_text[: m.end()]
         if not head.endswith("\n"):
             # Degenerate case: file ends exactly at `[metadata]` with no
             # trailing newline — add one so Name= lands on its own line.
-            head += "\n"
-        return head + f"Name={new_name}\n" + dck_text[m.end():]
-    return f"[metadata]\nName={new_name}\n\n" + dck_text
+            head += nl
+        return head + f"Name={new_name}{nl}" + dck_text[m.end():]
+    return f"[metadata]{nl}Name={new_name}{nl}{nl}" + dck_text
+
+
+def line_ending(dck_text: str) -> str:
+    """The file's dominant line ending — ``"\r\n"`` when the first newline
+    is CRLF, else ``"\n"`` (R3 W-10). Synthesized lines use it so a
+    Windows-edited deck keeps one convention after a rewrite."""
+    i = dck_text.find("\n")
+    return "\r\n" if i > 0 and dck_text[i - 1] == "\r" else "\n"
 
 
 def stamp_name_preserving_display(dck_text: str, stem: str) -> str:
@@ -146,7 +160,90 @@ def stamp_name_preserving_display(dck_text: str, stem: str) -> str:
     # references (``\1``, ``\g<...>``) is inserted literally.
     nm = _NAME_LINE.search(out)
     assert nm is not None  # rewrite_name guarantees a Name= line exists
-    return out[: nm.end()] + f"\nDisplayName={old_name}" + out[nm.end():]
+    nl = line_ending(out)  # R3 W-10: a CRLF deck gets a CRLF line
+    return out[: nm.end()] + f"{nl}DisplayName={old_name}" + out[nm.end():]
+
+
+def _read(path: Path) -> str:
+    from .dck_utils import read_deck_text
+    return read_deck_text(path)
+
+
+def read_name(dck_text: str) -> Optional[str]:
+    """The first ``Name=`` value, stripped, or None when the deck has no
+    ``Name=`` line (an EMPTY ``Name=`` counts as none: Forge has nothing
+    to report for it either)."""
+    m = _NAME_LINE.search(dck_text)
+    if not m:
+        return None
+    value = m.group(0)[len("Name="):].strip()
+    return value or None
+
+
+def check_compare_name_alignment(old_path: Path, new_path: Path) -> list[str]:
+    """Sim-time preflight for a head-to-head pair (2026-09-03, R3 C-04).
+
+    ``compare_versions`` attributes wins by ``log_parser._normalize``-d
+    NAME (see the module docstring), so two things must hold before a
+    single JVM game is spent:
+
+      * each deck's ``Name=`` normalizes to its own filename stem —
+        otherwise Forge reports a name no filename matches and that
+        deck's wins go to nobody;
+      * the two ``Name=`` values normalize DIFFERENTLY — otherwise both
+        seats report one name, neither side matches, and 20 games print
+        ``OLD 0 - 0 NEW (TIE)`` as if observed. A hand-copied pair
+        (``cp v1.dck v2.dck`` then edit cards) does exactly this; every
+        in-tree writer restamps, so nothing in the pipeline produces it,
+        and nothing used to catch it.
+
+    Raises ``ValueError`` naming the offending file(s) and the remedy
+    (``rewrite_name_to_stem`` / ``commander-snapshot``) for either
+    violation. A deck with NO ``Name=`` line cannot be checked; that is
+    returned as a warning string for the caller to print, not raised —
+    Forge's own default for a nameless deck is not something this module
+    can promise. Returns the list of warnings (empty when both decks
+    carry a ``Name=`` that checks out).
+    """
+    from .log_parser import _normalize
+
+    warnings: list[str] = []
+    norms: dict[str, Optional[str]] = {}
+    for path in (old_path, new_path):
+        name = read_name(_read(path))
+        if name is None:
+            warnings.append(
+                f"{path.name} has no Name= line; win attribution keys on "
+                f"Name=, so if Forge reports a name other than "
+                f"{_normalize(path.stem)!r} this deck's wins go to nobody. "
+                f"Stamp it with dck_meta.rewrite_name_to_stem to be sure."
+            )
+            norms[path.name] = None
+            continue
+        if _normalize(name) != _normalize(path.stem):
+            raise ValueError(
+                f"{path.name}: Name={name!r} does not match its filename "
+                f"(normalized {_normalize(name)!r} != "
+                f"{_normalize(path.stem)!r}) — a hand-copied file inherits "
+                f"its source's Name= exactly like this. Forge reports decks "
+                f"by Name=, so every game this deck won would be attributed "
+                f"to nobody (and with both seats under one name, to nobody "
+                f"on either side: OLD 0 - 0 NEW). Fix: "
+                f"dck_meta.rewrite_name_to_stem(path), or re-snapshot with "
+                f"commander-snapshot."
+            )
+        norms[path.name] = _normalize(name)
+    a, b = norms[old_path.name], norms[new_path.name]
+    if a is not None and a == b:
+        raise ValueError(
+            f"{old_path.name} and {new_path.name} share Name= (both "
+            f"normalize to {a!r}) — a hand-copied pair? Forge would report "
+            f"both seats under one name, neither side would be attributed "
+            f"a single win, and the run would print OLD 0 - 0 NEW as if "
+            f"observed. Fix: dck_meta.rewrite_name_to_stem on each file "
+            f"(commander-snapshot does this for you)."
+        )
+    return warnings
 
 
 def rewrite_name_to_stem(path: Path) -> str:
@@ -155,8 +252,10 @@ def rewrite_name_to_stem(path: Path) -> str:
     Call this right after copying or writing a ``.dck`` under a new
     filename. Returns the stem that was written, mostly for logging.
     """
-    text = path.read_text(encoding="utf-8")
-    path.write_text(rewrite_name(text, path.stem), encoding="utf-8")
+    from .atomic_io import atomic_write_text
+    from .dck_utils import read_deck_text
+    text = read_deck_text(path)
+    atomic_write_text(path, rewrite_name(text, path.stem))  # R3 W-09
     return path.stem
 
 
@@ -231,8 +330,9 @@ def read_bracket_unverified(dck_text: Optional[str]) -> Optional[int]:
     """
     if not dck_text:
         return None
+    from .dck_utils import strip_bom
     in_metadata = False
-    for raw in dck_text.splitlines():
+    for raw in strip_bom(dck_text).splitlines():  # R3 W-03
         s = raw.strip()
         if s.startswith("[") and s.endswith("]"):
             in_metadata = s.lower() == "[metadata]"
@@ -279,9 +379,12 @@ def set_bracket_unverified(dck_text: str, bracket: int) -> str:
     """
     out = clear_bracket_unverified(dck_text)
     line = f"{BRACKET_UNVERIFIED_META_KEY}={int(bracket)}"
+    nl = line_ending(out)
     m = _METADATA_HEADER.search(out)
     if not m:
-        return f"[metadata]\n{line}\n\n" + out
+        return f"[metadata]{nl}{line}{nl}{nl}" + out
+    # ``splitlines`` + join with the FILE's ending (R3 W-10): joining
+    # with "\n" LF-normalized every CRLF deck on save.
     lines = out.splitlines()
     # Line index of the `[metadata]` header itself: the number of
     # newlines in the text preceding it.
@@ -294,4 +397,4 @@ def set_bracket_unverified(dck_text: str, bracket: int) -> str:
         if stripped:
             insert_at = i + 1
     lines.insert(insert_at, line)
-    return "\n".join(lines) + "\n"
+    return nl.join(lines) + nl

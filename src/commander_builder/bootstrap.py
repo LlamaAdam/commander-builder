@@ -173,6 +173,129 @@ def _pick_forge_jar_asset(release: dict) -> Optional[dict]:
     return max(candidates, key=_ver)
 
 
+# Forge's release assets, as actually published (captured 2026-09-28,
+# tests/fixtures/forge_release_latest_2026-09-28.json): every release
+# from 2.0.08 (2026-01-01) through 2.0.14 ships exactly
+#   build.txt, forge-installer-<ver>.jar (IzPack), forge-installer-
+#   <ver>.tar.bz2, version.txt (+ an iOS zip on 2.0.14)
+# and NO standalone forge-gui-desktop-*-jar-with-dependencies.jar. The
+# fat jar lives INSIDE the tar.bz2, at the top level next to res/
+# (tests/fixtures/forge_bundle_2.0.14_listing.json) -- which is the
+# layout forge_runner already launches from. So the picker prefers the
+# legacy standalone jar if a release ever ships one again, and
+# otherwise takes the bundle; download_forge extracts it in place. The
+# weekly canary was red 5/5 on "no forge-gui-desktop fat jar found"
+# because of this; it had never seen a release with that asset.
+_FORGE_BUNDLE_SUFFIX = ".tar.bz2"
+
+
+def _pick_forge_bundle_asset(release: dict) -> Optional[dict]:
+    """The ``forge-installer-<ver>.tar.bz2`` bundle asset of a release,
+    highest version if several, or None."""
+    assets = release.get("assets") or []
+    candidates = [
+        a for a in assets
+        if isinstance(a, dict)
+        and (a.get("name") or "").startswith("forge-installer-")
+        and (a.get("name") or "").endswith(_FORGE_BUNDLE_SUFFIX)
+    ]
+    if not candidates:
+        return None
+    import re
+
+    def _ver(a: dict) -> tuple:
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", a.get("name", ""))
+        return tuple(int(g) for g in m.groups()) if m else (0, 0, 0)
+
+    return max(candidates, key=_ver)
+
+
+def _pick_forge_asset(release: dict) -> tuple[Optional[dict], str]:
+    """``(asset, kind)`` with kind ``"fat_jar"`` or ``"bundle"``;
+    ``(None, "")`` when the release carries neither shape."""
+    jar = _pick_forge_jar_asset(release)
+    if jar is not None:
+        return jar, "fat_jar"
+    bundle = _pick_forge_bundle_asset(release)
+    if bundle is not None:
+        return bundle, "bundle"
+    return None, ""
+
+
+def _extract_forge_bundle(archive: Path, forge_dir: Path) -> Path:
+    """Extract a ``forge-installer-<ver>.tar.bz2`` into ``forge_dir`` and
+    return the fat jar it contained.
+
+    The bundle is FLAT (no single top-level directory): the jar, the
+    launcher scripts and ``res/`` sit at the archive root, so it extracts
+    straight into ``forge_dir`` -- the same shape a user gets by
+    unpacking the release by hand, and the one ``verify_forge`` and
+    ``forge_runner`` already accept. Same zip-slip guards as
+    ``extract_jre``. Raises RuntimeError when the archive yields no
+    ``forge-gui-desktop-*-jar-with-dependencies.jar``.
+    """
+    import tarfile
+    forge_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "r:bz2") as tf:
+        try:
+            tf.extractall(forge_dir, filter="data")
+        except TypeError:  # Python < 3.12: no filter= arg.
+            _ensure_tar_members_within(tf, forge_dir)
+            tf.extractall(forge_dir)
+    jar = _find_forge_jar(forge_dir)
+    if jar is None:
+        raise RuntimeError(
+            f"{archive.name} extracted into {forge_dir} but contains no "
+            "forge-gui-desktop-*-jar-with-dependencies.jar -- the bundle "
+            "layout changed; re-probe the release through the capture lane"
+        )
+    return jar
+
+
+# forge.profile.properties -- the file that makes a fresh Forge look in
+# ./userdata for decks. Captured example (tests/fixtures/
+# forge_profile_properties_example_2026-10-02.txt, from Card-Forge/forge
+# forge-gui/forge.profile.properties.example): with the keys EMPTY, Forge
+# uses platform defaults -- Linux ~/.forge/ for userDir, ~/.cache/forge/
+# for cacheDir -- and the bundle ships only the .example. The runner's
+# contract (forge_runner module docstring) is cwd == install dir with
+# decks under <userDir>/decks/commander/, and every profile this repo
+# manages sets userDir=./userdata. The canary learned this the hard way
+# on 2026-10-02: after the bundle fix it ran a 4-game pod to completion
+# with 0 wins on both sides, because the decks it seeded into
+# vendor/forge/userdata were not where Forge was looking.
+FORGE_PROFILE_FILENAME = "forge.profile.properties"
+_FORGE_PROFILE_TEXT = (
+    "# written by commander-builder (bootstrap.ensure_forge_profile)\n"
+    "# Relative paths resolve against the Forge program directory.\n"
+    "userDir=./userdata\n"
+    "cacheDir=./userdata/cache\n"
+    "cardPicsDir=\n"
+    "cardPicsSubDirs=\n"
+    "decksDir=\n"
+    "decksConstructedDir=\n"
+)
+
+
+def ensure_forge_profile(forge_dir: Optional[Path] = None) -> Path:
+    """Write ``forge.profile.properties`` into ``forge_dir`` if absent so
+    Forge keeps decks, cache and forge.log under ``forge_dir/userdata``.
+
+    Never overwrites an existing file -- an owner-tuned profile (custom
+    pic dirs, a shared cache) must survive a re-download. Returns the
+    profile path. The ``userdata/decks/commander`` directory is created
+    too, so the first ``.dck`` copy has somewhere to land.
+    """
+    from .forge_runner import VENDOR_FORGE
+    forge_dir = forge_dir or VENDOR_FORGE
+    forge_dir.mkdir(parents=True, exist_ok=True)
+    profile = forge_dir / FORGE_PROFILE_FILENAME
+    if not profile.exists():
+        profile.write_text(_FORGE_PROFILE_TEXT, encoding="utf-8")
+    (forge_dir / "userdata" / "decks" / "commander").mkdir(parents=True, exist_ok=True)
+    return profile
+
+
 def _pick_jre_asset(release: dict, system: str, machine: str) -> Optional[dict]:
     """From an Adoptium/Temurin GitHub release payload, pick the JRE archive
     asset matching the caller's platform.
@@ -226,7 +349,10 @@ def download_forge(
 ) -> Path:
     """Download the latest Forge desktop fat-jar into ``forge_dir``.
 
-    Returns the written jar path. ``_get_release`` / ``_download`` are
+    Releases since 2.0.08 ship the jar only inside the
+    ``forge-installer-<ver>.tar.bz2`` bundle (see ``_pick_forge_asset``);
+    that bundle is downloaded, checksum-verified, extracted flat into
+    ``forge_dir`` and deleted. Returns the jar path either way. ``_get_release`` / ``_download`` are
     injectable for tests; defaults hit the GitHub API + stream the asset.
     Raises RuntimeError when no suitable asset is found.
     """
@@ -236,15 +362,31 @@ def download_forge(
     download = _download or _stream_to_file
 
     release = get_release()
-    asset = _pick_forge_jar_asset(release)
+    asset, kind = _pick_forge_asset(release)
     if asset is None:
         raise RuntimeError(
-            "no forge-gui-desktop fat jar found in the latest GitHub release")
+            "no forge-gui-desktop fat jar and no forge-installer-<ver>.tar.bz2 "
+            "bundle found in the latest GitHub release (assets: "
+            + ", ".join(str(a.get("name")) for a in (release.get("assets") or [])
+                        if isinstance(a, dict)) + ")")
     forge_dir.mkdir(parents=True, exist_ok=True)
     dest = forge_dir / asset["name"]
     download(asset["browser_download_url"], dest)
     _verify_asset_checksum(release, asset, dest, download)
-    return dest
+    if kind == "fat_jar":
+        return dest
+    # Bundle: verified above (GitHub publishes a sha256 digest per asset),
+    # extracted in place, archive removed so the ~300 MB is not kept twice
+    # and check_dependencies' jar glob is the only thing left to find.
+    try:
+        jar = _extract_forge_bundle(dest, forge_dir)
+    finally:
+        dest.unlink(missing_ok=True)
+    # A freshly extracted bundle has only forge.profile.properties.example;
+    # without the real file Forge reads decks from ~/.forge (Linux), not
+    # from the userdata/ this repo seeds. See ensure_forge_profile.
+    ensure_forge_profile(forge_dir)
+    return jar
 
 
 def download_jre(

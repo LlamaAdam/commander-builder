@@ -15,6 +15,13 @@ from commander_builder.meta_test import (
     format_report_text,
 )
 
+# Offline at the module seams (audit open bug 3, 2026-09-09): under the suite-
+# wide network block the pipelines these tests drive were reaching EDHREC and
+# the WotC scrape behind degrade guards. The shared fixtures make those
+# upstreams miss instantly; a test wanting a specific answer patches over
+# them.
+pytestmark = pytest.mark.usefixtures("offline_edhrec", "offline_game_changers")
+
 
 # --- _ref_destination ------------------------------------------------------
 
@@ -783,3 +790,12 @@ def test_run_meta_test_total_games_includes_filler_wins(tmp_path, monkeypatch):
 
     # Draw-policy label rides along in the persisted dict shape.
     assert report.to_dict()["draw_policy"] == "plain_draw"
+
+
+def test_parse_main_card_names_tolerates_a_cp1252_deck(tmp_path, capsys):
+    """R4-FU B-02 sweep (2026-10-02)."""
+    from commander_builder.meta_test import _parse_main_card_names
+    p = tmp_path / "x.dck"
+    p.write_bytes("[Main]\n1 Sol Ring\n1 Jötun Grunt\n".encode("cp1252"))
+    assert _parse_main_card_names(p)[0] == "Sol Ring"
+    assert "not valid UTF-8" in capsys.readouterr().err

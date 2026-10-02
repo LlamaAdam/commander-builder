@@ -16,6 +16,8 @@ Every card touch is an injected fake ``lookup`` — nothing reaches Scryfall.
 """
 from types import SimpleNamespace
 
+import pytest
+
 from commander_builder import deck_builder
 from commander_builder.deck_builder import _assemble
 from commander_builder.deck_builder_manabase import (
@@ -36,6 +38,13 @@ from commander_builder.dck_utils import (
     main_card_quantities,
 )
 from commander_builder.edhrec_client import CardEntry
+
+# Offline at the module seams (audit open bug 3, 2026-09-09): under the suite-
+# wide network block the pipelines these tests drive were reaching Scryfall
+# and the WotC scrape behind degrade guards. The shared fixtures make those
+# upstreams miss instantly; a test wanting a specific answer patches over
+# them.
+pytestmark = pytest.mark.usefixtures("offline_scryfall", "offline_game_changers")
 
 
 # --- Fake card DB ---------------------------------------------------------

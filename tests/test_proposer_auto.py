@@ -34,6 +34,13 @@ from commander_builder.proposer import (
     enforce_bracket_caps,
 )
 
+# Offline at the module seams (audit open bug 3, 2026-09-09): under the suite-
+# wide network block the pipelines these tests drive were reaching Scryfall
+# and the WotC scrape behind degrade guards. The shared fixtures make those
+# upstreams miss instantly; a test wanting a specific answer patches over
+# them.
+pytestmark = pytest.mark.usefixtures("offline_scryfall", "offline_game_changers")
+
 
 # --- Fake Anthropic SDK injection -----------------------------------------
 
@@ -2880,15 +2887,18 @@ def test_ab_to_iteration_fields_omits_rates_when_zero_games():
 
 def test_ab_to_iteration_fields_null_rates_when_no_decisive_games():
     """Sim ran (games > 0) but every game drew or went to a filler:
-    decisive == 0 -> win_rate keys omitted (columns stay NULL), while
-    margin=0 is still a real observation and is recorded."""
+    decisive == 0 -> win_rate keys omitted (columns stay NULL) AND the
+    margin key omitted too. (Re-pinned 2026-09-03, R3 C-14: this writer
+    used to record margin=0 as "a real observation" while the web writer
+    and the backfill stored NULL for the same outcome — one column, two
+    conventions inside one era. NULL is the win-rate columns' own rule.)"""
     from commander_builder.proposer import _ab_to_iteration_fields
     from commander_builder.forge_runner import ABResult
     ab = ABResult(wins_a=0, wins_b=0, games=5, status="done")
     fields = _ab_to_iteration_fields(ab)
     assert "win_rate_old" not in fields
     assert "win_rate_new" not in fields
-    assert fields["margin"] == 0
+    assert "margin" not in fields
 
 
 def test_pick_filler_decks_skips_user_prefix_and_excludes(tmp_path):
@@ -4594,3 +4604,140 @@ def test_filler_exclusion_census_counts_by_prefix(tmp_path):
     assert census["by_prefix"] == {
         "[USER]": 1, "[CONTROL]": 1, "[PREMADE]": 1, "[REF]": 1,
     }
+
+
+# ---------------------------------------------------------------------------
+# R4-FU B-18 (2026-10-02) — the cut guard keys Protect= with match_key
+# ---------------------------------------------------------------------------
+
+def test_auto_propose_curly_apostrophe_protect_holds_on_the_cut_path(
+    tmp_path, monkeypatch,
+):
+    """R4-FU B-18: ``Protect=Jeska’s Will`` (typographic apostrophe) was
+    keyed ``lower()`` here, so it never equalled the proposal's
+    ``Jeska's Will`` and the card was cut by ``commander improve`` /
+    auto-curate — the path that actually cuts — while ``adopt`` (R3
+    F-10) already honoured it. Both sides go through ``match_key``."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "commander_builder.proposer._load_game_changers", lambda: set(),
+    )
+    _patch_anthropic(monkeypatch, json.dumps({
+        "adds": ["NewA"], "cuts": ["Jeska's Will", "RandomFiller"],
+        "rationale": "trim",
+    }))
+    deck = tmp_path / "[USER] Goblin [B3].dck"
+    deck.write_text(
+        "[metadata]\nName=Goblin\n[Commander]\n1 Krenko, Mob Boss\n"
+        "[Main]\n1 Jeska's Will\n1 RandomFiller\n",
+        encoding="utf-8",
+    )
+    proposal = auto_propose(
+        deck_path=deck, bracket=3, advice_report=_stub_advice_report(),
+        max_adds=5, max_cuts=5,
+        protected_cards=["Jeska\u2019s Will", "Lim-Dul's Vault"],
+    )
+    assert "Jeska's Will" not in proposal.cuts
+    assert proposal.dropped_for_protection == ["Jeska's Will"]
+    assert "RandomFiller" in proposal.cuts
+
+
+def test_apply_proposal_curly_apostrophe_metadata_protect_refuses_the_cut(tmp_path):
+    """R4-FU B-18, second site: the defense-in-depth guard in
+    ``apply_proposal_to_deck`` reads ``[metadata] Protect=`` itself and
+    compared ``lower()`` too."""
+    src = _make_dck(tmp_path, "[USER] Foo [B3].dck",
+                    ["Jeska's Will", "Lim-Dûl's Vault", "Cultivate"])
+    text = src.read_text(encoding="utf-8")
+    text = text.replace("Moxfield=abc\n",
+                        "Moxfield=abc\nProtect=Jeska\u2019s Will\n"
+                        "Protect=Lim-Dul's Vault\n")
+    src.write_text(text, encoding="utf-8")
+    proposal = Proposal(
+        adds=["A", "B", "C"], cuts=["Jeska's Will", "Lim-Dûl's Vault", "Cultivate"],
+        rationale="x", source="claude-auto",
+    )
+    out = apply_proposal_to_deck(src, proposal)
+    new_text = out.read_text(encoding="utf-8")
+    assert "1 Jeska's Will" in new_text
+    assert "1 Lim-Dûl's Vault" in new_text      # B-14 fold, through this guard
+    assert "1 Cultivate" not in new_text
+    assert set(proposal.dropped_for_protection) == {"Jeska's Will", "Lim-Dûl's Vault"}
+
+
+# ---------------------------------------------------------------------------
+# R4-FU A-13 (2026-10-02) — explicit --sim-fillers that seat excluded decks
+# ---------------------------------------------------------------------------
+
+def test_filler_override_note_names_the_seated_prefixes():
+    from commander_builder.filler_policy import (
+        filler_override_note, mark_fillers_overridden,
+    )
+    assert filler_override_note(None) is None
+    assert filler_override_note("Filler A.dck, Filler B.dck") is None
+    note = filler_override_note("[REF] Top [B3].dck,[CONTROL] Cal [B3].dck")
+    assert note.startswith("NOTE:")
+    assert "[REF] ([REF] Top [B3].dck)" in note
+    assert "[CONTROL] ([CONTROL] Cal [B3].dck)" in note
+    assert "fillers_overridden" in note
+    report: dict = {}
+    assert mark_fillers_overridden(report, "[REF] Top [B3].dck,x.dck") == \
+        filler_override_note("[REF] Top [B3].dck,x.dck")
+    assert report["fillers_overridden"] is True
+    untouched: dict = {}
+    assert mark_fillers_overridden(untouched, "a.dck,b.dck") is None
+    assert "fillers_overridden" not in untouched
+    assert mark_fillers_overridden(None, "[REF] Top [B3].dck") is not None
+
+
+def test_run_sim_and_record_stamps_fillers_overridden_and_prints_the_note(
+    tmp_path, monkeypatch, capsys,
+):
+    """R4-FU A-13: an explicit ``--sim-fillers`` seating ``[REF]`` /
+    ``[CONTROL]`` decks is a legitimate escape hatch, but the row must
+    SAY so: one ``NOTE:`` line on stderr and
+    ``sim_report["fillers_overridden"] = True`` on the persisted row."""
+    from commander_builder.forge_runner import ABResult
+    from commander_builder.proposer import _run_sim_and_record
+
+    def fake_ab_sim(deck_a_path, deck_b_path, games=5, **kw):
+        return ABResult(deck_a=deck_a_path.name, deck_b=deck_b_path.name,
+                        wins_a=10, wins_b=30, games=40,
+                        avg_turns_a=12.0, avg_turns_b=10.5, status="done")
+    monkeypatch.setattr(
+        "commander_builder.forge_runner.run_ab_simulation", fake_ab_sim,
+    )
+    persisted: dict = {}
+
+    def fake_update(iteration_id, verdict, notes, db_path=None, **fields):
+        persisted.update(fields, verdict=verdict)
+    monkeypatch.setattr(
+        "commander_builder.knowledge_log.update_iteration_sim", fake_update,
+    )
+    deck = tmp_path / "[USER] Mine [B3].dck"
+    deck.write_text("[Main]\n", encoding="utf-8")
+    out = tmp_path / "[USER] Mine v2 [B3].dck"
+    out.write_text("[Main]\n", encoding="utf-8")
+    for name in ("[REF] Top [B3].dck", "[CONTROL] Cal [B3].dck",
+                 "Filler A.dck", "Filler B.dck"):
+        (tmp_path / name).write_text("a", encoding="utf-8")
+
+    args = _SimArgs(deck, sim_fillers="[REF] Top [B3].dck,[CONTROL] Cal [B3].dck")
+    args.sim_margin = 1          # read past the give-up path this time
+    _result, error, verdict = _run_sim_and_record(
+        args, out_path=out, iteration_id=1, db_path=tmp_path / "kl.sqlite",
+    )
+    assert error is None and verdict == "kept"
+    assert persisted["sim_report"]["fillers_overridden"] is True
+    err = capsys.readouterr().err
+    assert err.count("NOTE: --sim-fillers seats prefix-excluded") == 1
+    assert "[REF] ([REF] Top [B3].dck)" in err
+
+    # Auto-picked fillers (eligible decks only) carry no stamp and no note.
+    persisted.clear()
+    args = _SimArgs(deck, sim_fillers="")
+    args.sim_margin = 1
+    _run_sim_and_record(args, out_path=out, iteration_id=2,
+                        db_path=tmp_path / "kl.sqlite")
+    assert "fillers_overridden" not in persisted["sim_report"]
+    assert "NOTE: --sim-fillers" not in capsys.readouterr().err

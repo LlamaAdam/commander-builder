@@ -585,6 +585,9 @@ def test_auto_curate_main_default_json_payload_unchanged(
 # commander-advise: --mode auto resolution + trimming
 # ---------------------------------------------------------------------------
 
+# The full advise CLI reached Scryfall and the WotC scrape behind degrade
+# guards (audit open bug 3, 2026-09-09); miss instantly at the seams instead.
+@pytest.mark.usefixtures("offline_scryfall", "offline_game_changers")
 def test_advise_cli_auto_mode_prints_and_trims(tmp_path, monkeypatch, capsys):
     from commander_builder import improvement_advisor as ia
     from commander_builder.improvement_advisor import (
@@ -630,6 +633,9 @@ def test_advise_cli_auto_mode_prints_and_trims(tmp_path, monkeypatch, capsys):
     assert "CutCard15" not in out
 
 
+# The full advise CLI reached Scryfall and the WotC scrape behind degrade
+# guards (audit open bug 3, 2026-09-09); miss instantly at the seams instead.
+@pytest.mark.usefixtures("offline_scryfall", "offline_game_changers")
 def test_advise_cli_without_mode_is_untrimmed(tmp_path, monkeypatch, capsys):
     from commander_builder import improvement_advisor as ia
     from commander_builder.improvement_advisor import (
