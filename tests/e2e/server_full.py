@@ -13,7 +13,7 @@ needs the opposite posture — the owner asked to see REAL results for two
 real decks, so the server here keeps the network open, lets the live
 import lane, the live audit and a real Forge compare run, and seeds
 nothing the spec can seed through the app's own routes (the spec
-paste-imports deck A and the fallback deck B and writes its iteration
+paste-imports deck A and, when the live import fails, a fallback deck B and writes its iteration
 rows through ``/api/save_iteration``, so the CI run and the owner's
 local run against a live app walk the same code). Mixing both postures
 into one launcher behind flags would couple the smokes to this lane's
@@ -33,7 +33,7 @@ What it still does before handing control to Flask:
 2. **Seed filler seats.** A pod-mode A/B compare needs at least two
    UNTAGGED same-bracket decks for the filler seats (decision C1: a
    ``[USER]``/``[REF]``/``[PREMADE]``/``[CONTROL]`` deck may never sit in
-   one). Eight copies of the fallback deck-B fixture are written under
+   one). Eight copies of the Muxus fixture (deck A) are written under
    plain ``Filler Goblins N [B3]`` names so the compare has a pool
    without harvesting anything from Moxfield. They are ``type: pool`` to
    ``/api/decks`` and so stay out of the sidebar by default.
@@ -73,7 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from server import _block_outbound_network, _install_offline_stubs  # noqa: E402
 
 FIXTURES = REPO / "tests" / "fixtures"
-FALLBACK_B = FIXTURES / "e2e_walkthrough_deck_b.dck"
+FILLER_SOURCE = FIXTURES / "e2e_walkthrough_muxus.dck"
 
 #: Untagged filler decks for the pod compare's filler seats. Bracket 3 to
 #: match both walkthrough decks' ``[B3]`` tags (filler picking is
@@ -86,7 +86,7 @@ def _seed_fillers(deck_dir: Path) -> None:
     """Write the four filler decks (idempotent: existing files are kept)."""
     from commander_builder.dck_meta import rewrite_name
 
-    text = FALLBACK_B.read_text(encoding="utf-8")
+    text = FILLER_SOURCE.read_text(encoding="utf-8")
     for stem in FILLER_STEMS:
         target = deck_dir / f"{stem}.dck"
         if target.exists():

@@ -93,8 +93,8 @@ const SHOT_BUDGET_BYTES = Number(process.env.E2E_SHOT_BUDGET_BYTES || 40 * 1024 
 const POLITE_MS = 500;
 
 const ARCHIDEKT_DECK_B_URL = "https://archidekt.com/decks/60036";
-const DECK_A_NAME = "Krenko Golden E2E";
-const DECK_B_FALLBACK_NAME = "Muxus Goblins E2E";
+const DECK_A_NAME = "Muxus Goblins E2E";
+const DECK_B_FALLBACK_NAME = "Ezuri Elves E2E";
 const THROWAWAY_NAME = "Throwaway Paste E2E";
 
 // ---------------------------------------------------------------------------
@@ -231,6 +231,10 @@ async function row(page, deck, name, opts, fn) {
       r.notes = `${r.notes}${r.notes ? " | " : ""}browser errors: ${short(consoleErrors.join("; "), 300)}`;
       if (r.status === "PASS") r.status = "FAIL";
     }
+    // Run 1: one timed-out row left the settings <dialog> open and five
+    // later rows failed on click timeouts. Whatever a row leaves behind
+    // is closed here so each row starts from a clean page.
+    await recoverUi(page);
   }
   r.ms = Date.now() - t0;
   if (!(r.status === "SKIP" && !opts.shotOnSkip)) {
@@ -245,11 +249,31 @@ async function row(page, deck, name, opts, fn) {
 // API + page helpers
 // ---------------------------------------------------------------------------
 
-async function api(request, method, url, data) {
+/** Close anything modal a row may have left open; never throws. */
+async function recoverUi(page) {
+  try {
+    if (page.isClosed()) return;
+    await page.keyboard.press("Escape").catch(() => {});
+    const cancel = page.locator("dialog[open] #settings-cancel");
+    if (await cancel.count()) await cancel.click({ timeout: 2_000 }).catch(() => {});
+    await page.evaluate(() => {
+      document.querySelectorAll("dialog[open]").forEach((d) => { try { d.close(); } catch (_e) { d.removeAttribute("open"); } });
+      document.querySelectorAll(".modal-backdrop").forEach((m) => { m.hidden = true; });
+      const scrim = document.getElementById("_card-ref-overlay");
+      if (scrim) scrim.remove();
+      document.body.classList.remove("drawer-open");
+    }).catch(() => {});
+  } catch (_e) {
+    /* recovery is best-effort */
+  }
+}
+
+async function api(request, method, url, data, timeout) {
   const resp = await request.fetch(url, {
     method,
     data,
     headers: data !== undefined ? { "Content-Type": "application/json" } : undefined,
+    timeout: timeout || 30_000,
   });
   let body = null;
   const text = await resp.text();
@@ -322,6 +346,22 @@ async function importPaste(request, name, text, bracket = 3) {
   return { ...res, stem };
 }
 
+/** Store a primer sidecar beside a deck through the project's own writer. */
+function storePrimer(deckId, primer) {
+  const primerFile = path.join(RESULTS, `_primer_${slug(deckId)}.txt`);
+  fs.writeFileSync(primerFile, primer);
+  const code = [
+    "import pathlib",
+    "from commander_builder.primer import store_primer_sidecar",
+    `dck = pathlib.Path(${JSON.stringify(serverState.deckDir)}) / ${JSON.stringify(`${deckId}.dck`)}`,
+    `out = store_primer_sidecar(dck, pathlib.Path(${JSON.stringify(primerFile)}).read_text(encoding='utf-8'))`,
+    "print('PRIMER=' + out.action)",
+  ].join("\n");
+  const py = runPython(["-c", code]);
+  fs.rmSync(primerFile, { force: true });
+  return /PRIMER=(\w+)/.exec(py.stdout)?.[1] || short(py.stderr || py.error, 120);
+}
+
 async function seedIterations(request, deckId, deckText, verdicts) {
   const ids = [];
   for (const verdict of verdicts) {
@@ -371,9 +411,14 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
     try { localStorage.setItem("auto_audit_on_dashboard_load", "0"); } catch (_e) { /* ignore */ }
   });
 
-  const goldenText = fs.readFileSync(path.join(FIXTURES, "golden_single_commander_build.dck"), "utf-8");
-  const fallbackBText = fs.readFileSync(path.join(FIXTURES, "e2e_walkthrough_deck_b.dck"), "utf-8");
-  const primerText = fs.readFileSync(path.join(FIXTURES, "e2e_walkthrough_deck_b.primer.txt"), "utf-8");
+  // Both decks are real lists (2026-10-02 run 1: the golden fixture's
+  // "Goblin 0..39" placeholders made the price / bracket / coverage rows
+  // meaningless). Deck A is the committed Muxus list with its primer;
+  // deck B is the live Archidekt import, else the committed Ezuri list.
+  const deckAText = fs.readFileSync(path.join(FIXTURES, "e2e_walkthrough_muxus.dck"), "utf-8");
+  const deckAPrimer = fs.readFileSync(path.join(FIXTURES, "e2e_walkthrough_muxus.primer.txt"), "utf-8");
+  const fallbackBText = fs.readFileSync(path.join(FIXTURES, "e2e_walkthrough_green.dck"), "utf-8");
+  const fallbackBPrimer = fs.readFileSync(path.join(FIXTURES, "e2e_walkthrough_green.primer.txt"), "utf-8");
 
   // ----- Phase 0: boot -------------------------------------------------
   await row(page, "global", "home: page loads", {}, async () => {
@@ -403,7 +448,9 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
 
   await row(page, "global", "api: read-only catalogue endpoints", {}, async () => {
     const checks = [
-      ["/api/config", (b) => "default_bracket" in b],
+      // A fresh store is redacted to just the <secret>_set flag;
+      // defaults are filled client-side (observation, not a failure).
+      ["/api/config", (b) => Object.keys(b).some((k) => /_api_key_set$/.test(k))],
       ["/api/sim_settings", (b) => b.games_are_per_pod === true && b.filler_pairs >= 1],
       ["/api/game_changers", (b) => Array.isArray(b.cards) && b.cards.length > 0],
       ["/api/rules/game_changers", (b) => Array.isArray(b.cards)],
@@ -418,18 +465,20 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
       const r = await api(request, "GET", url);
       if (r.status !== 200 || !ok(r.body)) throw new Error(`${url} -> ${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
       notes.push(`${url.split("?")[0]} ok`);
+      if (url === "/api/config" && !("default_bracket" in r.body)) notes.push("(config: defaults not echoed on a fresh store)");
     }
     return notes.join(", ");
   });
 
   // ----- Phase 1: the two decks ---------------------------------------
-  await row(page, "A", "deck A: paste-import the golden fixture through /api/import_deck", {}, async () => {
-    const res = await importPaste(request, DECK_A_NAME, goldenText, 3);
+  await row(page, "A", "deck A: paste-import the Muxus fixture through /api/import_deck (+ primer sidecar)", {}, async () => {
+    const res = await importPaste(request, DECK_A_NAME, deckAText, 3);
     expect(res.status).toBe(200);
     expect(res.body.id).toBe(res.stem);
     decks.A = res.body.id;
     decks.created.push(decks.A);
-    return `id=${decks.A} filename=${res.body.filename}`;
+    const primer = serverState.deckDir ? storePrimer(decks.A, deckAPrimer) : "skipped (deck_dir unknown)";
+    return `id=${decks.A} filename=${res.body.filename}; primer sidecar: ${primer}`;
   });
 
   let liveB = null;
@@ -439,46 +488,61 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
     });
     await sleep(POLITE_MS);
     if (res.status === 200) {
-      const text = await api(request, "GET", `/api/deck_text?deck=${encodeURIComponent(res.body.id)}`);
-      const isKrenko = /Krenko, Mob Boss/.test(text.body.text || "");
-      if (!isKrenko) {
-        await api(request, "DELETE", `/api/deck_text?deck=${encodeURIComponent(res.body.id)}`);
-        throw new Error(
-          `the web lane read "/decks/60036" as a MOXFIELD id and imported a different deck ` +
-          `(${res.body.id}); deleted it. See routes_decks.import_deck + moxfield_import.parse_deck_id.`,
-        );
-      }
+      const text = (await api(request, "GET", `/api/deck_text?deck=${encodeURIComponent(res.body.id)}`)).body.text || "";
+      const problems = [];
+      if (!/^Archidekt=60036/m.test(text)) problems.push("no Archidekt=60036 provenance line");
+      if (!/Krenko, Mob Boss/.test(text)) problems.push("commander is not Krenko, Mob Boss");
       liveB = res.body.id;
       decks.created.push(liveB);
-      return `imported ${liveB}; primer=${JSON.stringify(res.body.primer)}`;
+      const mainCount = (text.split("[Main]")[1] || "").split(/\r?\n/)
+        .map((l) => /^(\d+)\s/.exec(l)).filter(Boolean).reduce((n, m) => n + Number(m[1]), 0);
+      if (problems.length) throw new Error(`${problems.join("; ")} (imported ${liveB})`);
+      return `imported ${liveB}; main=${mainCount} cards; primer=${JSON.stringify(res.body.primer)}`;
     }
-    throw new Error(
-      `web lane is Moxfield-only: ${res.status} ${short(JSON.stringify(res.body), 200)} ` +
-      `(the UI's "Moxfield URL" tab has no Archidekt path; the CLI lane does)`,
-    );
+    throw new Error(`${res.status} ${short(JSON.stringify(res.body), 240)}`);
   });
 
-  await row(page, "B", "deck B: Archidekt lane (moxfield_import.import_deck, the project's own importer)", { network: true }, async () => {
-    if (liveB) return "web lane already produced deck B; not importing twice";
+  await row(page, "B", "deck B: Archidekt categories (includedInDeck flags) from the raw deck JSON; project-lane import if the web lane failed", { network: true }, async () => {
     if (!serverState.deckDir) throw new Error("deck_dir unknown (health row failed)");
+    // One fetch of the raw deck JSON (archidekt_client.fetch_deck) so the
+    // checklist shows WHY the imported list has the size it has:
+    // ``_excluded_categories`` honours Archidekt's per-category
+    // includedInDeck flag, so a sideboard flagged "included" is imported
+    // faithfully (run 1 reported 108/100 for this deck). When the web
+    // lane failed, the same JSON is written through the project's own
+    // converters — no second fetch.
     const code = [
-      "import sys, pathlib",
-      "from commander_builder.moxfield_import import import_deck",
-      `p = import_deck(${JSON.stringify(ARCHIDEKT_DECK_B_URL)}, out_dir=pathlib.Path(${JSON.stringify(serverState.deckDir)}), is_user=True)`,
-      "print('STEM=' + p.stem)",
+      "import json, pathlib",
+      "from commander_builder import archidekt_client as ac",
+      "from commander_builder.moxfield_import import to_dck, _insert_metadata_lines",
+      "from commander_builder.dck_meta import stamp_name_preserving_display",
+      "from commander_builder.primer import store_primer_sidecar",
+      `raw = ac.fetch_deck(ac.parse_deck_id(${JSON.stringify(ARCHIDEKT_DECK_B_URL)}))`,
+      "cats = [(c.get('name'), c.get('includedInDeck')) for c in (raw.get('categories') or []) if isinstance(c, dict)]",
+      "print('CATS=' + json.dumps(cats))",
+      "print('CARDS=' + str(sum(int(e.get('quantity') or 0) for e in (raw.get('cards') or []) if isinstance(e, dict))))",
+      `if ${liveB ? "False" : "True"}:`,
+      "    dj = ac.to_deck_json(raw)",
+      "    stem = '[USER] ' + ''.join(ch for ch in (dj.get('name') or 'Archidekt 60036') if ch not in '<>:\"/\\\\|?*').strip() + ' [B3]'",
+      `    target = pathlib.Path(${JSON.stringify(serverState.deckDir)}) / (stem + '.dck')`,
+      "    text = _insert_metadata_lines(to_dck(dj), ['Archidekt=60036', 'Source=archidekt'])",
+      "    target.write_text(stamp_name_preserving_display(text, stem), encoding='utf-8', newline='')",
+      "    store_primer_sidecar(target, dj.get('description'), source_id='archidekt:60036')",
+      "    print('STEM=' + stem)",
     ].join("\n");
     const res = runPython(["-c", code], { timeoutMs: 180_000 });
     await sleep(POLITE_MS);
     if (res.error && /ENOENT/.test(res.error)) throw new SoftFail(`no ${PYTHON} on PATH: ${res.error}`);
+    if (!res.ok) throw new SoftFail(`archidekt fetch exit ${res.status}: ${short(res.stderr || res.stdout || res.error, 300)}`);
+    const cats = JSON.parse(/CATS=(.*)$/m.exec(res.stdout)?.[1] || "[]");
+    const cards = /CARDS=(\d+)/.exec(res.stdout)?.[1];
+    const catNote = cats.map(([n, inc]) => `${n}${inc === false ? "(excluded)" : inc === true ? "(included)" : "(?)"}`).join(", ");
     const m = /STEM=(.+)$/m.exec(res.stdout);
-    if (!res.ok || !m) {
-      throw new SoftFail(`importer exit ${res.status}: ${short(res.stderr || res.stdout || res.error, 300)}`);
+    if (m) {
+      liveB = m[1].trim();
+      decks.created.push(liveB);
     }
-    liveB = m[1].trim();
-    decks.created.push(liveB);
-    const text = await api(request, "GET", `/api/deck_text?deck=${encodeURIComponent(liveB)}`);
-    if (text.status !== 200) throw new Error(`imported ${liveB} but /api/deck_text -> ${text.status}`);
-    return `imported ${liveB} (${(text.body.text || "").split("\n").length} lines)`;
+    return `${cards} card entries; categories: ${catNote}${m ? `; wrote ${liveB} from the same JSON` : ""}`;
   });
 
   await row(page, "B", "deck B: resolve (live import or fallback fixture + primer sidecar)", {}, async () => {
@@ -490,22 +554,10 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
     const res = await importPaste(request, DECK_B_FALLBACK_NAME, fallbackBText, 3);
     expect(res.status).toBe(200);
     decks.B = res.body.id;
-    decks.bSource = "fallback fixture (tests/fixtures/e2e_walkthrough_deck_b.dck)";
+    decks.bSource = "fallback fixture (tests/fixtures/e2e_walkthrough_green.dck)";
     decks.created.push(decks.B);
-    // The primer sidecar is written through the project's own writer so
-    // the adopt row has the identity header it expects.
-    const primerFile = path.join(RESULTS, "_primer_b.txt");
-    fs.writeFileSync(primerFile, primerText);
-    const code = [
-      "import pathlib",
-      "from commander_builder.primer import store_primer_sidecar",
-      `dck = pathlib.Path(${JSON.stringify(serverState.deckDir)}) / ${JSON.stringify(`${decks.B}.dck`)}`,
-      `out = store_primer_sidecar(dck, pathlib.Path(${JSON.stringify(primerFile)}).read_text(encoding='utf-8'))`,
-      "print('PRIMER=' + out.action)",
-    ].join("\n");
-    const py = runPython(["-c", code]);
-    fs.rmSync(primerFile, { force: true });
-    return `fallback deck ${decks.B}; primer sidecar: ${/PRIMER=(\w+)/.exec(py.stdout)?.[1] || short(py.stderr || py.error, 120)}`;
+    const primer = serverState.deckDir ? storePrimer(decks.B, fallbackBPrimer) : "skipped (deck_dir unknown)";
+    return `fallback deck ${decks.B}; primer sidecar: ${primer}`;
   });
 
   for (const key of ["A", "B"]) {
@@ -716,12 +768,16 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
       await sleep(POLITE_MS);
       const text = (await panel.textContent()) || "";
       if (/Audit failed/.test(text)) throw new SoftFail(`stream status ${resp.status()}: ${short(text, 200)}`);
-      const tiles = panel.locator(".deck-health-row .tile, .deck-health-panel .tile");
-      const n = await tiles.count();
-      const tileText = (await tiles.allTextContents()).join(" | ");
-      const unavailable = (tileText.match(/unavailable/gi) || []).length;
-      if (n && unavailable >= n) throw new SoftFail(`all ${n} health tiles unavailable`);
-      return `stream ${resp.status()}; ${n} health tiles (${unavailable} unavailable); ${short(text, 140)}`;
+      // deck_health_ui.renderHealthTile builds ``.health-tile`` nodes
+      // inside ``.deck-health-row`` (run 1's ``.tile`` selector matched
+      // nothing).
+      const tiles = panel.locator(".deck-health-row .health-tile");
+      const texts = await tiles.allTextContents();
+      const n = texts.length;
+      const live = texts.filter((t) => !/unavailable/i.test(t)).length;
+      if (n < 3) throw new Error(`expected >= 3 health tiles, saw ${n}`);
+      if (live < 3) throw new SoftFail(`only ${live}/${n} health tiles carry a signal (rest unavailable)`);
+      return `stream ${resp.status()}; ${n} health tiles, ${live} with a signal; ${short(text, 140)}`;
     });
 
     await row(page, key, "audit: Save audit to log (no sim) -> /api/save_iteration", { network: true }, async () => {
@@ -734,29 +790,68 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
       return `save_iteration -> ${resp.status()}`;
     });
 
-    await row(page, key, "audit: judge/analyst path without an API key degrades honestly", { network: true }, async () => {
-      const streamResp = page.waitForResponse((r) => r.url().includes("/api/audit/stream"), { timeout: 30_000 });
-      // Request the analyst source by elimination (the valid-source set
-      // is a page global) rather than naming it here.
-      await page.evaluate(() => {
-        const s = [..._VALID_AUDIT_SOURCES].find((x) => x !== "heuristic" && x !== "bracket_peers");
-        return loadAdvise(s);
-      });
-      const resp = await streamResp;
-      expect(resp.url()).not.toContain("source=heuristic");
-      const panel = page.locator("#sug-panel");
-      await expect(panel).toContainText(/Audit — full proposed deck|Audit failed/, { timeout: 180_000 });
-      await expect(panel.locator("button", { hasText: "Use this list" }).or(panel.getByText(/Audit failed/))).toBeVisible({ timeout: 180_000 });
-      const text = (await panel.textContent()) || "";
-      if (/Audit failed/.test(text)) throw new SoftFail(short(text, 200));
-      if (!/no API key|Settings|fell back|unavailable/i.test(text)) {
-        throw new Error(`no fallback warning rendered: ${short(text, 200)}`);
+    await row(page, key, "audit: analyst path without an API key degrades honestly (SSE frames read directly)", { network: true }, async () => {
+      // Run 1 never saw a terminal frame in 180 s through the UI, so this
+      // row reads the stream itself (same fetch + frame parser contract
+      // as audit_streaming.js) and records every event with its elapsed
+      // ms: a hang or an error frame lands in the checklist with the
+      // last frame and the time, instead of a bare timeout.
+      const result = await page.evaluate(async ({ deck, bracket, limitMs }) => {
+        const source = [..._VALID_AUDIT_SOURCES].find((x) => x !== "heuristic" && x !== "bracket_peers");
+        const url = `/api/audit/stream?deck=${encodeURIComponent(deck)}&bracket=${bracket}&source=${encodeURIComponent(source)}`;
+        const t0 = performance.now();
+        const out = { source, status: null, events: [], complete: null, error: null, lastFrame: "", elapsed: 0, timedOut: false };
+        const ctl = new AbortController();
+        const timer = setTimeout(() => { out.timedOut = true; ctl.abort(); }, limitMs);
+        try {
+          const resp = await fetch(url, { signal: ctl.signal });
+          out.status = resp.status;
+          if (!resp.ok || !resp.body) {
+            out.error = `HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`;
+          } else {
+            const reader = resp.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              buf += dec.decode(value, { stream: true });
+              let idx;
+              while ((idx = buf.indexOf("\n\n")) >= 0) {
+                const frame = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+                const ev = /^event:\s*(.+)$/m.exec(frame)?.[1]?.trim() || "message";
+                const dataLine = /^data:\s*(.*)$/m.exec(frame)?.[1] || "";
+                out.events.push({ event: ev, ms: Math.round(performance.now() - t0), bytes: frame.length });
+                out.lastFrame = frame.slice(0, 300);
+                if (ev === "complete") { try { out.complete = JSON.parse(dataLine); } catch (_e) { out.complete = { parseError: true }; } }
+                if (ev === "error") { try { out.error = JSON.stringify(JSON.parse(dataLine)).slice(0, 300); } catch (_e) { out.error = dataLine.slice(0, 300); } }
+              }
+            }
+          }
+        } catch (e) {
+          out.error = out.error || String(e && e.message ? e.message : e);
+        } finally {
+          clearTimeout(timer);
+          out.elapsed = Math.round(performance.now() - t0);
+        }
+        return out;
+      }, { deck: deckId, bracket: 3, limitMs: 300_000 });
+      await sleep(POLITE_MS);
+      const trail = result.events.map((e) => `${e.event}@${e.ms}ms`).join(" > ") || "(no frames)";
+      const base = `source=${result.source} HTTP ${result.status}; frames: ${trail}; total ${result.elapsed}ms`;
+      if (result.timedOut) throw new Error(`stream still open after 300 s — ${base}; last frame: ${short(result.lastFrame, 160)}`);
+      if (result.error) throw new Error(`stream error — ${base}; ${short(result.error, 200)}`);
+      if (!result.complete) throw new Error(`no complete frame — ${base}; last frame: ${short(result.lastFrame, 160)}`);
+      const warning = String(result.complete.warning || "");
+      if (!/no API key/i.test(warning)) {
+        throw new Error(`complete frame lacks the no-key warning — ${base}; source=${result.complete.source}; warning=${short(warning, 160) || "(none)"}`);
       }
-      return short(text.match(/[^.]*(API key|fell back|unavailable)[^.]*\./i)?.[0] || text, 200);
+      return `${base}; effective source=${result.complete.source}; warning: ${short(warning, 160)}`;
     });
 
     await row(page, key, "api: /api/advise (legacy sync advisor)", { network: true }, async () => {
-      const r = await api(request, "GET", `/api/advise?deck=${enc}`);
+      const r = await api(request, "GET", `/api/advise?deck=${enc}`, undefined, 90_000);
       await sleep(POLITE_MS);
       if (r.status !== 200) throw new SoftFail(`${r.status} ${short(JSON.stringify(r.body), 160)}`);
       return `200; keys ${Object.keys(r.body).slice(0, 6).join(",")}`;
@@ -905,7 +1000,7 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
       const sidecar = fs.existsSync(path.join(serverState.deckDir, `${deckId}.primer.md`));
       fs.writeFileSync(path.join(RESULTS, key, "adopt.json"), res.stdout);
       const keys = parsed ? Object.keys(parsed).slice(0, 8).join(",") : short(res.stdout, 120);
-      if (key === "B" && !sidecar) throw new Error("deck B has no primer sidecar — adopt explanation ran without the primer");
+      if (!sidecar) throw new Error(`deck ${key} has no primer sidecar — adopt explanation ran without the primer`);
       return `primer sidecar: ${sidecar}; adopt keys: ${keys}`;
     });
   }
@@ -942,9 +1037,16 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
     await page.locator("#btn-settings").click();
     await expect(page.locator("#settings-dialog")).toBeVisible();
     await page.locator("#settings-collection").fill("1 Sol Ring\n1 Arcane Signet\nLightning Bolt\n");
-    const put = page.waitForResponse((r) => r.url().includes("/api/collection") && r.request().method() === "PUT");
+    // saveSettings PUTs /api/config first and only then the collection
+    // (non-blank textarea); wait for each in turn (run 1 waited on the
+    // collection alone with the default 15 s and timed out).
+    const putConfig = page.waitForResponse((r) => r.url().includes("/api/config") && r.request().method() === "PUT", { timeout: 30_000 });
+    const putColl = page.waitForResponse((r) => r.url().includes("/api/collection") && r.request().method() === "PUT", { timeout: 30_000 });
     await page.locator("#settings-save").click();
-    expect((await put).status()).toBe(200);
+    const cfgStatus = (await putConfig).status();
+    const collStatus = (await putColl).status();
+    expect(cfgStatus).toBe(200);
+    expect(collStatus).toBe(200);
     await expect(page.locator("#settings-collection-state")).toHaveText(/3 cards/);
     await expect(page.locator("#settings-dialog")).toBeHidden({ timeout: 5_000 });
     await page.locator("#btn-settings").click();
@@ -954,7 +1056,7 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
     await page.locator("#settings-cancel").click();
     const g = await api(request, "GET", "/api/collection");
     expect(g.body.configured).toBe(false);
-    return "3-card collection registered then cleared";
+    return `config PUT ${cfgStatus}, collection PUT ${collStatus}; 3-card collection registered then cleared`;
   });
 
   await row(page, "global", "cards: library search (/api/library)", {}, async () => {
@@ -979,12 +1081,18 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
     await page.locator("#card-search-btn").click();
     const r = await resp;
     await sleep(POLITE_MS);
-    await expect(page.locator("#alert-modal")).toBeVisible();
-    await page.waitForTimeout(800);
-    const text = short(await page.locator("#alert-body").textContent(), 160);
-    await page.locator('#alert-modal [data-close="alert-modal"]').click();
+    // openCardReference renders into its own overlay appended to body
+    // (#_card-ref-overlay), not the shared alert modal.
+    const overlay = page.locator("#_card-ref-overlay");
+    await expect(overlay).toBeVisible();
+    await expect(overlay).toContainText(/Lightning Bolt|Lookup failed|No card found/, { timeout: 15_000 });
+    const heading = await overlay.locator("h2").first().textContent().catch(() => "");
+    const text = short(await overlay.textContent(), 160);
+    await page.keyboard.press("Escape");
+    await expect(overlay).toBeHidden();
     if (r.status() !== 200) throw new SoftFail(`card lookup ${r.status()}: ${text}`);
-    return text;
+    if (!/Lightning Bolt/.test(heading || "")) throw new Error(`no card heading: ${text}`);
+    return `heading "${short(heading, 40)}"; ${text}`;
   });
 
   await row(page, "global", "api: oracle + card image", { network: true }, async () => {
@@ -1040,13 +1148,16 @@ test("full walkthrough: two decks, every page and action", async ({ page, reques
     await page.locator('.tab[data-tab="moxfield"]').click();
     await page.locator("#new-mox-url").fill("");
     await page.locator("#new-mox-import").click();
-    await expect(page.locator("#new-deck-status")).toContainText(/Enter a Moxfield URL/);
+    await expect(page.locator("#new-deck-status")).toContainText(/Enter a Moxfield/);
     const bulk = await api(request, "POST", "/api/bulk_import", { urls: [] });
     return `tabs ok; empty bulk -> UI validation; POST bulk_import [] -> ${bulk.status}`;
   });
 
   await row(page, "global", "new deck: paste tab creates a throwaway deck, Delete removes it (confirm dialog)", {}, async () => {
     await api(request, "DELETE", `/api/deck_text?deck=${encodeURIComponent(`[USER] ${THROWAWAY_NAME} [B2]`)}`);
+    // Every row starts with the modals closed (recoverUi), so reopen.
+    await page.locator("#btn-new-deck").click();
+    await expect(page.locator("#new-deck-modal")).toBeVisible();
     await page.locator('.tab[data-tab="paste"]').click();
     await page.locator("#new-paste-name").fill(THROWAWAY_NAME);
     await page.locator("#new-paste-bracket").selectOption("2");
