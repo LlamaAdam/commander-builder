@@ -44,6 +44,11 @@ process.env.CB_E2E_PORT = String(PORT);
 module.exports = defineConfig({
   testDir: path.join(__dirname, "tests", "e2e"),
   testMatch: /.*\.spec\.js/,
+  // The full walkthrough (2026-10-02) has its own config
+  // (playwright.full.config.js): live network, a real Forge compare and
+  // a 40-minute budget. Running it against this lane's stubbed server
+  // would record a wall of honest-but-useless network failures.
+  testIgnore: /full-walkthrough\.spec\.js/,
   // Nothing in the suite is timing-sensitive beyond the propose-swap
   // poll (a fixed 2s first-poll delay in app.js), so a short timeout
   // keeps a genuine hang from eating the CI budget.
