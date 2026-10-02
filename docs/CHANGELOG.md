@@ -6,6 +6,78 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-10-02 — round-4 follow-up batch
+
+The 11 FOLLOW-UP items of negative-mode round 4 (`NEGATIVE_MODE_ROUND4.md`
+§4) plus the two sweeps the FIX-NOW batch left out. Each carries a pin
+that fails without it.
+
+- **A-04** — `backfill_web_margins --era-boundary-report` selects the
+  boundary day on each row's UTC instant (`_row_instant_utc(...).date()`)
+  instead of the raw `created_at` prefix, and prints the instant (with
+  the stored stamp beside it when they differ). `measurement_era_for` is
+  untouched.
+- **A-08** — `analyst.analyze` returns the heuristic's `inconclusive`
+  without escalating when decisive games are below the floor, so no LLM
+  rung can render a verdict on a sub-floor sim; the LLM verdict rung treats
+  a missing or unknown label as a parse failure (`LLMJsonError`, the loud
+  degrade path) instead of coercing it to `neutral`. Four analyst pins
+  moved from 5-6/11 (sub-floor) to 10-11/21 (noise band above the floor).
+- **A-11** — dashboard price tile: subtitle reads "N priced non-land
+  cards"; a land whose snapshot has no `prices` block now counts as
+  unpriced (named, `price_partial: True`) instead of being skipped before
+  the price step. Priced lands stay out of the tile's math.
+- **A-12** — `backfill_web_margins` lists and (with `--apply`) NULLs the
+  legacy era-4 shape `margin = 0 AND win_rate_old IS NULL AND
+  win_rate_new IS NULL` on AB-shaped rows above the fence; a measured tie
+  (margin 0 with win rates) is untouched.
+- **A-13** — an explicit `--sim-fillers` list that seats a `[REF]` /
+  `[CONTROL]` / `[PREMADE]` / `[USER]` deck prints one `NOTE:` line naming
+  the prefixes seated and stamps `sim_report["fillers_overridden"] = True`
+  on the auto-curate row and the bandit row; the confirm sim prints the
+  note. Helpers in `filler_policy` (`filler_override_note`,
+  `mark_fillers_overridden`, `print_filler_override_note`).
+- **B-05** — `judge_agreement.analyze` carries `per_version`
+  (`{prompt_version: gates over that version's rows}`) and
+  `pooled_informational`; the render prints a per-version G1/G2/G3 block
+  and marks the pooled gates informational when versions are mixed.
+- **B-06** — negation window: `drop*` / `skip*` / `nothing` dropped as
+  PRE cues, `against` dropped as a POST cue (kept as PRE); `but` / `only` /
+  `except` break the window's scope. `nothing` survives only as the
+  mention's direct object ("sacrifice nothing"). Six affirmative sentences
+  pinned, and the three PRIMER_CORPUS appendices are now fixtures
+  (`tests/fixtures/primer_corpus_appendix_*.txt`) with their slug lists
+  pinned — the trim moves none of them.
+- **B-07** — a win "heading" is a bare whole-line title (`fullmatch`, at
+  most four words) or a markdown-marked line (`## …`, `**…**`); "Combo
+  pieces I cut" no longer makes the cut list under it "how it wins".
+- **B-10** — the WotC payload is trusted only when all seven
+  `Game Changer Wiki <colour>` entries matched with at least one name;
+  a missing entry is rejected by name on stderr before the 80 % gate and
+  nothing is cached. The "Game Changers Info" entry is never harvested.
+- **B-11** — `atomic_write_text` resolves `os.path.realpath` first, so a
+  symlinked `config.json` / deck is written through (the link survives);
+  the docstring records that an existing parent's mode is never narrowed.
+- **B-18** — the proposer's two cut guards (`auto_propose`,
+  `apply_proposal_to_deck`) key `Protect=` with `collection.match_key`
+  instead of `lower()`, so a curly-apostrophe or accented `Protect=`
+  holds on `commander improve` / auto-curate.
+- **B-02 sweep** — the remaining strict CLI deck readers migrated to
+  `dck_utils.read_deck_text`: `archetype` (its decode failure used to be
+  swallowed into a silent "midrange"), `_proposer_cli`, `improve_search`,
+  `meta_test`, `compare_versions`, `combo_detection`, `deck_identity`,
+  `lift_analysis` (deck and corpus reads), `oracle_store`,
+  `moxfield_push`, `improvement_advisor` (CLI reads).
+- **B-14 diacritics** — `collection.match_key` folds diacritics (NFKD,
+  combining marks dropped, ligatures spelled in ASCII) on top of the R3
+  apostrophe fold: `Lim-Dûl's` = `Lim-Dul's`, `Æther` = `Aether`.
+  `name_key` is deliberately unchanged (the collection and lift matrix
+  store unfolded keys). New `collection.fold_diacritics`.
+- **Tests** — new `tests/test_atomic_io.py`; the
+  `test_build_deck_defaults_bracket_to_3` flake noted in the backlog was
+  not reproduced in three full-suite runs and repeated random-order runs
+  of `tests/test_web_app.py`; the backlog note stays.
+
 ### 2026-10-02 — canary profile; EDHREC inclusion drift
 
 - **forge-canary, second cause.** With the bundle fix in, the canary ran a
