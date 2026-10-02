@@ -1,0 +1,343 @@
+{
+ "_provenance": {
+  "source": "https://json.edhrec.com/pages/commanders/krenko-mob-boss.json",
+  "captured": "2026-10-02 via the capture lane url: form",
+  "trimmed": "container.json_dict only; 4 of 12 cardlists, first 8 cardviews each; per-cardview keys limited to name/sanitized/slug/num_decks/potential_decks/synergy/lift/trend_zscore (ids, urls, prices, images dropped)",
+  "observation": "no cardview on the live page carries an \"inclusion\" key (0 of 221); EDHREC's displayed inclusion% is num_decks / potential_decks"
+ },
+ "container": {
+  "json_dict": {
+   "card": {
+    "name": "Krenko, Mob Boss",
+    "num_decks": 44287,
+    "sanitized": "krenko-mob-boss"
+   },
+   "cardlists": [
+    {
+     "header": "High Lift Cards",
+     "tag": "highliftcards",
+     "cardviews": [
+      {
+       "name": "Umbral Mantle",
+       "sanitized": "umbral-mantle",
+       "slug": "umbral-mantle",
+       "synergy": 0.17342959964248122,
+       "lift": 7.636586805459624,
+       "num_decks": 8838,
+       "potential_decks": 44287,
+       "trend_zscore": 0.20870893035016805
+      },
+      {
+       "name": "Mob Justice",
+       "sanitized": "mob-justice",
+       "slug": "mob-justice",
+       "synergy": 0.19141590299046657,
+       "lift": 7.572703785344857,
+       "num_decks": 9767,
+       "potential_decks": 44287,
+       "trend_zscore": -1.79762349184365
+      },
+      {
+       "name": "Sword of the Paruns",
+       "sanitized": "sword-of-the-paruns",
+       "slug": "sword-of-the-paruns",
+       "synergy": 0.09038063298325033,
+       "lift": 7.463109435036631,
+       "num_decks": 4622,
+       "potential_decks": 44287,
+       "trend_zscore": -0.5680457084989106
+      },
+      {
+       "name": "Battle Squadron",
+       "sanitized": "battle-squadron",
+       "slug": "battle-squadron",
+       "synergy": 0.17315639628256455,
+       "lift": 7.278397692569899,
+       "num_decks": 8890,
+       "potential_decks": 44287,
+       "trend_zscore": -1.3332042675506635
+      },
+      {
+       "name": "Reckless One",
+       "sanitized": "reckless-one",
+       "slug": "reckless-one",
+       "synergy": 0.10870062870636518,
+       "lift": 7.164119418083825,
+       "num_decks": 5595,
+       "potential_decks": 44287,
+       "trend_zscore": -1.2603332919227395
+      },
+      {
+       "name": "Marvin, Murderous Mimic",
+       "sanitized": "marvin-murderous-mimic",
+       "slug": "marvin-murderous-mimic",
+       "synergy": 0.23635412382504695,
+       "lift": 7.137140971632943,
+       "num_decks": 12173,
+       "potential_decks": 44287,
+       "trend_zscore": -0.19561171792798102
+      },
+      {
+       "name": "Goblin Lookout",
+       "sanitized": "goblin-lookout",
+       "slug": "goblin-lookout",
+       "synergy": 0.1783566171048855,
+       "lift": 7.113113685808303,
+       "num_decks": 9191,
+       "potential_decks": 44287,
+       "trend_zscore": -1.0306750165879868
+      },
+      {
+       "name": "Massive Raid",
+       "sanitized": "massive-raid",
+       "slug": "massive-raid",
+       "synergy": 0.30496740675678546,
+       "lift": 7.089562218242489,
+       "num_decks": 15724,
+       "potential_decks": 44287,
+       "trend_zscore": -1.828384258893758
+      }
+     ]
+    },
+    {
+     "header": "Top Cards",
+     "tag": "topcards",
+     "cardviews": [
+      {
+       "name": "Goblin Warchief",
+       "sanitized": "goblin-warchief",
+       "slug": "goblin-warchief",
+       "synergy": 0.7228664421480111,
+       "lift": 5.765051202777769,
+       "num_decks": 38732,
+       "potential_decks": 44287,
+       "trend_zscore": 0.3010229234355011
+      },
+      {
+       "name": "Skirk Prospector",
+       "sanitized": "skirk-prospector",
+       "slug": "skirk-prospector",
+       "synergy": 0.6840508925287587,
+       "lift": 4.811385508728363,
+       "num_decks": 38243,
+       "potential_decks": 44287,
+       "trend_zscore": 0.4944030610934196
+      },
+      {
+       "name": "Impact Tremors",
+       "sanitized": "impact-tremors",
+       "slug": "impact-tremors",
+       "synergy": 0.6077437801993124,
+       "lift": 3.5560806383997394,
+       "num_decks": 37445,
+       "potential_decks": 44287,
+       "trend_zscore": 0.6407123889097351
+      },
+      {
+       "name": "Goblin Matron",
+       "sanitized": "goblin-matron",
+       "slug": "goblin-matron",
+       "synergy": 0.6750152567283061,
+       "lift": 5.163797911325317,
+       "num_decks": 37074,
+       "potential_decks": 44287,
+       "trend_zscore": 0.47691593376748387
+      },
+      {
+       "name": "Goblin Chieftain",
+       "sanitized": "goblin-chieftain",
+       "slug": "goblin-chieftain",
+       "synergy": 0.6482182747875388,
+       "lift": 6.143487753093759,
+       "num_decks": 34289,
+       "potential_decks": 44287,
+       "trend_zscore": 0.7442552128596199
+      },
+      {
+       "name": "Goblin Bombardment",
+       "sanitized": "goblin-bombardment",
+       "slug": "goblin-bombardment",
+       "synergy": 0.5825977167505911,
+       "lift": 4.727197403012939,
+       "num_decks": 32724,
+       "potential_decks": 44287,
+       "trend_zscore": 0.8489390230812183
+      },
+      {
+       "name": "Brightstone Ritual",
+       "sanitized": "brightstone-ritual",
+       "slug": "brightstone-ritual",
+       "synergy": 0.5569382294817042,
+       "lift": 5.424335281636663,
+       "num_decks": 30240,
+       "potential_decks": 44287,
+       "trend_zscore": 1.64916009173801
+      },
+      {
+       "name": "Pashalik Mons",
+       "sanitized": "pashalik-mons",
+       "slug": "pashalik-mons",
+       "synergy": 0.5604607659550223,
+       "lift": 5.886169550213185,
+       "num_decks": 29901,
+       "potential_decks": 44287,
+       "trend_zscore": 1.4305806626691213
+      }
+     ]
+    },
+    {
+     "header": "Game Changers",
+     "tag": "gamechangers",
+     "cardviews": [
+      {
+       "name": "Jeska's Will",
+       "sanitized": "jeskas-will",
+       "slug": "jeskas-will",
+       "synergy": -0.10348048290076578,
+       "lift": 0.7077985937437064,
+       "num_decks": 11101,
+       "potential_decks": 44287,
+       "trend_zscore": 0.6303470192831944
+      },
+      {
+       "name": "Gamble",
+       "sanitized": "gamble",
+       "slug": "gamble",
+       "synergy": 0.0253146330414252,
+       "lift": 1.118574521029111,
+       "num_decks": 10576,
+       "potential_decks": 44287,
+       "trend_zscore": 0.213396378093744
+      },
+      {
+       "name": "Ancient Tomb",
+       "sanitized": "ancient-tomb",
+       "slug": "ancient-tomb",
+       "synergy": -0.024291113320628346,
+       "lift": 0.8075106852430249,
+       "num_decks": 4513,
+       "potential_decks": 44287,
+       "trend_zscore": -0.07639545058317665
+      },
+      {
+       "name": "The One Ring",
+       "sanitized": "the-one-ring",
+       "slug": "the-one-ring",
+       "synergy": -0.030936432211229603,
+       "lift": 0.7293442036920949,
+       "num_decks": 3692,
+       "potential_decks": 44287,
+       "trend_zscore": 0.26968386193770566
+      },
+      {
+       "name": "Chrome Mox",
+       "sanitized": "chrome-mox",
+       "slug": "chrome-mox",
+       "synergy": -0.00683760553462142,
+       "lift": 0.8988525241726751,
+       "num_decks": 2691,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Mana Vault",
+       "sanitized": "mana-vault",
+       "slug": "mana-vault",
+       "synergy": -0.019308527081478427,
+       "lift": 0.7348571205021317,
+       "num_decks": 2370,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      }
+     ]
+    },
+    {
+     "header": "Mana Artifacts",
+     "tag": "manaartifacts",
+     "cardviews": [
+      {
+       "name": "Sol Ring",
+       "sanitized": "sol-ring",
+       "slug": "sol-ring",
+       "synergy": 0.010720046037341224,
+       "lift": 1.0127382775647977,
+       "num_decks": 37745,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Arcane Signet",
+       "sanitized": "arcane-signet",
+       "slug": "arcane-signet",
+       "synergy": -0.07961160804459622,
+       "lift": 0.8685730449976293,
+       "num_decks": 23301,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Patriar's Seal",
+       "sanitized": "patriars-seal",
+       "slug": "patriars-seal",
+       "synergy": 0.21773930855442575,
+       "lift": 5.919960656248181,
+       "num_decks": 11603,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Heraldic Banner",
+       "sanitized": "heraldic-banner",
+       "slug": "heraldic-banner",
+       "synergy": 0.14118720283303615,
+       "lift": 2.5674048117915182,
+       "num_decks": 10242,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Mind Stone",
+       "sanitized": "mind-stone",
+       "slug": "mind-stone",
+       "synergy": -0.10303928601855605,
+       "lift": 0.6632822052080545,
+       "num_decks": 8989,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Patchwork Banner",
+       "sanitized": "patchwork-banner",
+       "slug": "patchwork-banner",
+       "synergy": 0.15374340791256264,
+       "lift": 4.157843725033287,
+       "num_decks": 8965,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Fire Diamond",
+       "sanitized": "fire-diamond",
+       "slug": "fire-diamond",
+       "synergy": -0.05598180427135757,
+       "lift": 0.758503615069606,
+       "num_decks": 7787,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      },
+      {
+       "name": "Fellwar Stone",
+       "sanitized": "fellwar-stone",
+       "slug": "fellwar-stone",
+       "synergy": -0.08607672587472655,
+       "lift": 0.4695188502406871,
+       "num_decks": 3374,
+       "potential_decks": 44287,
+       "trend_zscore": 0.0
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

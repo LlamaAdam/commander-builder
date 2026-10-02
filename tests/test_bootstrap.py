@@ -541,3 +541,51 @@ def test_download_forge_error_names_the_assets_it_saw(tmp_path):
             _get_release=lambda: {"assets": [{"name": "build.txt", "browser_download_url": "u"}]},
             _download=lambda url, dest: None,
         )
+
+
+# --------------------------------------------------------------------------- #
+# forge.profile.properties (2026-10-02): a fresh bundle has only the .example
+# --------------------------------------------------------------------------- #
+_PROFILE_EXAMPLE = (_FIXTURES / "forge_profile_properties_example_2026-10-02.txt").read_text(encoding="utf-8")
+
+
+def test_captured_example_leaves_every_dir_key_empty():
+    # The drift the canary hit: with userDir empty Forge uses ~/.forge on
+    # Linux, so decks seeded into vendor/forge/userdata are invisible.
+    keys = dict(l.split("=", 1) for l in _PROFILE_EXAMPLE.splitlines()
+                if l and not l.startswith("#") and "=" in l)
+    assert keys["userDir"] == "" and keys["cacheDir"] == "" and keys["decksDir"] == ""
+    assert "Linux: <your home directory>/.forge/" in _PROFILE_EXAMPLE
+
+
+def test_ensure_forge_profile_writes_userdata_profile_and_deck_dir(tmp_path):
+    forge = tmp_path / "forge"
+    profile = bootstrap.ensure_forge_profile(forge)
+    assert profile == forge / "forge.profile.properties"
+    keys = dict(l.split("=", 1) for l in profile.read_text(encoding="utf-8").splitlines()
+                if l and not l.startswith("#") and "=" in l)
+    assert keys["userDir"] == "./userdata"
+    assert keys["cacheDir"] == "./userdata/cache"
+    # Only keys the real example file defines, so Forge parses it as its own.
+    example_keys = {l.split("=", 1)[0] for l in _PROFILE_EXAMPLE.splitlines()
+                    if l and not l.startswith("#") and "=" in l}
+    assert set(keys) <= example_keys
+    assert (forge / "userdata" / "decks" / "commander").is_dir()
+
+
+def test_ensure_forge_profile_never_overwrites_an_owner_profile(tmp_path):
+    forge = tmp_path / "forge"; forge.mkdir()
+    (forge / "forge.profile.properties").write_text("userDir=D:/ForgeData\n", encoding="utf-8")
+    bootstrap.ensure_forge_profile(forge)
+    assert (forge / "forge.profile.properties").read_text(encoding="utf-8") == "userDir=D:/ForgeData\n"
+
+
+def test_download_forge_bundle_also_writes_the_profile(tmp_path):
+    forge = tmp_path / "forge"
+    data = _real_layout_bundle()
+    release = {"assets": [{"name": "forge-installer-2.0.14.tar.bz2",
+                           "browser_download_url": "u",
+                           "digest": "sha256:" + hashlib.sha256(data).hexdigest()}]}
+    bootstrap.download_forge(forge_dir=forge, _get_release=lambda: release,
+                             _download=lambda url, dest: dest.write_bytes(data))
+    assert "userDir=./userdata" in (forge / "forge.profile.properties").read_text(encoding="utf-8")

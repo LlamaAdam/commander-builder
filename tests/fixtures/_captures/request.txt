@@ -1,2 +1,0 @@
-url: https://raw.githubusercontent.com/Card-Forge/forge/master/forge-gui/forge.profile.properties.example
-url: https://raw.githubusercontent.com/Card-Forge/forge/master/forge-gui/release-files/forge.profile.properties.example

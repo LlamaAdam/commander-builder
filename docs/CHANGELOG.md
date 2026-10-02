@@ -6,6 +6,30 @@ applies once we tag a 1.0.
 
 ## [Unreleased]
 
+### 2026-10-02 — canary profile; EDHREC inclusion drift
+
+- **forge-canary, second cause.** With the bundle fix in, the canary ran a
+  4-game pod to completion with 0 wins on both sides. A freshly extracted
+  bundle ships only `forge.profile.properties.example`, and with its keys
+  empty Forge reads decks from `~/.forge` on Linux (pinned from the real
+  example file, `tests/fixtures/forge_profile_properties_example_2026-10-02.txt`),
+  so nothing the workflow seeded into `vendor/forge/userdata` existed where
+  Forge looked. New `bootstrap.ensure_forge_profile` writes `userDir=./userdata`
+  (never over an existing profile); `download_forge` calls it after a bundle
+  extraction and the canary calls it before seeding. On red the workflow now
+  prints where Forge actually put things and uploads `~/.forge` logs too.
+- **EDHREC inclusion was 0 for every card.** Live `json.edhrec.com`
+  cardviews carry `num_decks`, `potential_decks`, `synergy`, `lift` and
+  `trend_zscore` and no `inclusion` key (0 of 221 on the captured Krenko
+  page, `tests/fixtures/edhrec_commander_page_krenko_2026-10-02.json`); the
+  parser read `inclusion` and produced `inclusion_pct == 0.0` throughout,
+  which silently emptied the heuristic advisor's inclusion gates. One
+  `_entry_from_cardview` builder now derives inclusion as
+  `num_decks / potential_decks` (EDHREC's own displayed number), honours an
+  explicit `inclusion` first, and carries EDHREC's `lift` on `CardEntry`.
+- **Lane.** `url:` captures every url line in a request; one failing URL no
+  longer aborts the rest.
+
 ### 2026-09-28 — forge-canary: Forge releases ship a bundle, not a fat jar
 
 - **Bug.** `forge-canary.yml` was red on every weekly run since it was

@@ -78,6 +78,42 @@ class CardEntry:
     inclusion_pct: float = 0.0
     synergy_pct: float = 0.0
     num_decks: int = 0
+    # EDHREC's own pairwise-lift score for the card against the page's
+    # subject (commander or card). Live payloads carry it on every
+    # cardview (2026-10-02 capture: 221/221); 0.0 when absent.
+    lift: float = 0.0
+
+
+def _entry_from_cardview(cv: dict) -> CardEntry:
+    """The ONE CardEntry builder for a json.edhrec.com cardview.
+
+    DRIFT PINNED 2026-10-02 (tests/fixtures/edhrec_commander_page_krenko
+    _2026-10-02.json): live cardviews carry ``num_decks`` +
+    ``potential_decks`` + ``synergy`` + ``lift`` + ``trend_zscore`` and
+    NO ``inclusion`` key at all (0 of 221 on the Krenko page). Reading
+    ``cv["inclusion"]`` therefore yielded ``inclusion_pct == 0.0`` for
+    every card, which silently emptied every ``MIN_INCLUSION_PCT_FOR_ADD``
+    gate in the heuristic advisor. Inclusion is what EDHREC itself
+    displays: ``num_decks / potential_decks`` (decks running the card
+    over decks where it is legal), as a percentage. ``inclusion`` is
+    still honored first for any page that carries it.
+    """
+    num_decks = int(cv.get("num_decks", 0) or 0)
+    potential = int(cv.get("potential_decks", 0) or 0)
+    raw_incl = cv.get("inclusion")
+    if raw_incl not in (None, "", 0):
+        inclusion = float(raw_incl)
+    elif potential > 0:
+        inclusion = 100.0 * num_decks / potential
+    else:
+        inclusion = 0.0
+    return CardEntry(
+        name=str(cv.get("name", cv.get("sanitized", ""))),
+        inclusion_pct=inclusion,
+        synergy_pct=float(cv.get("synergy", 0) or 0) * 100,
+        num_decks=num_decks,
+        lift=float(cv.get("lift", 0) or 0),
+    )
 
 
 @dataclass
@@ -413,12 +449,7 @@ def _walk_for_cardlists(node, out: dict[str, list[CardEntry]]) -> None:
             for cv in node["cardviews"]:
                 if not isinstance(cv, dict):
                     continue
-                bucket.append(CardEntry(
-                    name=str(cv.get("name", cv.get("sanitized", ""))),
-                    inclusion_pct=float(cv.get("inclusion", 0) or 0),
-                    synergy_pct=float(cv.get("synergy", 0) or 0) * 100,
-                    num_decks=int(cv.get("num_decks", 0) or 0),
-                ))
+                bucket.append(_entry_from_cardview(cv))
             # Bucket the section under a normalized key so the parser
             # tolerates EDHREC's variations ("Top Cards", "topcards", etc.).
             if "high synergy" in header or "high-synergy" in header:
@@ -1362,12 +1393,9 @@ def _walk_for_average_deck_cards(node) -> list[CardEntry]:
                     if not name or name.lower() in seen:
                         continue
                     seen.add(name.lower())
-                    out.append(CardEntry(
-                        name=name,
-                        inclusion_pct=float(cv.get("inclusion", 0) or 0),
-                        synergy_pct=float(cv.get("synergy", 0) or 0) * 100,
-                        num_decks=int(cv.get("num_decks", 0) or 0),
-                    ))
+                    entry = _entry_from_cardview(cv)
+                    entry.name = name
+                    out.append(entry)
             for v in n.values():
                 _walk(v)
         elif isinstance(n, list):

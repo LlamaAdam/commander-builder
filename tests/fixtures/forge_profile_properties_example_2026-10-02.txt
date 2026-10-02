@@ -1,3 +1,7 @@
+# PROVENANCE: captured 2026-10-02 through the capture lane (url: form) from
+# https://raw.githubusercontent.com/Card-Forge/forge/master/forge-gui/forge.profile.properties.example
+# Verbatim. Pins the platform defaults bootstrap.ensure_forge_profile overrides
+# (Linux userDir default ~/.forge/, cacheDir ~/.cache/forge/).
 #
 # forge.profile.properties.example
 #

@@ -252,6 +252,50 @@ def _extract_forge_bundle(archive: Path, forge_dir: Path) -> Path:
     return jar
 
 
+# forge.profile.properties -- the file that makes a fresh Forge look in
+# ./userdata for decks. Captured example (tests/fixtures/
+# forge_profile_properties_example_2026-10-02.txt, from Card-Forge/forge
+# forge-gui/forge.profile.properties.example): with the keys EMPTY, Forge
+# uses platform defaults -- Linux ~/.forge/ for userDir, ~/.cache/forge/
+# for cacheDir -- and the bundle ships only the .example. The runner's
+# contract (forge_runner module docstring) is cwd == install dir with
+# decks under <userDir>/decks/commander/, and every profile this repo
+# manages sets userDir=./userdata. The canary learned this the hard way
+# on 2026-10-02: after the bundle fix it ran a 4-game pod to completion
+# with 0 wins on both sides, because the decks it seeded into
+# vendor/forge/userdata were not where Forge was looking.
+FORGE_PROFILE_FILENAME = "forge.profile.properties"
+_FORGE_PROFILE_TEXT = (
+    "# written by commander-builder (bootstrap.ensure_forge_profile)\n"
+    "# Relative paths resolve against the Forge program directory.\n"
+    "userDir=./userdata\n"
+    "cacheDir=./userdata/cache\n"
+    "cardPicsDir=\n"
+    "cardPicsSubDirs=\n"
+    "decksDir=\n"
+    "decksConstructedDir=\n"
+)
+
+
+def ensure_forge_profile(forge_dir: Optional[Path] = None) -> Path:
+    """Write ``forge.profile.properties`` into ``forge_dir`` if absent so
+    Forge keeps decks, cache and forge.log under ``forge_dir/userdata``.
+
+    Never overwrites an existing file -- an owner-tuned profile (custom
+    pic dirs, a shared cache) must survive a re-download. Returns the
+    profile path. The ``userdata/decks/commander`` directory is created
+    too, so the first ``.dck`` copy has somewhere to land.
+    """
+    from .forge_runner import VENDOR_FORGE
+    forge_dir = forge_dir or VENDOR_FORGE
+    forge_dir.mkdir(parents=True, exist_ok=True)
+    profile = forge_dir / FORGE_PROFILE_FILENAME
+    if not profile.exists():
+        profile.write_text(_FORGE_PROFILE_TEXT, encoding="utf-8")
+    (forge_dir / "userdata" / "decks" / "commander").mkdir(parents=True, exist_ok=True)
+    return profile
+
+
 def _pick_jre_asset(release: dict, system: str, machine: str) -> Optional[dict]:
     """From an Adoptium/Temurin GitHub release payload, pick the JRE archive
     asset matching the caller's platform.
@@ -335,9 +379,14 @@ def download_forge(
     # extracted in place, archive removed so the ~300 MB is not kept twice
     # and check_dependencies' jar glob is the only thing left to find.
     try:
-        return _extract_forge_bundle(dest, forge_dir)
+        jar = _extract_forge_bundle(dest, forge_dir)
     finally:
         dest.unlink(missing_ok=True)
+    # A freshly extracted bundle has only forge.profile.properties.example;
+    # without the real file Forge reads decks from ~/.forge (Linux), not
+    # from the userdata/ this repo seeds. See ensure_forge_profile.
+    ensure_forge_profile(forge_dir)
+    return jar
 
 
 def download_jre(
