@@ -1,0 +1,4 @@
+url: https://json.edhrec.com/pages/cards/krenko-mob-boss.json
+url: https://json.edhrec.com/pages/commanders/krenko-mob-boss.json
+url: https://edhrec.com/recs
+url: https://json.edhrec.com/pages/recs.json
